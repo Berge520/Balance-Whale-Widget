@@ -33,10 +33,17 @@ const cfg = reactive({
   lowAlertOn: true,
   lowAlertAmount: 10,
   timeBubbleOn: true,
+  updateCheckOn: true,
 })
 const widgetVisible = ref(true)
 const widgetMsg = ref('')
 const widgetErr = ref(false)
+
+// —— 检查更新 ——
+const appVersion = ref('')
+const updateChecking = ref(false)
+const updateResult = ref<any>(null)
+const updateMsg = ref('')
 
 // —— 近 7 天用量趋势 ——
 const usageHistory = ref<Array<{ date: string; usage: number }>>([])
@@ -182,6 +189,26 @@ function addHotkey() {
     : '跳转失败，请手动打开 uTools 设置 → 全局功能 添加。'
 }
 
+function doCheckUpdate(force: boolean) {
+  if (!services.checkUpdate) return
+  updateChecking.value = true
+  updateMsg.value = ''
+  Promise.resolve(services.checkUpdate(force))
+    .then((r: any) => {
+      updateResult.value = r || null
+      if (!r || !r.ok) updateMsg.value = '检查失败：' + ((r && r.error) || '未知错误')
+      else if (r.hasUpdate) updateMsg.value = '发现新版本 v' + r.latest + '，可前往项目主页查看'
+      else updateMsg.value = '已是最新版本'
+    })
+    .catch((err: any) => {
+      updateMsg.value = '检查失败：' + String(err?.message || err)
+    })
+    .finally(() => { updateChecking.value = false })
+}
+function openHomepage() {
+  services.openExternal?.('https://github.com/Berge520/Balance-Whale-Widget')
+}
+
 onMounted(() => {
   try {
     const c = services.getConfig?.()
@@ -206,12 +233,14 @@ onMounted(() => {
       secrets.platformToken = s.platformToken || ''
     }
     widgetVisible.value = services.isWidgetVisible?.() !== false
+    appVersion.value = services.getVersion?.() || ''
     const h = services.getUsageHistory?.(7)
     if (h && Array.isArray(h.days)) {
       usageHistory.value = h.days
       usageCurrency.value = h.currency || 'CNY'
     }
   } catch (err) {}
+  if (cfg.updateCheckOn) doCheckUpdate(false)
 })
 </script>
 
@@ -362,6 +391,27 @@ onMounted(() => {
       <p class="hint">提示：挂件常驻桌面，可拖拽到屏幕四边吸附；贴左缘会镜像翻转。点击鲸鱼刷新余额，悬停后点右上角菜单可调整设置。</p>
       <p class="hint">设置快捷键：按 Ctrl+, 打开 uTools 设置 → 全局功能 → 新增 → 指令填「显示/隐藏挂件」→ 按下组合键。可点「复制指令名」快速复制；绑定被删除后，点「新增快捷键」可直接跳转重新添加。</p>
     </section>
+
+    <!-- 关于与更新 -->
+    <section class="card">
+      <h2>关于与更新</h2>
+      <label class="field row check">
+        <span class="label">自动检查更新</span>
+        <input type="checkbox" v-model="cfg.updateCheckOn" @change="patchCfg({ updateCheckOn: cfg.updateCheckOn })" />
+      </label>
+      <label class="field row">
+        <span class="label">当前版本</span>
+        <span class="ver">v{{ appVersion }}</span>
+      </label>
+      <div class="btn-row">
+        <button class="secondary" :disabled="updateChecking" @click="doCheckUpdate(true)">
+          {{ updateChecking ? '检查中…' : '立即检查更新' }}
+        </button>
+        <button class="secondary" @click="openHomepage">项目主页</button>
+      </div>
+      <p v-if="updateMsg" class="msg" :class="updateResult && updateResult.ok ? 'ok' : 'err'">{{ updateMsg }}</p>
+      <p class="hint">开启后每次呼出插件自动检查一次（12 小时内最多一次），发现新版本会弹出系统通知。</p>
+    </section>
   </div>
 </template>
 
@@ -483,6 +533,10 @@ select:focus,
 .num-text {
   width: 44px;
   text-align: right;
+  font-size: 13px;
+  color: var(--fg-dim);
+}
+.ver {
   font-size: 13px;
   color: var(--fg-dim);
 }

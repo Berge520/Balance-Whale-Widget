@@ -20,6 +20,12 @@ const USAGE_URL = 'https://platform.deepseek.com/api/v0/usage/by_api_key/amount'
 const BALANCE_TTL_MS = 25000
 const FETCH_TIMEOUT_MS = 20000
 
+// 检查更新：拉取远端 package.json（经 ghfast 加速），只取 version 字段做比对
+const UPDATE_CHECK_URL = 'https://ghfast.top/https://raw.githubusercontent.com/Berge520/Balance-Whale-Widget/refs/heads/main/package.json'
+// 当前插件版本。uTools 未提供读取插件自身版本的 API，此处需与 package.json / plugin.json 的 version 保持一致
+const PLUGIN_VERSION = '1.0.0'
+const UPDATE_TTL_MS = 12 * 3600 * 1000
+
 const MIN_SCALE = 0.6
 const MAX_SCALE = 2.5
 const BASE_MIN = 122   // 挂件基准尺寸下限 px
@@ -51,6 +57,7 @@ const K = {
   config: 'whale:config',   // dbStorage：挂件配置
   ledger: 'whale:ledger',   // dbStorage：本地账本
   win: 'whale:window',      // dbStorage：窗口锚点
+  update: 'whale:update',   // dbStorage：上次检查更新结果缓存
 }
 
 // ──────────────────────────────────────────────
@@ -101,7 +108,7 @@ function writeSecrets(secrets) {
 }
 
 function defaultConfig() {
-  return { scale: 1.5, vol: 0.9, soundOn: true, soundSet: 'duck', usageMode: 'ledger', peakMode: 'default', bubbleOn: true, menuBtn: true, onTop: true, lowAlertOn: true, lowAlertAmount: 10, timeBubbleOn: true }
+  return { scale: 1.5, vol: 0.9, soundOn: true, soundSet: 'duck', usageMode: 'ledger', peakMode: 'default', bubbleOn: true, menuBtn: true, onTop: true, lowAlertOn: true, lowAlertAmount: 10, timeBubbleOn: true, updateCheckOn: true }
 }
 function clampNum(v, lo, hi, dft) {
   const n = Number(v)
@@ -126,6 +133,7 @@ function readConfig() {
     lowAlertOn: p.lowAlertOn !== false,
     lowAlertAmount: clampNum(p.lowAlertAmount, 0, 1e9, dft.lowAlertAmount),
     timeBubbleOn: p.timeBubbleOn !== false,
+    updateCheckOn: p.updateCheckOn !== false,
   }
 }
 function writeConfig(cfg) {
@@ -142,6 +150,7 @@ function writeConfig(cfg) {
     lowAlertOn: cfg.lowAlertOn !== false,
     lowAlertAmount: cfg.lowAlertAmount,
     timeBubbleOn: cfg.timeBubbleOn !== false,
+    updateCheckOn: cfg.updateCheckOn !== false,
     updatedAt: new Date().toISOString(),
   })
 }
@@ -160,6 +169,7 @@ function patchConfig(patch) {
   if (p.lowAlertOn !== undefined) cfg.lowAlertOn = !!p.lowAlertOn
   if (p.lowAlertAmount !== undefined) cfg.lowAlertAmount = clampNum(p.lowAlertAmount, 0, 1e9, cfg.lowAlertAmount)
   if (p.timeBubbleOn !== undefined) cfg.timeBubbleOn = !!p.timeBubbleOn
+  if (p.updateCheckOn !== undefined) cfg.updateCheckOn = !!p.updateCheckOn
   writeConfig(cfg)
   return cfg
 }
@@ -376,6 +386,65 @@ async function fetchPlatformUsage(platformToken) {
   } catch (err) {
     return { error: String((err && err.message) || err) }
   }
+}
+
+// ──────────────────────────────────────────────
+// 检查更新
+// ──────────────────────────────────────────────
+function parseVersion(v) {
+  const m = String(v == null ? '' : v).trim().replace(/^v/i, '').match(/^(\d+)\.(\d+)\.(\d+)/)
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null
+}
+function isNewerVersion(latest, current) {
+  const a = parseVersion(latest)
+  const b = parseVersion(current)
+  if (!a || !b) return false
+  for (let i = 0; i < 3; i++) {
+    if (a[i] !== b[i]) return a[i] > b[i]
+  }
+  return false
+}
+
+let updateInFlight = null
+// force=false 时命中 12 小时缓存直接返回（fresh=false）；force=true 强制联网检查
+function checkUpdate(force) {
+  const now = Date.now()
+  if (!force) {
+    try {
+      const cached = utools.dbStorage.getItem(K.update)
+      if (cached && typeof cached.at === 'number' && now - cached.at < UPDATE_TTL_MS) {
+        return Promise.resolve(Object.assign({}, cached, { fresh: false }))
+      }
+    } catch (err) {}
+  }
+  if (updateInFlight) return updateInFlight
+  updateInFlight = fetch(UPDATE_CHECK_URL, { signal: AbortSignal.timeout(15000) })
+    .then((res) => {
+      if (!res.ok) throw new Error('HTTP ' + res.status)
+      return res.json()
+    })
+    .then((data) => {
+      const latest = String((data && data.version) || '').trim()
+      if (!parseVersion(latest)) throw new Error('远端未提供有效版本号')
+      const result = {
+        ok: true,
+        fresh: true,
+        at: now,
+        current: PLUGIN_VERSION,
+        latest,
+        hasUpdate: isNewerVersion(latest, PLUGIN_VERSION),
+      }
+      try { utools.dbStorage.setItem(K.update, result) } catch (err) {}
+      return result
+    })
+    .catch((err) => ({
+      ok: false,
+      at: now,
+      current: PLUGIN_VERSION,
+      error: String((err && err.message) || err),
+    }))
+    .finally(() => { updateInFlight = null })
+  return updateInFlight
 }
 
 let balanceCache = null // { at, payload }
@@ -882,6 +951,22 @@ window.services = {
   getConfig() {
     return readConfig()
   },
+  getVersion() {
+    return PLUGIN_VERSION
+  },
+  // force=false 命中缓存；force=true 立即联网检查
+  checkUpdate(force) {
+    return checkUpdate(!!force)
+  },
+  // 系统默认浏览器打开外链（用于跳转下载页）
+  openExternal(url) {
+    try {
+      utools.shellOpenExternal(String(url || ''))
+      return true
+    } catch (err) {
+      return false
+    }
+  },
   saveConfig(patch) {
     // 设置页拖动滑块中的实时预览：只改窗口几何（rAF 合帧），不写存储、不广播
     if (patch && patch.__live) {
@@ -987,5 +1072,17 @@ try {
     }
     // 默认功能（whale）：任何进入方式都确保挂件存在
     ensureWidget()
+    // 自动检查更新：开关关闭时跳过；仅新拉取到的结果触发一次系统通知
+    try {
+      if (readConfig().updateCheckOn) {
+        checkUpdate(false).then((r) => {
+          if (r && r.ok && r.fresh && r.hasUpdate) {
+            try {
+              utools.showNotification('小鲸鱼余额挂件有新版本 v' + r.latest + '（当前 v' + r.current + '）', 'whale')
+            } catch (err) {}
+          }
+        })
+      }
+    } catch (err) {}
   })
 } catch (err) {}
