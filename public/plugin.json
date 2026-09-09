@@ -1,0 +1,30 @@
+{
+  "main": "index.html",
+  "preload": "preload/services.js",
+  "logo": "logo.png",
+  "development": {
+    "main": "http://localhost:5173"
+  },
+  "features": [
+    {
+      "code": "whale",
+      "explain": "小鲸鱼余额挂件：桌面透明置顶小窗，显示 DeepSeek 余额",
+      "cmds": [
+        "余额挂件",
+        "小鲸鱼",
+        "小鲸鱼余额",
+        "DeepSeek余额",
+        "whale"
+      ]
+    },
+    {
+      "code": "whale-toggle",
+      "explain": "显示/隐藏小鲸鱼余额挂件（可绑定全局快捷键）",
+      "mainHide": true,
+      "cmds": [
+        "显示/隐藏挂件",
+        "切换挂件"
+      ]
+    }
+  ]
+}
