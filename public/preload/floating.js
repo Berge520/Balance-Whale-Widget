@@ -11,7 +11,15 @@
 const electron = require('electron')
 const { ipcRenderer, contextBridge } = electron
 
-try { console.log('[whale] floating preload 已加载, typeof utools =', typeof utools, ', contextIsolated =', !!process.contextIsolated) } catch (err) {}
+// 调试日志：dev 下同时同步落盘 %TEMP%\whale-debug.log（窗口/进程被 uTools 关闭也不丢），
+// DEV 同时暴露给页面（window.whale.dev）做页面侧门控
+const { DEV, LOG_FILE, log, logErr } = require('./lib/log')
+
+log('[whale][floating] preload 已加载', {
+  windowType: (function () { try { return utools.getWindowType() } catch (err) { return 'unknown' } })(),
+  contextIsolated: !!process.contextIsolated,
+  logFile: LOG_FILE || '(仅控制台)',
+})
 
 const handlers = { init: [], balance: [], config: [], snapped: [] }
 
@@ -22,7 +30,7 @@ function emit(name, data) {
   const list = handlers[name]
   if (!list) return
   for (const cb of list) {
-    try { cb(data) } catch (err) {}
+    try { cb(data) } catch (err) { logErr('[whale] 页面回调异常', err && err.message) }
   }
 }
 
@@ -38,7 +46,7 @@ function send(channel) {
     if (typeof utools !== 'undefined' && typeof utools.sendToParent === 'function') {
       utools.sendToParent(channel, ...args)
     }
-  } catch (err) {}
+  } catch (err) { logErr('[whale] sendToParent 失败', channel, err && err.message) }
 }
 
 const api = {
@@ -55,9 +63,13 @@ const api = {
   dragMove(x, y) { send('whale:drag-move', { x: Number(x), y: Number(y) }) },
   dragEnd() { send('whale:drag-end', {}) },
   setIgnoreMouse(ignore) { send('whale:ignore-mouse', { ignore: !!ignore }) },
+  // 请求宿主唤出 uTools 主窗（设置页），用于「只显示挂件」模式下的设置入口
+  openSettings() { send('whale:open-settings') },
 
   // 标记真实桥接已加载（页面据此区分空实现）
   __bridge: true,
+  // 开发者模式标志：页面侧据此决定是否打印调试日志
+  dev: DEV,
 }
 
 // createBrowserWindow 默认开启 contextIsolation：此时 preload 的 window 与页面隔离，
@@ -65,12 +77,12 @@ const api = {
 try {
   if (process.contextIsolated && contextBridge && typeof contextBridge.exposeInMainWorld === 'function') {
     contextBridge.exposeInMainWorld('whale', api)
-    try { console.log('[whale] 已通过 contextBridge 暴露 window.whale') } catch (err) {}
+    log('[whale] 已通过 contextBridge 暴露 window.whale')
   } else {
     window.whale = api
-    try { console.log('[whale] 已直接挂载 window.whale（contextIsolation 关闭）') } catch (err) {}
+    log('[whale] 已直接挂载 window.whale（contextIsolation 关闭）')
   }
 } catch (err) {
-  try { window.whale = api } catch (e) {}
-  try { console.error('[whale] 暴露 window.whale 失败:', err && err.message) } catch (e) {}
+  try { window.whale = api } catch (e) { logErr('[whale] 回退挂载 window.whale 失败', e && e.message) }
+  logErr('[whale] 暴露 window.whale 失败:', err && err.message)
 }

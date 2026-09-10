@@ -1,5 +1,5 @@
 {
-  "version": "1.0.0",
+  "version": "1.1.0",
   "main": "index.html",
   "preload": "preload/services.js",
   "logo": "logo.png",
@@ -9,7 +9,8 @@
   "features": [
     {
       "code": "whale",
-      "explain": "小鲸鱼余额挂件：桌面透明置顶小窗，显示 DeepSeek 余额",
+      "explain": "小鲸鱼余额挂件：桌面透明置顶小窗显示 DeepSeek 余额，并可打开设置窗口",
+      "mainHide": true,
       "cmds": [
         "余额挂件",
         "小鲸鱼",

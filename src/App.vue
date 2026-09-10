@@ -1,11 +1,16 @@
 <script lang="ts" setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
+import type { WhaleServices } from './types/services'
 
 // 主窗 preload（services.js）注入的宿主 API
-const services = (window as any).services || {}
+const services: Partial<WhaleServices> = window.services || {}
 
 // —— 密钥（加密存储） ——
 const secrets = reactive({ apiKey: '', platformToken: '' })
+// 获取教程默认折叠，点「如何获取？」按钮才展开
+const guides = reactive({ apiKey: false, token: false })
+// 「挂件窗口」卡片的说明默认折叠，点标题才展开（help=使用说明，trouble=故障排查）
+const widgetFolds = reactive({ help: false, trouble: false })
 const secretsMsg = ref('')
 const secretsOk = ref(false)
 const testing = ref(false)
@@ -27,6 +32,7 @@ const cfg = reactive({
   soundSet: 'duck',
   usageMode: 'ledger',
   peakMode: 'default',
+  peakRemindOn: true,
   bubbleOn: true,
   menuBtn: true,
   onTop: true,
@@ -34,10 +40,24 @@ const cfg = reactive({
   lowAlertAmount: 10,
   timeBubbleOn: true,
   updateCheckOn: true,
+  dragLock: false,
+  enterMode: 'both',
 })
 const widgetVisible = ref(true)
 const widgetMsg = ref('')
 const widgetErr = ref(false)
+// 挂件错误查看：errDetail 为宿主记录的最后一条创建/加载错误，空串表示无错误
+const errDetail = ref('')
+const errMsg = ref('')
+const errMsgErr = ref(false)
+const clearConfirm = ref<'' | 'all' | 'keep'>('')
+const dataMsg = ref('')
+const dataErr = ref(false)
+// 诊断日志：dev 下同步落盘（%TEMP%\whale-debug.log），插件进程被 uTools 结束也不丢
+const diagMsg = ref('')
+const diagErr = ref(false)
+// 诊断日志入口只在 uTools 开发者模式（日志真正落盘）时出现，正式版不显示
+const diagReady = !!services.isDev?.()
 
 // —— 检查更新 ——
 const appVersion = ref('')
@@ -48,6 +68,10 @@ const updateMsg = ref('')
 // —— 近 7 天用量趋势 ——
 const usageHistory = ref<Array<{ date: string; usage: number }>>([])
 const usageCurrency = ref('CNY')
+const exportMsg = ref('')
+const exportErr = ref(false)
+const importMsg = ref('')
+const importErr = ref(false)
 const historyMax = computed(() => {
   let m = 0
   for (const d of usageHistory.value) if (d.usage > m) m = d.usage
@@ -62,6 +86,52 @@ function barHeight(u: number) {
 function fmtMoney(v: number) {
   const num = Number(v) || 0
   return usageCurrency.value === 'CNY' ? '¥ ' + num.toFixed(2) : num.toFixed(2) + ' ' + usageCurrency.value
+}
+// 导出账本用量为 CSV（宿主弹系统保存框；用户取消时静默）
+function exportUsageCsv() {
+  exportMsg.value = ''
+  exportErr.value = false
+  try {
+    const r = services.exportUsageCsv?.(usageHistory.value.length || 7)
+    if (!r) {
+      exportErr.value = true
+      exportMsg.value = '导出失败：宿主 API 不可用'
+    } else if (r.ok) {
+      exportMsg.value = '已导出到：' + (r.path || '')
+    } else if (!r.canceled) {
+      exportErr.value = true
+      exportMsg.value = '导出失败：' + (r.error || '未知错误')
+    }
+  } catch (err: any) {
+    exportErr.value = true
+    exportMsg.value = '导出失败：' + String(err?.message || err)
+  }
+}
+// 导入账本用量 CSV（宿主弹系统打开框；合并后刷新趋势；用户取消时静默）
+function importUsageCsv() {
+  importMsg.value = ''
+  importErr.value = false
+  try {
+    const r = services.importUsageCsv?.()
+    if (!r) {
+      importErr.value = true
+      importMsg.value = '导入失败：宿主 API 不可用'
+    } else if (r.ok) {
+      const ignored = r.invalid ? '，忽略 ' + r.invalid + ' 行非法数据' : ''
+      importMsg.value = `已导入 ${r.imported} 天${ignored}；账本现有 ${r.kept} 天（${r.from} ~ ${r.to}）`
+      const h = services.getUsageHistory?.(7)
+      if (h && Array.isArray(h.days)) {
+        usageHistory.value = h.days
+        usageCurrency.value = h.currency || usageCurrency.value
+      }
+    } else if (!r.canceled) {
+      importErr.value = true
+      importMsg.value = '导入失败：' + (r.error || '未知错误')
+    }
+  } catch (err: any) {
+    importErr.value = true
+    importMsg.value = '导入失败：' + String(err?.message || err)
+  }
 }
 
 const MIN_SCALE = 0.6
@@ -165,11 +235,83 @@ function showWidget() {
     widgetMsg.value = '挂件创建失败：' + ((r && r.error) || '未知错误')
       + (import.meta.env.DEV ? '（详见开发者工具控制台 [whale][widget] 日志）' : '')
   }
+  checkWidgetError(true)
 }
 function hideWidget() {
   services.hideWidget?.()
   widgetVisible.value = false
   widgetMsg.value = ''
+}
+// 读取宿主记录的最后一条挂件创建失败原因；silent=true 时不显示「无错误」提示（用于自动检查）
+function checkWidgetError(silent = false) {
+  if (!silent) {
+    errMsg.value = ''
+    errMsgErr.value = false
+  }
+  try {
+    const e = services.getWidgetError?.()
+    errDetail.value = e || ''
+    if (!silent && !e) errMsg.value = '当前没有记录到挂件错误。'
+  } catch (err: any) {
+    errDetail.value = ''
+    if (!silent) {
+      errMsgErr.value = true
+      errMsg.value = '读取失败：' + String(err?.message || err)
+    }
+  }
+}
+function copyWidgetError() {
+  const ok = services.copyText?.(errDetail.value)
+  errMsgErr.value = !ok
+  errMsg.value = ok ? '错误信息已复制到剪贴板。' : '复制失败，请手动选中上方文本复制。'
+}
+// 清除本地数据：需二次确认，避免误触。
+// mode='all' 连凭据一起清除；mode='keep' 保留 API Key / 平台 Token。
+function clearAllData(mode: 'all' | 'keep') {
+  if (clearConfirm.value !== mode) {
+    clearConfirm.value = mode
+    dataMsg.value = ''
+    dataErr.value = false
+    return
+  }
+  clearConfirm.value = ''
+  try {
+    const keepSecrets = mode === 'keep'
+    const r = services.clearAllData?.({ keepSecrets }) || { ok: false }
+    dataErr.value = !(r && r.ok)
+    dataMsg.value = r && r.ok
+      ? (keepSecrets
+          ? '已清除设置、账本、窗口位置与更新缓存，API Key / 平台 Token 已保留，并按默认配置重建挂件。'
+          : '已清除全部本地数据（凭据、设置、账本、窗口位置、更新缓存），并按默认配置重建挂件。')
+      : '清除失败：' + ((r && r.error) || '未知错误')
+    if (r && r.ok) {
+      cfg.dragLock = false
+      cfg.enterMode = 'both'
+      cfg.scale = 1.5
+      cfg.scaleNum = scaleToNum(1.5)
+      cfg.vol = 0.9
+      cfg.soundOn = true
+      cfg.soundSet = 'duck'
+      cfg.usageMode = 'ledger'
+      cfg.peakMode = 'default'
+      cfg.bubbleOn = true
+      cfg.menuBtn = true
+      cfg.onTop = true
+      cfg.lowAlertOn = true
+      cfg.lowAlertAmount = 10
+      cfg.timeBubbleOn = true
+      cfg.updateCheckOn = true
+      if (!keepSecrets) {
+        secrets.apiKey = ''
+        secrets.platformToken = ''
+        secretsOk.value = false
+      }
+      usageHistory.value = []
+    }
+  } catch (err: any) {
+    dataErr.value = true
+    dataMsg.value = '清除失败：' + String(err?.message || err)
+  }
 }
 // 复制指令名，便于粘贴到 uTools「全局功能」新增全局快捷键
 function copyHotkeyCmd() {
@@ -187,6 +329,39 @@ function addHotkey() {
   widgetMsg.value = ok
     ? '已跳转 uTools「全局功能」并新增一条待绑定项，按下组合键即可完成绑定。'
     : '跳转失败，请手动打开 uTools 设置 → 全局功能 添加。'
+}
+// 复制诊断日志：uTools 结束插件进程会连带清空控制台，日志已同步落盘，可从文件取回
+function copyDebugLog() {
+  try {
+    const r = services.getDebugLog?.()
+    const text = (r && r.text) || ''
+    if (!text) {
+      diagErr.value = true
+      diagMsg.value = '暂无可复制的日志：控制台日志仅在 uTools 开发者模式下落盘。'
+      return
+    }
+    const ok = services.copyText?.(text)
+    diagErr.value = !ok
+    diagMsg.value = ok
+      ? `已复制诊断日志末尾 ${text.split('\n').length} 行。文件：${(r && r.path) || ''}`
+      : '复制失败，可点「打开日志文件」手动查看。'
+  } catch (err: any) {
+    diagErr.value = true
+    diagMsg.value = '读取失败：' + String(err?.message || err)
+  }
+}
+// 用系统默认程序打开日志文件，便于人工查看或另存
+function openLogFile() {
+  try {
+    const r = services.openLogFile?.()
+    diagErr.value = !(r && r.ok)
+    diagMsg.value = r && r.ok
+      ? '已用系统默认程序打开日志文件：' + (r.path || '')
+      : '打开失败：' + ((r && r.path) ? r.path : '控制台日志仅在 uTools 开发者模式下落盘。')
+  } catch (err: any) {
+    diagErr.value = true
+    diagMsg.value = '打开失败：' + String(err?.message || err)
+  }
 }
 
 function doCheckUpdate(force: boolean) {
@@ -208,31 +383,47 @@ function doCheckUpdate(force: boolean) {
 function openHomepage() {
   services.openExternal?.('https://github.com/Berge520/Balance-Whale-Widget')
 }
+// 教程里的链接用系统浏览器打开，避免在插件窗口内导航
+function openDoc(url: string) {
+  services.openExternal?.(url)
+}
+
+// 用宿主返回的配置回填设置页各开关（首次进入与挂件菜单改动后的同步都走这里）
+function applyConfig(c: any) {
+  if (!c) return
+  cfg.scale = c.scale
+  cfg.scaleNum = scaleToNum(c.scale)
+  cfg.vol = c.vol
+  cfg.soundOn = c.soundOn !== false
+  cfg.soundSet = c.soundSet
+  cfg.usageMode = c.usageMode
+  cfg.peakMode = c.peakMode
+  cfg.peakRemindOn = c.peakRemindOn !== false
+  cfg.bubbleOn = c.bubbleOn
+  cfg.menuBtn = c.menuBtn !== false
+  cfg.onTop = c.onTop !== false
+  cfg.lowAlertOn = c.lowAlertOn !== false
+  cfg.lowAlertAmount = typeof c.lowAlertAmount === 'number' ? c.lowAlertAmount : 10
+  cfg.timeBubbleOn = c.timeBubbleOn !== false
+  cfg.dragLock = c.dragLock === true
+  cfg.enterMode = c.enterMode === 'widget' || c.enterMode === 'settings' ? c.enterMode : 'both'
+}
+
+// 宿主推送的配置变更订阅（挂件三点菜单改设置时，让本页开关同步）
+let unsubConfig: (() => void) | undefined
 
 onMounted(() => {
   try {
-    const c = services.getConfig?.()
-    if (c) {
-      cfg.scale = c.scale
-      cfg.scaleNum = scaleToNum(c.scale)
-      cfg.vol = c.vol
-      cfg.soundOn = c.soundOn !== false
-      cfg.soundSet = c.soundSet
-      cfg.usageMode = c.usageMode
-      cfg.peakMode = c.peakMode
-      cfg.bubbleOn = c.bubbleOn
-      cfg.menuBtn = c.menuBtn !== false
-      cfg.onTop = c.onTop !== false
-      cfg.lowAlertOn = c.lowAlertOn !== false
-      cfg.lowAlertAmount = typeof c.lowAlertAmount === 'number' ? c.lowAlertAmount : 10
-      cfg.timeBubbleOn = c.timeBubbleOn !== false
-    }
+    applyConfig(services.getConfig?.())
+    // 挂件菜单勾选/取消 → 宿主广播 → 刷新本页开关
+    unsubConfig = services.onConfigChange?.(applyConfig)
     const s = services.getSecrets?.()
     if (s) {
       secrets.apiKey = s.apiKey || ''
       secrets.platformToken = s.platformToken || ''
     }
     widgetVisible.value = services.isWidgetVisible?.() !== false
+    checkWidgetError(true)
     appVersion.value = services.getVersion?.() || ''
     const h = services.getUsageHistory?.(7)
     if (h && Array.isArray(h.days)) {
@@ -241,6 +432,10 @@ onMounted(() => {
     }
   } catch (err) {}
   if (cfg.updateCheckOn) doCheckUpdate(false)
+})
+
+onUnmounted(() => {
+  try { unsubConfig?.() } catch (err) {}
 })
 </script>
 
@@ -256,10 +451,37 @@ onMounted(() => {
         <span class="label">API Key</span>
         <input v-model="secrets.apiKey" type="password" placeholder="sk-..." autocomplete="off" />
       </label>
+      <button class="link-btn" @click="guides.apiKey = !guides.apiKey">
+        {{ guides.apiKey ? '收起教程' : '如何获取 API Key？' }}
+      </button>
+      <div v-if="guides.apiKey" class="guide">
+        <p class="guide-use"><strong>用途：</strong>读取账户余额，挂件显示余额必需（<strong>必填</strong>）。</p>
+        <ol class="guide-steps">
+          <li>登录 <a href="#" @click.prevent="openDoc('https://platform.deepseek.com')">platform.deepseek.com</a>。</li>
+          <li>左侧进「API keys」→「创建 API key」。</li>
+          <li>复制 <code>sk-</code> 开头的密钥（仅完整显示一次）。</li>
+          <li>粘贴到上方，点「保存凭据」。</li>
+        </ol>
+        <p class="guide-meta"><strong>保存与安全：</strong>存于本机 uTools 加密存储，仅本插件可读、不上传服务器；只随请求发往 <code>api.deepseek.com</code>，不写日志。API Key 长期有效，泄露可在平台删旧 key 后换新。</p>
+        <p class="guide-note">注意：这是接口密钥，不是「平台 Token」；请勿泄露。</p>
+      </div>
       <label class="field">
         <span class="label">平台 Token <em>（可选，「实时·令牌」用量模式需要）</em></span>
         <input v-model="secrets.platformToken" type="password" placeholder="platform.deepseek.com 令牌" autocomplete="off" />
       </label>
+      <button class="link-btn" @click="guides.token = !guides.token">
+        {{ guides.token ? '收起教程' : '如何获取平台 Token？' }}
+      </button>
+      <div v-if="guides.token" class="guide">
+        <p class="guide-use"><strong>用途：</strong>可选。用于「实时·令牌」用量模式；不填则本地记账。</p>
+        <ol class="guide-steps">
+          <li>登录 <a href="#" @click.prevent="openDoc('https://platform.deepseek.com')">platform.deepseek.com</a>，按 <code>F12</code> 打开 Network。</li>
+          <li>刷新「用量」页，找到 <code>usage/by_api_key/amount</code> 请求。</li>
+          <li>复制其 Request Headers 里 <code>Authorization</code> 的值（<code>Bearer eyJ...</code>）。</li>
+          <li>粘贴到上方，点「保存凭据」。</li>
+        </ol>
+        <p class="guide-meta"><strong>保存与安全：</strong>同 API Key，本机加密存储、不上传服务器；只随请求发往 <code>platform.deepseek.com</code>。它属网页会话令牌，重登后可能失效，届时自动回落本地记账，重新复制一次即可。</p>
+      </div>
       <div class="btn-row">
         <button @click="saveSecrets">保存凭据（加密存储）</button>
         <button class="secondary" :disabled="testing || (!secrets.apiKey.trim() && !secrets.platformToken.trim())" @click="testKey">
@@ -329,6 +551,11 @@ onMounted(() => {
       </label>
 
       <label class="field row check">
+        <span class="label">峰谷切换提醒 <em>（进入峰/谷时段时气泡提示，需开启思考气泡）</em></span>
+        <input type="checkbox" v-model="cfg.peakRemindOn" @change="patchCfg({ peakRemindOn: cfg.peakRemindOn })" />
+      </label>
+
+      <label class="field row check">
         <span class="label">思考气泡</span>
         <input type="checkbox" v-model="cfg.bubbleOn" @change="patchCfg({ bubbleOn: cfg.bubbleOn })" />
       </label>
@@ -341,6 +568,11 @@ onMounted(() => {
       <label class="field row check">
         <span class="label">挂件右上角菜单按钮</span>
         <input type="checkbox" v-model="cfg.menuBtn" @change="patchCfg({ menuBtn: cfg.menuBtn })" />
+      </label>
+
+      <label class="field row check">
+        <span class="label">锁定位置 <em>（禁止拖拽与滚轮缩放，点击刷新仍可用）</em></span>
+        <input type="checkbox" v-model="cfg.dragLock" @change="patchCfg({ dragLock: cfg.dragLock })" />
       </label>
 
       <label class="field row check">
@@ -363,7 +595,13 @@ onMounted(() => {
 
     <!-- 用量趋势 -->
     <section class="card">
-      <h2>近 7 天用量</h2>
+      <div class="card-head">
+        <h2>近 7 天用量</h2>
+        <div class="head-actions">
+          <button class="export-btn" @click="importUsageCsv">导入 CSV</button>
+          <button class="export-btn" :disabled="historyMax <= 0" @click="exportUsageCsv">导出 CSV</button>
+        </div>
+      </div>
       <div v-if="historyMax > 0" class="chart">
         <div v-for="d in usageHistory" :key="d.date" class="bar-col">
           <div class="bar-val">{{ d.usage > 0 ? fmtMoney(d.usage) : '' }}</div>
@@ -374,11 +612,21 @@ onMounted(() => {
         </div>
       </div>
       <p v-else class="hint">暂无用量记录（挂件运行并记账后自动显示）。</p>
+      <p v-if="exportMsg" class="msg" :class="{ ok: !exportErr, err: exportErr }">{{ exportMsg }}</p>
+      <p v-if="importMsg" class="msg" :class="{ ok: !importErr, err: importErr }">{{ importMsg }}</p>
     </section>
 
     <!-- 显隐 -->
     <section class="card">
       <h2>挂件窗口</h2>
+      <label class="field row">
+        <span class="label">进入插件时</span>
+        <select v-model="cfg.enterMode" @change="patchCfg({ enterMode: cfg.enterMode })">
+          <option value="both">设置窗口 + 挂件</option>
+          <option value="widget">只显示挂件</option>
+          <option value="settings">只显示设置窗口</option>
+        </select>
+      </label>
       <div class="btn-row">
         <button @click="showWidget">显示挂件</button>
         <button class="secondary" @click="hideWidget">隐藏挂件</button>
@@ -387,9 +635,50 @@ onMounted(() => {
         <button class="secondary" @click="copyHotkeyCmd">复制指令名</button>
         <button class="secondary" @click="addHotkey">新增快捷键</button>
       </div>
+      <div v-if="errDetail" class="err-block">
+        <p class="err-title">挂件窗口创建失败</p>
+        <pre class="err-box">{{ errDetail }}</pre>
+        <div class="btn-row">
+          <button class="secondary" @click="copyWidgetError">复制错误信息</button>
+          <button class="secondary" @click="checkWidgetError()">重新检查</button>
+        </div>
+      </div>
+      <button v-else class="link-btn" @click="checkWidgetError()">挂件异常？查看错误详情</button>
       <p v-if="widgetMsg" class="msg" :class="{ ok: !widgetErr, err: widgetErr }">{{ widgetMsg }}</p>
-      <p class="hint">提示：挂件常驻桌面，可拖拽到屏幕四边吸附；贴左缘会镜像翻转。点击鲸鱼刷新余额，悬停后点右上角菜单可调整设置。</p>
-      <p class="hint">设置快捷键：按 Ctrl+, 打开 uTools 设置 → 全局功能 → 新增 → 指令填「显示/隐藏挂件」→ 按下组合键。可点「复制指令名」快速复制；绑定被删除后，点「新增快捷键」可直接跳转重新添加。</p>
+      <p v-if="errMsg" class="msg" :class="{ ok: !errMsgErr, err: errMsgErr }">{{ errMsg }}</p>
+      <div class="fold">
+        <button class="link-btn" @click="widgetFolds.help = !widgetFolds.help">{{ widgetFolds.help ? '收起使用说明' : '使用说明' }}</button>
+        <div v-if="widgetFolds.help" class="guide">
+          <p class="guide-use"><strong>进入插件时：</strong>选含挂件的模式后，挂件出现时会抢走焦点、本设置窗口自动收起；改设置请点挂件右上角菜单（或右键）→「打开设置」唤回本窗口。</p>
+          <p class="guide-use"><strong>挂件操作：</strong>可拖拽到屏幕四边吸附，贴左缘会镜像翻转；点击鲸鱼刷新余额，悬停后点右上角菜单调整设置。</p>
+          <p class="guide-use"><strong>快捷键：</strong>按 Ctrl+, 打开 uTools 设置 → 全局功能 → 新增 → 指令填「显示/隐藏挂件」→ 按下组合键。可点上方「复制指令名」快速复制。</p>
+          <p class="guide-use"><strong>常驻：</strong>退出到后台挂件保留；关闭 Ctrl+D 分离窗口会直接结束插件运行、挂件消失，分离后请用「最小化」；重进插件会自动重建，配置不丢。</p>
+        </div>
+      </div>
+      <div v-if="diagReady" class="fold">
+        <button class="link-btn" @click="widgetFolds.trouble = !widgetFolds.trouble">{{ widgetFolds.trouble ? '收起故障排查' : '故障排查' }}</button>
+        <div v-if="widgetFolds.trouble" class="guide">
+          <p class="guide-use">挂件消失或显示异常时，可复制诊断日志（仅 uTools 开发者模式下落盘）或用系统程序打开日志文件。</p>
+          <div class="btn-row">
+            <button class="secondary" @click="copyDebugLog">复制诊断日志</button>
+            <button class="secondary" @click="openLogFile">打开日志文件</button>
+          </div>
+          <p v-if="diagMsg" class="msg" :class="{ ok: !diagErr, err: diagErr }">{{ diagMsg }}</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- 数据与隐私 -->
+    <section class="card">
+      <h2>数据与隐私</h2>
+      <p class="hint">API Key 与平台 Token 通过 uTools 加密存储，账本与窗口位置也只保存在本机，不会上传到任何第三方服务器。</p>
+      <p class="hint">注意：卸载 uTools 插件不会自动删除上述数据，如需彻底清除请点下方按钮。</p>
+      <div class="btn-row">
+        <button class="danger" @click="clearAllData('all')">{{ clearConfirm === 'all' ? '确认清除？不可恢复' : '清除全部数据' }}</button>
+        <button class="secondary" @click="clearAllData('keep')">{{ clearConfirm === 'keep' ? '确认清除？保留凭据' : '清除数据（保留凭据）' }}</button>
+        <button v-if="clearConfirm" class="secondary" @click="clearConfirm = ''">取消</button>
+      </div>
+      <p v-if="dataMsg" class="msg" :class="{ ok: !dataErr, err: dataErr }">{{ dataMsg }}</p>
     </section>
 
     <!-- 关于与更新 -->
@@ -411,6 +700,7 @@ onMounted(() => {
       </div>
       <p v-if="updateMsg" class="msg" :class="updateResult && updateResult.ok ? 'ok' : 'err'">{{ updateMsg }}</p>
       <p class="hint">开启后每次呼出插件自动检查一次（12 小时内最多一次），发现新版本会弹出系统通知。</p>
+      <p class="hint">用得还顺手吗？想要的新功能、碰到的 bug，或者只是想吐槽两句，都欢迎告诉鲸鱼娘～可以去 <a href="#" @click.prevent="openDoc('https://www.u-tools.cn/plugins/detail/%E5%B0%8F%E9%B2%B8%E9%B1%BC%E4%BD%99%E9%A2%9D%E6%8C%82%E4%BB%B6/')">插件市场详情页</a> 的「留言」区，也可以在 <a href="#" @click.prevent="openDoc('https://github.com/Berge520/Balance-Whale-Widget/issues')">GitHub Issues</a> 里提，每条我都会认真看完，顺手给个五星好评就更开心啦 (๑•̀ㅂ•́)و✧</p>
     </section>
   </div>
 </template>
@@ -425,8 +715,12 @@ onMounted(() => {
   --card-bg: rgba(127, 127, 127, 0.08);
   --card-border: rgba(127, 127, 127, 0.18);
   --track: rgba(83, 107, 169, 0.1);
+  --input-bg: #ffffff;
   --ok: #2fa24c;
   --err: #e0433f;
+  /* 让原生控件（下拉列表、复选框等）跟随本页主题，否则深色模式下
+     下拉展开的选项会用系统浅色底 + 本页浅色字，导致文字看不清 */
+  color-scheme: light;
   max-width: 560px;
   margin: 0 auto;
   padding: 22px 18px 44px;
@@ -443,8 +737,10 @@ onMounted(() => {
     --card-bg: rgba(255, 255, 255, 0.06);
     --card-border: rgba(255, 255, 255, 0.12);
     --track: rgba(255, 255, 255, 0.08);
+    --input-bg: #2b3145;
     --ok: #4ec46b;
     --err: #ff6b66;
+    color-scheme: dark;
   }
 }
 h1 {
@@ -469,6 +765,37 @@ h1 {
   font-size: 14px;
   font-weight: 600;
   color: var(--fg-dim);
+}
+.card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.card-head h2 {
+  margin: 0;
+}
+.head-actions {
+  display: flex;
+  gap: 8px;
+}
+.export-btn {
+  padding: 4px 10px;
+  font-size: 12px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--fg-dim);
+  cursor: pointer;
+}
+.export-btn:hover:not(:disabled) {
+  color: var(--fg);
+  border-color: var(--accent);
+}
+.export-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 .field {
   display: block;
@@ -504,8 +831,14 @@ select {
   font-size: 13px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: transparent;
-  color: inherit;
+  background: var(--input-bg);
+  color: var(--fg);
+}
+/* 下拉展开后的选项：必须显式给出背景与文字色。
+   否则深色模式下选项文字（浅色）会落在系统浅色弹层上，完全看不清。 */
+select option {
+  background: var(--input-bg);
+  color: var(--fg);
 }
 input[type='password']:focus,
 select:focus,
@@ -559,6 +892,14 @@ input[type='checkbox'] {
   background: rgba(83, 107, 169, 0.18);
   color: var(--accent);
 }
+.btn-row button.danger {
+  background: rgba(224, 67, 63, 0.16);
+  color: var(--err);
+}
+.btn-row button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
 .msg {
   margin: 10px 0 0;
   font-size: 12px;
@@ -569,11 +910,125 @@ input[type='checkbox'] {
 .msg.err {
   color: var(--err);
 }
+.link-btn {
+  margin-top: 10px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--fg-dim);
+  font-size: 12px;
+  text-align: left;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.link-btn:hover {
+  color: var(--fg);
+}
+/* 凭据获取教程（默认折叠） */
+.field + .link-btn {
+  margin-top: -4px;
+}
+.guide {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--input-bg);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.guide-use {
+  margin: 0;
+  color: var(--fg);
+}
+.guide-use + .guide-use {
+  margin-top: 6px;
+}
+/* 折叠面板里的首个标题紧贴顶部，不额外留白 */
+.guide > .link-btn:first-child {
+  margin-top: 0;
+}
+/* 分组折叠（使用说明 / 故障排查）：组间留白并用分隔线隔开 */
+.fold {
+  margin-top: 12px;
+}
+.fold > .link-btn {
+  margin-top: 0;
+}
+.fold + .fold {
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+.guide-steps {
+  margin: 8px 0 0;
+  padding-left: 18px;
+  color: var(--fg);
+}
+.guide-steps li {
+  margin-bottom: 4px;
+}
+.guide-steps li:last-child {
+  margin-bottom: 0;
+}
+.guide-note {
+  margin: 8px 0 0;
+  color: var(--fg-dim);
+}
+/* 保存位置 / 安全性 / 可靠性：与「注意」同色，但行距更紧凑 */
+.guide-meta {
+  margin: 6px 0 0;
+  color: var(--fg-dim);
+}
+.guide code {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: rgba(127, 127, 127, 0.18);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  word-break: break-all;
+}
+.guide a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.err-block {
+  margin-top: 10px;
+}
+.err-title {
+  margin: 0;
+  color: var(--err);
+  font-size: 12px;
+}
+.err-box {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--err);
+  background: rgba(224, 67, 63, 0.08);
+  color: var(--fg);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 160px;
+  overflow: auto;
+  user-select: text;
+}
 .hint {
   margin: 10px 0 0;
   font-size: 12px;
   color: var(--fg-faint);
   line-height: 1.6;
+}
+.hint a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
 }
 /* 测试连接结果 */
 .test-list {
