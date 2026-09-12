@@ -6,7 +6,7 @@ const { PLUGIN_VERSION, K } = require('./constants')
 const { DEV, logErr, LOG_FILE } = require('./log')
 const {
   clampNum, readConfig, patchConfig, readSecrets, writeSecrets, readLedger,
-  resetAnchorCache, mergeLedgerHistory,
+  resetAnchorCache, mergeLedgerHistory, clearTimer,
 } = require('./store')
 const {
   fetchBalanceWith, fetchPlatformUsage, checkUpdate, resetBalanceCache,
@@ -15,6 +15,7 @@ const {
   ensureWidget, destroyWidget, winAlive, getWidgetError, getWindow,
   applyScaleToWindow, applyOnTop, pushConfig, queueLiveScale,
 } = require('./widget')
+const dsh = require('./dsh')
 
 // 近 N 天用量（含今日，缺失日期补 0），按日期升序
 function usageDays(days) {
@@ -100,6 +101,56 @@ module.exports = {
       return false
     }
   },
+  // ──────────────────────────────────────────────
+  // DeepSeek Harness（dsh，面向开发者用户）
+  // ──────────────────────────────────────────────
+  // 状态快照：运行中/pid/地址/模式/Node 目录与版本/错误/日志
+  // 顺手触发一次端口探测（异步），这样「打开设置页/刷新状态」就能看到外部 dsh 的真实状态
+  dshStatus() {
+    try { dsh.probePort(() => {}) } catch (err) {}
+    return dsh.snapshot()
+  },
+  dshStart() {
+    return dsh.start()
+  },
+  dshStop() {
+    return dsh.stop()
+  },
+  // 重启要等旧进程退出，结果通过回调异步更新（返回当前快照）
+  dshRestart() {
+    const cur = dsh.snapshot()
+    dsh.restart(() => {})
+    return cur
+  },
+  dshUpdate() {
+    return dsh.update()
+  },
+  dshOpenWeb() {
+    return dsh.openWeb()
+  },
+  // 查询可用版本列表（结果通过状态快照的 versions 字段回传，稍后刷新状态即可看到）
+  dshListVersions() {
+    return dsh.listVersions()
+  },
+  // 选择 Node.js 安装目录并校验（目录里必须有 node 可执行文件）
+  dshPickNodeDir() {
+    let picked
+    try {
+      picked = utools.showOpenDialog({
+        title: '选择 Node.js 安装目录',
+        buttonLabel: '选择',
+        properties: ['openDirectory'],
+      })
+    } catch (err) {
+      return { ok: false, error: '无法打开目录选择框：' + ((err && err.message) || err) }
+    }
+    const dir = Array.isArray(picked) ? picked[0] : picked
+    if (!dir) return { ok: false, canceled: true }
+    if (!dsh.nodeInDir(dir)) {
+      return { ok: false, error: '该目录下没有 node 可执行文件，请选择 Node.js 的安装目录（如 D:\\nodejs）' }
+    }
+    return { ok: true, dir: dir }
+  },
   saveConfig(patch) {
     // 设置页拖动滑块中的实时预览：只改窗口几何（rAF 合帧），不写存储、不广播
     if (patch && patch.__live) {
@@ -108,6 +159,8 @@ module.exports = {
     }
     const prev = readConfig()
     const cfg = patchConfig(patch)
+    // 关掉「计时保存」时顺手清掉已落库的计时状态，避免下次重建挂件又恢复
+    if (cfg.timerPersistOn === false && prev.timerPersistOn !== false) clearTimer()
     if (cfg.scale !== prev.scale) applyScaleToWindow(cfg.scale, true)
     if (cfg.onTop !== prev.onTop) applyOnTop(cfg.onTop)
     if (cfg.usageMode !== prev.usageMode) resetBalanceCache()
@@ -197,23 +250,32 @@ module.exports = {
     const r = mergeLedgerHistory(rows)
     return { ok: true, path: filePath, imported: r.imported, invalid: invalid, kept: r.kept, from: r.from, to: r.to }
   },
-  // 清除本地数据：挂件设置、账本、窗口锚点、更新缓存。
-  // 传 { keepSecrets: true } 时保留 API Key/平台 Token；否则一并清除（含凭据）。
-  // 卸载 uTools 插件不会删除这些数据，需要彻底清除时由设置页调用本方法。
+  // 按项清除本地数据：opts = { secrets, config, ledger, window }，为 true 的项才会被清除。
+  // 「窗口」项同时含窗口锚点与更新缓存。卸载 uTools 插件不会删除这些数据，需要彻底清除时由设置页调用。
   clearAllData(opts) {
-    const keepSecrets = !!(opts && opts.keepSecrets)
+    const o = opts && typeof opts === 'object' ? opts : {}
     const wasVisible = winAlive()
-    try { utools.dbStorage.removeItem(K.config) } catch (err) {}
-    try { utools.dbStorage.removeItem(K.ledger) } catch (err) {}
-    try { utools.dbStorage.removeItem(K.win) } catch (err) {}
-    try { utools.dbStorage.removeItem(K.update) } catch (err) {}
-    if (!keepSecrets) { try { utools.dbCryptoStorage.removeItem(K.secrets) } catch (err) {} }
-    resetAnchorCache()
+    if (o.secrets) { try { utools.dbCryptoStorage.removeItem(K.secrets) } catch (err) {} }
+    if (o.config) {
+      try { utools.dbStorage.removeItem(K.config) } catch (err) {}
+      clearTimer() // 设置被重置，一并清掉已落库的计时状态
+    }
+    if (o.ledger) { try { utools.dbStorage.removeItem(K.ledger) } catch (err) {} }
+    if (o.window) {
+      try { utools.dbStorage.removeItem(K.win) } catch (err) {}
+      try { utools.dbStorage.removeItem(K.update) } catch (err) {}
+      resetAnchorCache()
+    }
     resetBalanceCache()
-    // 重建挂件窗口，让默认配置与默认位置立即生效（原本隐藏则保持隐藏）
-    destroyWidget()
-    if (wasVisible) ensureWidget()
-    return { ok: true, keepSecrets: keepSecrets }
+    // 配置或窗口锚点被清除后按默认值重建挂件（原本隐藏则保持隐藏）
+    if (o.config || o.window) {
+      destroyWidget()
+      if (wasVisible) ensureWidget()
+    }
+    return {
+      ok: true,
+      cleared: { secrets: !!o.secrets, config: !!o.config, ledger: !!o.ledger, window: !!o.window },
+    }
   },
   ensureWidget() {
     ensureWidget()

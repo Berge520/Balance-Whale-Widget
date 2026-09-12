@@ -14,7 +14,8 @@ uTools 插件：呼出后在桌面创建一个**透明、无边框、置顶**的
 - 今日已用双模式：
   - **小鲸鱼记账（默认，免令牌）**：余额差值本地记账（uTools `dbStorage`），跨天归档保留 30 天，切换币种只重置基准。
   - **实时·令牌**：用平台网页令牌调 `usage/by_api_key/amount`，按峰谷定价表换算；失败自动回落记账。
-- 交互：拖拽 + 四边四分之一吸附（四角可组合）+ 自由位、贴左镜像、按压 Q 弹 + 双段音效、汉堡菜单（大小/音效开关/音色/音量/用量/峰谷文案/气泡/报时/置顶）、数字滚动、60s 自动刷新 + 点击手动刷新、随机台词 + rua.gif、透明区点击穿透。
+- 交互：拖拽 + 四边四分之一吸附（四角可组合）+ 自由位、贴左镜像、按压 Q 弹 + 双段音效、汉堡菜单（大小/音效开关/音色/音量/用量/峰谷文案/气泡/峰谷提醒/报时/计时/锁定/置顶）、数字滚动、60s 自动刷新 + 点击手动刷新、随机台词 + rua.gif、透明区点击穿透。
+- 计时 / 定时 / 倒计时：结果在思考气泡内显示并每秒刷新；到点响提示音（沿用音效开关与音量）并在气泡里显示「时间到！」。
 - **不含**「每轮对话消耗统计」（该功能依赖 DSH 本机会话事件，uTools 无对应数据源）。
 
 ---
@@ -113,7 +114,9 @@ uTools 插件：呼出后在桌面创建一个**透明、无边框、置顶**的
 | 子→父 | `whale:drag-end` | — | 松手，主窗吸附 + 回推 snapped |
 | 子→父 | `whale:ignore-mouse` | `{ignore:boolean}` | 点击穿透开关 |
 | 子→父 | `whale:open-settings` | — | 挂件菜单请求唤出 uTools 主窗（`utools.showMainWindow()`），「只显示挂件」模式下的设置入口 |
-| 父→子 | `whale:init` | `{config, anchor:{hAnchor,vAnchor,flipped}, balance}` | 初始化 |
+| 子→父 | `whale:timer` | 计时状态对象，或 `null`（清除） | 计时开始 / 停止 / 到点时落库，宿主重建挂件后回推恢复 |
+| 子→父 | `whale:timer-done` | `{text}` | 计时到点：宿主 `utools.showNotification(text, 'whale')`；是否通知由页面按 `timerNotifyOn` 判断 |
+| 父→子 | `whale:init` | `{config, anchor:{hAnchor,vAnchor,flipped}, balance, timer}` | 初始化；`timer` 仅在 `timerPersistOn` 开启时有值 |
 | 父→子 | `whale:balance` | 余额 payload（见下） | 余额/今日已用结果 |
 | 父→子 | `whale:config` | 完整 config | 设置页/菜单改动广播 |
 | 父→子 | `whale:snapped` | `{hAnchor,vAnchor,flipped}` | 吸附结果（驱动镜像） |
@@ -127,12 +130,13 @@ uTools 插件：呼出后在桌面创建一个**透明、无边框、置顶**的
 | 介质 | 键 | 内容 |
 |---|---|---|
 | `dbCryptoStorage`（加密） | `whale:secrets` | `{apiKey, platformToken}`，写入前 `sanitizeKey` 剔除空白 |
-| `dbStorage` | `whale:config` | `{scale,vol,soundOn,soundSet,usageMode,peakMode,bubbleOn,menuBtn,onTop,lowAlertOn,lowAlertAmount,timeBubbleOn,updateCheckOn,dragLock,enterMode,updatedAt}` |
+| `dbStorage` | `whale:config` | `{scale,vol,soundOn,soundSet,usageMode,peakMode,peakRemindOn,bubbleOn,menuBtn,onTop,lowAlertOn,lowAlertAmount,timeBubbleOn,updateCheckOn,dragLock,enterMode,timerNotifyOn,timerPersistOn,updatedAt}` |
 | `dbStorage` | `whale:ledger` | `{date,lastBalance,lastCurrency,todayUsage,history:{YYYY-MM-DD:金额}}`（history 留 30 天） |
+| `dbStorage` | `whale:timer` | `{mode,running,startAt,endAt,elapsed,arg}` 计时状态（`timerPersistOn` 开启时才有；关掉开关或清除「挂件设置」时删除） |
 | `dbStorage` | `whale:window` | `{hAnchor,hDist,vAnchor,vDist}` 净距离锚点 |
 | `dbStorage` | `whale:update` | 上次检查更新结果缓存 `{at,latest,hasUpdate,...}`（TTL 12h） |
 
-默认 config：`{scale:1.5, vol:0.9, soundOn:true, soundSet:'duck', usageMode:'ledger', peakMode:'default', bubbleOn:true, menuBtn:true, onTop:true, lowAlertOn:true, lowAlertAmount:10, timeBubbleOn:true, updateCheckOn:true, dragLock:false, enterMode:'both'}`。
+默认 config：`{scale:1.5, vol:0.9, soundOn:true, soundSet:'duck', usageMode:'ledger', peakMode:'default', peakRemindOn:true, bubbleOn:true, menuBtn:true, onTop:true, lowAlertOn:true, lowAlertAmount:10, timeBubbleOn:true, updateCheckOn:true, dragLock:false, enterMode:'both', timerNotifyOn:true, timerPersistOn:true}`。
 
 ---
 
@@ -146,6 +150,7 @@ uTools 插件：呼出后在桌面创建一个**透明、无边框、置顶**的
 - URL `https://platform.deepseek.com/api/v0/usage/by_api_key/amount?start=<本地零点unix>&end=<+86400>&tz=<偏移秒>`，`Bearer <token>`（自动去 `Bearer ` 前缀），15s 超时。
 - 解析 `data.biz_data.series[]`（兼容 `data.series`），每 series `{model,buckets:[{time,usage:{RESPONSE_TOKEN,PROMPT_CACHE_HIT_TOKEN,PROMPT_CACHE_MISS_TOKEN}}]}`；接口只给 token 不给金额。
 - 峰谷：北京时间工作日 9–12、14–18 为峰；`WEEKEND_VALLEY_FROM_SEC`（=北京 2026-08-23 00:00）起周末全天谷价。
+- 成功后 `setTodayUsage(amount)` 把平台今日总量写入账本 `todayUsage`：趋势图 / 导出 / 今日已用都取账本，不写会导致设置页与挂件显示不一致（记账累计值 ≠ 平台今日总量）。
 
 **定价表**（每百万 token，CNY，谷/峰）：
 
@@ -170,8 +175,16 @@ DOM：`.dshwv-root`（定位/翻转）> `.dshwv-body`（Q 弹缩放）> `img.dsh
 - Q 弹：body `scaleY(.88) scaleX(1.05)`，origin `50% 100%`，`transform .22s cubic-bezier(.34,1.56,.64,1)`。
 - 音效：press=Ya1/D1、release=Ya2/D2；按住松手与短按（press 末尾提前 100ms 接 release）两节奏；vol=0 静音；`new Audio` 失败静默。
 - 随机台词六组权重 45/7/7/10/3/1（峰谷三行 / B 卖萌 / A 吐槽换行 / rua.gif / A 大烧货 / B 哦鲸鲸）；点气泡首次切随机、再点关闭；气泡 5s 自动收起；gif 加载失败兜底文字。气泡首行默认**报时**（`timeBubbleOn`，鲸鱼娘语气按时段变化，如「都 02:30 了，还不睡吗…」），关闭后显示「DeepSeek 余额」。
-- 汉堡菜单行：大小 / 音效 / 音量 / 用量 / 峰谷 / 气泡 / 报时 / 锁定 / **打开设置**（末行整宽按钮，`whaleApi.openSettings()` → 宿主 `utools.showMainWindow()`）。
-- 刷新节奏：`whale:init` 后启动 60s 轮询；`visibilitychange` 隐藏（`win.hide` / 最小化 / 切走虚拟桌面）时 `clearInterval` 暂停，重新可见时先 `refresh(false)` 立即拉一次再恢复轮询，避免后台空跑网络请求。
+- **气泡自适应**（`fitBubbleText`）：气泡三行字号本为固定值（A/B/P/C），长文案换行后会撑出气泡；`applyBubbleLines` 末尾按 `FIT_W×FIT_H`（560×330u）可用区域测量文本块，超出时把三行字号**等比缩小**（最多到 50%，最多迭代 3 次），正常内容保持原字号（只缩不放）。字号写成行内 `calc(var(--dshw-u) * N)`，因此挂件缩放后无需重新测量；`resetBubbleFont()` 在退出气泡文案（`render` 默认分支、`restoreBubbleLines`）时清掉行内字号。
+- 汉堡菜单行：大小 / 音效 / 音量 / 用量 / 峰谷 / 气泡 / **峰谷提醒** / 报时 / **计时**（模式下拉 + 开始/停止）/ **目标**（倒计时分钟数或定时刻，按模式二选一显示）/ **到点通知** / **计时保存** / 锁定 / **打开设置**（末行整宽按钮，`whaleApi.openSettings()` → 宿主 `utools.showMainWindow()`）。菜单行数较多时靠 `.dshwv-menu` 的 `max-height:100vh-8px + overflow-y:auto` 在窗口内滚动，不会被窗口边缘裁掉。
+- **计时 / 定时 / 倒计时**（`timerMode` = `off|up|down|at`）：
+  - 正计时从 0 累加；倒计时取「分钟数」（1–1440，默认 25）换算终点；定时取 `HH:MM`，该时刻今天已过则顺延到明天。
+  - 倒计时/定时用「终点时间戳」计时（`timerEndAt`），1s `setInterval` 只负责刷新显示与判断到点，因此窗口被后台节流也不会走时不准。
+  - 计时气泡**常驻不自动收起**（`showTimerBubble(0)`），点气泡可收起、计时继续；再点鲸鱼重新显示（`showBubble()` 在 `timerActive()` 时转 `showTimerBubble`）。
+  - 到点：`finishTimer()` 响提示音（`playPress()`，走音效开关与音量）→ 按 `timerNotifyOn` 决定是否 `whale:timer-done` 弹系统通知 → 气泡显示「时间到！」→ `BUBBLE_REMIND_MS`（8s）后收起，并在 `hideBubble` 里清掉结束态。
+  - 持久化（`timerPersistOn`，默认开）：开始/停止/到点/切模式时 `whale:timer` 上报落库（`whale:timer` 键）；重建挂件时宿主在 `whale:init` 里回推 `timer`，页面 `restoreTimer()` 恢复 —— 正计时按 `startAt` 继续，倒计时/定时按 `endAt` 继续，若挂件不在期间已到点则直接补一次到点流程（提示音 + 通知 + 气泡）。关闭开关后不再落库，宿主同时删除已有记录（`saveConfig`/`whale:config` 两条路径都会 `clearTimer()`）。
+  - 优先级：计时气泡 > 峰谷提醒 > 随机台词 > 余额提示；计时进行中 `showPeakRemind` 直接跳过，不打断计时。
+- 刷新节奏：`whale:init` 后启动 60s 轮询；`visibilitychange` 隐藏（`win.hide` / 最小化 / 切走虚拟桌面）时 `clearInterval` 暂停，重新可见时先 `timerStep()`（补判计时到点）与 `refresh(false)` 立即拉一次再恢复轮询，避免后台空跑网络请求。
 
 ---
 
@@ -190,14 +203,15 @@ DOM：`.dshwv-root`（定位/翻转）> `.dshwv-body`（Q 弹缩放）> `img.dsh
 | 翻转动画 | 根 `transform .3s ease`；文字按属性拆分 `opacity .16s .36s, transform .3s` |
 | Q 弹 | scaleY(.88) scaleX(1.05)，origin 50% 100%，.22s 回弹 |
 | 数字动画 | 700ms ease-out 三次方（rAF）；自动刷新变动延迟 300ms 起滚，900ms 落定 |
-| 计时 | 自动刷新 60s（页面隐藏时暂停）；气泡 5s；余额缓存 25s |
+| 时长 | 自动刷新 60s（页面隐藏时暂停）；气泡 5s；余额缓存 25s |
+| 计时功能 | 1s 刷新（按终点时间戳推进）；计时气泡常驻；到点提示音 + 「时间到！」停留 8s（`BUBBLE_REMIND_MS`） |
 | z-index | 挂件 9999，菜单 10000 |
 
 ---
 
 ## 十、设置页（src/App.vue）
 
-通过 `window.services` 调用：`getConfig/onConfigChange/saveConfig/getSecrets/saveSecrets/testApiKey/testPlatformToken/getUsageHistory/exportUsageCsv/importUsageCsv/showWidget/hideWidget/isWidgetVisible/ensureWidget/getWidgetError/copyText/redirectHotKeySetting`。**配置双向同步**：设置页改开关 → `saveConfig` → `pushConfig()` 推给挂件；挂件三点菜单改设置 → `whale:config` → `patchConfig` + `pushConfig()`（挂件）+ `emitConfigChange()`（广播给已打开的设置页，`App.vue` 在 `onMounted` 订阅、`onUnmounted` 退订），避免「挂件菜单勾选与设置窗口开关不同步」。包含 API Key / 平台 Token 录入（加密保存 + 测试连接，分项验证余额接口与用量接口）、大小/音效开关/音色/音量/用量/峰谷文案/气泡/报时/菜单按钮/置顶/低余额预警开关与阈值、近 7 天用量柱状图 + **导出 CSV**（`exportUsageCsv(days)`：`utools.showSaveDialog` 弹系统保存框，写 UTF-8 BOM 的 `日期,用量,币种` 三列，Excel 可直接打开；用户取消返回 `{ok:false,canceled:true}`）、**导入 CSV**（`importUsageCsv()`：`utools.showOpenDialog` 选 `日期,用量[,币种]` 文件，兼容 BOM/CRLF/表头/`-`、`/`、`.` 日期分隔符；`store.mergeLedgerHistory` 合并进账本 `history`，同日以导入值覆盖、只留最近 30 天；当天行同步写入 `todayUsage`（否则趋势图当天柱会被实时累计值遮蔽），`lastBalance/lastCurrency` 基准不动；返回 `{ok,imported,invalid,kept,from,to}`，成功后设置页刷新趋势图）、显示/隐藏挂件、复制指令名（`copyText('显示/隐藏挂件')`）、新增快捷键（`redirectHotKeySetting('显示/隐藏挂件')`，跳转「全局功能」并新增待绑定项）、挂件错误查看（进入设置页自动 `getWidgetError()` 静默检查：有错误时展开红色标题 + 等宽错误详情 + `copyText` 复制按钮与「重新检查」；无错误时仅显示一行浅色「挂件异常？查看错误详情」链接，点击才提示「当前没有记录到挂件错误」）、数据与隐私（`clearAllData({keepSecrets})` 二次确认：`keepSecrets:true` 只清设置/账本/窗口锚点/更新缓存并保留凭据，否则连凭据一并清除；两种情况均按默认配置重建挂件）与错误回显。另在「挂件窗口」卡片末尾有「挂件常驻说明」引导提示，以及「复制诊断日志」(`getDebugLog()` → `copyText` 日志末尾 20000 字符) 与「打开日志文件」(`openLogFile()` → `utools.shellOpenPath`)，用于 uTools 结束进程后仍能取回控制台线索（见第三节第 11、13 条）。
+通过 `window.services` 调用：`getConfig/onConfigChange/saveConfig/getSecrets/saveSecrets/testApiKey/testPlatformToken/getUsageHistory/exportUsageCsv/importUsageCsv/showWidget/hideWidget/isWidgetVisible/ensureWidget/getWidgetError/copyText/redirectHotKeySetting`。**配置双向同步**：设置页改开关 → `saveConfig` → `pushConfig()` 推给挂件；挂件三点菜单改设置 → `whale:config` → `patchConfig` + `pushConfig()`（挂件）+ `emitConfigChange()`（广播给已打开的设置页，`App.vue` 在 `onMounted` 订阅、`onUnmounted` 退订），避免「挂件菜单勾选与设置窗口开关不同步」。包含 API Key / 平台 Token 录入（加密保存 + 测试连接，分项验证余额接口与用量接口）、大小/音效开关/音色/音量/用量/峰谷文案/气泡/峰谷切换提醒/**计时到点通知**/**记住计时状态**/报时/菜单按钮/置顶/低余额预警开关与阈值、近 7 天用量柱状图 + **导出 CSV**（`exportUsageCsv(days)`：`utools.showSaveDialog` 弹系统保存框，写 UTF-8 BOM 的 `日期,用量,币种` 三列，Excel 可直接打开；用户取消返回 `{ok:false,canceled:true}`）、**导入 CSV**（`importUsageCsv()`：`utools.showOpenDialog` 选 `日期,用量[,币种]` 文件，兼容 BOM/CRLF/表头/`-`、`/`、`.` 日期分隔符；`store.mergeLedgerHistory` 合并进账本 `history`，同日以导入值覆盖、只留最近 30 天；当天行同步写入 `todayUsage`（否则趋势图当天柱会被实时累计值遮蔽），`lastBalance/lastCurrency` 基准不动；返回 `{ok,imported,invalid,kept,from,to}`，成功后设置页刷新趋势图）、显示/隐藏挂件、复制指令名（`copyText('显示/隐藏挂件')`）、新增快捷键（`redirectHotKeySetting('显示/隐藏挂件')`，跳转「全局功能」并新增待绑定项）、挂件错误查看（进入设置页自动 `getWidgetError()` 静默检查：有错误时展开红色标题 + 等宽错误详情 + `copyText` 复制按钮与「重新检查」；无错误时仅显示一行浅色「挂件异常？查看错误详情」链接，点击才提示「当前没有记录到挂件错误」）、数据与隐私（**按项清除**：四个复选框「凭据 / 挂件设置 / 账本用量记录 / 窗口位置与更新缓存」→ `clearAllData({secrets,config,ledger,window})` 只清 `true` 的项，按钮二次确认，已清除项在提示里回显；清到配置或窗口项时宿主按默认配置重建挂件；清凭据后本页输入框同步置空）、近 7 天趋势的刷新时机（`refreshHistory()`：`onMounted`、导入 CSV 后、切换用量模式时、窗口 `focus`/`visibilitychange` 重新可见时——令牌模式的今日总量由挂件刷新时写入账本，不重拉会看不到变化）与错误回显。另在「挂件窗口」卡片末尾有「挂件常驻说明」引导提示，以及「复制诊断日志」(`getDebugLog()` → `copyText` 日志末尾 20000 字符) 与「打开日志文件」(`openLogFile()` → `utools.shellOpenPath`)，用于 uTools 结束进程后仍能取回控制台线索（见第三节第 11、13 条）。
 
 类型声明见 `src/types/services.d.ts`（`WhaleServices` 挂到 `Window.services`），`npm run typecheck`（`vue-tsc --noEmit`）校验。
 
@@ -209,4 +223,4 @@ DOM：`.dshwv-root`（定位/翻转）> `.dshwv-body`（Q 弹缩放）> `img.dsh
 2. 改 preload 后必须在 uTools 里重新加载插件（preload 不热更；`lib/*.js` 同理）。
 3. 类型检查：`npm run typecheck`（`vue-tsc --noEmit`）；提交前建议跑一次。
 4. 版本号单一来源：改 `package.json` 的 `version` 即可。`npm run build` 的 `prebuild` 钩子执行 `scripts/sync-version.mjs`，写入 `public/plugin.json` 的 `version` 与 `public/preload/lib/constants.js` 的 `PLUGIN_VERSION`。
-5. 自测：透明区穿透、拖到四边/四角吸附与贴左镜像、自由位、菜单改大小（鲸鱼角不动）、音效、点击刷新与 60s 自动刷新（隐藏窗口后确认不再轮询）、余额变动数字滚动、记账跨天、令牌模式回落、置顶开关、导出 CSV、导入 CSV（合并进账本并刷新趋势）、查看/复制挂件错误、清除数据（保留/不保留凭据）、**`widget` 模式下挂件菜单「打开设置」能唤回主窗**（合并 feature 后的 redirect 兜底，重点验证）、**挂件三点菜单勾选 ↔ 设置窗口开关双向同步**（设置窗开着时改挂件菜单，本页开关即时跟随）、**复制/打开诊断日志**（`%TEMP%\whale-debug.log` 能看到 `onPluginDetach` / `onPluginOut {isKill}` 序列）、**关闭分离窗口后重进插件挂件自动重建**。
+5. 自测：透明区穿透、拖到四边/四角吸附与贴左镜像、自由位、菜单改大小（鲸鱼角不动）、音效、点击刷新与 60s 自动刷新（隐藏窗口后确认不再轮询）、余额变动数字滚动、记账跨天、令牌模式回落、**令牌模式刷新后设置页趋势图当天柱与挂件「今日已用」一致**、**气泡长文案自适应（峰谷提醒 / 长台词不出框）**、**计时/定时/倒计时（正计时累加、倒计时分钟数归零响提示音、定时顺延到明天、计时气泡点开后收起与再打开；开启「计时到点通知」后到点弹系统通知；开启「计时保存」后重载插件/重建挂件仍继续计时，关闭后不恢复）**、置顶开关、导出 CSV、导入 CSV（合并进账本并刷新趋势）、查看/复制挂件错误、**按项清除数据（分别勾选凭据 / 设置 / 账本 / 窗口位置验证只清选中项）**、**`widget` 模式下挂件菜单「打开设置」能唤回主窗**（合并 feature 后的 redirect 兜底，重点验证）、**挂件三点菜单勾选 ↔ 设置窗口开关双向同步**（设置窗开着时改挂件菜单，本页开关即时跟随）、**复制/打开诊断日志**（`%TEMP%\whale-debug.log` 能看到 `onPluginDetach` / `onPluginOut {isKill}` 序列）、**关闭分离窗口后重进插件挂件自动重建**。

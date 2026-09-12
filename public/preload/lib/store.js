@@ -29,7 +29,20 @@ function writeSecrets(secrets) {
 // 配置
 // ──────────────────────────────────────────────
 function defaultConfig() {
-  return { scale: 1.5, vol: 0.9, soundOn: true, soundSet: 'duck', usageMode: 'ledger', peakMode: 'default', peakRemindOn: true, bubbleOn: true, menuBtn: true, onTop: true, lowAlertOn: true, lowAlertAmount: 10, timeBubbleOn: true, updateCheckOn: true, dragLock: false, enterMode: 'both' }
+  return { scale: 1.5, vol: 0.9, soundOn: true, soundSet: 'duck', usageMode: 'ledger', peakMode: 'default', peakRemindOn: true, bubbleOn: true, menuBtn: true, onTop: true, lowAlertOn: true, lowAlertAmount: 10, timeBubbleOn: true, updateCheckOn: true, dragLock: false, enterMode: 'both', timerNotifyOn: true, timerPersistOn: true, timerMode: 'off', timerMin: 25, timerAt: '07:30', timerRemindSec: 8, timerBubblePin: true, timerBubbleOnly: true, dshMode: 'npx', dshNodeDir: '', dshKeepAlive: false, dshRegistry: '', dshVersion: '', dshCleanNpx: false }
+}
+// dsh 运行方式：npx（不装全局）| global（npm i -g 后跑全局 dsh）
+function normDshMode(v) { return v === 'global' ? 'global' : 'npx' }
+// dsh 注册源：只接受 http(s) 或空（默认官方源）
+function normRegistry(v) {
+  const s = String(v == null ? '' : v).trim()
+  return /^https?:\/\//i.test(s) ? s.slice(0, 200) : ''
+}
+// dsh 版本：空 = latest；否则只留 数字/点/横杠/字母 的版本号
+function normVersion(v) {
+  const s = String(v == null ? '' : v).trim().replace(/^@/, '')
+  if (!s || s === 'latest') return ''
+  return /^[0-9A-Za-z][0-9A-Za-z.\-+]*$/.test(s) ? s.slice(0, 40) : ''
 }
 function clampNum(v, lo, hi, dft) {
   const n = Number(v)
@@ -58,6 +71,20 @@ function readConfig() {
     updateCheckOn: p.updateCheckOn !== false,
     dragLock: p.dragLock === true,
     enterMode: p.enterMode === 'widget' || p.enterMode === 'settings' ? p.enterMode : 'both',
+    timerNotifyOn: p.timerNotifyOn !== false,
+    timerPersistOn: p.timerPersistOn !== false,
+    timerMode: p.timerMode === 'up' || p.timerMode === 'down' || p.timerMode === 'at' ? p.timerMode : 'off',
+    timerMin: Math.round(clampNum(p.timerMin, 1, 1440, dft.timerMin)),
+    timerAt: /^\d{1,2}:\d{2}$/.test(String(p.timerAt || '')) ? String(p.timerAt) : dft.timerAt,
+    timerRemindSec: p.timerRemindSec === 0 || p.timerRemindSec === 5 || p.timerRemindSec === 8 || p.timerRemindSec === 15 ? p.timerRemindSec : dft.timerRemindSec,
+    timerBubblePin: p.timerBubblePin !== false,
+    timerBubbleOnly: p.timerBubbleOnly !== false,
+    dshMode: normDshMode(p.dshMode),
+    dshNodeDir: typeof p.dshNodeDir === 'string' ? p.dshNodeDir.slice(0, 260) : dft.dshNodeDir,
+    dshKeepAlive: p.dshKeepAlive === true,
+    dshRegistry: normRegistry(p.dshRegistry),
+    dshVersion: normVersion(p.dshVersion),
+    dshCleanNpx: p.dshCleanNpx === true,
   }
 }
 function writeConfig(cfg) {
@@ -78,6 +105,20 @@ function writeConfig(cfg) {
     updateCheckOn: cfg.updateCheckOn !== false,
     dragLock: cfg.dragLock === true,
     enterMode: cfg.enterMode === 'widget' || cfg.enterMode === 'settings' ? cfg.enterMode : 'both',
+    timerNotifyOn: cfg.timerNotifyOn !== false,
+    timerPersistOn: cfg.timerPersistOn !== false,
+    timerMode: cfg.timerMode === 'up' || cfg.timerMode === 'down' || cfg.timerMode === 'at' ? cfg.timerMode : 'off',
+    timerMin: Math.round(clampNum(cfg.timerMin, 1, 1440, 25)),
+    timerAt: /^\d{1,2}:\d{2}$/.test(String(cfg.timerAt || '')) ? String(cfg.timerAt) : '07:30',
+    timerRemindSec: cfg.timerRemindSec === 0 || cfg.timerRemindSec === 5 || cfg.timerRemindSec === 8 || cfg.timerRemindSec === 15 ? cfg.timerRemindSec : 8,
+    timerBubblePin: cfg.timerBubblePin !== false,
+    timerBubbleOnly: cfg.timerBubbleOnly !== false,
+    dshMode: normDshMode(cfg.dshMode),
+    dshNodeDir: typeof cfg.dshNodeDir === 'string' ? cfg.dshNodeDir.slice(0, 260) : '',
+    dshKeepAlive: cfg.dshKeepAlive === true,
+    dshRegistry: normRegistry(cfg.dshRegistry),
+    dshVersion: normVersion(cfg.dshVersion),
+    dshCleanNpx: cfg.dshCleanNpx === true,
     updatedAt: new Date().toISOString(),
   })
 }
@@ -100,6 +141,26 @@ function patchConfig(patch) {
   if (p.updateCheckOn !== undefined) cfg.updateCheckOn = !!p.updateCheckOn
   if (p.dragLock !== undefined) cfg.dragLock = !!p.dragLock
   if (p.enterMode !== undefined) cfg.enterMode = p.enterMode === 'widget' || p.enterMode === 'settings' ? p.enterMode : 'both'
+  if (p.timerNotifyOn !== undefined) cfg.timerNotifyOn = !!p.timerNotifyOn
+  if (p.timerPersistOn !== undefined) cfg.timerPersistOn = !!p.timerPersistOn
+  if (p.timerMode !== undefined) cfg.timerMode = p.timerMode === 'up' || p.timerMode === 'down' || p.timerMode === 'at' ? p.timerMode : 'off'
+  if (p.timerMin !== undefined) cfg.timerMin = Math.round(clampNum(p.timerMin, 1, 1440, cfg.timerMin))
+  if (p.timerAt !== undefined) {
+    const s = String(p.timerAt)
+    if (/^\d{1,2}:\d{2}$/.test(s)) cfg.timerAt = s
+  }
+  if (p.timerRemindSec !== undefined) {
+    const n = Number(p.timerRemindSec)
+    if (n === 0 || n === 5 || n === 8 || n === 15) cfg.timerRemindSec = n
+  }
+  if (p.timerBubblePin !== undefined) cfg.timerBubblePin = !!p.timerBubblePin
+  if (p.timerBubbleOnly !== undefined) cfg.timerBubbleOnly = !!p.timerBubbleOnly
+  if (p.dshMode !== undefined) cfg.dshMode = normDshMode(p.dshMode)
+  if (p.dshNodeDir !== undefined) cfg.dshNodeDir = String(p.dshNodeDir || '').trim().slice(0, 260)
+  if (p.dshKeepAlive !== undefined) cfg.dshKeepAlive = !!p.dshKeepAlive
+  if (p.dshRegistry !== undefined) cfg.dshRegistry = normRegistry(p.dshRegistry)
+  if (p.dshVersion !== undefined) cfg.dshVersion = normVersion(p.dshVersion)
+  if (p.dshCleanNpx !== undefined) cfg.dshCleanNpx = !!p.dshCleanNpx
   writeConfig(cfg)
   return cfg
 }
@@ -179,6 +240,46 @@ function mergeLedgerHistory(entries) {
   return { imported, kept: kept.length, from: kept[0] || '', to: kept[kept.length - 1] || '' }
 }
 
+// 令牌模式：平台返回的今日总量是权威值，直接写入账本当天用量。
+// 不写的话趋势图/导出仍取记账累计值，会与挂件显示的「今日已用」对不上。
+function setTodayUsage(amount) {
+  const led = readLedger()
+  led.todayUsage = Math.max(0, Number(amount) || 0)
+  try { utools.dbStorage.setItem(K.ledger, led) } catch (err) { logErr('[whale][ledger] 写今日用量失败', err && err.message) }
+  return led
+}
+
+// ──────────────────────────────────────────────
+// 计时状态（正计时/倒计时/定时）
+// ──────────────────────────────────────────────
+// 由悬浮窗在开始/停止/到点时上报；宿主只做落库，重建挂件后回推给页面恢复。
+// 传 null 表示清除（用户关掉「计时保存」开关时）。
+function readTimer() {
+  const dft = { mode: 'off', running: false, paused: false, startAt: 0, endAt: 0, elapsed: 0, remain: 0, arg: '' }
+  try {
+    const t = utools.dbStorage.getItem(K.timer)
+    if (t && typeof t === 'object') {
+      return {
+        mode: t.mode === 'up' || t.mode === 'down' || t.mode === 'at' ? t.mode : 'off',
+        running: t.running === true,
+        paused: t.paused === true,
+        startAt: isFinite(Number(t.startAt)) ? Number(t.startAt) : 0,
+        endAt: isFinite(Number(t.endAt)) ? Number(t.endAt) : 0,
+        elapsed: isFinite(Number(t.elapsed)) ? Math.max(0, Number(t.elapsed)) : 0,
+        remain: isFinite(Number(t.remain)) ? Math.max(0, Number(t.remain)) : 0,
+        arg: typeof t.arg === 'string' ? t.arg : '',
+      }
+    }
+  } catch (err) {}
+  return dft
+}
+function writeTimer(state) {
+  try { utools.dbStorage.setItem(K.timer, state) } catch (err) { logErr('[whale][timer] 写计时状态失败', err && err.message) }
+}
+function clearTimer() {
+  try { utools.dbStorage.removeItem(K.timer) } catch (err) {}
+}
+
 // ──────────────────────────────────────────────
 // 窗口锚点
 // ──────────────────────────────────────────────
@@ -223,6 +324,10 @@ module.exports = {
   readLedger,
   recordLedgerUsage,
   mergeLedgerHistory,
+  setTodayUsage,
+  readTimer,
+  writeTimer,
+  clearTimer,
   defaultAnchor,
   readAnchor,
   writeAnchor,

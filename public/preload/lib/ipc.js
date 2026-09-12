@@ -5,7 +5,8 @@ const { ipcRenderer } = require('electron')
 const { WIN_PAD } = require('./constants')
 const { log, logErr } = require('./log')
 const { getBalance } = require('./api')
-const { readConfig, patchConfig, writeAnchor } = require('./store')
+const { readConfig, patchConfig, writeAnchor, writeTimer, clearTimer } = require('./store')
+const dsh = require('./dsh')
 const {
   pushInit, sendToWidget, applyScaleToWindow, applyOnTop, pushConfig,
   winAlive, getWindow, clearLiveScaleCtx, queueLiveScale, widgetOrigin,
@@ -37,6 +38,8 @@ function registerIpc() {
     }
     const prev = readConfig()
     const cfg = patchConfig(patch)
+    // 关掉「计时保存」时顺手清掉已落库的计时状态
+    if (cfg.timerPersistOn === false && prev.timerPersistOn !== false) clearTimer()
     if (cfg.scale !== prev.scale) applyScaleToWindow(cfg.scale, true)
     if (cfg.onTop !== prev.onTop) applyOnTop(cfg.onTop)
     pushConfig()
@@ -105,6 +108,52 @@ function registerIpc() {
     //    showMainWindow 唤不回主窗，必须 redirect 重新「进入插件」（'余额挂件' 是 whale 的指令别名），
     //    由 onPluginEnter 的 redirect 分支显式 showMainWindow（重定向已让插件重新激活）。
     try { utools.redirect('余额挂件', '') } catch (err) { logErr('[whale][ipc] 跳转设置功能失败', err && err.message) }
+  })
+
+  // 计时状态落库（页面在开始/停止/到点时上报；state 为 null 表示清除）
+  ipcRenderer.on('whale:timer', (event, state) => {
+    if (!state || typeof state !== 'object') { clearTimer(); return }
+    writeTimer({
+      mode: state.mode === 'up' || state.mode === 'down' || state.mode === 'at' ? state.mode : 'off',
+      running: state.running === true,
+      paused: state.paused === true,
+      startAt: Number(state.startAt) || 0,
+      endAt: Number(state.endAt) || 0,
+      elapsed: Math.max(0, Number(state.elapsed) || 0),
+      remain: Math.max(0, Number(state.remain) || 0),
+      arg: typeof state.arg === 'string' ? state.arg : '',
+    })
+  })
+
+  // 计时到点系统通知（页面对「到点通知」开关的判断在页面侧完成）
+  ipcRenderer.on('whale:timer-done', (event, data) => {
+    const text = String((data && data.text) || '').slice(0, 200)
+    if (!text) return
+    try { utools.showNotification(text, 'whale') } catch (err) { logErr('[whale][ipc] 计时通知失败', err && err.message) }
+  })
+
+  // DeepSeek Harness（dsh）控制：挂件菜单 → 宿主执行 → 回推状态快照。
+  // 每次先探测 3080（识别「别的终端里跑的 dsh」），再执行/回报状态
+  ipcRenderer.on('whale:dsh', (event, data) => {
+    const action = String((data && data.action) || 'status')
+    const reply = (payload) => { try { sendToWidget('whale:dsh', payload) } catch (err) {} }
+    const act = () => {
+      try {
+        if (action === 'start') reply(dsh.start())
+        else if (action === 'stop') dsh.stop((s) => reply(s || dsh.snapshot()))
+        else if (action === 'restart') dsh.restart((s) => reply(s || dsh.snapshot()))
+        else if (action === 'update') reply(dsh.update())
+        else if (action === 'versions') reply(dsh.listVersions())
+        else if (action === 'open') { dsh.openWeb(); reply(dsh.snapshot()) }
+        else reply(dsh.snapshot())
+      } catch (err) {
+        logErr('[whale][ipc] dsh 操作失败', action, err && err.message)
+        reply(Object.assign(dsh.snapshot(), { error: String((err && err.message) || err) }))
+      }
+    }
+    try {
+      dsh.probePort(() => act())
+    } catch (err) { act() }
   })
 }
 

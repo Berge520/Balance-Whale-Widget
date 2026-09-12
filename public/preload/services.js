@@ -16,6 +16,7 @@ const { readConfig } = require('./lib/store')
 const { checkUpdate } = require('./lib/api')
 const { ensureWidget, toggleWidget } = require('./lib/widget')
 const { registerIpc } = require('./lib/ipc')
+const dsh = require('./lib/dsh')
 
 // 当前 preload 所处窗口类型：main=主窗 / detach=分离窗 / browser=createBrowserWindow 窗口
 function winType() {
@@ -105,6 +106,11 @@ try {
 try {
   utools.onPluginOut((isKill) => {
     log('[whale][lifecycle] onPluginOut', { isKill, windowType: winType() })
+    // 插件进程真正结束（isKill=true）时按「保留 dsh」开关决定是否结束 dsh，避免留下孤进程占着 3080。
+    // 关闭已分离的设置窗口也会触发 onPluginOut，但那种情况 isKill=false，不能动 dsh。
+    if (isKill) {
+      try { dsh.stopOnQuit() } catch (err) { logErr('[whale][dsh] 退出清理失败', err && err.message) }
+    }
   })
 } catch (err) { logErr('[whale][lifecycle] 注册 onPluginOut 失败', err && err.message) }
 

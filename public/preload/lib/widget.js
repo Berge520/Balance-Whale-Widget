@@ -3,7 +3,7 @@
  */
 const { MIN_SCALE, MAX_SCALE, BASE_MIN, BASE_CAP, BASE_MAX, WIN_PAD } = require('./constants')
 const { log, logErr } = require('./log')
-const { clampNum, readConfig, readAnchor, writeAnchor, defaultAnchor } = require('./store')
+const { clampNum, readConfig, readAnchor, writeAnchor, defaultAnchor, readTimer } = require('./store')
 const { getCachedBalance } = require('./api')
 
 let win = null
@@ -299,6 +299,8 @@ function pushInit() {
     config: cfg,
     anchor: { hAnchor: anchor.hAnchor, vAnchor: anchor.vAnchor, flipped: flippedOf(anchor) },
     balance: getCachedBalance(),
+    // 计时状态：仅当「计时保存」开启时恢复（关闭时不回推，页面按默认清空处理）
+    timer: cfg.timerPersistOn ? readTimer() : null,
   })
 }
 

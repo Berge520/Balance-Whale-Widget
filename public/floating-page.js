@@ -6,6 +6,7 @@
   // —— 常量 ——
   var MIN_SCALE = 0.6, MAX_SCALE = 2.5, CLICK_SQ = 9;
   var REFRESH_MS = 60000, CHANGE_MS = 900, ANIM_MS = 700, BUBBLE_MS = 5000, BUBBLE_REMIND_MS = 8000;
+  var TIMER_PEEK_MS = 2000; // 「只显计时」关闭时，点小鲸鱼先显示计时的时长（随后切回常规内容）
   var IMG_URL = './whale/DSniang1.png';
   var GIF_URL = './whale/rua.gif';
   var SOUND_FILES = {
@@ -17,9 +18,12 @@
   var whaleApi = window.whale || {
     onInit: function () {}, onBalance: function () {}, onConfig: function () {}, onSnapped: function () {},
     ready: function () {}, refresh: function () {}, saveConfig: function () {},
+    saveTimer: function () {}, notifyTimerDone: function () {},
     dragMove: function () {}, dragEnd: function () {}, setIgnoreMouse: function () {},
-    openSettings: function () {},
+    openSettings: function () {}, dsh: function () {}, onDsh: function () {},
   };
+  // 是否有真实宿主桥接（没有时 dsh 等需要宿主的操作要给提示，而不是一直转圈）
+  var HAS_BRIDGE = !!(window.whale && window.whale.__bridge);
   // 调试日志门控：宿主 preload 把 uTools 开发者模式标志透传为 window.whale.dev
   var DEV = !!(window.whale && window.whale.dev);
   function log() { if (DEV) console.log.apply(console, arguments); }
@@ -47,8 +51,39 @@
 
   var menuBox = document.createElement('div');
   menuBox.className = 'dshwv-menu';
-  function menuLabel(text) { var s = document.createElement('span'); s.textContent = text; return s; }
+  function menuLabel(text) { var s = document.createElement('span'); s.className = 'dshwv-menu-label'; s.textContent = text; return s; }
   function menuRow() { var r = document.createElement('div'); r.className = 'dshwv-menu-row'; return r; }
+
+  // 菜单分组：点标题折叠/展开。只默认展开常用组，避免菜单过长
+  function menuGroup(title, defaultOpen) {
+    var box = document.createElement('div');
+    box.className = 'dshwv-group';
+    var head = document.createElement('button');
+    head.type = 'button';
+    head.className = 'dshwv-group-head';
+    var arrow = document.createElement('span');
+    arrow.className = 'dshwv-group-arrow';
+    var name = document.createElement('span');
+    name.textContent = title;
+    head.appendChild(arrow); head.appendChild(name);
+    var bodyEl = document.createElement('div');
+    bodyEl.className = 'dshwv-group-body';
+    box.appendChild(head); box.appendChild(bodyEl);
+    var open = !!defaultOpen;
+    function apply() {
+      box.classList.toggle('dshwv-group-open', open);
+      bodyEl.style.display = open ? '' : 'none';
+      arrow.textContent = open ? '▾' : '▸';
+    }
+    head.addEventListener('click', function (e) {
+      e.stopPropagation();
+      open = !open;
+      apply();
+      positionMenu(); // 高度变化后重新夹取，保证菜单始终在按钮上方
+    });
+    apply();
+    return { el: box, body: bodyEl };
+  }
 
   var scaleInput = document.createElement('input');
   scaleInput.type = 'range';
@@ -122,6 +157,84 @@
   lockToggle.title = '锁定位置：禁止拖拽与滚轮缩放（点击刷新仍可用）';
   lockToggle.addEventListener('change', function () { setDragLock(lockToggle.checked); });
 
+  // 计时 / 定时 / 倒计时：结果显示在思考气泡里（见 timerLines）
+  var timerSelect = document.createElement('select');
+  timerSelect.className = 'dshwv-sound';
+  timerSelect.appendChild(soundOpt('off', '关闭'));
+  timerSelect.appendChild(soundOpt('up', '正计时'));
+  timerSelect.appendChild(soundOpt('down', '倒计时'));
+  timerSelect.appendChild(soundOpt('at', '定时'));
+  timerSelect.addEventListener('change', function () { setTimerMode(timerSelect.value); });
+
+  var timerBtn = document.createElement('button');
+  timerBtn.type = 'button';
+  timerBtn.className = 'dshwv-menu-link dshwv-timer-btn';
+  timerBtn.textContent = '开始';
+  timerBtn.addEventListener('click', function (e) { e.stopPropagation(); timerBtnClick(); });
+
+  // 重置：仅在计时中/暂停时出现（占满「目标」行），清掉进度回到未开始
+  var timerResetBtn = document.createElement('button');
+  timerResetBtn.type = 'button';
+  timerResetBtn.className = 'dshwv-menu-link dshwv-timer-reset';
+  timerResetBtn.textContent = '重置';
+  timerResetBtn.title = '清掉本次计时进度（模式保留）';
+  timerResetBtn.addEventListener('click', function (e) { e.stopPropagation(); resetTimer(); });
+
+  var timerNum = document.createElement('input');
+  timerNum.type = 'number';
+  timerNum.min = '1'; timerNum.max = '1440'; timerNum.step = '1';
+  timerNum.className = 'dshwv-number';
+  timerNum.value = '25';
+  timerNum.title = '倒计时分钟数（1–1440）';
+  timerNum.addEventListener('change', function () { saveCfg(); });
+
+  var timerTime = document.createElement('input');
+  timerTime.type = 'time';
+  timerTime.className = 'dshwv-number dshwv-timer-time';
+  timerTime.value = '07:30';
+  timerTime.title = '定时刻（HH:MM，已过点则顺延到明天）';
+  timerTime.addEventListener('change', function () { saveCfg(); });
+
+  var notifyToggle = document.createElement('input');
+  notifyToggle.type = 'checkbox';
+  notifyToggle.className = 'dshwv-check';
+  notifyToggle.checked = true;
+  notifyToggle.title = '计时到点时弹系统通知';
+  notifyToggle.addEventListener('change', function () { setTimerNotifyOn(notifyToggle.checked); });
+
+  var persistToggle = document.createElement('input');
+  persistToggle.type = 'checkbox';
+  persistToggle.className = 'dshwv-check';
+  persistToggle.checked = true;
+  persistToggle.title = '记住计时状态：重载插件/重建挂件后继续计时';
+  persistToggle.addEventListener('change', function () { setTimerPersistOn(persistToggle.checked); });
+
+  // 到点提醒气泡停留时长：0 = 常驻（手动点气泡关闭）
+  var remindSelect = document.createElement('select');
+  remindSelect.className = 'dshwv-sound';
+  remindSelect.appendChild(soundOpt('5', '5 秒'));
+  remindSelect.appendChild(soundOpt('8', '8 秒'));
+  remindSelect.appendChild(soundOpt('15', '15 秒'));
+  remindSelect.appendChild(soundOpt('0', '常驻'));
+  remindSelect.title = '到点提醒气泡的停留时长（常驻 = 需手动点气泡关闭）';
+  remindSelect.addEventListener('change', function () { setTimerRemindSec(remindSelect.value); });
+
+  // 计时气泡是否常驻：关闭后计时中气泡只短暂显示，点小鲸鱼可随时再看
+  var pinToggle = document.createElement('input');
+  pinToggle.type = 'checkbox';
+  pinToggle.className = 'dshwv-check';
+  pinToggle.checked = true;
+  pinToggle.title = '计时气泡常驻显示（关闭后只在开始时短暂显示，点小鲸鱼可随时查看）';
+  pinToggle.addEventListener('change', function () { setTimerBubblePin(pinToggle.checked); });
+
+  // 气泡内容：开 → 计时中气泡只显示计时；关 → 气泡照常显示余额/用量等全部内容
+  var onlyToggle = document.createElement('input');
+  onlyToggle.type = 'checkbox';
+  onlyToggle.className = 'dshwv-check';
+  onlyToggle.checked = true;
+  onlyToggle.title = '开启：计时中气泡只显示计时；关闭：气泡照常显示余额、今日用量等全部内容';
+  onlyToggle.addEventListener('change', function () { setTimerBubbleOnly(onlyToggle.checked); });
+
   var volInput = document.createElement('input');
   volInput.type = 'range';
   volInput.min = '0'; volInput.max = '1'; volInput.step = '0.05';
@@ -148,6 +261,19 @@
   rowRemind.appendChild(menuLabel('峰谷提醒')); rowRemind.appendChild(remindToggle);
   var row7 = menuRow();
   row7.appendChild(menuLabel('报时')); row7.appendChild(timeToggle);
+  var rowTimer = menuRow();
+  rowTimer.appendChild(menuLabel('计时')); rowTimer.appendChild(timerSelect); rowTimer.appendChild(timerBtn);
+  var rowTimerArg = menuRow();
+  rowTimerArg.appendChild(menuLabel('目标')); rowTimerArg.appendChild(timerNum); rowTimerArg.appendChild(timerTime);
+  rowTimerArg.appendChild(timerResetBtn);
+  var rowNotify = menuRow();
+  rowNotify.appendChild(menuLabel('到点通知')); rowNotify.appendChild(notifyToggle); rowNotify.appendChild(remindSelect);
+  var rowOnly = menuRow();
+  rowOnly.appendChild(menuLabel('只显计时')); rowOnly.appendChild(onlyToggle);
+  var rowPin = menuRow();
+  rowPin.appendChild(menuLabel('气泡常驻')); rowPin.appendChild(pinToggle);
+  var rowPersist = menuRow();
+  rowPersist.appendChild(menuLabel('计时保存')); rowPersist.appendChild(persistToggle);
   var row8 = menuRow();
   row8.appendChild(menuLabel('锁定')); row8.appendChild(lockToggle);
   var row9 = menuRow();
@@ -161,10 +287,108 @@
     openSettings();
   });
   row9.appendChild(settingsBtn);
-  menuBox.appendChild(row1); menuBox.appendChild(row2); menuBox.appendChild(row3);
-  menuBox.appendChild(row4); menuBox.appendChild(row5); menuBox.appendChild(row6);
-  menuBox.appendChild(rowRemind);
-  menuBox.appendChild(row7); menuBox.appendChild(row8); menuBox.appendChild(row9);
+  row9.classList.add('dshwv-menu-foot');
+
+  // —— dsh（DeepSeek Harness，开发者）：启动 / 重启 / 结束 / 更新 + 打开页面 + 状态 ——
+  var dshStateEl = document.createElement('span');
+  dshStateEl.className = 'dshwv-dsh-state';
+  dshStateEl.textContent = '未获取';
+  function dshBtn(text, action, title) {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'dshwv-menu-link dshwv-dsh-btn';
+    b.textContent = text;
+    b.title = title;
+    b.addEventListener('click', function (e) { e.stopPropagation(); dshSend(action); });
+    return b;
+  }
+  var dshStartBtn = dshBtn('启动', 'start', '启动 dsh Web UI（npx 模式首次会先下载 @deepseek-ai/dsh）');
+  var dshRestartBtn = dshBtn('重启', 'restart', '先结束再启动 dsh');
+  var dshStopBtn = dshBtn('结束', 'stop', '结束 dsh 进程');
+  var dshUpdateBtn = dshBtn('更新', 'update', '拉取最新版 dsh：npx 模式下载最新包；全局模式执行 npm i -g @deepseek-ai/dsh@latest');
+  var dshOpenBtn = dshBtn('打开页面', 'open', '在系统浏览器打开 dsh 页面（自动使用 dsh 打印的带 token 地址，避免提示需要认证）');
+  var rowDsh = menuRow();
+  rowDsh.appendChild(menuLabel('dsh'));
+  rowDsh.appendChild(dshStartBtn); rowDsh.appendChild(dshRestartBtn);
+  rowDsh.appendChild(dshStopBtn); rowDsh.appendChild(dshUpdateBtn);
+  var rowDshPage = menuRow();
+  rowDshPage.appendChild(menuLabel('页面')); rowDshPage.appendChild(dshOpenBtn);
+  var rowDshState = menuRow();
+  rowDshState.appendChild(menuLabel('状态')); rowDshState.appendChild(dshStateEl);
+  // 最近执行过的命令（太长就省略，悬停看完整内容；完整日志在设置页）
+  var dshCmdEl = document.createElement('span');
+  dshCmdEl.className = 'dshwv-dsh-cmd';
+  dshCmdEl.textContent = '—';
+  var rowDshCmd = menuRow();
+  rowDshCmd.appendChild(menuLabel('命令')); rowDshCmd.appendChild(dshCmdEl);
+
+  // 分组：常用组默认展开，其余折叠，菜单整体高度约减半
+  var groupLook = menuGroup('外观与音效', true);
+  groupLook.body.appendChild(row1); groupLook.body.appendChild(row2); groupLook.body.appendChild(row3);
+  groupLook.body.appendChild(row6); groupLook.body.appendChild(row7); groupLook.body.appendChild(row8);
+  var groupUsage = menuGroup('用量与峰谷', false);
+  groupUsage.body.appendChild(row4); groupUsage.body.appendChild(row5);
+  groupUsage.body.appendChild(rowRemind);
+  var groupTimer = menuGroup('计时', false);
+  groupTimer.body.appendChild(rowTimer); groupTimer.body.appendChild(rowTimerArg);
+  groupTimer.body.appendChild(rowNotify); groupTimer.body.appendChild(rowOnly);
+  groupTimer.body.appendChild(rowPin); groupTimer.body.appendChild(rowPersist);
+  var groupDsh = menuGroup('dsh（开发者）', false);
+  groupDsh.body.appendChild(rowDsh); groupDsh.body.appendChild(rowDshPage);
+  groupDsh.body.appendChild(rowDshState); groupDsh.body.appendChild(rowDshCmd);
+  menuBox.appendChild(groupLook.el);
+  menuBox.appendChild(groupUsage.el);
+  menuBox.appendChild(groupTimer.el);
+  menuBox.appendChild(groupDsh.el);
+  menuBox.appendChild(row9);
+
+  // dsh 状态渲染（宿主回推快照；菜单打开与启动时也会主动问一次）
+  function dshRender(s) {
+    if (!s) return;
+    var err = s.error ? String(s.error) : '';
+    // 3080 上的进程：running=本插件启动；external=别的终端启动的 dsh；portOther=非 dsh 占用
+    var ext = !!(s.external && s.externalPid);
+    var other = s.portOther || '';
+    var text = '未获取';
+    if (s.busy === 'update') text = '更新中…';
+    else if (s.busy === 'versions') text = '查询版本中…';
+    else if (err) text = err;
+    else if (s.running) text = s.stopping ? '正在结束…' : (s.ready ? '运行中 · pid ' + s.pid : '启动中…（3080 未就绪）');
+    else if (ext) text = '外部 dsh · pid ' + s.externalPid;
+    else if (other) text = '端口 3080 被 ' + other + ' 占用';
+    else text = '未运行';
+    var cls = 'dshwv-dsh-state';
+    if (err) cls += ' dshwv-dsh-err';
+    else if (s.running || ext) cls += ' dshwv-dsh-on';
+    dshStateEl.className = cls;
+    dshStateEl.textContent = text;
+    dshStateEl.title = text +
+      '\ndsh：' + (s.url || '') +
+      (s.running ? '\n状态：' + (s.ready ? '3080 已就绪' : '启动中，npx 首次需下载，稍等') : '') +
+      '\nNode：' + (s.nodeDir || '未找到') + (s.nodeVersion ? '（' + s.nodeVersion + '）' : '') +
+      '\n方式：' + (s.mode === 'global' ? '全局安装（dsh 命令）' : 'npx ' + (s.version ? '@' + s.version : '@latest')) +
+      (ext ? '\n外部进程：由别的终端启动，「结束」会结束它，「重启」会用当前配置重新启动' : '') +
+      '\n页面：' + (s.webUrl ? '已捕获带 token 地址' : (s.url || '')) +
+      '\n详细日志见设置页「DeepSeek Harness」';
+    dshCmdEl.textContent = s.lastCmd || '—';
+    dshCmdEl.title = s.lastCmd
+      ? '最近执行的命令：\n' + s.lastCmd + '\n（完整日志见设置页「DeepSeek Harness」）'
+      : '还没有执行过命令';
+    var busy = s.busy === 'update' || s.busy === 'versions';
+    dshStartBtn.disabled = !!s.running || ext || !!other || busy;
+    dshRestartBtn.disabled = (!s.running && !ext) || busy;
+    dshStopBtn.disabled = (!s.running && !ext) || !!s.stopping;
+    dshUpdateBtn.disabled = busy;
+  }
+  function dshSend(action) {
+    if (!HAS_BRIDGE) { dshRender({ error: '未连接宿主，无法控制 dsh' }); return; }
+    if (action !== 'status') {
+      dshStateEl.className = 'dshwv-dsh-state';
+      dshStateEl.textContent = action === 'update' ? '更新中…' : '处理中…';
+    }
+    try { whaleApi.dsh(action); } catch (err) { dshRender({ error: '发送失败：' + (err && err.message) }); }
+  }
+  whaleApi.onDsh(function (s) { dshRender(s); });
 
   var textBox = document.createElement('div');
   textBox.className = 'dshwv-text';
@@ -197,8 +421,10 @@
   bubbleBox.addEventListener('click', function (e) {
     e.stopPropagation();
     if (!bubbleShown) return;
-    if (bubbleRandomActive) {
-      hideBubble(); // 再次点击：关闭
+    if (bubbleRandomActive || bubbleTimerActive) {
+      // 「只显计时」关闭时计时只是先弹一下：点掉它要接着显示常规内容，而不是直接把气泡收起
+      if (bubbleTimerActive && !timerTakesBubble()) { timerPeekDone(); return; }
+      hideBubble(); // 再次点击：关闭（计时气泡收起后计时继续）
     } else {
       // 首次点击：切随机台词，并重置自动关闭计时（保证第二段有完整停留时间）
       bubbleRemindActive = false; // 用户点击后让随机台词接管，避免被峰谷提醒覆盖
@@ -227,9 +453,11 @@
   var animDelayTimer = null, drag = null, shown = null, animId = null;
   var bubbleShown = false, bubbleTimer = null, bubbleRandomActive = false, bubbleRandomLines = null;
   var bubbleRemindActive = false, bubbleRemindLines = null; // 峰谷提醒气泡（优先级高于随机台词）
+  var bubbleTimerActive = false; // 计时气泡（正计时/倒计时/定时/时间到），优先级最高
   var BUBBLE_STYLE_CLASS = { A: 'dshwv-label', B: 'dshwv-amount', P: 'dshwv-period', C: 'dshwv-hint' };
 
   var soundOn = true, soundVol = 0.9, soundSet = 'duck';
+  var timerNotifyOn = true, timerPersistOn = true; // 计时到点系统通知 / 计时状态持久化
   var usageMode = 'ledger', peakMode = 'default', bubbleOn = true;
   var peakRemindOn = true; // 峰/谷时段切换时用气泡提醒（需开启思考气泡）
   var menuBtnEnabled = true; // 挂件右上角菜单按钮开关（设置页可关）
@@ -314,8 +542,360 @@
     ];
   }
 
+  // —— 计时 / 定时 / 倒计时（结果显示在思考气泡内，每秒刷新） ——
+  var TIMER_MIN_DEFAULT = 25, TIMER_MAX_MIN = 1440;
+  var timerMode = 'off';     // off | up(正计时) | down(倒计时) | at(定时)
+  var timerRunning = false;  // 正在走秒
+  var timerPaused = false;   // 已暂停：进度保留，点「继续」接着走
+  var timerFinished = false; // 刚结束，气泡里显示「时间到」
+  var timerStartAt = 0;      // 正计时本段起点（暂停时为 0）
+  var timerEndAt = 0;        // 倒计时/定时终点（暂停时为 0）
+  var timerElapsed = 0;      // 正计时累计已计毫秒
+  var timerRemain = 0;       // 倒计时/定时暂停时的剩余毫秒
+  var timerArg = '';         // 倒计时分钟数 / 定时 HH:MM
+  var timerRemindSec = 8;    // 到点提醒气泡停留秒数（0 = 常驻，手动点气泡关闭）
+  var timerBubblePin = true; // 计时中气泡是否常驻显示（关闭则只短暂显示，点小鲸鱼可再看）
+  var timerBubbleOnly = true; // 气泡是否只显示计时：关掉后气泡照常显示余额/用量等全部内容
+  var timerTick = null;
+  var timerClockText = '';   // 气泡里已渲染的时钟文本：每秒只改这一处，避免整块重排
+  function pad2(n) { return n < 10 ? '0' + n : String(n); }
+  function fmtClock(ms) {
+    var s = Math.max(0, Math.round(ms / 1000));
+    var h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+    return h > 0 ? h + ':' + pad2(m) + ':' + pad2(sec) : pad2(m) + ':' + pad2(sec);
+  }
+  function fmtHm(ts) {
+    var d = new Date(ts);
+    return pad2(d.getHours()) + ':' + pad2(d.getMinutes());
+  }
+  function timerActive() { return timerRunning || timerPaused || timerFinished; }
+  function timerBusy() { return timerRunning || timerPaused; }
+  function timerModeLabel() { return timerMode === 'up' ? '正计时' : (timerMode === 'at' ? '定时' : '倒计时'); }
+  function timerLabelText() { return timerPaused ? timerModeLabel() + '（已暂停）' : timerModeLabel(); }
+  function timerRemainMs() {
+    if (timerMode === 'up') return timerRunning ? timerElapsed + (Date.now() - timerStartAt) : timerElapsed;
+    if (timerRunning) return Math.max(0, timerEndAt - Date.now());
+    return Math.max(0, timerRemain);
+  }
+  function timerTailText() {
+    if (timerFinished) return '点气泡关闭提醒';
+    if (timerPaused) return '点继续接着走';
+    if (timerMode === 'up') return '点气泡可收起';
+    if (timerMode === 'at') {
+      // 跨到明天时标明「明天」，避免误读成今天到点
+      var d = new Date(timerEndAt);
+      var now = new Date();
+      var crossDay = d.getFullYear() !== now.getFullYear() || d.getMonth() !== now.getMonth() || d.getDate() !== now.getDate();
+      return '到点 ' + (crossDay ? '明天 ' : '') + fmtHm(timerEndAt);
+    }
+    return '共 ' + timerArg + ' 分钟';
+  }
+  function timerLines() {
+    if (timerFinished) {
+      return [
+        { t: timerModeLabel() + '结束', s: 'A', c: '' },
+        { t: '时间到！', s: 'P', c: '#e0433f' },
+        { t: timerTailText(), s: 'C', c: '', w: true },
+      ];
+    }
+    return [
+      { t: timerLabelText(), s: 'A', c: '' },
+      { t: fmtClock(timerRemainMs()), s: 'P', c: '' },
+      { t: timerTailText(), s: 'C', c: '', w: true },
+    ];
+  }
+  // 每秒只改时钟那一行：文案结构没变就不重新测量/缩放字号（只有位数变化时才补一次适配）
+  function updateTimerClock() {
+    if (!bubbleTimerActive) return;
+    var txt = fmtClock(timerRemainMs());
+    if (txt === timerClockText) return;
+    var lenChanged = txt.length !== timerClockText.length;
+    timerClockText = txt;
+    amountEl.textContent = txt;
+    if (lenChanged) fitBubbleText();
+  }
+  // 单次推进：刷新气泡显示 + 判断是否到点（窗口被后台节流时，恢复可见时会立即补一次）
+  function timerStep() {
+    if (!timerRunning) return;
+    if (timerMode !== 'up' && Date.now() >= timerEndAt) { finishTimer(); return; }
+    updateTimerClock();
+  }
+  function startTimerTick() {
+    if (timerTick) return;
+    timerTick = setInterval(timerStep, 1000);
+  }
+  function stopTimerTick() {
+    if (!timerTick) return;
+    clearInterval(timerTick);
+    timerTick = null;
+  }
+  function timerRemindMs() { return Math.max(0, timerRemindSec) * 1000; }
+  // 计时气泡的自动收起时长：0 = 常驻。到点提醒用「提醒时长」；计时中：
+  // 「只显计时」开 → 按「气泡常驻」；关 → 只先弹出来提示一下，随后回到余额/用量的常规气泡
+  function timerBubbleAutoMs() {
+    if (timerFinished) return timerRemindMs();
+    return (timerBubbleOnly && timerBubblePin) ? 0 : BUBBLE_MS;
+  }
+  // 计时气泡是否占用思考气泡：到点提醒始终显示；计时中/暂停时由「只显计时」开关决定
+  function timerTakesBubble() { return timerFinished || timerBubbleOnly; }
+  // 到点系统通知（走宿主 utools.showNotification）
+  function notifyTimerDone() {
+    if (!timerNotifyOn) return;
+    var text = timerMode === 'at'
+      ? '小鲸鱼提醒：定时到点（' + timerArg + '）'
+      : '小鲸鱼提醒：倒计时结束（' + timerArg + ' 分钟）';
+    try { whaleApi.notifyTimerDone(text); } catch (err) { logErr('[whale][page] 计时通知失败', err && err.message); }
+  }
+  // —— 计时状态持久化（开关关闭时不落库；宿主在关闭时会清掉旧值） ——
+  function currentTimerState() {
+    return {
+      mode: timerMode,
+      running: timerRunning,
+      paused: timerPaused,
+      startAt: (timerRunning && timerMode === 'up') ? timerStartAt : 0,
+      endAt: (timerRunning && timerMode !== 'up') ? timerEndAt : 0,
+      elapsed: timerMode === 'up' ? timerElapsed : 0,
+      remain: (timerPaused && timerMode !== 'up') ? timerRemain : 0,
+      arg: timerArg,
+    };
+  }
+  function saveTimerState() {
+    if (!timerPersistOn) return;
+    try { whaleApi.saveTimer(currentTimerState()); } catch (err) {}
+  }
+  // 重建挂件后恢复计时（仅在「计时保存」开启时宿主才会回推 timer）
+  function restoreTimer(t) {
+    if (!t || !timerPersistOn) return;
+    if (t.mode !== 'up' && t.mode !== 'down' && t.mode !== 'at') return;
+    timerMode = t.mode;
+    timerArg = typeof t.arg === 'string' ? t.arg : '';
+    timerFinished = false;
+    if (t.running) {
+      if (timerMode === 'up') {
+        timerStartAt = Number(t.startAt) || Date.now();
+      } else {
+        timerEndAt = Number(t.endAt) || 0;
+        // 挂件不在期间已到点：补一次提示音 + 通知 + 气泡
+        if (!timerEndAt || Date.now() >= timerEndAt) { finishTimer(); return; }
+      }
+      timerRunning = true;
+      timerPaused = false;
+      startTimerTick();
+      syncTimerMenu();
+      showTimerBubble(timerBubbleAutoMs());
+      return;
+    }
+    // 未在运行：可能只是选了模式、或停在暂停中 —— 都不补「到点」，避免误报
+    timerElapsed = Math.max(0, Number(t.elapsed) || 0);
+    timerRemain = Math.max(0, Number(t.remain) || 0);
+    timerPaused = !!t.paused;
+    syncTimerMenu();
+    if (timerPaused) showTimerBubble(timerBubbleAutoMs());
+  }
+  // 到点：提示音（沿用音效开关与音量）+ 系统通知 + 气泡显示「时间到！」，默认 8s 后自动收起
+  function finishTimer() {
+    timerRunning = false;
+    timerPaused = false;
+    stopTimerTick();
+    timerFinished = true;
+    timerClockText = '';
+    playPress();
+    notifyTimerDone();
+    saveTimerState();
+    syncTimerMenu();
+    showTimerBubble(timerRemindMs());
+  }
+  function startTimer() {
+    var now = Date.now();
+    if (timerMode === 'down') {
+      var mins = Math.round(Number(timerNum.value));
+      if (!isFinite(mins) || mins <= 0) mins = TIMER_MIN_DEFAULT;
+      mins = Math.min(TIMER_MAX_MIN, Math.max(1, mins));
+      timerNum.value = String(mins);
+      timerArg = String(mins);
+      timerEndAt = now + mins * 60000;
+      timerRemain = 0;
+    } else if (timerMode === 'at') {
+      var m = /^(\d{1,2}):(\d{2})$/.exec(String(timerTime.value || ''));
+      var hh = m ? Math.min(23, Number(m[1])) : 7;
+      var mm = m ? Math.min(59, Number(m[2])) : 30;
+      timerArg = pad2(hh) + ':' + pad2(mm);
+      timerTime.value = timerArg;
+      var d = new Date();
+      d.setHours(hh, mm, 0, 0);
+      // 该时刻今天已过 → 顺延到明天
+      if (d.getTime() <= now) d.setDate(d.getDate() + 1);
+      timerEndAt = d.getTime();
+      timerRemain = 0;
+    } else {
+      timerMode = 'up';
+      timerStartAt = now;
+      timerElapsed = 0;
+      timerRemain = 0;
+    }
+    timerRunning = true;
+    timerPaused = false;
+    timerFinished = false;
+    startTimerTick();
+    saveCfg();       // 记住这次用的模式与参数
+    saveTimerState();
+    syncTimerMenu();
+    showTimerBubble(timerBubbleAutoMs()); // 开始/暂停/继续都先弹计时：常驻时不收起，否则短暂提示
+  }
+  // 暂停：保留进度（正计时记住已计时间，倒计时/定时记住剩余时间），继续时接着走
+  function pauseTimer() {
+    var now = Date.now();
+    if (timerMode === 'up') {
+      timerElapsed += now - timerStartAt;
+      timerStartAt = 0;
+    } else {
+      timerRemain = Math.max(0, timerEndAt - now);
+      timerEndAt = 0;
+    }
+    timerRunning = false;
+    timerPaused = true;
+    stopTimerTick();
+    saveTimerState();
+    syncTimerMenu();
+    showTimerBubble(timerBubbleAutoMs());
+  }
+  function resumeTimer() {
+    var now = Date.now();
+    if (timerMode === 'up') timerStartAt = now;
+    else timerEndAt = now + Math.max(0, timerRemain);
+    timerRemain = 0;
+    timerRunning = true;
+    timerPaused = false;
+    startTimerTick();
+    saveTimerState();
+    syncTimerMenu();
+    showTimerBubble(timerBubbleAutoMs());
+  }
+  // 完全复位（切模式 / 点「重置」）：清掉进度回到未开始；不传 nextMode 则保留当前模式
+  function resetTimer(nextMode) {
+    timerRunning = false;
+    timerPaused = false;
+    timerFinished = false;
+    timerStartAt = 0;
+    timerEndAt = 0;
+    timerElapsed = 0;
+    timerRemain = 0;
+    timerClockText = '';
+    stopTimerTick();
+    if (nextMode !== undefined) timerMode = nextMode;
+    if (bubbleTimerActive) hideBubble();
+    saveTimerState();
+    syncTimerMenu();
+  }
+  function setTimerMode(v) {
+    var next = (v === 'up' || v === 'down' || v === 'at') ? v : 'off';
+    resetTimer(next);
+    saveCfg(); // 记住所选模式，重载后不用重新选
+  }
+  function setTimerNotifyOn(v) {
+    timerNotifyOn = !!v;
+    notifyToggle.checked = timerNotifyOn;
+    saveCfg();
+  }
+  function setTimerPersistOn(v) {
+    timerPersistOn = !!v;
+    persistToggle.checked = timerPersistOn;
+    saveCfg();
+    // 关闭：宿主收到配置后会清掉已落库的计时；开启：立即把当前状态存一次
+    saveTimerState();
+  }
+  function setTimerRemindSec(v) {
+    var n = Math.round(Number(v));
+    timerRemindSec = (n === 0 || n === 5 || n === 8 || n === 15) ? n : 8;
+    remindSelect.value = String(timerRemindSec);
+    saveCfg();
+  }
+  function setTimerBubblePin(v) {
+    timerBubblePin = !!v;
+    pinToggle.checked = timerBubblePin;
+    saveCfg();
+    // 立即套用：开启 → 一直显示；关闭 → 重新按「短暂停留」计时收起
+    if (timerActive() && timerTakesBubble()) showTimerBubble(timerBubbleAutoMs());
+  }
+  // 「只显计时」开关：开 → 计时中气泡只显示计时；关 → 气泡照常显示余额/用量等全部内容
+  function setTimerBubbleOnly(v) {
+    timerBubbleOnly = !!v;
+    onlyToggle.checked = timerBubbleOnly;
+    saveCfg();
+    if (!timerActive()) return;
+    if (timerBubbleOnly) {
+      showTimerBubble(timerBubbleAutoMs());
+    } else if (bubbleTimerActive && !timerFinished) {
+      // 关掉后立刻把气泡切回余额/用量，方便直接看到效果
+      hideBubble();
+      showBubble(true);
+    }
+  }
+  // 主按钮：开始 → 暂停 → 继续 →（到点后）开始
+  function timerBtnClick() {
+    if (timerRunning) { pauseTimer(); return; }
+    if (timerPaused) { resumeTimer(); return; }
+    if (timerMode === 'off') timerMode = 'up';
+    startTimer();
+  }
+  function syncTimerMenu() {
+    timerSelect.value = timerMode;
+    timerBtn.textContent = timerRunning ? '暂停' : (timerPaused ? '继续' : '开始');
+    var busy = timerBusy();
+    // 「目标」行：计时中/暂停时让位给「重置」；未开始时才显示分钟数/时刻输入
+    rowTimerArg.style.display = (busy || (!timerFinished && (timerMode === 'down' || timerMode === 'at'))) ? '' : 'none';
+    timerResetBtn.style.display = busy ? '' : 'none';
+    timerNum.style.display = (!busy && timerMode === 'down') ? '' : 'none';
+    timerTime.style.display = (!busy && timerMode === 'at') ? '' : 'none';
+  }
+
   // —— 气泡内容 ——
   var bubbleSwapTimer = null, hintFadeTimer = null, gifFadeTimer = null, lastHintText = null;
+  // 气泡自适应：三行字号固定，长文案换行后可能撑出气泡，这里按可用区域测量后等比缩小字号
+  // （只缩不放，正常内容保持原字号）；单位 u = 挂件基准 / 1026，与 CSS 的 --dshw-u 一致
+  var BUBBLE_FONT = { 'dshwv-label': 66, 'dshwv-amount': 128, 'dshwv-period': 104, 'dshwv-hint': 56 };
+  // 气泡内文字可用区域（单位 u = 挂件基准/1026）。与 CSS 里 .dshwv-bubble 的放大倍数(1.18)保持一致：
+  // 圆圈放大多少，这里就放大多少，字号才会跟着变大而不是被压小
+  var FIT_W = 660, FIT_H = 390, FIT_MIN = 0.5;
+  function resetBubbleFont() {
+    labelEl.style.fontSize = '';
+    amountEl.style.fontSize = '';
+    hintEl.style.fontSize = '';
+  }
+  // 量出文本块的真实占位：宽取各行「内容宽度」的最大值（scrollWidth 能反映 nowrap 溢出的宽度，
+  // 而 offsetWidth 会被绝对定位的 shrink-to-fit 上限截断），高为可见各行 offsetHeight 之和。
+  // 均用布局尺寸而非 getBoundingClientRect：后者会带上 Q 弹的 scaleY(.88)/scaleX(1.05)
+  // 与贴左镜像的 scaleX(-1)，导致测量失真。
+  function measureBubbleText(els) {
+    var w = 0, h = 0, i;
+    for (i = 0; i < 3; i++) {
+      var el = els[i];
+      if (el.style.display === 'none') continue;
+      if (el.scrollWidth > w) w = el.scrollWidth;
+      h += el.offsetHeight;
+    }
+    return { w: w, h: h };
+  }
+  function fitBubbleText() {
+    if (gifEl.style.display === 'block') return;
+    var u = (root.clientWidth || 0) / 1026;
+    if (!u) return;
+    var els = [labelEl, amountEl, hintEl];
+    var availW = FIT_W * u, availH = FIT_H * u;
+    var i, k = 1, pass, m;
+    for (pass = 0; pass < 3; pass++) {
+      m = measureBubbleText(els);
+      if (!m.w || !m.h) return;
+      var f = Math.min(1, availW / m.w, availH / m.h);
+      if (f > 0.995) return;
+      k = Math.max(FIT_MIN, k * f);
+      for (i = 0; i < 3; i++) {
+        var base = BUBBLE_FONT[String(els[i].className).split(' ')[0]];
+        if (base) els[i].style.fontSize = 'calc(var(--dshw-u) * ' + (base * k).toFixed(1) + ')';
+      }
+      if (k <= FIT_MIN + 0.001) return;
+    }
+  }
   function applyBubbleLines(lines) {
     if (lines && lines.gif) {
       if (gifFailed) {
@@ -333,6 +913,7 @@
     if (gifFadeTimer) { clearTimeout(gifFadeTimer); gifFadeTimer = null; }
     gifEl.style.display = 'none';
     gifEl.style.opacity = '';
+    resetBubbleFont();
     var els = [labelEl, amountEl, hintEl];
     for (var i = 0; i < 3; i++) {
       var el = els[i];
@@ -348,6 +929,7 @@
         el.style.color = '';
       }
     }
+    fitBubbleText();
   }
   function setHint(text) {
     if (text === lastHintText) return;
@@ -381,6 +963,7 @@
     lastHintText = null;
     textBox.style.transition = '';
     textBox.style.opacity = '';
+    resetBubbleFont();
     gifEl.style.display = 'none';
     gifEl.style.opacity = '';
     labelEl.style.display = '';
@@ -395,8 +978,21 @@
     hintEl.style.color = '';
     render();
   }
-  function showBubble() {
+  function showBubble(fromUser) {
     if (!bubbleOn) return;
+    // 计时中/刚结束：气泡优先显示计时（「只显计时」关掉后交给下面的常规内容），
+    // 不会被余额或随机台词顶掉
+    if (timerActive() && timerTakesBubble()) {
+      // 「气泡常驻」关闭时：只有用户点小鲸鱼才弹出计时，避免余额刷新时反复弹
+      if (!timerBubblePin && !fromUser && !timerFinished) return;
+      showTimerBubble(timerBubbleAutoMs());
+      return;
+    }
+    // 「只显计时」关闭：点小鲸鱼先显示一眼计时，随后继续常规内容（余额/用量/报时）
+    if (fromUser && timerActive() && !timerFinished) {
+      showTimerBubble(TIMER_PEEK_MS, true);
+      return;
+    }
     if (bubbleTimer) { clearTimeout(bubbleTimer); bubbleTimer = null; }
     if (gifFadeTimer) { clearTimeout(gifFadeTimer); gifFadeTimer = null; }
     bubbleShown = true;
@@ -407,9 +1003,33 @@
     bubbleBox.classList.add('dshwv-bubble-open');
     bubbleTimer = setTimeout(hideBubble, BUBBLE_MS);
   }
+  // 「只显计时」关闭时，计时先显示一段后原地切回常规内容（气泡不收起，继续按常规时长停留）
+  function timerPeekDone() {
+    bubbleTimerActive = false;
+    timerClockText = '';
+    if (!bubbleShown) return; // 期间已被用户/其他开关收起：不再把它弹回来
+    showBubble(false);
+  }
+  // 计时气泡：autoHideMs=0 表示常驻（点气泡可收起，计时继续）；thenNormal=true 表示到时切回常规内容
+  function showTimerBubble(autoHideMs, thenNormal) {
+    if (!bubbleOn) return;
+    if (bubbleTimer) { clearTimeout(bubbleTimer); bubbleTimer = null; }
+    if (gifFadeTimer) { clearTimeout(gifFadeTimer); gifFadeTimer = null; }
+    bubbleShown = true;
+    bubbleRandomActive = false;
+    bubbleRandomLines = null;
+    bubbleRemindActive = false;
+    bubbleRemindLines = null;
+    bubbleTimerActive = true;
+    restoreBubbleLines();
+    applyBubbleLines(timerLines());
+    timerClockText = timerFinished ? '' : fmtClock(timerRemainMs());
+    bubbleBox.classList.add('dshwv-bubble-open');
+    if (autoHideMs) bubbleTimer = setTimeout(thenNormal ? timerPeekDone : hideBubble, autoHideMs);
+  }
   // 峰/谷时段切换提醒：独立于随机台词，停留更久（内容多一行时段表）
   function showPeakRemind(isPeak) {
-    if (!bubbleOn) return;
+    if (!bubbleOn || timerActive()) return; // 计时进行中不打断
     if (bubbleTimer) { clearTimeout(bubbleTimer); bubbleTimer = null; }
     if (gifFadeTimer) { clearTimeout(gifFadeTimer); gifFadeTimer = null; }
     bubbleShown = true;
@@ -434,6 +1054,10 @@
     bubbleRandomLines = null;
     bubbleRemindActive = false;
     bubbleRemindLines = null;
+    bubbleTimerActive = false;
+    timerClockText = '';
+    // 「时间到」提示收起后回到普通状态（计时已结束，模式保留便于重新开始）
+    if (timerFinished) { timerFinished = false; syncTimerMenu(); }
     bubbleShown = false;
     bubbleBox.classList.remove('dshwv-bubble-open');
     // gif 靠 CSS opacity 淡出；display:none 会跳过过渡，等淡出完成再隐藏
@@ -475,13 +1099,19 @@
       hint = '今日已用 ' + (state.todayUsage !== null && state.todayUsage !== undefined ? fmt(state.todayUsage, state.currency) : '--');
     }
     amountEl.textContent = amount;
-    if (bubbleRemindActive && bubbleRemindLines) {
+    if (bubbleTimerActive && timerActive()) {
+      applyBubbleLines(timerLines());
+      timerClockText = timerFinished ? '' : fmtClock(timerRemainMs());
+    } else if (bubbleRemindActive && bubbleRemindLines) {
       applyBubbleLines(bubbleRemindLines);
     } else if (bubbleRandomActive && bubbleRandomLines) {
       applyBubbleLines(bubbleRandomLines);
     } else {
+      resetBubbleFont(); // 退出气泡文案后恢复默认字号
       setHint(hint);
       applyLowAlert();
+      // 报时/余额文案过长时同样等比缩小，避免超出气泡（与计时/随机台词走同一套适配）
+      fitBubbleText();
     }
   }
 
@@ -548,6 +1178,13 @@
       scale: curScale, vol: soundVol, soundOn: soundOn, soundSet: soundSet,
       usageMode: usageMode, peakMode: peakMode, bubbleOn: bubbleOn,
       timeBubbleOn: timeBubbleOn, peakRemindOn: peakRemindOn, dragLock: dragLock,
+      timerNotifyOn: timerNotifyOn, timerPersistOn: timerPersistOn,
+      timerMode: timerMode,
+      timerMin: Math.min(TIMER_MAX_MIN, Math.max(1, Math.round(Number(timerNum.value) || TIMER_MIN_DEFAULT))),
+      timerAt: String(timerTime.value || ''),
+      timerRemindSec: timerRemindSec,
+      timerBubblePin: timerBubblePin,
+      timerBubbleOnly: timerBubbleOnly,
     });
   }
   function scaleToDisplay(s) {
@@ -688,6 +1325,36 @@
       dragLock = cfg.dragLock;
       lockToggle.checked = dragLock;
     }
+    if (typeof cfg.timerNotifyOn === 'boolean') {
+      timerNotifyOn = cfg.timerNotifyOn;
+      notifyToggle.checked = timerNotifyOn;
+    }
+    if (typeof cfg.timerPersistOn === 'boolean') {
+      timerPersistOn = cfg.timerPersistOn;
+      persistToggle.checked = timerPersistOn;
+    }
+    // 计时偏好：运行中的状态以 timer 状态为准，这里只在空闲时套用
+    if (typeof cfg.timerMin === 'number' && isFinite(cfg.timerMin)) {
+      timerNum.value = String(Math.min(TIMER_MAX_MIN, Math.max(1, Math.round(cfg.timerMin))));
+    }
+    if (typeof cfg.timerAt === 'string' && /^\d{1,2}:\d{2}$/.test(cfg.timerAt)) timerTime.value = cfg.timerAt;
+    if (typeof cfg.timerRemindSec === 'number' && isFinite(cfg.timerRemindSec)) {
+      var sec = Math.round(cfg.timerRemindSec);
+      timerRemindSec = (sec === 0 || sec === 5 || sec === 8 || sec === 15) ? sec : 8;
+      remindSelect.value = String(timerRemindSec);
+    }
+    if (typeof cfg.timerBubblePin === 'boolean') {
+      timerBubblePin = cfg.timerBubblePin;
+      pinToggle.checked = timerBubblePin;
+    }
+    if (typeof cfg.timerBubbleOnly === 'boolean') {
+      timerBubbleOnly = cfg.timerBubbleOnly;
+      onlyToggle.checked = timerBubbleOnly;
+    }
+    if (!timerActive() && (cfg.timerMode === 'off' || cfg.timerMode === 'up' || cfg.timerMode === 'down' || cfg.timerMode === 'at')) {
+      timerMode = cfg.timerMode;
+    }
+    syncTimerMenu();
     try { if (pressAudio) pressAudio.volume = soundVol; if (releaseAudio) releaseAudio.volume = soundVol; } catch (err) {}
   }
 
@@ -757,7 +1424,7 @@
   // —— 菜单 ——
   function toggleMenu() {
     menuOpen = !menuOpen;
-    if (menuOpen) positionMenu();
+    if (menuOpen) { positionMenu(); dshSend('status'); }
     menuBox.classList.toggle('dshwv-menu-open', menuOpen);
     if (menuOpen) menuBtn.classList.add('dshwv-menu-btn-visible');
   }
@@ -789,12 +1456,11 @@
         menuBox.style.left = 'auto';
         menuBox.style.transformOrigin = 'bottom right';
       }
-      // 菜单在按钮上方展开；行数增多后可能顶出视口，夹住底部值保证不溢出
-      var mh = menuBox.offsetHeight || 0;
-      var bottom = vh - b.top;
-      if (mh > 0 && bottom + mh > vh - 4) bottom = Math.max(4, vh - 4 - mh);
-      menuBox.style.bottom = bottom + 'px';
+      // 菜单始终在按钮上方展开：底边贴按钮上沿，可用高度不足时压缩高度并在菜单内滚动，
+      // 避免（原逻辑）把菜单向下压到挂件上遮住小鲸鱼
+      menuBox.style.bottom = Math.max(0, vh - b.top) + 'px';
       menuBox.style.top = 'auto';
+      menuBox.style.maxHeight = Math.max(120, b.top - 8) + 'px';
     } catch (err) {}
   }
 
@@ -932,7 +1598,7 @@
     var wasClick = clickAllowed && !drag.moved;
     drag = null;
     if (wasClick) {
-      showBubble();
+      showBubble(true); // 用户点击：计时气泡即使不常驻也要弹出来
       refresh(true);
     } else {
       // 宿主吸附后回推 whale:snapped → 镜像翻转
@@ -991,6 +1657,7 @@
   }
   document.addEventListener('visibilitychange', function () {
     if (document.hidden) { stopPolling(); return; }
+    timerStep(); // 后台被节流时可能错过到点，恢复可见立即补一次
     refresh(false);
     startPolling();
   });
@@ -1003,6 +1670,7 @@
       root.classList.toggle('dshwv-left', flipped);
     }
     if (data.balance) handleBalance(data.balance, false);
+    restoreTimer(data.timer); // 「计时保存」开启时恢复上次的计时状态
     if (!document.hidden) startPolling();
   });
   whaleApi.onBalance(function (data) {
@@ -1018,7 +1686,9 @@
   // —— 启动 ——
   render();
   applySoundSet();
+  syncTimerMenu();
   setupHitTest();
   whaleApi.setIgnoreMouse(true); // 初始全穿透，悬停鲸鱼时自动取消
+  dshSend('status');             // 先取一次 dsh 状态，菜单里的状态行/按钮一开始就是对的
   whaleApi.ready();
 })();

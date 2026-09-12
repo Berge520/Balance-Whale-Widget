@@ -6,7 +6,7 @@ const {
   UPDATE_CHECK_URL, PLUGIN_VERSION, UPDATE_TTL_MS, K,
 } = require('./constants')
 const { logErr } = require('./log')
-const { readSecrets, sanitizeKey, recordLedgerUsage, readConfig } = require('./store')
+const { readSecrets, sanitizeKey, recordLedgerUsage, readConfig, setTodayUsage } = require('./store')
 const { isPeakTime, priceFor } = require('./pricing')
 
 // ──────────────────────────────────────────────
@@ -229,6 +229,7 @@ async function getBalancePayload() {
     if (u && u.amount !== undefined) {
       full.todayUsage = u.amount
       full.usageMode = 'token'
+      setTodayUsage(u.amount) // 同步进账本，趋势图/导出与挂件显示保持一致
       return full
     }
     // 平台令牌失败：回落记账
