@@ -2,6 +2,7 @@
  * 悬浮窗窗口管理（CommonJS）：创建/销毁/几何/缩放/向子窗推送数据。
  */
 const { MIN_SCALE, MAX_SCALE, BASE_MIN, BASE_CAP, BASE_MAX, WIN_PAD } = require('./constants')
+const { execFileSync } = require('child_process')
 const { log, logErr } = require('./log')
 const { clampNum, readConfig, readAnchor, writeAnchor, defaultAnchor, readTimer } = require('./store')
 const { getCachedBalance } = require('./api')
@@ -25,12 +26,232 @@ function primaryWorkArea() {
   } catch (err) {}
   return { x: 0, y: 0, width: 1280, height: 720 }
 }
-function workAreaNear(x, y) {
+// 显示器信息：workArea（当前可用区，任务栏占位时已排除它）与 bounds（整屏）
+function displayInfo(x, y) {
+  const fb = { x: 0, y: 0, width: 1280, height: 720 }
   try {
-    const d = utools.getDisplayNearestPoint({ x: Math.round(x), y: Math.round(y) })
-    if (d && d.workArea) return d.workArea
+    const d = (typeof x === 'number' && typeof y === 'number')
+      ? utools.getDisplayNearestPoint({ x: Math.round(x), y: Math.round(y) })
+      : utools.getPrimaryDisplay()
+    if (d && d.workArea) {
+      return {
+        wa: d.workArea,
+        bounds: d.bounds && d.bounds.width ? d.bounds : d.workArea,
+        id: d.id,
+        scaleFactor: d.scaleFactor > 0 ? d.scaleFactor : 1,
+      }
+    }
   } catch (err) {}
-  return primaryWorkArea()
+  return { wa: fb, bounds: fb, id: '', scaleFactor: 1 }
+}
+// 任务栏收起时 workArea == 整屏，看不出它在哪条边，只能问注册表：
+// StuckRects3\Settings 里 byte[8] 低两位 = 0 左 / 1 上 / 2 右 / 3 下，后面还带任务栏矩形
+const TASKBAR_REG = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StuckRects3'
+const TB_TTL = 60000 // 注册表结果缓存 60s：任务栏设置一般不会频繁改，也避免每次拖拽都起进程
+let tbCache = { at: 0, edge: '', size: 0 }
+
+function taskbarFromRegistry() {
+  const now = Date.now()
+  if (tbCache.at && now - tbCache.at < TB_TTL) return tbCache
+  let edge = ''
+  let size = 0
+  try {
+    const out = String(execFileSync('reg', ['query', TASKBAR_REG, '/v', 'Settings'], {
+      timeout: 4000, windowsHide: true, encoding: 'utf8',
+    }))
+    const m = /REG_BINARY\s+([0-9A-Fa-f\s]+)/.exec(out)
+    const hex = m ? m[1].replace(/\s+/g, '') : ''
+    const bytes = []
+    for (let i = 0; i + 1 < hex.length; i += 2) bytes.push(parseInt(hex.slice(i, i + 2), 16))
+    if (bytes.length >= 40) {
+      edge = ['left', 'top', 'right', 'bottom'][bytes[8] & 0x03] || ''
+      // 结构里带的矩形：[24..39] = left/top/right/bottom
+      const u32 = (i) => bytes[i] | (bytes[i + 1] << 8) | (bytes[i + 2] << 16) | (bytes[i + 3] << 24)
+      const l = u32(24), t = u32(28), r = u32(32), b = u32(36)
+      const w = r - l, h = b - t
+      if (w > 0 && h > 0 && w < 10000 && h < 10000) size = (edge === 'left' || edge === 'right') ? w : h
+      if (!(size >= 8 && size <= 400)) size = 0
+    }
+  } catch (err) {
+    // 读不到（权限/精简系统/非 Windows）→ 用兜底值
+  }
+  tbCache = { at: now, edge: edge, size: size }
+  return tbCache
+}
+
+// 光标是否停在任务栏那条边的「条带」里（= 正压在任务栏上）、是否压到屏幕最边上（= 触发它弹出）
+let cursorWarned = false
+function cursorOnTaskbar(info, edge, thickness) {
+  const b = info.bounds
+  const slack = 3 // 贴边触发区（Windows 的鼠标触发区只有最边上 1~2px）
+  let p = null
+  try { p = utools.getCursorScreenPoint() } catch (err) {}
+  if (!p || !isFinite(p.x) || !isFinite(p.y)) {
+    if (!cursorWarned) {
+      cursorWarned = true
+      logErr('[whale][taskbar] 拿不到光标位置（utools.getCursorScreenPoint 不可用），无法识别任务栏显隐')
+    }
+    return { inStrip: false, atEdge: false }
+  }
+  const x = Number(p.x)
+  const y = Number(p.y)
+  const inX = x >= b.x && x < b.x + b.width
+  const inY = y >= b.y && y < b.y + b.height
+  if (edge === 'bottom') return { inStrip: inX && y >= b.y + b.height - thickness, atEdge: inX && y >= b.y + b.height - slack }
+  if (edge === 'top') return { inStrip: inX && y < b.y + thickness, atEdge: inX && y < b.y + slack }
+  if (edge === 'left') return { inStrip: inY && x < b.x + thickness, atEdge: inY && x < b.x + slack }
+  return { inStrip: inY && x >= b.x + b.width - thickness, atEdge: inY && x >= b.x + b.width - slack }
+}
+
+// 「自动隐藏的任务栏此刻正弹出吗」—— 只能看光标：Windows 只在光标压到屏幕那条边时才把它
+// 拉出来，拉出后光标就落在它的矩形里，光标一离开它又缩回去。不能直接拿 workArea 判断：
+// Windows 上 Electron/uTools 的 workArea 不随任务栏显隐刷新，只反映进程启动时的状态
+// （electron#6312：display-metrics-changed 也不响应任务栏变化）。
+let tbPopped = false
+let tbLastIn = 0
+const TB_HOLD = 400 // 光标离开后仍按住一小会儿，避开任务栏收回动画
+function liveTaskbarPopped(info, edge, thickness) {
+  if (!thickness) return false
+  const s = cursorOnTaskbar(info, edge, thickness)
+  const now = Date.now()
+  if (s.atEdge) tbPopped = true
+  else if (!s.inStrip && tbPopped && now - tbLastIn > TB_HOLD) tbPopped = false
+  if (s.inStrip) tbLastIn = now
+  return tbPopped
+}
+
+function sameDisplay(a, b) {
+  if (a.id != null && b.id != null) return a.id === b.id
+  return a.bounds.x === b.bounds.x && a.bounds.y === b.bounds.y
+}
+
+// 主屏任务栏的基本情况：
+//  常显 → workArea 已有内缩：edge/thickness 就是内缩量，popped 恒为 true（一直占位）
+//  自动隐藏 → workArea 内缩为 0，方向/厚度读注册表，此刻是否弹出看光标
+function taskbarBase() {
+  const info = displayInfo()
+  const b = info.bounds
+  const wa = info.wa
+  const insets = {
+    left: Math.round(wa.x - b.x),
+    top: Math.round(wa.y - b.y),
+    right: Math.round((b.x + b.width) - (wa.x + wa.width)),
+    bottom: Math.round((b.y + b.height) - (wa.y + wa.height)),
+  }
+  let edge = ''
+  let thickness = 0
+  for (const k of ['left', 'top', 'right', 'bottom']) {
+    if (insets[k] > thickness) { edge = k; thickness = insets[k] }
+  }
+  if (edge) return { info: info, edge: edge, thickness: thickness, autoHide: false, popped: true }
+  // 没内缩 → 任务栏不在可用区里（自动隐藏且已收起，或本机没有任务栏）：读注册表拿方向与厚度
+  const tb = taskbarFromRegistry()
+  if (!tb.edge) return { info: info, edge: '', thickness: 0, autoHide: false, popped: false }
+  const t = tb.size ? Math.max(0, Math.round(tb.size / info.scaleFactor)) : 0
+  return {
+    info: info,
+    edge: tb.edge,
+    thickness: t,
+    autoHide: t > 0,
+    popped: liveTaskbarPopped(info, tb.edge, t),
+  }
+}
+
+// 任务栏「当前」状态（供设置页展示）：visible = 正在占位（常显 / 自动隐藏已弹出）/ hidden = 已自动收起
+function taskbarState() {
+  const tb = taskbarBase()
+  if (!tb.edge) return { state: 'none', edge: '', thickness: 0 }
+  return { state: tb.popped ? 'visible' : 'hidden', edge: tb.edge, thickness: tb.thickness }
+}
+
+// 实际可用于摆放挂件的区域 = 系统工作区（常显任务栏已被排除）+ 四边「贴边间距」。
+// 自动隐藏的任务栏 workArea 不会跟着变，所以它此刻正弹出时，这里自己按注册表厚度让位；
+// 收起时不让位（挂件可以贴满边）。「自动避让任务栏」关掉则不跟随。
+function usableArea(x, y) {
+  const cfg = readConfig()
+  const info = displayInfo(x, y)
+  const wa = info.wa
+  const m = {
+    top: Math.max(0, Number(cfg.edgeTop) || 0),
+    right: Math.max(0, Number(cfg.edgeRight) || 0),
+    bottom: Math.max(0, Number(cfg.edgeBottom) || 0),
+    left: Math.max(0, Number(cfg.edgeLeft) || 0),
+  }
+  if (cfg.avoidTaskbar !== false) {
+    const tb = taskbarBase()
+    if (tb.edge && tb.autoHide && tb.popped && sameDisplay(info, tb.info)) {
+      m[tb.edge] = Math.max(m[tb.edge], tb.thickness)
+    }
+  }
+  if (!m.top && !m.right && !m.bottom && !m.left) return wa
+  return {
+    x: wa.x + m.left,
+    y: wa.y + m.top,
+    width: Math.max(1, wa.width - m.left - m.right),
+    height: Math.max(1, wa.height - m.top - m.bottom),
+  }
+}
+// 按当前锚点重新摆一次窗口（改开关/间距，或任务栏状态变化后立刻生效）
+function repositionFromAnchor() {
+  if (!winAlive()) return false
+  try {
+    const sz = win.getSize()
+    const pos = win.getPosition()
+    const winS = isFinite(sz[0]) ? sz[0] : WIN_PAD + BASE_MIN
+    const wa = usableArea(pos[0] + winS / 2, pos[1] + winS / 2)
+    const p = anchorToRect(wa, winS, readAnchor())
+    win.setPosition(Math.round(p.x), Math.round(p.y))
+    return true
+  } catch (err) {
+    logErr('[whale][anchor] 重新摆放挂件失败', err && err.message)
+    return false
+  }
+}
+
+// ── 任务栏 / 显示器变化监听 ──
+// 每 250ms 采样一次「显示器 + 可用区 + 任务栏此刻是否弹出」，有变化就按锚点重摆。
+// 任务栏那条边用 taskbarBase()（自动隐藏时看光标），可用区/显示器变化则覆盖改分辨率、
+// 改缩放、换屏这些情况。「自动避让任务栏」关掉或挂件不存在时不轮询。
+const WATCH_MS = 250
+let watchTimer = null
+let watchSig = ''
+let watchPos = ''
+function watchTick() {
+  if (!winAlive()) return
+  try {
+    const sz = win.getSize()
+    const pos = win.getPosition()
+    const s = isFinite(sz[0]) ? sz[0] : WIN_PAD + BASE_MIN
+    const x = isFinite(pos[0]) ? pos[0] : 0
+    const y = isFinite(pos[1]) ? pos[1] : 0
+    const info = displayInfo(x + s / 2, y + s / 2)
+    const tb = taskbarBase()
+    const sig = [info.id, info.bounds.x, info.bounds.y, info.bounds.width, info.bounds.height,
+      info.wa.x, info.wa.y, info.wa.width, info.wa.height, tb.edge, tb.popped ? 1 : 0].join(',')
+    const pkey = x + ',' + y
+    const moved = !!watchPos && pkey !== watchPos
+    watchPos = pkey
+    if (sig === watchSig) return
+    const first = !watchSig
+    watchSig = sig
+    // 首次只记基线；窗口位置刚变过（用户正在拖拽/缩放）时不抢位置，避免和操作打架
+    if (first || moved) return
+    log('[whale][taskbar] 可用区变化，按锚点重摆挂件', sig)
+    clearLiveScaleCtx()
+    repositionFromAnchor()
+  } catch (err) {}
+}
+function syncTaskbarWatch() {
+  const need = winAlive() && readConfig().avoidTaskbar !== false
+  if (need && !watchTimer) {
+    watchSig = ''
+    watchPos = ''
+    watchTimer = setInterval(watchTick, WATCH_MS)
+    watchTick() // 立刻建立基线
+  } else if (!need && watchTimer) {
+    clearInterval(watchTimer)
+    watchTimer = null
+  }
 }
 
 // 挂件基准尺寸：clamp(122, min(250, min(workW,workH)*0.28) * scale, 625)
@@ -153,6 +374,14 @@ function getWidgetError() { return lastWidgetError || null }
 // opts.focus：是否要求挂件夺焦（true=「显示挂件」模式；false=设置窗需同时可见）；
 //            不传则沿用当前窗口的 focusable，供 toggleWidget 等内部调用。
 function ensureWidget(opts) {
+  const w = ensureWidgetInner(opts)
+  // 每次「确保显示」都对一次监听状态：窗口可能是上次就活着、没走 createWidget 的路径，
+  // 不补这一次的话「自动避让任务栏」的轮询压根不会启动。
+  syncTaskbarWatch()
+  return w
+}
+
+function ensureWidgetInner(opts) {
   const wantFocus = opts && typeof opts.focus === 'boolean' ? opts.focus : winFocusable
   if (winAlive()) {
     if (winFocusable !== wantFocus) {
@@ -186,7 +415,7 @@ function ensureWidget(opts) {
 function createWidget(focusable) {
   const wantFocus = !!focusable
   const cfg = readConfig()
-  const wa = primaryWorkArea()
+  const wa = usableArea()
   const size = winSize(wa, cfg.scale)
   const anchor = readAnchor()
   const pos = anchorToRect(wa, size, anchor)
@@ -248,6 +477,7 @@ function createWidget(focusable) {
     try { win.show() } catch (err) {}
     try { applyOnTop(onTop) } catch (err) {}
     setWidgetError('')
+    syncTaskbarWatch() // 挂件就位后开始跟随任务栏显隐（「自动避让任务栏」关掉则不轮询）
     // 注意：uTools 返回的定制窗口「不包含 BrowserWindow / webContents 实例事件」，
     // 因此这里不能用 win.webContents.on('did-fail-load') 等；错误只能靠创建回调与 try/catch。
   } catch (err) {
@@ -266,6 +496,7 @@ function destroyWidget() {
   }
   win = null
   clearLiveScaleCtx()
+  syncTaskbarWatch() // 窗口没了 → 停掉任务栏轮询
 }
 
 // 切换挂件显隐（供「切换挂件」指令 / 全局快捷键调用），返回切换后的可见状态
@@ -355,7 +586,7 @@ function applyScaleToWindow(scale, persist) {
       } catch (err) { logErr('[whale][scale] 读取窗口几何异常', err && err.message) }
       const oldS = bw - WIN_PAD // 旧挂件本体边长
       const wl = bx + WIN_PAD, wt = by + WIN_PAD // 旧挂件左上
-      wa = workAreaNear(wl + oldS / 2, wt + oldS / 2)
+      wa = usableArea(wl + oldS / 2, wt + oldS / 2)
       anchor = readAnchor()
       // 不动点：左吸附→挂件左缘 x，否则→挂件右缘 x；顶部→上缘 y，否则→下缘 y
       pivotX = flippedOf(anchor) ? wl : wl + oldS
@@ -419,7 +650,10 @@ function applyScaleToWindow(scale, persist) {
 
 module.exports = {
   primaryWorkArea,
-  workAreaNear,
+  usableArea,
+  taskbarState,
+  repositionFromAnchor,
+  syncTaskbarWatch,
   baseSize,
   winSize,
   widgetOrigin,

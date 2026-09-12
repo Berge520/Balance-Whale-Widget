@@ -18,6 +18,13 @@ export interface WhaleConfig {
   timeBubbleOn: boolean
   updateCheckOn: boolean
   dragLock: boolean
+  // 自动避让任务栏：实时识别任务栏隐藏/显示，任务栏弹出占位时挂件自动让位
+  avoidTaskbar: boolean
+  // 贴边间距（px，0 = 紧贴该边）：上/右/下/左，以系统当前可用区为准
+  edgeTop: number
+  edgeRight: number
+  edgeBottom: number
+  edgeLeft: number
   // 计时到点时弹系统通知
   timerNotifyOn: boolean
   // 记住计时状态：重载插件/重建挂件后继续计时
@@ -33,14 +40,14 @@ export interface WhaleConfig {
   timerBubbleOnly: boolean
   // 进入插件时显示哪些窗口：both=设置窗+挂件；widget=只显示挂件；settings=只显示设置窗
   enterMode: 'both' | 'widget' | 'settings'
-  // DeepSeek Harness（dsh，开发者）：运行方式 / 自定义 Node.js 目录（''=自动探测）/ 退出后是否保留进程
-  dshMode: 'npx' | 'global'
+  // DeepSeek Harness（dsh，开发者）：自定义 Node.js 目录（''=自动探测）/ 退出后是否保留进程
   dshNodeDir: string
   dshKeepAlive: boolean
-  // npm 注册源（'' = 官方源）/ 固定版本（'' = latest）/ 更新前是否清理 npx 缓存
+  // npm 注册源（'' = 官方源）/ 固定版本（'' = 自动：安装/更新时取 latest）/ 更新前是否先删掉插件目录里的 dsh / 启动是否带 --no-open
   dshRegistry: string
   dshVersion: string
-  dshCleanNpx: boolean
+  dshReinstall: boolean
+  dshNoOpen: boolean
 }
 
 export interface WhaleSecrets {
@@ -144,7 +151,6 @@ export interface DshStatus {
   startedAt: number
   exitCode: number | null
   exitAt: number
-  mode: 'npx' | 'global'
   keepAlive: boolean
   url: string
   port: number
@@ -154,15 +160,28 @@ export interface DshStatus {
   // 目录是否来自自动探测
   nodeAuto: boolean
   found: boolean
-  dshFound: boolean
   error: string
   // 最近执行过的命令（启动/更新/结束），界面直接展示
   lastCmd: string
   log: string
-  // 运行方式相关配置回显
+  // dsh 相关配置回显
   registry: string
   version: string
-  cleanNpx: boolean
+  // 「实际会跑」的版本（全局优先，其次插件目录）
+  resolved: string
+  // 已查询到 latest 且比当前用的新（界面提示「有新版本」）
+  hasUpdate: boolean
+  // 用哪一份：global=全局安装（优先）；plugin=插件目录；''=都没有
+  source: 'global' | 'plugin' | ''
+  // 全局安装的那份（没有则为空）
+  globalVersion: string
+  globalDir: string
+  // 全局安装目录当前用户可写？（false 时「更新」会弹一次 UAC 提权）
+  globalWritable: boolean
+  // 更新前是否先删掉插件目录里的 dsh
+  reinstall: boolean
+  // 插件自己那份 dsh 的安装目录
+  prefix: string
   // 「查询可用版本」结果（list 按版本号升序，latest 为最后一个）
   versions: { at: number; latest: string; list: string[] }
   // 3080 上的进程探测：external=别的终端启动的 dsh；portOther=非 dsh 进程名
@@ -176,6 +195,11 @@ export interface DshStatus {
   readyAt: number
   // dsh 打印的带 token 的页面地址（浏览器首次访问需要它，否则提示 authentication required）
   webUrl: string
+  // 实际已安装的 dsh 版本（npx 缓存，探测不到为空）
+  installed: string
+  // 本次启动实际用的版本；缓存里已换成别的版本时 needsRestart=true（需点「重启」才生效）
+  runVersion: string
+  needsRestart: boolean
 }
 
 export interface DshDirPickResult {
@@ -185,10 +209,51 @@ export interface DshDirPickResult {
   error?: string
 }
 
+// 备份导出结果
+export interface BackupExportResult {
+  ok: boolean
+  canceled?: boolean
+  path?: string
+  withSecrets?: boolean
+  exportedAt?: string
+  error?: string
+}
+
+// 备份预览（选择文件后解析出来，尚未写入）
+export interface BackupPreviewResult {
+  ok: boolean
+  canceled?: boolean
+  path?: string
+  exportedAt?: string
+  appVersion?: string
+  has?: { config: boolean; ledger: boolean; window: boolean; timer: boolean; secrets: boolean }
+  error?: string
+}
+
+// 备份恢复结果
+export interface BackupApplyResult {
+  ok: boolean
+  applied?: string[]
+  skipped?: string[]
+  errors?: string[]
+  widgetRebuilt?: boolean
+  error?: string
+}
+
+export interface TaskbarState {
+  state: 'visible' | 'hidden' | 'none'
+  // 'left' | 'top' | 'right' | 'bottom'，未识别到时为空串
+  edge: string
+  // 任务栏厚度（DIP，px）；未识别到时为 0
+  thickness: number
+}
+
 export interface WhaleServices {
   getConfig(): WhaleConfig
   // 订阅配置变更（挂件菜单改设置时宿主广播过来），返回退订函数
   onConfigChange(cb: (cfg: WhaleConfig) => void): () => void
+  // 任务栏当前状态：visible = 正在占位（常显/自动隐藏已弹出）/ hidden = 已自动收起 / none = 未识别到
+  getTaskbarState(): TaskbarState
   getVersion(): string
   checkUpdate(force?: boolean): Promise<UpdateCheckResult>
   openExternal(url: string): boolean
@@ -224,8 +289,23 @@ export interface WhaleServices {
   dshOpenWeb(): string
   // 查询可用版本（结果在状态的 versions 字段里，稍后刷新状态可见）
   dshListVersions(): DshStatus
+  // 清空内存日志
+  dshClearLog(): DshStatus
+  // 删除插件目录里的那份 dsh
+  dshRemovePlugin(): DshStatus
+  // 清理 npx 缓存里含 dsh 的历史副本
+  dshCleanNpxCache(): DshStatus
   // 选择 Node.js 安装目录（文件夹选择器，校验目录里有 node）
   dshPickNodeDir(): DshDirPickResult
+  // —— 备份 / 恢复 ——
+  // 导出备份（secrets=true 时用 password 加密后才写入凭据）
+  backupExport(opts: { secrets?: boolean; password?: string }): BackupExportResult
+  // 选择备份文件并解析预览（不写任何数据）
+  backupPick(): BackupPreviewResult
+  // 按勾选项恢复（同名覆盖）
+  backupApply(opts: { config?: boolean; ledger?: boolean; window?: boolean; timer?: boolean; secrets?: boolean; password?: string }): BackupApplyResult
+  // 放弃本次选择
+  backupCancel(): { ok: boolean }
 }
 
 declare global {

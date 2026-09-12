@@ -1,6 +1,6 @@
 <script lang="ts" setup>
-import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
-import type { WhaleServices } from './types/services'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import type { BackupPreviewResult, WhaleServices } from './types/services'
 
 // 主窗 preload（services.js）注入的宿主 API
 const services: Partial<WhaleServices> = window.services || {}
@@ -41,15 +41,22 @@ const cfg = reactive({
   timeBubbleOn: true,
   updateCheckOn: true,
   dragLock: false,
+  // 实时识别任务栏隐藏/显示：任务栏弹出占位时挂件自动让位（详见宿主 widget.js 的 syncTaskbarWatch）
+  avoidTaskbar: true,
+  // 贴边间距（上/右/下/左，px）：0 = 紧贴该边
+  edgeTop: 0,
+  edgeRight: 0,
+  edgeBottom: 0,
+  edgeLeft: 0,
   timerNotifyOn: true,
   timerPersistOn: true,
   enterMode: 'both',
-  dshMode: 'npx',
   dshNodeDir: '',
   dshKeepAlive: false,
   dshRegistry: '',
   dshVersion: '',
-  dshCleanNpx: false,
+  dshReinstall: false,
+  dshNoOpen: true,
 })
 const widgetVisible = ref(true)
 const widgetMsg = ref('')
@@ -62,6 +69,15 @@ const clearConfirm = ref(false)
 // 「数据与隐私」按项清除：勾选的项才会被清除（凭据 / 设置 / 账本 / 窗口位置与更新缓存）
 const clearItems = reactive({ secrets: true, config: true, ledger: true, window: true })
 const anyClearItem = computed(() => clearItems.secrets || clearItems.config || clearItems.ledger || clearItems.window)
+// 二次确认时把「将清除哪些项」写清楚，避免误删
+const clearItemNames = computed(() => {
+  const names: string[] = []
+  if (clearItems.secrets) names.push('凭据')
+  if (clearItems.config) names.push('挂件设置')
+  if (clearItems.ledger) names.push('账本用量记录')
+  if (clearItems.window) names.push('窗口位置与更新缓存')
+  return names.join('、')
+})
 const dataMsg = ref('')
 const dataErr = ref(false)
 // 诊断日志：dev 下同步落盘（%TEMP%\whale-debug.log），插件进程被 uTools 结束也不丢
@@ -73,16 +89,33 @@ const diagReady = !!services.isDev?.()
 // —— DeepSeek Harness（dsh，开发者） ——
 const dsh = reactive({
   running: false, stopping: false, busy: '', pid: 0, startedAt: 0, ready: false, readyAt: 0,
-  mode: 'npx', keepAlive: false, url: '', port: 3080,
-  nodeDir: '', nodeVersion: '', nodeAuto: true, found: true, dshFound: true,
+  keepAlive: false, url: '', port: 3080,
+  nodeDir: '', nodeVersion: '', nodeAuto: true, found: true,
   error: '', lastCmd: '', log: '',
-  registry: '', version: '', cleanNpx: false,
+  registry: '', version: '', resolved: '', hasUpdate: false, runVersion: '', needsRestart: false, reinstall: false, prefix: '', source: '', globalVersion: '', globalDir: '', globalWritable: true,
   versions: { at: 0, latest: '', list: [] as string[] },
-  external: false, externalPid: 0, externalName: '', portOther: '', webUrl: '',
+  external: false, externalPid: 0, externalName: '', portOther: '', webUrl: '', installed: '',
 })
 const dshMsg = ref('')
 const dshErr = ref(false)
 const dshLogOpen = ref(false)
+const dshLogEl = ref<HTMLElement | null>(null)
+// 折叠区（默认收起，卡片更短）：高级选项 / 使用说明 / 故障排查
+const dshFolds = reactive({ advanced: false, help: false, trouble: false })
+const dshConfirm = ref('') // '' | 'remove-plugin' | 'clean-npx'
+const dshNow = ref(Date.now()) // 未就绪时的「已等待 x 秒」
+let dshTickTimer = 0
+function dshTickSync(running: boolean, ready: boolean) {
+  const need = running && !ready
+  if (need && !dshTickTimer) dshTickTimer = window.setInterval(() => { dshNow.value = Date.now() }, 1000)
+  else if (!need && dshTickTimer) { window.clearInterval(dshTickTimer); dshTickTimer = 0 }
+  if (need) dshNow.value = Date.now()
+}
+// 有新版本提示（查询过可用版本才有）
+const dshLatestTip = computed(() => {
+  if (!dsh.hasUpdate) return ''
+  return '有新版本 ' + ((dsh.versions && dsh.versions.latest) || '') + '，点「更新」'
+})
 function dshApply(s: any) {
   if (!s || typeof s !== 'object') return
   dsh.running = !!s.running
@@ -92,7 +125,6 @@ function dshApply(s: any) {
   dsh.startedAt = s.startedAt || 0
   dsh.ready = !!s.ready
   dsh.readyAt = s.readyAt || 0
-  dsh.mode = s.mode === 'global' ? 'global' : 'npx'
   dsh.keepAlive = s.keepAlive === true
   dsh.url = s.url || ''
   dsh.port = s.port || 3080
@@ -100,20 +132,38 @@ function dshApply(s: any) {
   dsh.nodeVersion = s.nodeVersion || ''
   dsh.nodeAuto = s.nodeAuto !== false
   dsh.found = s.found !== false
-  dsh.dshFound = s.dshFound !== false
   dsh.error = s.error || ''
   dsh.lastCmd = s.lastCmd || ''
   dsh.log = s.log || ''
   dsh.registry = s.registry || ''
   dsh.version = s.version || ''
-  dsh.cleanNpx = s.cleanNpx === true
+  dsh.resolved = s.resolved || ''
+  dsh.hasUpdate = s.hasUpdate === true
+  dsh.runVersion = s.runVersion || ''
+  dsh.needsRestart = s.needsRestart === true
+  dsh.reinstall = s.reinstall === true
+  dsh.prefix = s.prefix || ''
+  dsh.source = s.source === 'global' || s.source === 'plugin' ? s.source : ''
+  dsh.globalVersion = s.globalVersion || ''
+  dsh.globalDir = s.globalDir || ''
+  dsh.globalWritable = s.globalWritable !== false
   dsh.versions = s.versions && typeof s.versions === 'object' ? s.versions : { at: 0, latest: '', list: [] }
   dsh.external = !!s.external
   dsh.externalPid = s.externalPid || 0
   dsh.externalName = s.externalName || ''
   dsh.portOther = s.portOther || ''
   dsh.webUrl = s.webUrl || ''
+  dsh.installed = s.installed || ''
+  dshTickSync(dsh.running, dsh.ready)
 }
+// 日志跟着更新滚到底部（只看得到最新几行）
+watch(() => dsh.log, () => {
+  if (!dshLogOpen.value) return
+  nextTick(() => {
+    const el = dshLogEl.value
+    if (el) el.scrollTop = el.scrollHeight
+  })
+})
 function dshStatus(deep = false) {
   try {
     dshApply(services.dshStatus?.())
@@ -132,6 +182,7 @@ function dshPollStart() {
 }
 function dshPollStop() {
   if (dshTimer) { window.clearInterval(dshTimer); dshTimer = 0 }
+  dshTickSync(false, true)
 }
 // 启动/结束是同步返回；重启要等旧进程退出、更新要下载，之后再补一次状态
 function dshDo(action: 'start' | 'stop' | 'restart' | 'update') {
@@ -140,17 +191,51 @@ function dshDo(action: 'start' | 'stop' | 'restart' | 'update') {
     const fn = action === 'start' ? api.dshStart : action === 'stop' ? api.dshStop : action === 'restart' ? api.dshRestart : api.dshUpdate
     dshApply(fn?.())
     dshErr.value = false
-    dshMsg.value = action === 'start' ? '已启动 dsh（首次用 npx 运行需先下载，稍等片刻再看状态）'
+    // 启动/重启/更新都要等一会儿（首次安装要下载），自动展开日志方便看进度
+    if (action !== 'stop') dshLogOpen.value = true
+    dshMsg.value = action === 'start' ? '已启动 dsh（首次会自动下载安装，稍等片刻再看状态）'
       : action === 'stop' ? '已结束 dsh'
         : action === 'restart' ? '正在重启 dsh…'
-          : '已开始更新 dsh，完成后重启生效'
-    // 结束外部 dsh 要等 700ms 复查端口，所以多刷新一次
-    const delays = action === 'restart' ? [2500, 6000] : action === 'update' ? [1500, 6000, 15000] : action === 'stop' ? [900, 2400] : [800]
+          : '正在更新 dsh（结束旧进程 → 重新安装 → 用新版启动）…'
+    // 结束外部 dsh 要等 700ms 复查端口；更新要重新下载（首次安装约几十秒），所以多刷新几次
+    const delays = action === 'restart' ? [2500, 6000] : action === 'update' ? [5000, 20000, 45000, 90000] : action === 'stop' ? [900, 2400] : [800]
     for (const ms of delays) window.setTimeout(dshStatus, ms)
   } catch (err: any) {
     dshErr.value = true
     dshMsg.value = '操作失败：' + String(err?.message || err)
   }
+}
+// 清空内存日志
+function dshClearLog() {
+  try {
+    dshApply(services.dshClearLog?.())
+    dshErr.value = false
+    dshMsg.value = '已清空日志'
+  } catch (err: any) {
+    dshErr.value = true
+    dshMsg.value = '清空失败：' + String(err?.message || err)
+  }
+}
+// 维护类操作：点第一次变确认，点第二次执行（避免误删）
+function dshMaintain(kind: 'remove-plugin' | 'clean-npx') {
+  if (dshConfirm.value !== kind) { dshConfirm.value = kind; dshMsg.value = ''; return }
+  dshConfirm.value = ''
+  try {
+    const s = kind === 'remove-plugin' ? services.dshRemovePlugin?.() : services.dshCleanNpxCache?.()
+    dshApply(s)
+    dshErr.value = !!dsh.error
+    dshMsg.value = kind === 'remove-plugin' ? '已删除插件目录里的 dsh' : '已清理 npx 旧缓存（详见日志）'
+    dshLogOpen.value = true
+  } catch (err: any) {
+    dshErr.value = true
+    dshMsg.value = '操作失败：' + String(err?.message || err)
+  }
+}
+function dshCopyPath(p: string, label: string) {
+  if (!p) { dshErr.value = true; dshMsg.value = '暂无' + label; return }
+  const ok = services.copyText?.(p)
+  dshErr.value = !ok
+  dshMsg.value = ok ? '已复制' + label + '：' + p : '复制失败，请手动选中复制。'
 }
 function dshOpenPage() {
   try {
@@ -221,29 +306,35 @@ const dshNodeText = computed(() => {
   return dsh.nodeDir ? '自动：' + dsh.nodeDir : '未找到 Node.js'
 })
 const dshStateText = computed(() => {
+  if (dsh.busy === 'install') return '安装中…'
   if (dsh.busy === 'update') return '更新中…'
   if (dsh.busy === 'versions') return '查询版本中…'
   if (dsh.running) {
-    if (!dsh.ready) return '启动中…（3080 未就绪，npx 首次需下载）'
+    if (!dsh.ready) {
+      const wait = dsh.startedAt ? Math.max(0, Math.round((dshNow.value - dsh.startedAt) / 1000)) : 0
+      return '启动中…（3080 未就绪' + (wait > 3 ? '，已等待 ' + wait + ' 秒' : '，首次安装需要下载') + '）'
+    }
     const sec = dsh.startedAt && dsh.readyAt ? ((dsh.readyAt - dsh.startedAt) / 1000).toFixed(1) + 's' : ''
-    return '运行中 · pid ' + dsh.pid + (sec ? '（就绪用时 ' + sec + '）' : '')
+    return '运行中 · pid ' + dsh.pid + (sec ? '（就绪用时 ' + sec + '）' : '') +
+      (dsh.needsRestart ? ' · 已更新到 ' + (dsh.resolved || '') + '，点「重启」生效' : '')
   }
   if (dsh.external) return '外部 dsh · pid ' + dsh.externalPid
   if (dsh.portOther) return '端口 3080 被 ' + dsh.portOther + ' 占用'
   return '未运行'
 })
-const dshBusy = computed(() => dsh.busy === 'update' || dsh.busy === 'versions')
-// 版本下拉：latest + 已查询到的版本（当前选中的版本若不在列表里也补上）
+const dshBusy = computed(() => dsh.busy === 'update' || dsh.busy === 'versions' || dsh.busy === 'install')
+// 版本下拉：「自动」＝安装/更新时取 latest；也可以固定成某个具体版本
 const dshVersionOptions = computed(() => {
   const list: string[] = (dsh.versions && dsh.versions.list) || []
-  const out: Array<{ v: string; label: string }> = [{ v: '', label: 'latest（每次拉最新）' }]
+  const out: Array<{ v: string; label: string }> = [{ v: '', label: '自动（安装/更新时取 latest）' }]
   const seen: Record<string, boolean> = { '': true }
   const push = (v: string, label: string) => {
     if (!v || seen[v]) return
     seen[v] = true
     out.push({ v: v, label: label })
   }
-  if (cfg.dshVersion) push(cfg.dshVersion, cfg.dshVersion + '（当前）')
+  if (dsh.installed) push(dsh.installed, dsh.installed + '（已安装）')
+  if (cfg.dshVersion) push(cfg.dshVersion, cfg.dshVersion + '（已选）')
   for (let i = list.length - 1; i >= 0; i--) {
     const tag = list[i] === dsh.versions.latest ? '（latest 标签）' : ''
     push(list[i], list[i] + tag)
@@ -517,6 +608,130 @@ function clearSelectedData() {
     dataMsg.value = '清除失败：' + String(err?.message || err)
   }
 }
+// —— 备份与恢复（数据与隐私卡片）——
+const backupFolds = reactive({ open: false })
+const backupWithSecrets = ref(false)
+const backupPassword = ref('')
+const backupBusy = ref(false)
+const backupMsg = ref('')
+const backupErr = ref(false)
+const backupConfirm = ref(false)
+const backupPreview = ref<BackupPreviewResult | null>(null)
+const backupPicks = reactive<Record<string, boolean>>({ config: true, ledger: true, window: true, timer: true, secrets: true })
+const backupItems: Array<{ key: string; label: string; note: string }> = [
+  { key: 'config', label: '挂件设置', note: '（同名覆盖）' },
+  { key: 'ledger', label: '账本用量记录', note: '（同日覆盖，保留最近 30 天）' },
+  { key: 'window', label: '窗口位置', note: '（恢复后挂件重建一次）' },
+  { key: 'timer', label: '计时状态', note: '（重载插件后恢复）' },
+  { key: 'secrets', label: '凭据', note: '（用备份密码解密）' },
+]
+const backupHas = (key: string) => !!backupPreview.value?.has?.[key as 'config']
+const backupAnyItem = computed(() => backupItems.some((it) => backupPicks[it.key] && backupHas(it.key)))
+const backupItemLabel = (key: string) => (backupItems.find((i) => i.key === key) || { label: key }).label
+const backupNames = (list?: string[]) => (list || []).map(backupItemLabel).join('、')
+function backupExport() {
+  if (backupBusy.value) return
+  backupBusy.value = true
+  backupMsg.value = ''
+  backupErr.value = false
+  try {
+    const r = services.backupExport?.({ secrets: backupWithSecrets.value, password: backupPassword.value })
+    if (!r || (!r.ok && !r.canceled)) {
+      backupErr.value = true
+      backupMsg.value = '导出失败：' + ((r && r.error) || '未知错误')
+    } else if (r.canceled) {
+      backupMsg.value = '已取消导出'
+    } else {
+      backupPassword.value = '' // 密码不留在内存/界面上
+      backupMsg.value = '已导出备份：' + r.path + (r.withSecrets ? '（含加密凭据）' : '（不含凭据）')
+    }
+  } catch (err: any) {
+    backupErr.value = true
+    backupMsg.value = '导出失败：' + String(err?.message || err)
+  } finally {
+    backupBusy.value = false
+  }
+}
+function backupPick() {
+  if (backupBusy.value) return
+  backupBusy.value = true
+  backupMsg.value = ''
+  backupErr.value = false
+  backupConfirm.value = false
+  backupPreview.value = null
+  try {
+    const r = services.backupPick?.()
+    if (!r || (!r.ok && !r.canceled)) {
+      backupErr.value = true
+      backupMsg.value = '读取失败：' + ((r && r.error) || '未知错误')
+    } else if (r.canceled) {
+      backupMsg.value = '已取消导入'
+    } else {
+      backupPreview.value = r as BackupPreviewResult
+      backupItems.forEach((it) => { backupPicks[it.key] = backupHas(it.key) })
+      backupMsg.value = '已读取备份，请勾选要恢复的项，再点「恢复选中项」'
+    }
+  } catch (err: any) {
+    backupErr.value = true
+    backupMsg.value = '读取失败：' + String(err?.message || err)
+  } finally {
+    backupBusy.value = false
+  }
+}
+function backupApply() {
+  if (backupBusy.value || !backupAnyItem.value) return
+  if (!backupConfirm.value) {
+    backupConfirm.value = true
+    backupMsg.value = ''
+    backupErr.value = false
+    return
+  }
+  backupConfirm.value = false
+  backupBusy.value = true
+  try {
+    const r = services.backupApply?.({
+      config: backupPicks.config, ledger: backupPicks.ledger, window: backupPicks.window,
+      timer: backupPicks.timer, secrets: backupPicks.secrets, password: backupPassword.value,
+    })
+    const applied = (r && r.applied) || []
+    if (!r || !r.ok) {
+      backupErr.value = true
+      backupMsg.value = '恢复失败：' + ((r && (r.errors || [])[0]) || (r && r.error) || '未知错误')
+    } else {
+      let msg = '已恢复：' + backupNames(applied) + '。'
+      if (r.skipped && r.skipped.length) msg += '备份里没有：' + backupNames(r.skipped) + '。'
+      if (r.widgetRebuilt) msg += '挂件已按恢复的设置重建。'
+      backupErr.value = false
+      if (r.errors && r.errors.length) { msg += r.errors.join('；'); backupErr.value = true }
+      backupPassword.value = ''
+      backupPreview.value = null
+      backupMsg.value = msg
+      // 让页面回显跟上：设置 / 账本 / 凭据分别刷新
+      if (applied.indexOf('config') >= 0) applyConfig(services.getConfig?.())
+      if (applied.indexOf('ledger') >= 0) refreshHistory()
+      if (applied.indexOf('secrets') >= 0) {
+        const s = services.getSecrets?.()
+        if (s) {
+          secrets.apiKey = s.apiKey || ''
+          secrets.platformToken = s.platformToken || ''
+        }
+        secretsOk.value = true
+        setTimeout(() => { secretsOk.value = false }, 3000)
+      }
+    }
+  } catch (err: any) {
+    backupErr.value = true
+    backupMsg.value = '恢复失败：' + String(err?.message || err)
+  } finally {
+    backupBusy.value = false
+  }
+}
+function backupCancelPick() {
+  backupPreview.value = null
+  backupConfirm.value = false
+  backupMsg.value = ''
+  try { services.backupCancel?.() } catch (err) {}
+}
 // 复制指令名，便于粘贴到 uTools「全局功能」新增全局快捷键
 function copyHotkeyCmd() {
   const ok = services.copyText?.('显示/隐藏挂件')
@@ -613,21 +828,60 @@ function applyConfig(c: any) {
   cfg.timerNotifyOn = c.timerNotifyOn !== false
   cfg.timerPersistOn = c.timerPersistOn !== false
   cfg.enterMode = c.enterMode === 'widget' || c.enterMode === 'settings' ? c.enterMode : 'both'
-  cfg.dshMode = c.dshMode === 'global' ? 'global' : 'npx'
   cfg.dshNodeDir = typeof c.dshNodeDir === 'string' ? c.dshNodeDir : ''
   cfg.dshKeepAlive = c.dshKeepAlive === true
   cfg.dshRegistry = typeof c.dshRegistry === 'string' ? c.dshRegistry : ''
   cfg.dshVersion = typeof c.dshVersion === 'string' ? c.dshVersion : ''
-  cfg.dshCleanNpx = c.dshCleanNpx === true
+  cfg.dshReinstall = c.dshReinstall === true
+  cfg.dshNoOpen = c.dshNoOpen !== false
+  cfg.avoidTaskbar = c.avoidTaskbar !== false
+  cfg.edgeTop = typeof c.edgeTop === 'number' ? c.edgeTop : 0
+  cfg.edgeRight = typeof c.edgeRight === 'number' ? c.edgeRight : 0
+  cfg.edgeBottom = typeof c.edgeBottom === 'number' ? c.edgeBottom : 0
+  cfg.edgeLeft = typeof c.edgeLeft === 'number' ? c.edgeLeft : 0
 }
 
-// 宿主推送的配置变更订阅（挂件三点菜单改设置时，让本页开关同步）
+// —— 任务栏状态（宿主实时识别；本页每 2s 同步一次，用来展示现在是隐藏还是显示） ——
+const taskbar = reactive({ state: '', edge: '', thickness: 0 })
+const edgeName: Record<string, string> = { left: '左侧', top: '顶部', right: '右侧', bottom: '底部' }
+function taskbarSync() {
+  try {
+    const s = services.getTaskbarState?.()
+    if (!s) return
+    taskbar.state = s.state || ''
+    taskbar.edge = s.edge || ''
+    taskbar.thickness = s.thickness || 0
+  } catch (err) {}
+}
+const taskbarText = computed(() => {
+  const e = edgeName[taskbar.edge] || '任务栏所在边'
+  if (taskbar.state === 'visible') return '正在显示：占' + e + ' ' + taskbar.thickness + 'px，挂件已让位'
+  if (taskbar.state === 'hidden') {
+    return '已自动收起（' + e + (taskbar.thickness ? '，厚 ' + taskbar.thickness + 'px' : '') + '）：挂件贴满边，弹出时自动让位'
+  }
+  return '未识别到任务栏，挂件按屏幕边缘贴边'
+})
+let taskbarTimer = 0
+function taskbarPollStart() {
+  taskbarPollStop()
+  taskbarSync()
+  taskbarTimer = window.setInterval(() => {
+    if (document.visibilityState === 'hidden') return
+    taskbarSync()
+  }, 2000)
+}
+function taskbarPollStop() {
+  if (taskbarTimer) { window.clearInterval(taskbarTimer); taskbarTimer = 0 }
+}
+
+// 宿主推送的配置变更订阅（挂件菜单改设置时，让本页开关同步）
 let unsubConfig: (() => void) | undefined
 // 本窗口重新可见/重新聚焦时刷新趋势（挂件刷新余额后账本可能已变）
 function onWindowActive() {
   if (document.visibilityState === 'hidden') return
   refreshHistory()
   dshStatus(true) // 回到本页时同步 dsh 状态（可能在挂件菜单里启停过）
+  taskbarSync() // 顺带同步任务栏显隐状态
 }
 
 onMounted(() => {
@@ -646,6 +900,7 @@ onMounted(() => {
     refreshHistory()
     dshStatus(true) // 打开插件就先探测一次（识别外部终端里跑的 dsh）
     dshPollStart()
+    taskbarPollStart()
   } catch (err) {}
   window.addEventListener('focus', onWindowActive)
   document.addEventListener('visibilitychange', onWindowActive)
@@ -655,6 +910,7 @@ onMounted(() => {
 onUnmounted(() => {
   try { unsubConfig?.() } catch (err) {}
   dshPollStop()
+  taskbarPollStop()
   window.removeEventListener('focus', onWindowActive)
   document.removeEventListener('visibilitychange', onWindowActive)
 })
@@ -812,6 +1068,26 @@ onUnmounted(() => {
       </label>
 
       <label class="field row check">
+        <span class="label">自动避让任务栏 <em>（实时识别任务栏隐藏/显示，弹出时让位、收起后贴回）</em></span>
+        <input type="checkbox" v-model="cfg.avoidTaskbar" @change="patchCfg({ avoidTaskbar: cfg.avoidTaskbar })" />
+      </label>
+      <p class="hint taskbar-hint">
+        任务栏：{{ taskbarText }}
+        <em v-if="!cfg.avoidTaskbar">（避让已关闭，挂件位置不再跟随任务栏变化）</em>
+      </p>
+
+      <label class="field row">
+        <span class="label">贴边间距</span>
+        <span class="edge-row">
+          <em>上</em><input class="num" type="number" min="0" max="400" step="4" v-model.number="cfg.edgeTop" @change="patchCfg({ edgeTop: cfg.edgeTop })" />
+          <em>右</em><input class="num" type="number" min="0" max="400" step="4" v-model.number="cfg.edgeRight" @change="patchCfg({ edgeRight: cfg.edgeRight })" />
+          <em>下</em><input class="num" type="number" min="0" max="400" step="4" v-model.number="cfg.edgeBottom" @change="patchCfg({ edgeBottom: cfg.edgeBottom })" />
+          <em>左</em><input class="num" type="number" min="0" max="400" step="4" v-model.number="cfg.edgeLeft" @change="patchCfg({ edgeLeft: cfg.edgeLeft })" />
+        </span>
+      </label>
+      <p class="hint">贴边间距：挂件贴到该边时留出的像素数（0＝紧贴）。开了「自动避让任务栏」时，任务栏占位的那条边会自动让位；任务栏收起后又回到这里设定的贴边位置。</p>
+
+      <label class="field row check">
         <span class="label">低余额预警</span>
         <input type="checkbox" v-model="cfg.lowAlertOn" @change="patchCfg({ lowAlertOn: cfg.lowAlertOn })" />
       </label>
@@ -903,7 +1179,7 @@ onUnmounted(() => {
     <section class="card">
       <h2>数据与隐私</h2>
       <p class="hint">API Key 与平台 Token 通过 uTools 加密存储，账本与窗口位置也只保存在本机，不会上传到任何第三方服务器。</p>
-      <p class="hint">卸载 uTools 插件不会自动删除这些数据，需要彻底清除时请勾选下方要清除的内容：</p>
+      <p class="hint">卸载 uTools 插件不会自动删除这些数据，需要彻底清除时请勾选下方要清除的内容（<strong>清除前建议先导出一份备份</strong>，见下方「备份与恢复」）：</p>
       <label class="field row check">
         <span class="label">凭据 <em>（API Key / 平台 Token）</em></span>
         <input type="checkbox" v-model="clearItems.secrets" @change="clearConfirm = false" />
@@ -926,60 +1202,93 @@ onUnmounted(() => {
         </button>
         <button v-if="clearConfirm" class="secondary" @click="clearConfirm = false">取消</button>
       </div>
+      <p v-if="clearConfirm" class="hint">将清除：{{ clearItemNames || '（未选中任何项）' }}。此操作不可撤销。</p>
       <p v-if="dataMsg" class="msg" :class="{ ok: !dataErr, err: dataErr }">{{ dataMsg }}</p>
+
+      <div class="fold">
+        <button class="link-btn" @click="backupFolds.open = !backupFolds.open">{{ backupFolds.open ? '收起备份与恢复' : '备份与恢复' }}</button>
+        <div v-if="backupFolds.open" class="guide">
+          <p class="guide-use"><strong>导出：</strong>把「挂件设置 / 账本 / 窗口位置 / 计时」打包成一个 JSON 文件（不含 dsh 开发者配置与 Node 路径）；<strong>凭据默认不导出</strong>，勾选「包含凭据」后必须设密码，凭据会用 scrypt + AES-256-GCM 加密后才写入文件（文件里没有明文）。</p>
+          <p class="guide-use"><strong>安全提示：</strong>密码不会保存到任何地方，忘记就无法解密（其余项仍可正常恢复）；备份文件本身含你的设置与用量记录，请妥善保管。</p>
+          <label class="field row check">
+            <span class="label">包含凭据 <em>（需设密码，加密后写入）</em></span>
+            <input type="checkbox" v-model="backupWithSecrets" @change="backupMsg = ''" />
+          </label>
+          <label v-if="backupWithSecrets" class="field row">
+            <span class="label">备份密码</span>
+            <input type="password" v-model="backupPassword" placeholder="至少 6 位，导入时要用" autocomplete="new-password" />
+          </label>
+          <div class="btn-row">
+            <button class="secondary" :disabled="backupBusy" @click="backupExport">导出备份…</button>
+            <button class="secondary" :disabled="backupBusy" @click="backupPick">导入备份…</button>
+            <button v-if="backupPreview" class="secondary" @click="backupCancelPick">取消导入</button>
+          </div>
+
+          <div v-if="backupPreview">
+            <p class="guide-use">已选文件：<code>{{ backupPreview.path }}</code><br />导出时间：{{ backupPreview.exportedAt || '未知' }} · 插件版本：{{ backupPreview.appVersion || '未知' }}</p>
+            <label v-for="it in backupItems" :key="it.key" class="field row check">
+              <span class="label">{{ it.label }} <em>{{ it.note }}{{ backupHas(it.key) ? '' : '：备份里没有这一项' }}</em></span>
+              <input type="checkbox" v-model="backupPicks[it.key]" :disabled="!backupHas(it.key)" @change="backupConfirm = false" />
+            </label>
+            <label v-if="backupHas('secrets')" class="field row">
+              <span class="label">备份密码</span>
+              <input type="password" v-model="backupPassword" placeholder="导出时设的密码（用于解密凭据）" autocomplete="off" />
+            </label>
+            <div class="btn-row">
+              <button class="danger" :disabled="backupBusy || !backupAnyItem" @click="backupApply">
+                {{ backupConfirm ? '确认覆盖写入？不可撤销' : '恢复选中项' }}
+              </button>
+              <button v-if="backupConfirm" class="secondary" @click="backupConfirm = false">取消</button>
+            </div>
+          </div>
+          <p v-if="backupMsg" class="msg" :class="{ ok: !backupErr, err: backupErr }">{{ backupMsg }}</p>
+        </div>
+      </div>
     </section>
 
     <!-- DeepSeek Harness（开发者） -->
     <section class="card">
       <h2>DeepSeek Harness（dsh）</h2>
-      <p class="hint">给开发者用的便捷入口：挂件右上角菜单的「dsh（开发者）」分组，或本卡片，可以直接 启动 / 重启 / 结束 / 更新 DeepSeek Harness（<code>@deepseek-ai/dsh</code>），默认页面 <code>http://127.0.0.1:3080</code>。</p>
+      <p class="hint">在挂件菜单「dsh（开发者）」分组或本卡片里 启动 / 重启 / 结束 / 更新 dsh 并打开它的 Web UI（默认 <code>http://127.0.0.1:3080</code>）。<strong>优先用你已全局安装的那份</strong>（零重复占用、终端与插件同一版本），没有才装到插件数据目录。</p>
+
       <label class="field row">
-        <span class="label">运行方式</span>
-        <select v-model="cfg.dshMode" @change="patchCfg({ dshMode: cfg.dshMode })">
-          <option value="npx">npx 直接运行（无需全局安装）</option>
-          <option value="global">全局安装（需先 npm i -g @deepseek-ai/dsh）</option>
-        </select>
+        <span class="label">状态</span>
+        <span class="ver">{{ dshStateText }}<span v-if="dsh.nodeVersion"> · Node {{ dsh.nodeVersion }}</span><span v-if="dshLatestTip" class="tag tag-new">{{ dshLatestTip }}</span></span>
+      </label>
+      <div class="btn-row">
+        <button :disabled="dsh.running || dsh.external || !!dsh.portOther || dshBusy" @click="dshDo('start')">启动</button>
+        <button class="secondary" :disabled="(!dsh.running && !dsh.external) || dshBusy" @click="dshDo('restart')">重启</button>
+        <button class="secondary" :disabled="(!dsh.running && !dsh.external) || dshBusy" @click="dshDo('stop')">结束</button>
+        <button class="secondary" :disabled="dshBusy" @click="dshDo('update')">更新</button>
+        <button class="secondary" @click="dshOpenPage">打开 Web UI</button>
+      </div>
+      <p v-if="dsh.external" class="hint">3080 上检测到由<strong>别的终端</strong>启动的 dsh（pid {{ dsh.externalPid }}）：「结束」会结束它，「重启」会结束它并按当前版本重新启动。</p>
+      <p v-else-if="dsh.portOther" class="hint">3080 被 {{ dsh.portOther }} 占用（不是 dsh）。为避免误杀，插件不会结束它。</p>
+
+      <label class="field row">
+        <span class="label">实际使用</span>
+        <span class="ver">{{ dsh.resolved || '未安装' }}<span v-if="dsh.source" class="tag">{{ dsh.source === 'global' ? '全局' : '插件目录' }}</span></span>
       </label>
       <label class="field row">
-        <span class="label">npm 注册源</span>
-        <select v-model="cfg.dshRegistry" @change="patchCfg({ dshRegistry: cfg.dshRegistry })">
-          <option value="">官方（registry.npmjs.org）</option>
-          <option value="https://registry.npmmirror.com">淘宝镜像（registry.npmmirror.com）</option>
-        </select>
+        <span class="label">全局安装</span>
+        <span class="ver">{{ dsh.globalVersion || '无' }}<span v-if="dsh.globalVersion && !dsh.globalWritable" class="tag">只读，更新会弹一次 UAC</span></span>
       </label>
       <label class="field row">
-        <span class="label">dsh 版本</span>
-        <select v-model="cfg.dshVersion" @change="patchCfg({ dshVersion: cfg.dshVersion })">
-          <option v-for="o in dshVersionOptions" :key="o.v" :value="o.v">{{ o.label }}</option>
-        </select>
+        <span class="label">插件目录</span>
+        <span class="ver">{{ dsh.installed || '未安装' }}</span>
+      </label>
+      <label class="field row">
+        <span class="label">最新</span>
+        <span class="ver">{{ (dsh.versions && dsh.versions.latest) || '未知（点「查询可用版本」）' }}</span>
       </label>
       <div class="btn-row">
         <button class="secondary" :disabled="dsh.busy === 'versions'" @click="dshQueryVersions">
           {{ dsh.busy === 'versions' ? '查询中…' : '查询可用版本' }}
         </button>
-        <span v-if="dsh.versions && dsh.versions.latest" class="ver">最新：{{ dsh.versions.latest }}</span>
+        <button v-if="dsh.globalDir" class="secondary" @click="dshCopyPath(dsh.globalDir, '全局路径')">复制全局路径</button>
+        <button v-if="dsh.installed" class="secondary" @click="dshCopyPath(dsh.prefix, '插件路径')">复制插件路径</button>
       </div>
-      <label class="field row">
-        <span class="label">Node.js 目录</span>
-        <span class="ver">{{ dshNodeText }}</span>
-      </label>
-      <div class="btn-row">
-        <button class="secondary" @click="dshPickDir">选择目录</button>
-        <button v-if="cfg.dshNodeDir" class="secondary" @click="dshAutoDir">改为自动探测</button>
-        <button class="secondary" @click="dshStatus()">刷新状态</button>
-      </div>
-      <label class="field row check">
-        <span class="label">更新前清理 npx 缓存 <em>（等价 rm -rf ~/.npm/_npx，强制重新拉取，下次启动会慢一些）</em></span>
-        <input type="checkbox" v-model="cfg.dshCleanNpx" @change="patchCfg({ dshCleanNpx: cfg.dshCleanNpx })" />
-      </label>
-      <label class="field row check">
-        <span class="label">uTools 退出后保留 dsh <em>（不勾选＝插件退出时自动结束，避免一直占着端口）</em></span>
-        <input type="checkbox" v-model="cfg.dshKeepAlive" @change="patchCfg({ dshKeepAlive: cfg.dshKeepAlive })" />
-      </label>
-      <label class="field row">
-        <span class="label">状态</span>
-        <span class="ver">{{ dshStateText }}<span v-if="dsh.nodeVersion"> · Node {{ dsh.nodeVersion }}</span></span>
-      </label>
+
       <label class="field row">
         <span class="label">最近命令</span>
         <span class="cmdline">{{ dsh.lastCmd || '（还没执行过）' }}</span>
@@ -988,26 +1297,81 @@ onUnmounted(() => {
         <span class="label">页面地址</span>
         <span class="cmdline">{{ dsh.webUrl || (dsh.url + '（未捕获 token，dsh 启动完成后会自动获取）') }}</span>
       </label>
-      <p v-if="dsh.external" class="hint">3080 上检测到由<strong>别的终端</strong>启动的 dsh（pid {{ dsh.externalPid }}）：「结束」会结束它，「重启」会结束它并用上面的配置重新启动。</p>
-      <p v-else-if="dsh.portOther" class="hint">3080 被 {{ dsh.portOther }} 占用（不是 dsh）。为避免误杀，插件不会结束它。</p>
       <div class="btn-row">
-        <button :disabled="dsh.running || dsh.external || !!dsh.portOther || dshBusy" @click="dshDo('start')">启动</button>
-        <button class="secondary" :disabled="(!dsh.running && !dsh.external) || dshBusy" @click="dshDo('restart')">重启</button>
-        <button class="secondary" :disabled="!dsh.running && !dsh.external" @click="dshDo('stop')">结束</button>
-        <button class="secondary" :disabled="dshBusy" @click="dshDo('update')">更新</button>
-      </div>
-      <div class="btn-row">
-        <button class="secondary" @click="dshOpenPage">打开 Web UI</button>
         <button class="secondary" @click="dshCopyUrl">复制地址</button>
         <button class="secondary" @click="dshLogOpen = !dshLogOpen">{{ dshLogOpen ? '收起日志' : '查看日志' }}</button>
+        <button v-if="dshLogOpen" class="secondary" @click="dshClearLog">清空日志</button>
         <button v-if="dshLogOpen" class="secondary" @click="dshCopyLog">复制日志</button>
       </div>
-      <pre v-if="dshLogOpen" class="err-box">{{ dsh.log || '（暂无日志：启动或更新 dsh 后再看）' }}</pre>
+      <pre v-if="dshLogOpen" ref="dshLogEl" class="log-box">{{ dsh.log || '（暂无日志：启动或更新 dsh 后再看）' }}</pre>
       <p v-if="dsh.error && !dshLogOpen" class="msg err">{{ dsh.error }}</p>
       <p v-if="dshMsg" class="msg" :class="{ ok: !dshErr, err: dshErr }">{{ dshMsg }}</p>
-      <p class="hint">npx 模式：启动/更新使用 <code>npx -y [--registry=…] @deepseek-ai/dsh@&lt;版本&gt;</code>；选了具体版本后启动与更新都用它（可先「查询可用版本」）。全局模式：先执行 <code>npm i -g @deepseek-ai/dsh</code>，「更新」执行 <code>npm i -g [--registry=…] @deepseek-ai/dsh@&lt;版本&gt;</code>。</p>
-      <p class="hint">「结束」「重启」不只管本插件启动的进程：只要 3080 上跑着 dsh（含在别的终端里启动的），就能被它们结束；非 dsh 占用端口时会拒绝执行，避免误杀。</p>
-      <p class="hint">dsh 的工作目录取用户主目录；它自己的配置与数据由 dsh 管理，本插件不做改动。</p>
+
+      <div class="fold">
+        <button class="link-btn" @click="dshFolds.advanced = !dshFolds.advanced">{{ dshFolds.advanced ? '收起高级选项' : '高级选项（版本 / 注册源 / Node 目录 / 行为）' }}</button>
+        <div v-if="dshFolds.advanced" class="guide">
+          <label class="field row">
+            <span class="label">dsh 版本</span>
+            <select v-model="cfg.dshVersion" @change="patchCfg({ dshVersion: cfg.dshVersion })">
+              <option v-for="o in dshVersionOptions" :key="o.v" :value="o.v">{{ o.label }}</option>
+            </select>
+          </label>
+          <label class="field row">
+            <span class="label">npm 注册源</span>
+            <select v-model="cfg.dshRegistry" @change="patchCfg({ dshRegistry: cfg.dshRegistry })">
+              <option value="">官方（registry.npmjs.org）</option>
+              <option value="https://registry.npmmirror.com">淘宝镜像（registry.npmmirror.com）</option>
+            </select>
+          </label>
+          <label class="field row">
+            <span class="label">Node.js 目录</span>
+            <span class="ver">{{ dshNodeText }}</span>
+          </label>
+          <div class="btn-row">
+            <button class="secondary" @click="dshPickDir">选择目录</button>
+            <button v-if="cfg.dshNodeDir" class="secondary" @click="dshAutoDir">改为自动探测</button>
+            <button class="secondary" @click="dshStatus()">刷新状态</button>
+          </div>
+          <label class="field row check">
+            <span class="label">启动时不自动打开浏览器 <em>（勾选：命令追加 --no-open，启动后点「打开 Web UI」查看）</em></span>
+            <input type="checkbox" v-model="cfg.dshNoOpen" @change="patchCfg({ dshNoOpen: cfg.dshNoOpen })" />
+          </label>
+          <label class="field row check">
+            <span class="label">更新前重新下载 <em>（先删掉插件目录里的那份再装；用全局那份时不生效）</em></span>
+            <input type="checkbox" v-model="cfg.dshReinstall" @change="patchCfg({ dshReinstall: cfg.dshReinstall })" />
+          </label>
+          <label class="field row check">
+            <span class="label">uTools 退出后保留 dsh <em>（不勾选＝插件退出时自动结束，避免占着端口）</em></span>
+            <input type="checkbox" v-model="cfg.dshKeepAlive" @change="patchCfg({ dshKeepAlive: cfg.dshKeepAlive })" />
+          </label>
+        </div>
+      </div>
+
+      <div class="fold">
+        <button class="link-btn" @click="dshFolds.help = !dshFolds.help">{{ dshFolds.help ? '收起使用说明' : '使用说明' }}</button>
+        <div v-if="dshFolds.help" class="guide">
+          <p class="guide-use"><strong>启动：</strong>直接 <code>node &lt;那份 dsh&gt;/lib/bin.js web [--no-open]</code>（有全局安装就用全局那份，否则用插件目录的）—— 不再经过 npx，也就不会再堆缓存副本。</p>
+          <p class="guide-use"><strong>更新：</strong>结束正在运行的 dsh → 重新安装「dsh 版本」里选定的版本（自动＝latest）→ 原本在跑就用新版重新启动；已有全局安装时更新的就是全局那份（<code>npm i -g</code>）。</p>
+          <p class="guide-use"><strong>dsh 自己的数据：</strong>工作目录取用户主目录，配置与数据由 dsh 自己管理（默认 <code>~/.dsh</code>），本插件不做改动。</p>
+        </div>
+      </div>
+      <div class="fold">
+        <button class="link-btn" @click="dshFolds.trouble = !dshFolds.trouble">{{ dshFolds.trouble ? '收起故障排查' : '故障排查' }}</button>
+        <div v-if="dshFolds.trouble" class="guide">
+          <p class="guide-use"><strong>结束 / 重启：</strong>不只管本插件启动的进程 —— 只要 3080 上跑着 dsh（含在别的终端里启动的）都能被结束；非 dsh 占用端口时会拒绝执行，避免误杀。</p>
+          <p class="guide-use"><strong>首次安装很慢：</strong>要下载约 500 个包，国内建议把「npm 注册源」改成淘宝镜像；等待期间状态行会显示「已等待 x 秒」。</p>
+          <p class="guide-use"><strong>占用空间：</strong>「删除插件目录的 dsh」清掉插件装的那份（有全局安装时用不到它）；「清理 npx 旧缓存」清掉旧版本留在 npx 缓存里的副本。</p>
+          <div class="btn-row">
+            <button class="secondary" :disabled="!dsh.installed || dshBusy" @click="dshMaintain('remove-plugin')">
+              {{ dshConfirm === 'remove-plugin' ? '确认删除插件目录的 dsh？' : '删除插件目录的 dsh' }}
+            </button>
+            <button class="secondary" :disabled="dshBusy" @click="dshMaintain('clean-npx')">
+              {{ dshConfirm === 'clean-npx' ? '确认清理 npx 旧缓存？' : '清理 npx 旧缓存' }}
+            </button>
+            <button v-if="dshConfirm" class="secondary" @click="dshConfirm = ''">取消</button>
+          </div>
+        </div>
+      </div>
     </section>
 
     <!-- 关于与更新 -->
@@ -1202,12 +1566,58 @@ select:focus,
   font-size: 13px;
   color: var(--fg-dim);
 }
+/* 贴边间距：一行四个数值（上/右/下/左） */
+.edge-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.edge-row em {
+  font-style: normal;
+  font-size: 11px;
+  color: var(--fg-faint);
+}
+/* 任务栏状态：紧跟「自动避让任务栏」开关之后，收紧上下间距 */
+.taskbar-hint {
+  margin: 2px 0 12px;
+}
 /* dsh 最近执行的命令：等宽小字，可换行，方便核对/复制 */
 .cmdline {
   font-family: ui-monospace, Consolas, 'Courier New', monospace;
   font-size: 12px;
   color: var(--fg-dim);
   word-break: break-all;
+}
+/* dsh 状态行里的小标签（来源 / 有新版本） */
+.tag {
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 6px;
+  font-size: 11px;
+  color: var(--fg-dim);
+  background: rgba(127, 127, 127, 0.16);
+}
+.tag-new {
+  color: #fff;
+  background: var(--accent);
+}
+/* dsh 日志：中性框（普通输出不是错误，别用红框） */
+.log-box {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--card-border);
+  background: rgba(127, 127, 127, 0.08);
+  color: var(--fg);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 200px;
+  overflow: auto;
+  user-select: text;
 }
 input[type='checkbox'] {
   width: 16px;

@@ -10,7 +10,7 @@ const dsh = require('./dsh')
 const {
   pushInit, sendToWidget, applyScaleToWindow, applyOnTop, pushConfig,
   winAlive, getWindow, clearLiveScaleCtx, queueLiveScale, widgetOrigin,
-  winOrigin, clampWidget, workAreaNear, snapRect, flippedOf,
+  winOrigin, clampWidget, usableArea, snapRect, flippedOf, syncTaskbarWatch,
 } = require('./widget')
 // 挂件菜单改配置后，通知已打开的设置窗口同步刷新开关（详见 settings.js 的 onConfigChange）
 const { emitConfigChange } = require('./settings')
@@ -42,6 +42,7 @@ function registerIpc() {
     if (cfg.timerPersistOn === false && prev.timerPersistOn !== false) clearTimer()
     if (cfg.scale !== prev.scale) applyScaleToWindow(cfg.scale, true)
     if (cfg.onTop !== prev.onTop) applyOnTop(cfg.onTop)
+    if (cfg.avoidTaskbar !== prev.avoidTaskbar) syncTaskbarWatch()
     pushConfig()
     // 反向同步：把新配置广播给主窗（设置页），否则设置窗口的开关仍是旧值
     emitConfigChange()
@@ -58,7 +59,7 @@ function registerIpc() {
       const x = Number(data.x), y = Number(data.y) // 目标窗口左上角
       if (!isFinite(x) || !isFinite(y)) return
       const wgt = widgetOrigin(x, y) // 目标挂件左上角
-      const wa = workAreaNear(wgt.x + s / 2, wgt.y + s / 2)
+      const wa = usableArea(wgt.x + s / 2, wgt.y + s / 2)
       // 限制「挂件本体」在工作区内；透明留白可越界，不影响
       const c = clampWidget(wa, wgt.x, wgt.y, s)
       const wp = winOrigin(c.x, c.y)
@@ -78,7 +79,7 @@ function registerIpc() {
       const y = data && isFinite(Number(data.y)) ? Number(data.y) : pos[1]
       const s = width - WIN_PAD
       const wgt = widgetOrigin(x, y)
-      const wa = workAreaNear(wgt.x + s / 2, wgt.y + s / 2)
+      const wa = usableArea(wgt.x + s / 2, wgt.y + s / 2)
       const r = snapRect(wa, x, y, width, height)
       w.setPosition(Math.round(r.x), Math.round(r.y))
       writeAnchor(r.anchor)

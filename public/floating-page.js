@@ -302,10 +302,10 @@
     b.addEventListener('click', function (e) { e.stopPropagation(); dshSend(action); });
     return b;
   }
-  var dshStartBtn = dshBtn('启动', 'start', '启动 dsh Web UI（npx 模式首次会先下载 @deepseek-ai/dsh）');
+  var dshStartBtn = dshBtn('启动', 'start', '启动 dsh Web UI（插件目录里还没有时会先自动下载安装）');
   var dshRestartBtn = dshBtn('重启', 'restart', '先结束再启动 dsh');
   var dshStopBtn = dshBtn('结束', 'stop', '结束 dsh 进程');
-  var dshUpdateBtn = dshBtn('更新', 'update', '拉取最新版 dsh：npx 模式下载最新包；全局模式执行 npm i -g @deepseek-ai/dsh@latest');
+  var dshUpdateBtn = dshBtn('更新', 'update', '结束并按「dsh 版本」重新安装（自动＝latest），装完用新版启动');
   var dshOpenBtn = dshBtn('打开页面', 'open', '在系统浏览器打开 dsh 页面（自动使用 dsh 打印的带 token 地址，避免提示需要认证）');
   var rowDsh = menuRow();
   rowDsh.appendChild(menuLabel('dsh'));
@@ -350,7 +350,8 @@
     var ext = !!(s.external && s.externalPid);
     var other = s.portOther || '';
     var text = '未获取';
-    if (s.busy === 'update') text = '更新中…';
+    if (s.busy === 'install') text = '安装中…';
+    else if (s.busy === 'update') text = '更新中…';
     else if (s.busy === 'versions') text = '查询版本中…';
     else if (err) text = err;
     else if (s.running) text = s.stopping ? '正在结束…' : (s.ready ? '运行中 · pid ' + s.pid : '启动中…（3080 未就绪）');
@@ -364,9 +365,9 @@
     dshStateEl.textContent = text;
     dshStateEl.title = text +
       '\ndsh：' + (s.url || '') +
-      (s.running ? '\n状态：' + (s.ready ? '3080 已就绪' : '启动中，npx 首次需下载，稍等') : '') +
+      (s.running ? '\n状态：' + (s.ready ? '3080 已就绪' : '启动中，稍等') + (s.needsRestart ? '（已换成 ' + (s.resolved || '') + '，点「重启」生效）' : '') : '') +
       '\nNode：' + (s.nodeDir || '未找到') + (s.nodeVersion ? '（' + s.nodeVersion + '）' : '') +
-      '\n方式：' + (s.mode === 'global' ? '全局安装（dsh 命令）' : 'npx ' + (s.version ? '@' + s.version : '@latest')) +
+      '\n版本：' + (s.resolved || '未安装') + (s.source === 'global' ? '（全局）' : s.source === 'plugin' ? '（插件目录）' : '') +
       (ext ? '\n外部进程：由别的终端启动，「结束」会结束它，「重启」会用当前配置重新启动' : '') +
       '\n页面：' + (s.webUrl ? '已捕获带 token 地址' : (s.url || '')) +
       '\n详细日志见设置页「DeepSeek Harness」';
@@ -374,7 +375,7 @@
     dshCmdEl.title = s.lastCmd
       ? '最近执行的命令：\n' + s.lastCmd + '\n（完整日志见设置页「DeepSeek Harness」）'
       : '还没有执行过命令';
-    var busy = s.busy === 'update' || s.busy === 'versions';
+    var busy = s.busy === 'update' || s.busy === 'versions' || s.busy === 'install';
     dshStartBtn.disabled = !!s.running || ext || !!other || busy;
     dshRestartBtn.disabled = (!s.running && !ext) || busy;
     dshStopBtn.disabled = (!s.running && !ext) || !!s.stopping;

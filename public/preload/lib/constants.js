@@ -13,7 +13,7 @@ const FETCH_TIMEOUT_MS = 20000
 const UPDATE_CHECK_URL = 'https://ghfast.top/https://raw.githubusercontent.com/Berge520/Balance-Whale-Widget/refs/heads/main/package.json'
 // 当前插件版本。uTools 未提供读取插件自身版本的 API，此处由 scripts/sync-version.mjs
 // 在构建前从 package.json 的 version 自动写入，无需手动维护
-const PLUGIN_VERSION = '1.2.0'
+const PLUGIN_VERSION = '1.3.0'
 const UPDATE_TTL_MS = 12 * 3600 * 1000
 
 const MIN_SCALE = 0.6
@@ -49,6 +49,7 @@ const K = {
   win: 'whale:window',      // dbStorage：窗口锚点
   update: 'whale:update',   // dbStorage：上次检查更新结果缓存
   timer: 'whale:timer',     // dbStorage：计时状态（重建挂件后恢复）
+  dshVersions: 'whale:dshVersions', // dbStorage：dsh 可用版本列表缓存（查询结果，重载后仍可选用）
 }
 
 module.exports = {

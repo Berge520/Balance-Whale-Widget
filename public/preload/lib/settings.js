@@ -13,9 +13,11 @@ const {
 } = require('./api')
 const {
   ensureWidget, destroyWidget, winAlive, getWidgetError, getWindow,
-  applyScaleToWindow, applyOnTop, pushConfig, queueLiveScale,
+  applyScaleToWindow, applyOnTop, pushConfig, queueLiveScale, repositionFromAnchor,
+  taskbarState, syncTaskbarWatch,
 } = require('./widget')
 const dsh = require('./dsh')
+const backup = require('./backup')
 
 // 近 N 天用量（含今日，缺失日期补 0），按日期升序
 function usageDays(days) {
@@ -84,6 +86,10 @@ module.exports = {
     }
   },
   emitConfigChange,
+  // 任务栏「当前」状态（设置页显示）：visible = 正在占位 / hidden = 已自动收起 / none = 未识别到
+  getTaskbarState() {
+    try { return taskbarState() } catch (err) { return { state: 'none', edge: '', thickness: 0 } }
+  },
   getVersion() {
     return PLUGIN_VERSION
   },
@@ -132,6 +138,17 @@ module.exports = {
   dshListVersions() {
     return dsh.listVersions()
   },
+  dshClearLog() {
+    return dsh.clearLog()
+  },
+  // 删除插件目录里的那份 dsh（有全局安装时用不到它）
+  dshRemovePlugin() {
+    return dsh.removePluginDsh()
+  },
+  // 清理 npx 缓存里含 dsh 的历史副本（旧版本留下的）
+  dshCleanNpxCache() {
+    return dsh.cleanNpxCaches()
+  },
   // 选择 Node.js 安装目录并校验（目录里必须有 node 可执行文件）
   dshPickNodeDir() {
     let picked
@@ -162,6 +179,13 @@ module.exports = {
     // 关掉「计时保存」时顺手清掉已落库的计时状态，避免下次重建挂件又恢复
     if (cfg.timerPersistOn === false && prev.timerPersistOn !== false) clearTimer()
     if (cfg.scale !== prev.scale) applyScaleToWindow(cfg.scale, true)
+    // 「自动避让任务栏」或四边间距变了：按当前锚点重摆一次，立刻能看到效果
+    if (cfg.avoidTaskbar !== prev.avoidTaskbar
+      || cfg.edgeTop !== prev.edgeTop || cfg.edgeRight !== prev.edgeRight
+      || cfg.edgeBottom !== prev.edgeBottom || cfg.edgeLeft !== prev.edgeLeft) {
+      repositionFromAnchor()
+    }
+    if (cfg.avoidTaskbar !== prev.avoidTaskbar) syncTaskbarWatch()
     if (cfg.onTop !== prev.onTop) applyOnTop(cfg.onTop)
     if (cfg.usageMode !== prev.usageMode) resetBalanceCache()
     pushConfig()
@@ -264,6 +288,7 @@ module.exports = {
     if (o.window) {
       try { utools.dbStorage.removeItem(K.win) } catch (err) {}
       try { utools.dbStorage.removeItem(K.update) } catch (err) {}
+      try { utools.dbStorage.removeItem(K.dshVersions) } catch (err) {}
       resetAnchorCache()
     }
     resetBalanceCache()
@@ -280,6 +305,32 @@ module.exports = {
   ensureWidget() {
     ensureWidget()
     return { ok: winAlive(), error: getWidgetError() }
+  },
+  // ── 备份 / 恢复 ──
+  // 导出：设置 / 账本 / 窗口位置 / 计时；opts.secrets=true 时用 opts.password 加密后才写入凭据
+  backupExport(opts) {
+    return backup.exportBackup(opts)
+  },
+  // 选择备份文件并解析出预览（不写任何数据）
+  backupPick() {
+    return backup.pickBackup()
+  },
+  // 按勾选项恢复（同名覆盖）；设置或窗口位置被恢复后重建挂件，让它立刻生效
+  backupApply(opts) {
+    const r = backup.applyBackup(opts)
+    const hit = r && r.applied && (r.applied.indexOf('config') >= 0 || r.applied.indexOf('window') >= 0)
+    if (hit) {
+      resetBalanceCache()
+      const wasVisible = winAlive()
+      destroyWidget()
+      if (wasVisible) ensureWidget()
+      return Object.assign({}, r, { widgetRebuilt: true })
+    }
+    return r
+  },
+  // 放弃本次选择
+  backupCancel() {
+    return backup.clearPending()
   },
   showWidget() {
     ensureWidget()

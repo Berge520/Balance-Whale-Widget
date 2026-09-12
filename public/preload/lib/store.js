@@ -29,16 +29,14 @@ function writeSecrets(secrets) {
 // 配置
 // ──────────────────────────────────────────────
 function defaultConfig() {
-  return { scale: 1.5, vol: 0.9, soundOn: true, soundSet: 'duck', usageMode: 'ledger', peakMode: 'default', peakRemindOn: true, bubbleOn: true, menuBtn: true, onTop: true, lowAlertOn: true, lowAlertAmount: 10, timeBubbleOn: true, updateCheckOn: true, dragLock: false, enterMode: 'both', timerNotifyOn: true, timerPersistOn: true, timerMode: 'off', timerMin: 25, timerAt: '07:30', timerRemindSec: 8, timerBubblePin: true, timerBubbleOnly: true, dshMode: 'npx', dshNodeDir: '', dshKeepAlive: false, dshRegistry: '', dshVersion: '', dshCleanNpx: false }
+  return { scale: 1.5, vol: 0.9, soundOn: true, soundSet: 'duck', usageMode: 'ledger', peakMode: 'default', peakRemindOn: true, bubbleOn: true, menuBtn: true, onTop: true, lowAlertOn: true, lowAlertAmount: 10, timeBubbleOn: true, updateCheckOn: true, dragLock: false, enterMode: 'both', timerNotifyOn: true, timerPersistOn: true, timerMode: 'off', timerMin: 25, timerAt: '07:30', timerRemindSec: 8, timerBubblePin: true, timerBubbleOnly: true, dshNodeDir: '', dshKeepAlive: false, dshRegistry: '', dshVersion: '', dshReinstall: false, dshNoOpen: true, avoidTaskbar: true, edgeTop: 0, edgeRight: 0, edgeBottom: 0, edgeLeft: 0 }
 }
-// dsh 运行方式：npx（不装全局）| global（npm i -g 后跑全局 dsh）
-function normDshMode(v) { return v === 'global' ? 'global' : 'npx' }
 // dsh 注册源：只接受 http(s) 或空（默认官方源）
 function normRegistry(v) {
   const s = String(v == null ? '' : v).trim()
   return /^https?:\/\//i.test(s) ? s.slice(0, 200) : ''
 }
-// dsh 版本：空 = latest；否则只留 数字/点/横杠/字母 的版本号
+// dsh 版本：'' = 自动（安装/更新时取 latest）；否则固定版本号
 function normVersion(v) {
   const s = String(v == null ? '' : v).trim().replace(/^@/, '')
   if (!s || s === 'latest') return ''
@@ -79,12 +77,17 @@ function readConfig() {
     timerRemindSec: p.timerRemindSec === 0 || p.timerRemindSec === 5 || p.timerRemindSec === 8 || p.timerRemindSec === 15 ? p.timerRemindSec : dft.timerRemindSec,
     timerBubblePin: p.timerBubblePin !== false,
     timerBubbleOnly: p.timerBubbleOnly !== false,
-    dshMode: normDshMode(p.dshMode),
     dshNodeDir: typeof p.dshNodeDir === 'string' ? p.dshNodeDir.slice(0, 260) : dft.dshNodeDir,
     dshKeepAlive: p.dshKeepAlive === true,
     dshRegistry: normRegistry(p.dshRegistry),
     dshVersion: normVersion(p.dshVersion),
-    dshCleanNpx: p.dshCleanNpx === true,
+    dshReinstall: p.dshReinstall === true,
+    dshNoOpen: p.dshNoOpen !== false,
+    avoidTaskbar: p.avoidTaskbar !== false,
+    edgeTop: Math.round(clampNum(p.edgeTop, 0, 400, dft.edgeTop)),
+    edgeRight: Math.round(clampNum(p.edgeRight, 0, 400, dft.edgeRight)),
+    edgeBottom: Math.round(clampNum(p.edgeBottom, 0, 400, dft.edgeBottom)),
+    edgeLeft: Math.round(clampNum(p.edgeLeft, 0, 400, dft.edgeLeft)),
   }
 }
 function writeConfig(cfg) {
@@ -113,12 +116,17 @@ function writeConfig(cfg) {
     timerRemindSec: cfg.timerRemindSec === 0 || cfg.timerRemindSec === 5 || cfg.timerRemindSec === 8 || cfg.timerRemindSec === 15 ? cfg.timerRemindSec : 8,
     timerBubblePin: cfg.timerBubblePin !== false,
     timerBubbleOnly: cfg.timerBubbleOnly !== false,
-    dshMode: normDshMode(cfg.dshMode),
     dshNodeDir: typeof cfg.dshNodeDir === 'string' ? cfg.dshNodeDir.slice(0, 260) : '',
     dshKeepAlive: cfg.dshKeepAlive === true,
     dshRegistry: normRegistry(cfg.dshRegistry),
     dshVersion: normVersion(cfg.dshVersion),
-    dshCleanNpx: cfg.dshCleanNpx === true,
+    dshReinstall: cfg.dshReinstall === true,
+    dshNoOpen: cfg.dshNoOpen !== false,
+    avoidTaskbar: cfg.avoidTaskbar !== false,
+    edgeTop: Math.round(clampNum(cfg.edgeTop, 0, 400, 0)),
+    edgeRight: Math.round(clampNum(cfg.edgeRight, 0, 400, 0)),
+    edgeBottom: Math.round(clampNum(cfg.edgeBottom, 0, 400, 0)),
+    edgeLeft: Math.round(clampNum(cfg.edgeLeft, 0, 400, 0)),
     updatedAt: new Date().toISOString(),
   })
 }
@@ -155,12 +163,18 @@ function patchConfig(patch) {
   }
   if (p.timerBubblePin !== undefined) cfg.timerBubblePin = !!p.timerBubblePin
   if (p.timerBubbleOnly !== undefined) cfg.timerBubbleOnly = !!p.timerBubbleOnly
-  if (p.dshMode !== undefined) cfg.dshMode = normDshMode(p.dshMode)
   if (p.dshNodeDir !== undefined) cfg.dshNodeDir = String(p.dshNodeDir || '').trim().slice(0, 260)
   if (p.dshKeepAlive !== undefined) cfg.dshKeepAlive = !!p.dshKeepAlive
   if (p.dshRegistry !== undefined) cfg.dshRegistry = normRegistry(p.dshRegistry)
   if (p.dshVersion !== undefined) cfg.dshVersion = normVersion(p.dshVersion)
-  if (p.dshCleanNpx !== undefined) cfg.dshCleanNpx = !!p.dshCleanNpx
+  if (p.dshReinstall !== undefined) cfg.dshReinstall = !!p.dshReinstall
+  if (p.dshNoOpen !== undefined) cfg.dshNoOpen = p.dshNoOpen !== false
+  if (p.avoidTaskbar !== undefined) cfg.avoidTaskbar = !!p.avoidTaskbar
+  // 贴边间距（上/右/下/左，px）：0 = 紧贴该边（以系统当前可用区为准）
+  if (p.edgeTop !== undefined) cfg.edgeTop = Math.round(clampNum(p.edgeTop, 0, 400, cfg.edgeTop))
+  if (p.edgeRight !== undefined) cfg.edgeRight = Math.round(clampNum(p.edgeRight, 0, 400, cfg.edgeRight))
+  if (p.edgeBottom !== undefined) cfg.edgeBottom = Math.round(clampNum(p.edgeBottom, 0, 400, cfg.edgeBottom))
+  if (p.edgeLeft !== undefined) cfg.edgeLeft = Math.round(clampNum(p.edgeLeft, 0, 400, cfg.edgeLeft))
   writeConfig(cfg)
   return cfg
 }

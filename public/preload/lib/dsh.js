@@ -2,8 +2,11 @@
  * DeepSeek Harness（dsh）进程管理（CommonJS）。
  *
  * 面向开发者用户：在挂件菜单/设置页里 启动 / 重启 / 结束 / 更新 dsh，并打开它的 Web UI。
- *  - npx 模式：npx -y @deepseek-ai/dsh@latest web --no-open（不污染全局，「更新」即重新拉最新）
- *  - 全局模式：dsh web --no-open（需先 npm i -g @deepseek-ai/dsh，「更新」走 npm i -g …@latest）
+ *  - 插件把 dsh 装在自己的数据目录（<userData>/dsh，npm install --prefix，不污染全局），
+ *    启动时直接用 node 跑那份 CLI：既不会被 PATH 上的全局 dsh 抢先，也不受 npx 缓存哈希/清理影响，
+ *    因此「已安装 / 实际使用 / 设置里选的版本」三者始终一致
+ *  - 「更新」＝结束正在运行的 dsh → 重新安装指定版本 → 原本在跑就用新版重新启动
+ *  - --no-open 可在设置页勾选（默认勾选＝启动不自动弹浏览器，用「打开页面」按钮打开）
  * Node.js 目录：优先用户自定义目录，其次 PATH，最后常见安装位置（含 nvm）。
  */
 const { spawn, execFile, execFileSync } = require('child_process')
@@ -12,6 +15,7 @@ const path = require('path')
 const os = require('os')
 const { log, logErr } = require('./log')
 const { readConfig } = require('./store')
+const { K } = require('./constants')
 
 const DSH_PORT = 3080
 const DSH_URL = 'http://127.0.0.1:' + DSH_PORT
@@ -24,7 +28,6 @@ const state = {
   pid: 0,
   startedAt: 0,
   stopping: false,
-  mode: 'npx',        // npx | global
   nodeDir: '',        // 用户自定义 Node.js 目录；'' = 自动探测
   keepAlive: false,   // true = uTools 退出后不结束 dsh
   busy: '',           // '' | 'update'
@@ -34,15 +37,21 @@ const state = {
   log: [],
   lastCmd: '',        // 最近执行的命令（界面展示 + 日志里以 $ 开头记一行）
   registry: '',       // npm 注册源（'' = 官方 registry.npmjs.org）
-  version: '',        // '' = @latest；否则固定版本号
-  cleanNpx: false,    // 更新前清理 npx 缓存（~/.npm/_npx）
-  versions: { at: 0, latest: '', list: [] }, // 「查询版本」结果
+  version: '',        // '' = 自动（安装/更新时取 latest）；否则固定版本号
+  reinstall: false,   // 更新前先删掉插件目录里的 dsh，强制重装
+  noOpen: true,       // 启动时带 --no-open（不自动开浏览器，用「打开页面」按钮打开）
+  versions: { at: 0, latest: '', list: [] }, // 「查询版本」结果（落库缓存，重载插件后仍在）
+  versionsLoaded: false,
+  installed: '',      // 插件目录里实际安装的 dsh 版本（所见即所跑）
+  prefix: '',         // 插件自己那份 dsh 的安装目录（懒解析）
+  globalWritable: null, // 全局安装目录当前用户可写？null=还没测过（只在需要时试写一次）
   extPid: 0,          // 监听 3080 的外部 dsh 进程（非本插件启动）
   extName: '',
-  ready: false,       // 本次启动后 3080 是否已就绪（npx 首次要下载，起来要一会儿）
+  ready: false,       // 本次启动后 3080 是否已就绪（首次安装要下载，起来要一会儿）
   readyAt: 0,
   readyTimer: null,
   webUrl: '',         // dsh 打印的带 token 的页面地址（浏览器认证用），停止后失效
+  runVersion: '',     // 本次启动实际用的版本（用于判断更新后是否要重启）
   tail: '',           // 输出滚动缓冲：token 地址可能被拆到两个 data 事件里
   versionCache: {},   // dir → node -v 结果
   resolveCache: { key: '\u0000', value: null },
@@ -149,19 +158,6 @@ function resolveNode(custom) {
   state.resolveCache = { key: key, value: found }
   return found
 }
-// 全局安装的 dsh 可执行文件（node 目录 / 上级目录 / npm 全局 bin）
-function dshBin(node) {
-  const cands = []
-  if (node) { cands.push(node.dir, path.dirname(node.dir)) }
-  if (process.env.APPDATA) cands.push(path.join(process.env.APPDATA, 'npm'))
-  if (process.env.LOCALAPPDATA) cands.push(path.join(process.env.LOCALAPPDATA, 'npm'))
-  if (!WIN) cands.push('/usr/local/bin', '/usr/bin', '/opt/homebrew/bin')
-  for (const d of cands) {
-    const p = findExe(d, 'dsh')
-    if (p) return p
-  }
-  return ''
-}
 function nodeVersion(node) {
   if (!node) return ''
   if (state.versionCache[node.dir] !== undefined) return state.versionCache[node.dir]
@@ -176,7 +172,7 @@ function nodeVersion(node) {
 // ──────────────────────────────────────────────
 // 子进程
 // ──────────────────────────────────────────────
-// Windows 下 npm/npx/dsh 都是 .cmd，必须经 shell 执行；路径可能含空格，这里统一加引号
+// Windows 下 npm/dsh 都是 .cmd，必须经 shell 执行；路径可能含空格，这里统一加引号
 function quote(s) {
   const v = String(s)
   return WIN ? '"' + v.replace(/"/g, '\\"') + '"' : "'" + v.replace(/'/g, "'\\''") + "'"
@@ -196,7 +192,7 @@ function childEnv(node) {
 function spawnCmd(exe, args, node) {
   const options = { cwd: os.homedir(), env: childEnv(node), windowsHide: true }
   if (WIN) return spawn(quote(exe) + ' ' + args.map(quote).join(' '), Object.assign(options, { shell: true }))
-  // POSIX 下独立进程组，结束时可整组杀掉（npx/dsh 会有子进程）
+  // POSIX 下独立进程组，结束时可整组杀掉（dsh 会有子进程）
   return spawn(exe, args, Object.assign(options, { detached: true }))
 }
 function bindOutput(child) {
@@ -241,12 +237,41 @@ function decodeOut(buf) {
   if (u8.indexOf('\uFFFD') < 0) return u8
   try { return new TextDecoder('gbk').decode(raw) } catch (err) { return u8 }
 }
+// 目录当前用户是否可写：Windows 上 fs.access 的 W_OK 不校验 ACL，只能真的建/删一个临时目录来试
+function canWriteDir(dir) {
+  if (!dir) return false
+  let tmp = ''
+  try {
+    tmp = fs.mkdtempSync(path.join(dir, '.whale-write-'))
+    return true
+  } catch (err) {
+    return false
+  } finally {
+    if (tmp) { try { fs.rmSync(tmp, { recursive: true, force: true }) } catch (err) {} }
+  }
+}
 // 提权结束用的 powershell 绝对路径（找不到就退回 PATH 里的 powershell）
 function psExe() {
   const root = process.env.SystemRoot || process.env.windir || 'C:\\Windows'
   const p = path.join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
   try { if (fs.existsSync(p)) return p } catch (err) {}
   return 'powershell'
+}
+// 以管理员权限跑一次 npm（UAC 弹窗）；用于全局安装目录只对管理员可写的情况
+// 用 -Wait -PassThru 拿 npm 的退出码，避免「提权被取消」却被当成成功
+function elevateInstall(npmExe, args, onDone) {
+  const q = (s) => "'" + String(s).replace(/'/g, "''") + "'"
+  const ps = '$p = Start-Process -FilePath ' + q(npmExe) + ' -ArgumentList '
+    + args.map(q).join(',') + ' -Verb RunAs -Wait -PassThru; exit $p.ExitCode'
+  execFile(psExe(), ['-NoProfile', '-Command', ps], { windowsHide: true, encoding: 'buffer' }, (err, so, se) => {
+    const out = (decodeOut(so) + decodeOut(se)).trim()
+    if (out) pushLog(out)
+    if (err) {
+      const code = err && err.code !== undefined ? err.code : '未知'
+      pushLog('提权安装未成功（退出码 ' + code + '，可能是取消了 UAC）：' + ((err && err.message) || ''))
+    }
+    if (onDone) onDone(err)
+  })
 }
 function processName(pid, cb) {
   if (WIN) {
@@ -341,17 +366,116 @@ function externalPid() {
 function portOccupiedByOther() {
   return !!probe.pid && probe.pid !== state.pid && !isDshName(probe.name) ? probe.name || '未知进程' : ''
 }
-// 删除 npx 缓存目录（对应手工的 rm -rf ~/.npm/_npx，强制重新拉取）
-function cleanNpxCache() {
-  const dir = path.join(os.homedir(), '.npm', '_npx')
+// ── 插件自己那份 dsh：装在插件数据目录，不依赖全局安装，也不受 npx 缓存影响 ──
+function dshPrefix() {
+  if (!state.prefix) {
+    let base = ''
+    try { base = utools.getPath('userData') || '' } catch (err) {}
+    if (!base) base = path.join(os.homedir(), '.balance-whale-widget')
+    state.prefix = path.join(base, 'dsh')
+  }
+  return state.prefix
+}
+function dshPkgDir() { return path.join(dshPrefix(), 'node_modules', DSH_PKG) }
+function readPkgVersion(p) {
+  try {
+    const j = JSON.parse(fs.readFileSync(p, 'utf8'))
+    return j && j.version ? String(j.version) : ''
+  } catch (err) { return '' }
+}
+// 某个 dsh 包目录的 CLI 入口：package.json 的 bin 字段（字符串，或 { dsh: 'lib/bin.js' }）
+function cliEntryIn(pkgDir) {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(pkgDir, 'package.json'), 'utf8'))
+    const b = pkg.bin
+    const rel = typeof b === 'string' ? b : (b && (b.dsh || b[Object.keys(b)[0]]))
+    if (!rel) return ''
+    const p = path.join(pkgDir, String(rel))
+    if (fs.statSync(p).isFile()) return p
+  } catch (err) {}
+  return ''
+}
+// 插件目录里的 dsh（CLI 入口 / 版本）
+function cliEntry() { return cliEntryIn(dshPkgDir()) }
+function installedVersion() {
+  const v = readPkgVersion(path.join(dshPkgDir(), 'package.json'))
+  state.installed = v
+  return v
+}
+// 全局安装的 dsh 可能落在哪儿：Node 目录附近的各种布局 + npm 默认 prefix + PATH 里有 dsh 的目录
+function globalPkgDirs() {
+  const out = []
+  const add = (d) => { if (d && out.indexOf(d) < 0) out.push(d) }
+  const node = resolveNode(state.nodeDir)
+  if (node && node.dir) {
+    add(path.join(node.dir, 'node_modules'))
+    add(path.join(node.dir, '..', 'node_modules'))
+    add(path.join(node.dir, '..', 'lib', 'node_modules'))
+    add(path.join(node.dir, 'node_global', 'node_modules'))  // nvm-windows
+    add(path.join(node.dir, 'npm-global', 'node_modules'))   // 自定义 prefix（如 D:\nodejs\npm-global）
+  }
+  if (process.env.APPDATA) add(path.join(process.env.APPDATA, 'npm', 'node_modules'))
+  if (process.env.LOCALAPPDATA) add(path.join(process.env.LOCALAPPDATA, 'npm', 'node_modules'))
+  if (process.env.PREFIX) add(path.join(process.env.PREFIX, 'lib', 'node_modules'))
+  add(path.join(os.homedir(), '.npm-global', 'lib', 'node_modules'))
+  add('/usr/local/lib/node_modules')
+  add('/usr/lib/node_modules')
+  // PATH 里带着 dsh 命令的目录，它旁边的 node_modules 就是那份全局安装
+  for (const d of pathDirs()) {
+    if (!d) continue
+    for (const n of WIN ? ['dsh.cmd', 'dsh.exe', 'dsh'] : ['dsh']) {
+      try {
+        if (fs.statSync(path.join(d, n)).isFile()) { add(path.join(d, 'node_modules')); break }
+      } catch (err) {}
+    }
+  }
+  return out
+}
+// 全局有没有装 dsh（装了就用它，省一份重复下载）
+function globalDsh() {
+  for (const base of globalPkgDirs()) {
+    const pkgDir = path.join(base, DSH_PKG)
+    const version = readPkgVersion(path.join(pkgDir, 'package.json'))
+    if (!version) continue
+    const entry = cliEntryIn(pkgDir)
+    if (entry) return { source: 'global', pkgDir: pkgDir, version: version, entry: entry }
+  }
+  return null
+}
+// 实际会用哪一份：全局优先，其次插件目录
+function activeDsh() {
+  const g = globalDsh()
+  if (g) return g
+  const entry = cliEntry()
+  if (!entry) return null
+  return { source: 'plugin', pkgDir: dshPkgDir(), version: installedVersion(), entry: entry }
+}
+// 「更新前重新下载」：删掉插件目录里的 dsh，强制重装（不动全局安装）
+function removeInstalled() {
+  const dir = path.join(dshPrefix(), 'node_modules')
   try {
     fs.rmSync(dir, { recursive: true, force: true })
-    pushLog('已清理 npx 缓存：' + dir)
-    return true
+    pushLog('已删除插件目录里的 dsh（将重新下载）：' + dir)
   } catch (err) {
-    pushLog('清理 npx 缓存失败（可能有 npx 正在运行）：' + ((err && err.message) || err))
-    return false
+    pushLog('删除插件目录失败（文件被占用？）：' + ((err && err.message) || err))
   }
+  state.installed = ''
+  return true
+}
+// latest 是否比当前更新（数字段逐位比较；预发布后缀按「数字 > 字母」粗略处理，够用）
+function isNewer(a, b) {
+  const pa = String(a || '').split(/[.\-+]/), pb = String(b || '').split(/[.\-+]/)
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const x = pa[i], y = pb[i]
+    if (x === undefined) return false
+    if (y === undefined) return true
+    const ix = parseInt(x, 10), iy = parseInt(y, 10)
+    const sx = isNaN(ix), sy = isNaN(iy)
+    if (sx && sy) { if (x !== y) return x > y; continue }
+    if (sx !== sy) return sx // 数字段 > 字母段
+    if (ix !== iy) return ix > iy
+  }
+  return false
 }
 
 // ──────────────────────────────────────────────
@@ -359,33 +483,38 @@ function cleanNpxCache() {
 // ──────────────────────────────────────────────
 function configure(cfg) {
   const c = cfg && typeof cfg === 'object' ? cfg : {}
-  const mode = c.dshMode === 'global' ? 'global' : 'npx'
   const nodeDir = typeof c.dshNodeDir === 'string' ? c.dshNodeDir.trim() : ''
   const registry = typeof c.dshRegistry === 'string' ? c.dshRegistry.trim() : ''
   const version = typeof c.dshVersion === 'string' ? c.dshVersion.trim() : ''
   if (nodeDir !== state.nodeDir) state.resolveCache = { key: '\u0000', value: null }
-  if (mode !== state.mode || nodeDir !== state.nodeDir) log('[whale][dsh] 配置变更', { mode, nodeDir: nodeDir || '(自动)' })
-  state.mode = mode
+  if (nodeDir !== state.nodeDir) log('[whale][dsh] 配置变更', { nodeDir: nodeDir || '(自动)' })
   state.nodeDir = nodeDir
   state.keepAlive = c.dshKeepAlive === true
   state.registry = registry
   state.version = version
-  state.cleanNpx = c.dshCleanNpx === true
+  state.noOpen = c.dshNoOpen !== false
+  state.reinstall = c.dshReinstall === true
 }
 // 每次操作前从配置同步（设置页/挂件菜单都可能改），避免漏掉某个调用点
 function syncConfig() {
   try { configure(readConfig()) } catch (err) { logErr('[whale][dsh] 读取配置失败', err && err.message) }
 }
-// 包名（@latest 或指定版本）与注册源参数
-function pkgSpec() { return DSH_PKG + '@' + (state.version || 'latest') }
+// 「实际会跑」的版本＝全局优先、其次插件目录那份；都没有返回 ''
+function resolvedVersion() { const a = activeDsh(); return a ? a.version : '' }
+// 「要安装的版本」：配置固定了就用它，否则 latest（「更新」用这个）
+function installVersion() { return state.version || 'latest' }
+// 包名（@版本）
+function pkgSpec(v) { return DSH_PKG + '@' + (v || installVersion()) }
 function regArgs() { return state.registry ? ['--registry=' + state.registry] : [] }
-// npm/npx 提速参数：跳过审计与赞助请求；锁定版本时可优先命中缓存（@latest 不能加，否则可能拿到过期的 latest）
+// 子命令：默认带 --no-open（不自动弹浏览器，用「打开页面」打开）
+function webArgs() { return state.noOpen ? ['web', '--no-open'] : ['web'] }
+// npm 提速参数：跳过审计与赞助请求；固定版本时优先命中缓存
 function fastArgs() {
   const out = ['--no-audit', '--no-fund']
-  if (state.version) out.push('--prefer-offline')
+  if (installVersion() !== 'latest') out.push('--prefer-offline')
   return out
 }
-// 启动后就绪检测：3080 真正开始监听才算可用（npx 首次下载可能几十秒）
+// 启动后就绪检测：3080 真正开始监听才算可用（首次安装要下载，可能几十秒）
 function watchReady() {
   if (state.readyTimer) clearInterval(state.readyTimer)
   let ticks = 0
@@ -449,26 +578,17 @@ function start() {
     pushLog(state.error)
     return snapshot()
   }
-  let exe = ''
-  let args = []
-  if (state.mode === 'global') {
-    exe = dshBin(node)
-    if (!exe) {
-      state.error = '未找到全局 dsh：请先执行 npm i -g ' + DSH_PKG + '，或把运行方式改成 npx'
-      pushLog(state.error)
-      return snapshot()
-    }
-    args = ['web', '--no-open']
-  } else {
-    if (!node.npx) {
-      state.error = 'Node.js 目录里没有 npx（' + node.dir + '），请重新指定目录'
-      pushLog(state.error)
-      return snapshot()
-    }
-    exe = node.npx
-    // npx -y [--no-audit --no-fund --prefer-offline] [--registry=镜像] @deepseek-ai/dsh@<版本|latest> web --no-open
-    args = ['-y'].concat(fastArgs(), regArgs(), [pkgSpec(), 'web', '--no-open'])
+  const act = activeDsh()
+  if (!act) {
+    // 全局和插件目录都没有：先装再启动（装到插件目录，不动全局）
+    pushLog('还没有可用的 dsh，先安装：' + pkgSpec())
+    installDsh(() => start(), 'install')
+    return snapshot()
   }
+  const exe = node.node
+  state.runVersion = act.version // 本次实际跑的版本（用于判断「更新后是否要重启」）
+  // node <dsh 包目录>/lib/bin.js web [--no-open]（全局安装优先，其次插件目录）
+  const args = [act.entry].concat(webArgs())
   state.error = ''
   state.exitCode = null
   setCmd(exe + ' ' + args.join(' '))
@@ -489,7 +609,7 @@ function start() {
     state.error = '启动失败：' + ((err && err.message) || err)
     pushLog(state.error)
     logErr('[whale][dsh] 启动失败', err && err.message)
-    if (state.child === child) { state.child = null; state.pid = 0 }
+    if (state.child === child) { state.child = null; state.pid = 0; state.runVersion = '' }
   })
   child.on('exit', (code, signal) => {
     pushLog('dsh 已退出（code=' + code + (signal ? '，signal=' + signal : '') + '）')
@@ -499,11 +619,11 @@ function start() {
       state.error = '端口 ' + DSH_PORT + ' 已被占用：dsh 可能已在别处运行，请先结束它再启动'
       pushLog(state.error)
     }
-    if (state.child === child) { state.child = null; state.pid = 0; state.stopping = false }
+    if (state.child === child) { state.child = null; state.pid = 0; state.stopping = false; state.runVersion = '' }
     state.exitCode = code
     state.exitAt = Date.now()
   })
-  log('[whale][dsh] 已启动', { pid: state.pid, mode: state.mode, node: node.dir })
+  log('[whale][dsh] 已启动', { pid: state.pid, node: node.dir })
   return snapshot()
 }
 
@@ -572,55 +692,169 @@ function restart(done) {
 
 function update() {
   syncConfig()
-  if (state.busy) { state.error = '正在' + (state.busy === 'versions' ? '查询版本' : '更新') + '中，请稍候'; return snapshot() }
+  if (state.busy) { state.error = '正在' + (state.busy === 'versions' ? '查询版本' : state.busy === 'install' ? '安装' : '更新') + '中，请稍候'; return snapshot() }
   const node = resolveNode(state.nodeDir)
   if (!node) {
     state.error = '未找到 Node.js：请在设置页「DeepSeek Harness」里指定 Node.js 目录'
     pushLog(state.error)
     return snapshot()
   }
-  const isGlobal = state.mode === 'global'
-  const exe = isGlobal ? node.npm : node.npx
-  const spec = pkgSpec()
-  const args = isGlobal ? ['i', '-g'].concat(fastArgs(), regArgs(), [spec]) : ['-y'].concat(fastArgs(), regArgs(), [spec, '--version'])
-  if (!exe) {
-    state.error = (isGlobal ? '未找到 npm' : '未找到 npx') + '：请重新指定 Node.js 目录'
+  if (!node.npm) {
+    state.error = 'Node.js 目录里没有 npm（' + node.dir + '），请重新指定目录'
     pushLog(state.error)
     return snapshot()
   }
   state.error = ''
+  // 已经是所选版本就别白跑一次 npm（固定版本可以直接判断；「更新前重新下载」时除外）
+  const cur = activeDsh()
+  if (state.version && cur && cur.version === state.version && !state.reinstall) {
+    pushLog('已是最新：当前用 ' + cur.version + '，与所选版本一致，无需更新')
+    return snapshot()
+  }
+  // 更新＝结束当前 dsh（含别的终端里启动的）→ 重新安装指定版本 → 原本在跑就用新版拉起来
+  const wasRunning = !!state.child || !!externalPid()
+  const doInstall = () => installDsh(() => {
+    if (!wasRunning) return
+    pushLog('正在用 ' + (installedVersion() || '新版') + ' 重新启动 dsh')
+    start()
+  }, 'update')
+  if (!wasRunning) { doInstall(); return snapshot() }
   state.busy = 'update'
-  if (state.cleanNpx) cleanNpxCache()
-  setCmd(exe + ' ' + args.join(' '))
-  let child = null
-  try { child = spawnCmd(exe, args, node) } catch (err) {
+  pushLog('更新：先结束正在运行的 dsh（否则文件被占用，装不上）')
+  stop(() => {
+    if (state.error) {
+      state.busy = ''
+      pushLog('更新中止：' + state.error)
+      return
+    }
+    // 等 3080 真正释放（刚 taskkill 完可能还没退干净，文件也还被占用）
+    let tries = 0
+    const timer = setInterval(() => {
+      tries++
+      probePort((pid) => {
+        if (!pid || tries > 20) { clearInterval(timer); doInstall() }
+      })
+    }, 350)
+  })
+  return snapshot()
+}
+
+// 把 dsh 装到插件自己的目录（npm install --prefix <userData>/dsh）
+// done：装成功后回调；busyKind：界面文案（'install' 首次安装 / 'update' 更新）
+function installDsh(done, busyKind) {
+  syncConfig()
+  const node = resolveNode(state.nodeDir)
+  if (!node) {
     state.busy = ''
-    state.error = '更新失败：' + ((err && err.message) || err)
+    state.error = '未找到 Node.js：请在设置页「DeepSeek Harness」里指定 Node.js 目录'
+    pushLog(state.error)
+    return snapshot()
+  }
+  if (!node.npm) {
+    state.busy = ''
+    state.error = 'Node.js 目录里没有 npm（' + node.dir + '），请重新指定目录'
+    pushLog(state.error)
+    return snapshot()
+  }
+  // 已有全局安装就更新它（省一份重复下载），否则装到插件目录
+  const g = globalDsh()
+  const target = g ? 'global' : 'plugin'
+  const before = g ? g.version : installedVersion()
+  if (target === 'plugin' && state.reinstall) removeInstalled()
+  const spec = pkgSpec()
+  const args = target === 'global'
+    ? ['install', '-g'].concat(fastArgs(), regArgs(), [spec])
+    : ['install', '--prefix', dshPrefix()].concat(fastArgs(), regArgs(), [spec])
+  state.busy = busyKind || 'install'
+  setCmd(node.npm + ' ' + args.join(' '))
+  pushLog((state.busy === 'update' ? '开始更新：' : '开始安装：') + spec + '（' + (target === 'global' ? '全局安装' : '插件目录') + '）')
+  let triedElevate = false
+  const afterVersion = () => (target === 'global' ? ((globalDsh() || {}).version || '') : installedVersion())
+  const succeed = (after) => {
+    state.busy = ''
+    state.globalWritable = null // 装过之后重新判定可写性
+    if (before && after !== before) pushLog('安装完成：' + before + ' → ' + after)
+    else pushLog('安装完成：' + after)
+    if (done) done()
+  }
+  // 全局安装目录常只对管理员可写：先探测，不可写就直接提权，免得白跑一遍再抛 EPERM
+  const globalBase = target === 'global' ? path.dirname(path.dirname(g.pkgDir)) : ''
+  if (target === 'global' && WIN && !canWriteDir(globalBase)) {
+    triedElevate = true
+    pushLog('全局安装目录 ' + globalBase + ' 普通用户不可写（需要管理员权限），改用管理员权限安装：请在 UAC 弹窗点「是」')
+    elevateInstall(node.npm, args, (elevErr) => {
+      const v2 = afterVersion()
+      if (!elevErr && v2) succeed(v2)
+      else failInstall(0, '：全局安装需要管理员权限（提权未成功，可能取消了 UAC）')
+    })
+    return snapshot()
+  }
+  let child = null
+  try { child = spawnCmd(node.npm, args, node) } catch (err) {
+    state.busy = ''
+    state.error = '安装失败：' + ((err && err.message) || err)
     pushLog(state.error)
     return snapshot()
   }
   bindOutput(child)
+  const fail = failInstall
   const finish = (code) => {
-    state.busy = ''
-    if (code === 0) {
-      pushLog((isGlobal ? '更新完成' : '已拉取 ' + spec) + '（重启 dsh 后生效）')
-    } else if (isGlobal) {
-      state.error = '更新失败（退出码 ' + code + '），详见设置页日志'
-      pushLog(state.error)
-    } else {
-      // npx 模式下这条命令只是为了把包拉进缓存，退出码非 0 不代表更新失败
-      pushLog('更新告警（退出码 ' + code + '）：包已尝试拉取；npx 模式每次启动都会用 ' + spec)
+    const after = afterVersion()
+    if (code === 0 && after) { succeed(after); return }
+    // npm 的 EPERM/EACCES：Windows 上多半是「目录只对管理员可写」或「文件正被占用」
+    const denied = /EPERM|EACCES|operation not permitted|拒绝访问/i.test(state.log.slice(-30).join('\n'))
+    if (target === 'global' && denied && !triedElevate && WIN) {
+      triedElevate = true
+      state.busy = busyKind || 'install'
+      pushLog('全局安装目录 ' + globalBase + ' 普通用户不可写，改用管理员权限重试：请在 UAC 弹窗点「是」')
+      elevateInstall(node.npm, args, (elevErr) => {
+        const v2 = afterVersion()
+        if (!elevErr && v2) succeed(v2)
+        else fail(code, '：全局安装需要管理员权限（提权未成功，可能取消了 UAC）')
+      })
+      return
     }
+    if (denied && target === 'global') {
+      fail(code, '：全局安装目录需要管理员权限。可在 UAC 弹窗点「是」重试、以管理员身份运行 uTools，'
+        + '或先卸载全局 dsh（npm uninstall -g ' + DSH_PKG + '）并删掉它，让插件装到插件数据目录')
+      return
+    }
+    if (denied) fail(code, '：目标文件被占用或权限不足（可先「结束」dsh 再重试）')
+    else fail(code, '')
   }
-  child.on('error', (err) => { state.busy = ''; state.error = '更新失败：' + ((err && err.message) || err); pushLog(state.error) })
+  function failInstall(code, why) {
+    state.busy = ''
+    state.error = '安装失败' + (code ? '（退出码 ' + code + '）' : '') + (why || '') + '：详见设置页日志'
+    pushLog(state.error)
+  }
+  child.on('error', (err) => {
+    state.busy = ''
+    state.error = '安装失败：' + ((err && err.message) || err)
+    pushLog(state.error)
+  })
   child.on('exit', (code) => finish(code))
   return snapshot()
+}
+
+// 版本列表落库缓存：重载插件后不用重新查询也能在下拉里选到具体版本
+function loadVersions() {
+  if (state.versionsLoaded) return
+  state.versionsLoaded = true
+  try {
+    const c = utools.dbStorage.getItem(K.dshVersions)
+    if (c && typeof c === 'object' && Array.isArray(c.list) && c.list.length) {
+      state.versions = { at: Number(c.at) || 0, latest: String(c.latest || ''), list: c.list.map(String).slice(-60) }
+    }
+  } catch (err) {}
+}
+function saveVersions() {
+  try { utools.dbStorage.setItem(K.dshVersions, state.versions) } catch (err) { logErr('[whale][dsh] 写版本缓存失败', err && err.message) }
 }
 
 // 查询可用版本列表（npm view <pkg> versions --json），结果缓存在 state.versions
 function listVersions() {
   syncConfig()
-  if (state.busy) { state.error = '正在' + (state.busy === 'update' ? '更新' : '查询版本') + '中，请稍候'; return snapshot() }
+  if (state.busy) { state.error = '正在' + (state.busy === 'versions' ? '查询版本' : state.busy === 'install' ? '安装' : '更新') + '中，请稍候'; return snapshot() }
   const node = resolveNode(state.nodeDir)
   const exe = node && node.npm
   if (!exe) {
@@ -672,6 +906,7 @@ function listVersions() {
       latest: tag || list[list.length - 1] || '',
       list: list.slice(-60),
     }
+    saveVersions()
     pushLog('可用版本 ' + list.length + ' 个，latest 标签：' + (state.versions.latest || '未知'))
   })
   return snapshot()
@@ -690,6 +925,75 @@ function openWeb() {
   }
 }
 
+// ── 维护操作（设置页按钮）──
+// 清空内存日志
+function clearLog() {
+  state.log = []
+  state.error = ''
+  pushLog('日志已清空')
+  return snapshot()
+}
+// 删除插件目录里的那份 dsh（有全局安装时本来就用不到它）
+function removePluginDsh() {
+  const act = activeDsh()
+  if (state.child && act && act.source === 'plugin') {
+    state.error = '正在运行插件目录里的 dsh，请先「结束」再删除'
+    pushLog(state.error)
+    return snapshot()
+  }
+  const dir = path.join(dshPrefix(), 'node_modules')
+  state.error = ''
+  if (!fs.existsSync(dir)) {
+    pushLog('插件目录里没有 dsh，无需删除')
+    return snapshot()
+  }
+  try {
+    fs.rmSync(dir, { recursive: true, force: true })
+    pushLog('已删除插件目录里的 dsh：' + dir)
+  } catch (err) {
+    state.error = '删除失败（文件被占用？）：' + ((err && err.message) || err)
+    pushLog(state.error)
+  }
+  state.installed = ''
+  return snapshot()
+}
+// npx 缓存根目录候选（只用于清理历史副本；插件自己已经不用 npx）
+function npxCacheBases() {
+  const out = []
+  const add = (d) => { if (d && out.indexOf(d) < 0) out.push(d) }
+  if (process.env.npm_config_cache) add(path.join(process.env.npm_config_cache, '_npx'))
+  if (WIN && process.env.LOCALAPPDATA) add(path.join(process.env.LOCALAPPDATA, 'npm-cache', '_npx'))
+  if (process.env.XDG_CACHE_HOME) add(path.join(process.env.XDG_CACHE_HOME, 'npm', '_npx'))
+  add(path.join(os.homedir(), '.npm', '_npx'))
+  add(path.join(os.homedir(), '.cache', 'npm', '_npx'))
+  return out
+}
+// 清理 npx 缓存里含 @deepseek-ai/dsh 的 <hash> 目录（以前的版本留下的，一次性回收；不动其它包）
+function cleanNpxCaches() {
+  let n = 0
+  state.error = ''
+  for (const base of npxCacheBases()) {
+    let names = []
+    try { names = fs.readdirSync(base) } catch (err) { continue }
+    for (const name of names) {
+      const dir = path.join(base, name)
+      const hasDsh = fs.existsSync(path.join(dir, 'node_modules', DSH_PKG, 'package.json'))
+      // 之前测过、只剩锁文件的空目录也一并清掉
+      const empty = !fs.existsSync(path.join(dir, 'node_modules')) && fs.existsSync(path.join(dir, 'concurrency.lock'))
+      if (!hasDsh && !empty) continue
+      try {
+        fs.rmSync(dir, { recursive: true, force: true })
+        n++
+        pushLog('已删除 ' + dir)
+      } catch (err) {
+        pushLog('删除失败（可能正被 npx 使用）：' + dir + ' —— ' + ((err && err.message) || err))
+      }
+    }
+  }
+  pushLog(n ? ('已清理 ' + n + ' 个 npx 缓存目录') : '没有需要清理的 npx 缓存目录')
+  return snapshot()
+}
+
 // uTools 退出（isKill=true）且用户没勾「保留」时结束 dsh，避免留下孤进程占着 3080
 function stopOnQuit() {
   syncConfig()
@@ -701,8 +1005,15 @@ function stopOnQuit() {
 // 面向 UI 的状态快照（含日志）
 function snapshot() {
   syncConfig()
+  loadVersions()
   const node = resolveNode(state.nodeDir)
-  const bin = state.mode === 'global' ? dshBin(node) : ''
+  const gv = globalDsh() // 全局安装（有就用它，省一份重复下载）
+  const act = gv || (cliEntry() ? { source: 'plugin', version: installedVersion() } : null)
+  const installed = installedVersion()
+  // 全局目录是否可写：只在第一次快照（以及安装后）真试一次，之后用缓存
+  if (gv && state.globalWritable === null) {
+    state.globalWritable = canWriteDir(path.dirname(path.dirname(gv.pkgDir)))
+  }
   return {
     running: !!state.child,
     stopping: !!state.stopping,
@@ -711,7 +1022,6 @@ function snapshot() {
     startedAt: state.startedAt,
     exitCode: state.exitCode,
     exitAt: state.exitAt,
-    mode: state.mode,
     keepAlive: state.keepAlive,
     url: DSH_URL,
     port: DSH_PORT,
@@ -719,15 +1029,28 @@ function snapshot() {
     nodeVersion: node ? nodeVersion(node) : '',
     nodeAuto: !state.nodeDir,
     found: !!node,
-    dshFound: state.mode === 'global' ? !!bin : true,
     error: state.error,
     lastCmd: state.lastCmd,
     log: state.log.join('\n'),
-    // 运行方式相关配置（界面回显）
+    // dsh 相关配置（界面回显）
     registry: state.registry,
     version: state.version,
-    cleanNpx: state.cleanNpx,
+    resolved: act ? act.version : '',
+    // 已查询到 latest 且比当前用的新（界面提示「有新版本」）
+    hasUpdate: !!(act && state.versions && state.versions.latest && isNewer(state.versions.latest, act.version)),
+    // 用哪一份：'global'（全局安装，优先）/ 'plugin'（插件目录）/ ''（都没有）
+    source: act ? act.source : '',
+    globalVersion: gv ? gv.version : '',
+    globalDir: gv ? gv.pkgDir : '',
+    // 全局安装目录是否可写（false 时「更新」会弹一次 UAC 提权）
+    globalWritable: !!gv && state.globalWritable !== false,
+    reinstall: state.reinstall,
+    prefix: dshPrefix(),
     versions: state.versions,
+    installed: installed,
+    // 本次启动用的版本 + 是否需要重启才生效（目录里已是另一个版本）
+    runVersion: state.runVersion,
+    needsRestart: !!state.child && !!state.runVersion && !!act && act.version !== state.runVersion,
     // 3080 上的进程探测：识别别的终端里跑的 dsh
     external: !!externalPid(),
     externalPid: externalPid() || 0,
@@ -752,6 +1075,9 @@ module.exports = {
   restart,
   update,
   listVersions,
+  clearLog,
+  removePluginDsh,
+  cleanNpxCaches,
   openWeb,
   stopOnQuit,
   probePort,
