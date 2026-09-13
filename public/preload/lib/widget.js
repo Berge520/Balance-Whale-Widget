@@ -6,6 +6,7 @@ const { execFileSync } = require('child_process')
 const { log, logErr } = require('./log')
 const { clampNum, readConfig, readAnchor, writeAnchor, defaultAnchor, readTimer } = require('./store')
 const { getCachedBalance } = require('./api')
+const { getSoundData } = require('./sounds')
 
 let win = null
 let winCreatedAt = 0 // 窗口创建时刻（ms），用于区分「刚创建尚未显示」与「被隐藏」
@@ -346,6 +347,11 @@ function applyOnTop(onTop) {
   try { if (onTop && win.moveTop) win.moveTop() } catch (err) {}
 }
 
+// 注意：窗口级 win.setOpacity() 在 Windows 上不能用于本挂件——本窗口是
+// transparent:true 的分层透明窗，调用 setOpacity 会让渲染层失效（整窗不显示，
+// 即使再设回 1.0 也不恢复，只能销毁重建）。透明度改为页面根元素 CSS opacity，
+// 由 floating-page.js 的 applyConfig 消费。
+
 // 显式放开窗口最小尺寸：Windows 无边框/不可调整窗可能被钳制在创建时尺寸，
 // 导致 setSize 放大有效、缩小无效。窗口边长 = 挂件本体(base) + 留白(WIN_PAD)。
 function applySizeBounds() {
@@ -532,6 +538,8 @@ function pushInit() {
     balance: getCachedBalance(),
     // 计时状态：仅当「计时保存」开启时恢复（关闭时不回推，页面按默认清空处理）
     timer: cfg.timerPersistOn ? readTimer() : null,
+    // 自定义音效本体（base64 data URL；无自定义时两段均为 null）
+    sounds: getSoundData(),
   })
 }
 

@@ -16,6 +16,15 @@ const {
 const { emitConfigChange } = require('./settings')
 
 function registerIpc() {
+  // dsh 异步状态变更（3080 就绪 / 进程退出 / 安装或版本查询完成 …）主动推给挂件：
+  // 挂件菜单不像设置页那样每 4s 轮询，只在点击操作时收一次回复，没有这路广播就会
+  // 一直停在「启动中…（3080 未就绪）」「正在结束…」，要点一下「打开页面」触发快照才刷新
+  try {
+    dsh.onChange((s) => {
+      try { sendToWidget('whale:dsh', s) } catch (err) {}
+    })
+  } catch (err) { logErr('[whale][ipc] 订阅 dsh 状态失败', err && err.message) }
+
   ipcRenderer.on('whale:ready', () => {
     log('[whale][widget] 收到 whale:ready（子窗已就绪）')
     pushInit()
@@ -34,6 +43,9 @@ function registerIpc() {
   ipcRenderer.on('whale:config', (event, patch) => {
     if (patch && patch.__live) {
       queueLiveScale(patch.scale)
+      // 透明度实时预览：不能用 win.setOpacity（transparent 窗口会整窗消失），
+      // 只把数值推给挂件页面走 CSS opacity；不写存储、不回推设置页
+      if (patch.opacity !== undefined) sendToWidget('whale:config', { opacity: patch.opacity })
       return
     }
     const prev = readConfig()
@@ -43,6 +55,7 @@ function registerIpc() {
     if (cfg.scale !== prev.scale) applyScaleToWindow(cfg.scale, true)
     if (cfg.onTop !== prev.onTop) applyOnTop(cfg.onTop)
     if (cfg.avoidTaskbar !== prev.avoidTaskbar) syncTaskbarWatch()
+    // opacity/passThrough 随 pushConfig 全量广播，由挂件页面以 CSS/命中测试消费
     pushConfig()
     // 反向同步：把新配置广播给主窗（设置页），否则设置窗口的开关仍是旧值
     emitConfigChange()
@@ -91,12 +104,21 @@ function registerIpc() {
     } catch (err) {}
   })
 
+  // 穿透开关状态缓存：值没变就不调 setIgnoreMouseEvents（鼠标在挂件上移动时
+  // 页面会高频上报，重复调用纯属浪费）。缓存按窗口实例失效 —— 窗口重建后新窗口
+  // 默认不穿透，必须重新下发一次。
+  let ignoreMouseWin = null
+  let ignoreMouseVal = null
   ipcRenderer.on('whale:ignore-mouse', (event, data) => {
-    if (!winAlive()) return
+    if (!winAlive()) { ignoreMouseWin = null; ignoreMouseVal = null; return }
+    const w = getWindow()
+    if (w !== ignoreMouseWin) { ignoreMouseWin = w; ignoreMouseVal = null }
+    const ignore = !!(data && data.ignore)
+    if (ignore === ignoreMouseVal) return
+    ignoreMouseVal = ignore
     try {
-      const ignore = !!(data && data.ignore)
-      getWindow().setIgnoreMouseEvents(ignore, { forward: true })
-    } catch (err) {}
+      w.setIgnoreMouseEvents(ignore, { forward: true })
+    } catch (err) { ignoreMouseVal = null }
   })
 
   // 挂件菜单请求唤出主窗（设置页）：「显示挂件」模式下唯一入口

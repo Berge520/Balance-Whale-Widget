@@ -17,6 +17,10 @@
     --dshw-base: calc(100vw - var(--whale-pad));
     width: calc(100vw - var(--whale-pad));
     height: calc(100vh - var(--whale-pad));
+    /* 窗口透明度：由 JS 写 --dshw-opacity（20%–100% → 0.2–1）。
+       不能用窗口 setOpacity（transparent 窗会整窗不显示），也不能给本元素写内联 opacity —— 
+       .dshwv-menu 的显隐就是靠 opacity，内联值会盖掉它的关闭态，导致菜单关不掉 */
+    opacity: var(--dshw-opacity, 1);
     pointer-events: none;
     user-select: none;
     -webkit-user-select: none;
@@ -130,6 +134,13 @@
     transition: opacity .15s ease, background .15s ease, transform .15s ease, box-shadow .15s ease;
   }
   .dshwv-menu-btn.dshwv-menu-btn-visible { opacity: 1; }
+  /* 鼠标穿透中（尚未接管）：低透明度 + 虚线环常显 —— 既提示「此刻点不动」，
+     也是悬停接管的抓手（在它或鲸鱼上停留约 1 秒即可临时接管） */
+  .dshwv-menu-btn.dshwv-menu-btn-pass {
+    opacity: .45;
+    border: 1px dashed rgba(255,255,255,.8);
+    box-shadow: none;
+  }
   .dshwv-menu-btn.dshwv-menu-btn-off { display: none; }
   .dshwv-menu-btn span { display: block; width: 13px; height: 2px; background: #fff; border-radius: 1px; }
   .dshwv-menu-btn:hover { background: #2438a0; transform: translateY(-1px); box-shadow: 0 4px 12px rgba(19,32,74,.36); }
@@ -165,7 +176,7 @@
     overflow-y: auto;
     overscroll-behavior: contain;
   }
-  .dshwv-menu.dshwv-menu-open { opacity: 1; transform: scale(1) translateY(0); pointer-events: auto; }
+  .dshwv-menu.dshwv-menu-open { opacity: var(--dshw-opacity, 1); transform: scale(1) translateY(0); pointer-events: auto; }
   .dshwv-menu::-webkit-scrollbar { width: 6px; }
   .dshwv-menu::-webkit-scrollbar-thumb { background: rgba(32,49,112,.22); border-radius: 3px; }
   .dshwv-menu::-webkit-scrollbar-thumb:hover { background: rgba(32,49,112,.36); }

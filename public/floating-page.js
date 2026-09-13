@@ -17,6 +17,7 @@
   // 宿主桥接（preload/floating.js 注入）；缺省空实现，单独打开页面也不报错
   var whaleApi = window.whale || {
     onInit: function () {}, onBalance: function () {}, onConfig: function () {}, onSnapped: function () {},
+    onSounds: function () {},
     ready: function () {}, refresh: function () {}, saveConfig: function () {},
     saveTimer: function () {}, notifyTimerDone: function () {},
     dragMove: function () {}, dragEnd: function () {}, setIgnoreMouse: function () {},
@@ -107,7 +108,19 @@
   soundSelect.className = 'dshwv-sound';
   soundSelect.appendChild(soundOpt('duck', '小黄鸭'));
   soundSelect.appendChild(soundOpt('fx1', '音效1'));
+  soundSelect.appendChild(soundOpt('custom', '自定义'));
   soundSelect.addEventListener('change', function () { setSoundSet(soundSelect.value); });
+
+  var OPACITY_PRESETS = [100, 80, 60, 40, 20];
+  var opacitySelect = document.createElement('select');
+  opacitySelect.className = 'dshwv-sound';
+  OPACITY_PRESETS.forEach(function (p) {
+    var o = document.createElement('option');
+    o.value = String(p);
+    o.textContent = p + '%';
+    opacitySelect.appendChild(o);
+  });
+  opacitySelect.addEventListener('change', function () { setOpacityPreset(opacitySelect.value); });
 
   var soundToggle = document.createElement('input');
   soundToggle.type = 'checkbox';
@@ -251,6 +264,8 @@
   row2.appendChild(menuLabel('音效')); row2.appendChild(soundToggle); row2.appendChild(soundSelect);
   var row3 = menuRow();
   row3.appendChild(menuLabel('音量')); row3.appendChild(volInput); row3.appendChild(volPct);
+  var rowOpacity = menuRow();
+  rowOpacity.appendChild(menuLabel('透明度')); rowOpacity.appendChild(opacitySelect);
   var row4 = menuRow();
   row4.appendChild(menuLabel('用量')); row4.appendChild(usageSelect);
   var row5 = menuRow();
@@ -325,6 +340,7 @@
   // 分组：常用组默认展开，其余折叠，菜单整体高度约减半
   var groupLook = menuGroup('外观与音效', true);
   groupLook.body.appendChild(row1); groupLook.body.appendChild(row2); groupLook.body.appendChild(row3);
+  groupLook.body.appendChild(rowOpacity);
   groupLook.body.appendChild(row6); groupLook.body.appendChild(row7); groupLook.body.appendChild(row8);
   var groupUsage = menuGroup('用量与峰谷', false);
   groupUsage.body.appendChild(row4); groupUsage.body.appendChild(row5);
@@ -448,7 +464,7 @@
   document.body.appendChild(menuBox);
 
   // —— 状态 ——
-  var state = { balance: null, currency: null, todayUsage: null, isPeak: false, status: 'loading', message: '' };
+  var state = { balance: null, currency: null, todayUsage: null, isPeak: false, status: 'loading', message: '', adjustNote: null };
   var curScale = 1.5;
   var flipped = false;
   var animDelayTimer = null, drag = null, shown = null, animId = null;
@@ -458,6 +474,75 @@
   var BUBBLE_STYLE_CLASS = { A: 'dshwv-label', B: 'dshwv-amount', P: 'dshwv-period', C: 'dshwv-hint' };
 
   var soundOn = true, soundVol = 0.9, soundSet = 'duck';
+  var customSounds = { press: null, release: null }; // 宿主推送的 base64 data URL（whale:sounds）
+  var opacityPct = 100;        // 窗口透明度 20–100
+  var passThroughOn = false;   // 鼠标穿透总开关：开启后连鲸鱼也穿透；悬停片刻可临时接管
+  // 透明度：写成 CSS 变量 --dshw-opacity，由样式表消费（.dshwv-root 与菜单打开态各自相乘）。
+  // 千万不能给 root/menuBox 写内联 opacity：菜单的显隐本身就是靠 opacity:0/1，内联值会
+  // 盖掉它的关闭态，表现为「三点菜单关不掉」。
+  function applyOpacityCss() {
+    try {
+      document.documentElement.style.setProperty('--dshw-opacity', String(opacityPct / 100));
+    } catch (err) {}
+  }
+
+  // —— 鼠标穿透：悬停临时接管 + IPC 去重 ——
+  // 穿透态下窗口 setIgnoreMouseEvents(true, {forward:true}) 仍会把 mousemove 转给页面，
+  // 所以「悬停唤醒」与「穿透中」角标都能工作；点击/滚轮才真正穿透给下层应用。
+  var PASS_DWELL_MS = 1200;    // 穿透态下鼠标在鲸鱼/菜单按钮上停留多久 → 临时接管
+  var PASS_RELEASE_MS = 700;   // 临时接管后离开 UI 多久 → 交回穿透
+  var passHoverActive = false; // 临时接管中（可点、可拖、可开菜单）
+  var passDwellTimer = null, passReleaseTimer = null;
+  var passNoticeReady = false; // 首次配置下发（onInit）不弹说明气泡，避免每次重建挂件都提示一遍
+  var lastIgnoreSent = null;   // 去重：值没变就不发 IPC（鼠标移动时每秒几十次无谓调用）
+  function sendIgnoreMouse(ignore) {
+    var v = !!ignore;
+    if (v === lastIgnoreSent) return;
+    lastIgnoreSent = v;
+    whaleApi.setIgnoreMouse(v);
+  }
+  function passDwellCancel() { if (passDwellTimer) { clearTimeout(passDwellTimer); passDwellTimer = null; } }
+  function passReleaseCancel() { if (passReleaseTimer) { clearTimeout(passReleaseTimer); passReleaseTimer = null; } }
+  // 穿透中且未接管时，让菜单按钮以低透明度常显：既是「此刻点不动」的提示，也是悬停接管的抓手
+  function passApplyIndicator() {
+    var on = passThroughOn && !passHoverActive && menuBtnEnabled;
+    menuBtn.classList.toggle('dshwv-menu-btn-pass', on);
+  }
+  function passTakeOver() {
+    passHoverActive = true;
+    passApplyIndicator();
+    menuBtn.classList.add('dshwv-menu-btn-visible');
+    sendIgnoreMouse(false);
+  }
+  function passRelease() {
+    passHoverActive = false;
+    passApplyIndicator();
+    menuBtn.classList.remove('dshwv-menu-btn-visible');
+    sendIgnoreMouse(true);
+  }
+  // 穿透开关切换的一次性说明气泡（穿透只影响输入、不影响绘制，气泡照常可见）
+  function showPassNotice(on) {
+    if (!bubbleOn || timerActive()) return; // 计时进行中不打断（此时也有系统通知兜底）
+    if (bubbleTimer) { clearTimeout(bubbleTimer); bubbleTimer = null; }
+    if (gifFadeTimer) { clearTimeout(gifFadeTimer); gifFadeTimer = null; }
+    bubbleShown = true;
+    bubbleRandomActive = false;
+    bubbleRandomLines = null;
+    bubbleTimerActive = false;
+    bubbleRemindActive = true;
+    bubbleRemindLines = [
+      { t: on ? '【鼠标穿透】已开启' : '【鼠标穿透】已关闭', s: 'A', c: '' },
+      { t: on ? '穿透中' : '可操作', s: 'P', c: on ? '#e0433f' : '#2fa24c' },
+      {
+        t: on ? '在鲸鱼上停留约 1 秒可临时接管；也可用「切换鼠标穿透」快捷键关闭' : '点击、拖拽与菜单已恢复',
+        s: 'C', c: '', w: true,
+      },
+    ];
+    restoreBubbleLines();
+    applyBubbleLines(bubbleRemindLines);
+    bubbleBox.classList.add('dshwv-bubble-open');
+    bubbleTimer = setTimeout(hideBubble, BUBBLE_REMIND_MS);
+  }
   var timerNotifyOn = true, timerPersistOn = true; // 计时到点系统通知 / 计时状态持久化
   var usageMode = 'ledger', peakMode = 'default', bubbleOn = true;
   var peakRemindOn = true; // 峰/谷时段切换时用气泡提醒（需开启思考气泡）
@@ -1087,8 +1172,23 @@
     amountEl.classList.toggle('dshwv-low', low);
     hintEl.classList.toggle('dshwv-low', low);
   }
+  // 「这笔余额下降没算进用量」的解释在第三行停留 12s（赠送额到期/异常跳变时由后端下发）
+  var ADJUST_NOTE_MS = 12000;
+  function activeAdjustNote() {
+    var n = state.adjustNote;
+    if (!n) return null;
+    if (Date.now() >= n.until) { state.adjustNote = null; return null; }
+    return n;
+  }
+  function adjustNoteText(a) {
+    var money = fmt(Number(a && a.amount), state.currency);
+    return a && a.why === '赠送额度到期/被收回'
+      ? '赠送额到期 ' + money + '，未计用量'
+      : '少了 ' + money + ' 太快，未计用量';
+  }
   function render() {
     var amount, hint;
+    var note = activeAdjustNote();
     if (state.status === 'error') {
       amount = shown !== null ? fmt(shown, state.currency) : '--';
       hint = state.message ? state.message.slice(0, 14) : '获取失败 · 点击重试';
@@ -1097,7 +1197,7 @@
       hint = '加载中…';
     } else {
       amount = shown !== null ? fmt(shown, state.currency) : fmt(state.balance, state.currency);
-      hint = '今日已用 ' + (state.todayUsage !== null && state.todayUsage !== undefined ? fmt(state.todayUsage, state.currency) : '--');
+      hint = note ? note.text : '今日已用 ' + (state.todayUsage !== null && state.todayUsage !== undefined ? fmt(state.todayUsage, state.currency) : '--');
     }
     amountEl.textContent = amount;
     if (bubbleTimerActive && timerActive()) {
@@ -1133,6 +1233,10 @@
       state.message = '';
       state.todayUsage = data.todayUsage !== undefined ? data.todayUsage : null;
       state.isPeak = !!data.isPeak;
+      // 本轮下降被判定为非消费（赠送额到期等）：第三行解释 12s；正常采样不带此字段
+      state.adjustNote = (data.adjust && data.adjust.amount)
+        ? { text: adjustNoteText(data.adjust), until: Date.now() + ADJUST_NOTE_MS }
+        : null;
       // 峰/谷时段切换：仅在上一次已有状态且发生变化时提醒（首次拉取不弹）
       var peakChanged = lastIsPeak !== null && lastIsPeak !== state.isPeak;
       lastIsPeak = state.isPeak;
@@ -1177,6 +1281,7 @@
   function saveCfg() {
     whaleApi.saveConfig({
       scale: curScale, vol: soundVol, soundOn: soundOn, soundSet: soundSet,
+      opacity: opacityPct,
       usageMode: usageMode, peakMode: peakMode, bubbleOn: bubbleOn,
       timeBubbleOn: timeBubbleOn, peakRemindOn: peakRemindOn, dragLock: dragLock,
       timerNotifyOn: timerNotifyOn, timerPersistOn: timerPersistOn,
@@ -1217,10 +1322,18 @@
     if (commit) saveCfg(); // 拖动中只改本地音量，松手才持久化（避免高频存储写入）
   }
   function setSoundSet(v) {
-    soundSet = v === 'fx1' ? 'fx1' : 'duck';
+    soundSet = (v === 'fx1' || v === 'custom') ? v : 'duck';
     soundSelect.value = soundSet;
     applySoundSet();
     saveCfg();
+  }
+  // 挂件菜单透明度档位（设置页有连续滑块，同一配置字段）
+  function setOpacityPreset(v) {
+    var n = Math.round(Number(v));
+    if (OPACITY_PRESETS.indexOf(n) < 0) return;
+    opacityPct = n;
+    opacitySelect.value = String(n);
+    saveCfg(); // opacity 随配置广播回本页，applyConfig 把它落到 root 的 CSS opacity
   }
   function setSoundOn(v) {
     soundOn = !!v;
@@ -1282,9 +1395,39 @@
       soundToggle.checked = soundOn;
     }
     if (typeof cfg.soundSet === 'string') {
-      var nextSet = cfg.soundSet === 'fx1' ? 'fx1' : 'duck';
+      var nextSet = (cfg.soundSet === 'fx1' || cfg.soundSet === 'custom') ? cfg.soundSet : 'duck';
       if (nextSet !== soundSet) { soundSet = nextSet; applySoundSet(); }
       soundSelect.value = soundSet;
+    }
+    if (typeof cfg.opacity === 'number' && isFinite(cfg.opacity)) {
+      opacityPct = Math.min(100, Math.max(20, Math.round(cfg.opacity)));
+      // 透明度走页面 CSS opacity，不用窗口 setOpacity（transparent 窗口会整窗不显示）
+      applyOpacityCss();
+      // 菜单只有几个档位，非档位值（设置页连续滑块改的）就近显示
+      var best = OPACITY_PRESETS[0];
+      for (var i = 0; i < OPACITY_PRESETS.length; i++) {
+        if (Math.abs(OPACITY_PRESETS[i] - opacityPct) < Math.abs(best - opacityPct)) best = OPACITY_PRESETS[i];
+      }
+      opacitySelect.value = String(best);
+    }
+    if (typeof cfg.passThrough === 'boolean' && cfg.passThrough !== passThroughOn) {
+      passThroughOn = cfg.passThrough;
+      // 状态切换：清掉悬停接管的中间态，立即生效（不能等下一次 mousemove —— 鼠标可能正静止）
+      passHoverActive = false;
+      passDwellCancel();
+      passReleaseCancel();
+      if (passThroughOn) {
+        if (menuOpen) closeMenu();
+        menuBtn.classList.remove('dshwv-menu-btn-visible');
+        sendIgnoreMouse(true);
+        if (passNoticeReady) showPassNotice(true);
+      } else {
+        // 关闭穿透：先按安全默认忽略鼠标，指针移到鲸鱼上时悬停逻辑会重新判定
+        sendIgnoreMouse(true);
+        menuBtn.classList.remove('dshwv-menu-btn-visible');
+        if (passNoticeReady) showPassNotice(false);
+      }
+      passApplyIndicator();
     }
     if (typeof cfg.usageMode === 'string') {
       usageMode = cfg.usageMode === 'token' ? 'token' : 'ledger';
@@ -1302,6 +1445,7 @@
     if (typeof cfg.menuBtn === 'boolean') {
       menuBtnEnabled = cfg.menuBtn;
       menuBtn.classList.toggle('dshwv-menu-btn-off', !menuBtnEnabled);
+      passApplyIndicator(); // 按钮被关掉时，穿透角标也要跟着收起
       if (!menuBtnEnabled) {
         if (hideBtnTimer) { clearTimeout(hideBtnTimer); hideBtnTimer = null; }
         menuBtn.classList.remove('dshwv-menu-btn-visible');
@@ -1365,13 +1509,28 @@
   var pressing = false, pressEnded = false, releasePlayed = false, releaseTimer = null;
   function applySoundSet() {
     try {
-      var f = SOUND_FILES[soundSet] || SOUND_FILES.duck;
-      pressAudio = new Audio(f.press);
-      pressAudio.preload = 'auto';
-      pressAudio.volume = soundVol;
-      releaseAudio = new Audio(f.release);
-      releaseAudio.preload = 'auto';
-      releaseAudio.volume = soundVol;
+      var f;
+      if (soundSet === 'custom') {
+        // 自定义：以按压音为准；没导入按压音时整体回退小黄鸭（避免「点了没反应」）
+        // 释放音可缺：松开时静音，音效仍比整段回退自然
+        if (customSounds.press) {
+          f = { press: customSounds.press, release: customSounds.release || null };
+        } else {
+          f = SOUND_FILES.duck;
+        }
+      } else {
+        f = SOUND_FILES[soundSet] || SOUND_FILES.duck;
+      }
+      pressAudio = f.press ? new Audio(f.press) : null;
+      if (pressAudio) {
+        pressAudio.preload = 'auto';
+        pressAudio.volume = soundVol;
+      }
+      releaseAudio = f.release ? new Audio(f.release) : null;
+      if (releaseAudio) {
+        releaseAudio.preload = 'auto';
+        releaseAudio.volume = soundVol;
+      }
     } catch (err) { logErr('[whale][page] 初始化音效失败', err && err.message); }
   }
   function playPress() {
@@ -1523,6 +1682,33 @@
   // 根据指针位置决定窗口是否穿透：鲸鱼/打开的气泡/菜单/菜单按钮 → 不穿透；其余透明区 → 穿透
   function updateHover(e) {
     if (!e) return;
+    var overBtn = isOverMenuBtn(e);
+    var overWhale = isWhaleHit(e);
+    // 「鼠标穿透」未接管时：恒穿透。鼠标在鲸鱼/菜单按钮上停留一小会儿 → 临时接管（可点可拖），
+    // 这样既满足「平时不挡下层应用」，又不用回设置页就能操作挂件。
+    if (passThroughOn && !passHoverActive) {
+      if (menuOpen) closeMenu();
+      setWidgetCursor('');
+      if (drag && drag.active) return; // 开关切换瞬间若在拖拽，等 pointerup 自然收尾
+      if (overWhale || overBtn) {
+        passReleaseCancel();
+        if (!passDwellTimer) {
+          passDwellTimer = setTimeout(function () {
+            passDwellTimer = null;
+            if (!passThroughOn || passHoverActive) return;
+            // 用最后一次已知位置复核：指针若已移出窗口（贴着屏幕边移走时不再有 move 事件），
+            // 不能误判为「仍在鲸鱼上」而接管
+            var p = lastHoverPt;
+            if (!p || !(isWhaleHit(p) || isOverMenuBtn(p))) return;
+            passTakeOver();
+          }, PASS_DWELL_MS);
+        }
+      } else {
+        passDwellCancel();
+        sendIgnoreMouse(true);
+      }
+      return;
+    }
     var overUI = false;
     var el = null;
     try { el = document.elementFromPoint(e.clientX, e.clientY); } catch (err) {}
@@ -1530,10 +1716,8 @@
       if (el.closest('.dshwv-menu.dshwv-menu-open')) overUI = true;
       else if (el.closest('.dshwv-bubble.dshwv-bubble-open')) overUI = true;
     }
-    var overBtn = isOverMenuBtn(e);
-    var overWhale = isWhaleHit(e);
     if (!overUI) overUI = overBtn || overWhale || menuOpen;
-    whaleApi.setIgnoreMouse(!overUI);
+    sendIgnoreMouse(!overUI);
     setWidgetCursor((drag && drag.active) ? 'grabbing' : (overUI && !dragLock ? 'grab' : ''));
     // 按钮可见性：在鲸鱼/按钮区/菜单打开时常显；离开后延迟一小段再隐藏（越过透明间隙）
     var wantBtn = menuBtnEnabled && (overWhale || overBtn || menuOpen);
@@ -1546,6 +1730,38 @@
         menuBtn.classList.remove('dshwv-menu-btn-visible');
       }, 350);
     }
+    // 临时接管中：离开鲸鱼/菜单/按钮一小会儿后交回穿透（拖拽期间不交回，否则会拖一半断掉）
+    if (passThroughOn && passHoverActive) {
+      if (overUI || (drag && drag.active)) passReleaseCancel();
+      else if (!passReleaseTimer) {
+        passReleaseTimer = setTimeout(function () {
+          passReleaseTimer = null;
+          if (menuOpen || (drag && drag.active)) return; // 期间又用起来了，等下一次 pointermove 再判
+          passRelease();
+        }, PASS_RELEASE_MS);
+      }
+    }
+  }
+
+  // pointermove 高频触发：把命中测试合并到每帧一次（elementFromPoint + closest 不便宜），
+  // 并为配置变更后的立即重算保留最后一个指针位置
+  var hoverRaf = 0, lastHoverPt = null;
+  function scheduleHover(e) {
+    if (e && isFinite(e.clientX)) lastHoverPt = { clientX: e.clientX, clientY: e.clientY };
+    if (hoverRaf) return;
+    hoverRaf = requestAnimationFrame(function () {
+      hoverRaf = 0;
+      if (lastHoverPt) updateHover(lastHoverPt);
+    });
+  }
+  function hoverNow() {
+    if (hoverRaf) { cancelAnimationFrame(hoverRaf); hoverRaf = 0; }
+    if (lastHoverPt) updateHover(lastHoverPt);
+  }
+  // 用事件里的最新位置立即重算（拖拽收尾、配置变更后用）
+  function hoverAt(e) {
+    if (e && isFinite(e.clientX)) lastHoverPt = { clientX: e.clientX, clientY: e.clientY };
+    hoverNow();
   }
 
   // —— 拖拽 / 按压 / 点击 ——
@@ -1559,7 +1775,8 @@
     try { e.preventDefault(); e.stopPropagation(); } catch (err) {}
     // 目标窗口左上角 = 屏幕指针坐标 - 指针在窗内的客户区坐标（拖拽过程恒定）
     drag = { active: true, sSX: e.screenX, sSY: e.screenY, cx0: e.clientX, cy0: e.clientY, moved: false, raf: 0, tx: 0, ty: 0 };
-    whaleApi.setIgnoreMouse(false);
+    passReleaseCancel(); // 开始拖拽：别让「交回穿透」的定时器在拖拽中途开火
+    sendIgnoreMouse(false);
     pressDown();
     // pointermove 为常驻监听（同一处理器浏览器自动去重），这里只补 up/cancel
     document.addEventListener('pointerup', onDocPointerUp, true);
@@ -1582,7 +1799,7 @@
         }
       }
     }
-    updateHover(e);
+    scheduleHover(e); // 合并到每帧一次
   }
   function onDocPointerUp(e) {
     try { if (isWhaleHit(e)) { e.preventDefault(); e.stopPropagation(); } } catch (err) {}
@@ -1605,7 +1822,7 @@
       // 宿主吸附后回推 whale:snapped → 镜像翻转
       whaleApi.dragEnd();
     }
-    updateHover(e);
+    hoverAt(e); // 立即按松手位置重算：穿透态下这里要决定是交回穿透还是保持接管
   }
   function onDocClickStopper(e) {
     if (!isWhaleHit(e)) return;
@@ -1666,6 +1883,12 @@
   whaleApi.onInit(function (data) {
     if (!data) return;
     applyConfig(data.config);
+    passNoticeReady = true; // 之后的配置变更（快捷键/设置页切换）才弹说明气泡
+    if (data.sounds) {
+      customSounds.press = data.sounds.press || null;
+      customSounds.release = data.sounds.release || null;
+      if (soundSet === 'custom') applySoundSet();
+    }
     if (data.anchor) {
       flipped = !!data.anchor.flipped;
       root.classList.toggle('dshwv-left', flipped);
@@ -1679,6 +1902,12 @@
     pendingManual = false;
   });
   whaleApi.onConfig(function (cfg) { applyConfig(cfg); });
+  whaleApi.onSounds(function (data) {
+    // 设置页导入/删除自定义音效后宿主重推；当前正用自定义音色时立即换源
+    customSounds.press = (data && data.press) || null;
+    customSounds.release = (data && data.release) || null;
+    if (soundSet === 'custom') applySoundSet();
+  });
   whaleApi.onSnapped(function (data) {
     flipped = !!(data && data.flipped);
     root.classList.toggle('dshwv-left', flipped);
@@ -1686,10 +1915,12 @@
 
   // —— 启动 ——
   render();
+  applyOpacityCss(); // 透明度初始值（onInit 配置到达后会再校正）
   applySoundSet();
   syncTimerMenu();
   setupHitTest();
-  whaleApi.setIgnoreMouse(true); // 初始全穿透，悬停鲸鱼时自动取消
-  dshSend('status');             // 先取一次 dsh 状态，菜单里的状态行/按钮一开始就是对的
+  sendIgnoreMouse(true); // 初始全穿透，悬停鲸鱼时自动取消
+  passApplyIndicator();  // 若配置里已开穿透，先把「穿透中」角标显示出来
+  dshSend('status');     // 先取一次 dsh 状态，菜单里的状态行/按钮一开始就是对的
   whaleApi.ready();
 })();

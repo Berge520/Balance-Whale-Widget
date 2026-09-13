@@ -6,7 +6,7 @@ const {
   UPDATE_CHECK_URL, PLUGIN_VERSION, UPDATE_TTL_MS, K,
 } = require('./constants')
 const { logErr } = require('./log')
-const { readSecrets, sanitizeKey, recordLedgerUsage, readConfig, setTodayUsage } = require('./store')
+const { readSecrets, sanitizeKey, recordLedgerUsage, keyFingerprint, readConfig, setTodayUsage } = require('./store')
 const { isPeakTime, priceFor } = require('./pricing')
 
 // ──────────────────────────────────────────────
@@ -84,9 +84,16 @@ async function fetchBalanceWith(rawKey) {
     if (!info || info.total_balance === undefined) {
       return { ok: false, code: 'SHAPE', transient: false, error: '余额接口返回结构异常' }
     }
+    // 赠送/充值分项余额：赠送额可能整块到期被收回，记账时要与真实消费区分开
+    const numOrNull = (v) => {
+      const n = Number(v)
+      return v !== undefined && v !== null && v !== '' && isFinite(n) ? n : null
+    }
     return {
       ok: true,
       totalBalance: Number(info.total_balance),
+      grantedBalance: numOrNull(info.granted_balance),
+      toppedUpBalance: numOrNull(info.topped_up_balance),
       currency: String(info.currency || 'CNY'),
       updatedAt: new Date().toISOString(),
     }
@@ -219,8 +226,13 @@ async function getBalancePayload() {
   const secrets = readSecrets()
   const payload = await fetchBalanceWith(secrets.apiKey)
   if (!payload.ok) return payload
-  // 无论哪种用量模式，都先把余额观测记入账本
-  const led = recordLedgerUsage(Number(payload.totalBalance), payload.currency)
+  // 无论哪种用量模式，都先把余额观测记入账本（含赠送额/Key 指纹的防误判）
+  const rec = recordLedgerUsage(Number(payload.totalBalance), payload.currency, {
+    granted: payload.grantedBalance,
+    toppedUp: payload.toppedUpBalance,
+    keyId: keyFingerprint(secrets.apiKey),
+  })
+  const led = rec.ledger
   const cfg = readConfig()
   const full = Object.assign({}, payload)
   full.isPeak = isPeakTime(Math.floor(Date.now() / 1000))
@@ -229,13 +241,18 @@ async function getBalancePayload() {
     if (u && u.amount !== undefined) {
       full.todayUsage = u.amount
       full.usageMode = 'token'
+      // 令牌模式今日已用以平台返回为准，不弹「这笔没算用量」
+      full.adjust = null
       setTodayUsage(u.amount) // 同步进账本，趋势图/导出与挂件显示保持一致
       return full
     }
     // 平台令牌失败：回落记账
   }
   full.todayUsage = led.todayUsage
+  full.todayAdjust = led.todayAdjust || 0
   full.usageMode = 'ledger'
+  // adjust 只在「本次新采样判定出非消费下降」时非空，挂件气泡解释用
+  full.adjust = rec.adjust
   return full
 }
 
@@ -249,7 +266,11 @@ function getBalance(force) {
   balanceInFlight = getBalancePayload()
     .then((payload) => {
       if (payload.ok) {
-        balanceCache = { at: now, payload }
+        // 「未计入用量」提示只在真实新采样那一刻下发；缓存副本剥掉，
+        // 避免 TTL 内复用/挂件重建推快照时重复弹气泡
+        const cached = Object.assign({}, payload)
+        delete cached.adjust
+        balanceCache = { at: now, payload: cached }
         return payload
       }
       if (payload.transient && balanceCache) {

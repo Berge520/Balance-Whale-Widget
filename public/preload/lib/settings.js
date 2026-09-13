@@ -6,7 +6,7 @@ const { PLUGIN_VERSION, K } = require('./constants')
 const { DEV, logErr, LOG_FILE } = require('./log')
 const {
   clampNum, readConfig, patchConfig, readSecrets, writeSecrets, readLedger,
-  resetAnchorCache, mergeLedgerHistory, clearTimer,
+  resetAnchorCache, mergeLedgerHistory, clearTimer, calibrateTodayUsage,
 } = require('./store')
 const {
   fetchBalanceWith, fetchPlatformUsage, checkUpdate, resetBalanceCache,
@@ -14,10 +14,11 @@ const {
 const {
   ensureWidget, destroyWidget, winAlive, getWidgetError, getWindow,
   applyScaleToWindow, applyOnTop, pushConfig, queueLiveScale, repositionFromAnchor,
-  taskbarState, syncTaskbarWatch,
+  taskbarState, syncTaskbarWatch, sendToWidget,
 } = require('./widget')
 const dsh = require('./dsh')
 const backup = require('./backup')
+const sounds = require('./sounds')
 
 // 近 N 天用量（含今日，缺失日期补 0），按日期升序
 function usageDays(days) {
@@ -34,7 +35,14 @@ function usageDays(days) {
     else if (typeof led.history[key] === 'number') usage = led.history[key]
     out.push({ date: key, usage: usage })
   }
-  return { currency: led.lastCurrency || 'CNY', days: out }
+  // 今日被防误判拦下、未计入用量的余额变动（赠送额到期等），供设置页说明展示
+  return {
+    currency: led.lastCurrency || 'CNY',
+    days: out,
+    todayAdjust: typeof led.todayAdjust === 'number' ? led.todayAdjust : 0,
+    lastAdjustWhy: led.lastAdjustWhy || '',
+    lastAdjustAt: led.lastAdjustAt || '',
+  }
 }
 
 // 解析用量 CSV → { rows: [{ date, usage }], invalid }。
@@ -216,6 +224,26 @@ module.exports = {
   getUsageHistory(days) {
     return usageDays(days)
   },
+  // 手动校准今日已用（记账模式）：只改当天累计、留校准记录，不动余额基准
+  calibrateTodayUsage(amount) {
+    return calibrateTodayUsage(amount)
+  },
+  // —— 自定义音效 ——
+  // 自定义音效元信息（按压/释放两段），供设置页展示当前文件名
+  getSounds() {
+    return sounds.readMeta()
+  },
+  // 导入（复制进 userData/whale-sounds）后推新音频数据给挂件
+  importSound(role) {
+    const r = sounds.importSound(role)
+    if (r && r.ok) sendToWidget('whale:sounds', sounds.getSoundData())
+    return r
+  },
+  removeSound(role) {
+    const r = sounds.removeSound(role)
+    if (r && r.ok) sendToWidget('whale:sounds', sounds.getSoundData())
+    return r
+  },
   // 导出近 N 天用量为 CSV（UTF-8 BOM，Excel 可直接打开）
   exportUsageCsv(days) {
     const { currency, days: rows } = usageDays(days)
@@ -274,7 +302,7 @@ module.exports = {
     const r = mergeLedgerHistory(rows)
     return { ok: true, path: filePath, imported: r.imported, invalid: invalid, kept: r.kept, from: r.from, to: r.to }
   },
-  // 按项清除本地数据：opts = { secrets, config, ledger, window }，为 true 的项才会被清除。
+  // 按项清除本地数据：opts = { secrets, config, ledger, window, sounds }，为 true 的项才会被清除。
   // 「窗口」项同时含窗口锚点与更新缓存。卸载 uTools 插件不会删除这些数据，需要彻底清除时由设置页调用。
   clearAllData(opts) {
     const o = opts && typeof opts === 'object' ? opts : {}
@@ -285,6 +313,20 @@ module.exports = {
       clearTimer() // 设置被重置，一并清掉已落库的计时状态
     }
     if (o.ledger) { try { utools.dbStorage.removeItem(K.ledger) } catch (err) {} }
+    // 自定义音效：音频文件（userData/whale-sounds）+ 元信息，独立于「挂件设置」
+    if (o.sounds) {
+      try { sounds.clearAll() } catch (err) { logErr('[whale][settings] 清除自定义音效失败', err && err.message) }
+      // 音效没了，音色还停在「自定义」就没有音源：顺带回退到内置「小黄鸭」
+      // （连同 config 一起清除时不必处理 —— 整份配置已重置，soundSet 本就是默认值）
+      if (!o.config) {
+        try {
+          if (readConfig().soundSet === 'custom') {
+            patchConfig({ soundSet: 'duck' })
+            pushConfig()
+          }
+        } catch (err) { logErr('[whale][settings] 回退音色失败', err && err.message) }
+      }
+    }
     if (o.window) {
       try { utools.dbStorage.removeItem(K.win) } catch (err) {}
       try { utools.dbStorage.removeItem(K.update) } catch (err) {}
@@ -297,9 +339,13 @@ module.exports = {
       destroyWidget()
       if (wasVisible) ensureWidget()
     }
+    // 音效被清除后把「无自定义音效」推给挂件，正在用「自定义」的音色会立刻回退内置音
+    if (o.sounds) {
+      try { sendToWidget('whale:sounds', sounds.getSoundData()) } catch (err) {}
+    }
     return {
       ok: true,
-      cleared: { secrets: !!o.secrets, config: !!o.config, ledger: !!o.ledger, window: !!o.window },
+      cleared: { secrets: !!o.secrets, config: !!o.config, ledger: !!o.ledger, window: !!o.window, sounds: !!o.sounds },
     }
   },
   ensureWidget() {

@@ -2,7 +2,7 @@
  * 小鲸鱼余额挂件 · 悬浮窗 preload（CommonJS，不可压缩混淆）
  *
  * 悬浮窗（floating.html）与主窗宿主（services.js）之间的薄桥接层：
- *  - 接收宿主推送：whale:init / whale:balance / whale:config / whale:snapped
+ *  - 接收宿主推送：whale:init / whale:balance / whale:config / whale:snapped / whale:sounds
  *  - 向宿主上报：whale:ready / whale:refresh / whale:config / whale:timer / whale:timer-done
  *              / whale:drag-move / whale:drag-end / whale:ignore-mouse / whale:open-settings
  *
@@ -21,7 +21,7 @@ log('[whale][floating] preload 已加载', {
   logFile: LOG_FILE || '(仅控制台)',
 })
 
-const handlers = { init: [], balance: [], config: [], snapped: [], dsh: [] }
+const handlers = { init: [], balance: [], config: [], snapped: [], dsh: [], sounds: [] }
 
 function on(name, cb) {
   if (handlers[name] && typeof cb === 'function') handlers[name].push(cb)
@@ -40,6 +40,8 @@ ipcRenderer.on('whale:config', (event, data) => emit('config', data))
 ipcRenderer.on('whale:snapped', (event, data) => emit('snapped', data))
 // dsh（DeepSeek Harness）操作结果/状态快照回推
 ipcRenderer.on('whale:dsh', (event, data) => emit('dsh', data))
+// 自定义音效本体（base64 data URL；导入/删除后宿主重推）
+ipcRenderer.on('whale:sounds', (event, data) => emit('sounds', data))
 
 // 悬浮窗 → 主窗。sendToParent 仅在 createBrowserWindow 创建的窗口中有效。
 function send(channel) {
@@ -58,6 +60,7 @@ const api = {
   onConfig(cb) { on('config', cb) },
   onSnapped(cb) { on('snapped', cb) },
   onDsh(cb) { on('dsh', cb) },
+  onSounds(cb) { on('sounds', cb) },
 
   // —— 向宿主上报 ——
   ready() { send('whale:ready') },

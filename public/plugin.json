@@ -1,5 +1,5 @@
 {
-  "version": "1.3.0",
+  "version": "1.4.0",
   "main": "index.html",
   "preload": "preload/services.js",
   "logo": "logo.png",
@@ -26,6 +26,15 @@
       "cmds": [
         "显示/隐藏挂件",
         "切换挂件"
+      ]
+    },
+    {
+      "code": "whale-passthrough",
+      "explain": "开启/关闭挂件的鼠标穿透（可绑定全局快捷键，穿透后唯一的快捷关闭方式）",
+      "mainHide": true,
+      "cmds": [
+        "切换鼠标穿透",
+        "鼠标穿透"
       ]
     }
   ]

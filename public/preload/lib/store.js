@@ -29,7 +29,7 @@ function writeSecrets(secrets) {
 // 配置
 // ──────────────────────────────────────────────
 function defaultConfig() {
-  return { scale: 1.5, vol: 0.9, soundOn: true, soundSet: 'duck', usageMode: 'ledger', peakMode: 'default', peakRemindOn: true, bubbleOn: true, menuBtn: true, onTop: true, lowAlertOn: true, lowAlertAmount: 10, timeBubbleOn: true, updateCheckOn: true, dragLock: false, enterMode: 'both', timerNotifyOn: true, timerPersistOn: true, timerMode: 'off', timerMin: 25, timerAt: '07:30', timerRemindSec: 8, timerBubblePin: true, timerBubbleOnly: true, dshNodeDir: '', dshKeepAlive: false, dshRegistry: '', dshVersion: '', dshReinstall: false, dshNoOpen: true, avoidTaskbar: true, edgeTop: 0, edgeRight: 0, edgeBottom: 0, edgeLeft: 0 }
+  return { scale: 1.5, vol: 0.9, soundOn: true, soundSet: 'duck', usageMode: 'ledger', peakMode: 'default', peakRemindOn: true, bubbleOn: true, menuBtn: true, onTop: true, lowAlertOn: true, lowAlertAmount: 10, timeBubbleOn: true, updateCheckOn: true, dragLock: false, enterMode: 'both', timerNotifyOn: true, timerPersistOn: true, timerMode: 'off', timerMin: 25, timerAt: '07:30', timerRemindSec: 8, timerBubblePin: true, timerBubbleOnly: true, dshNodeDir: '', dshKeepAlive: false, dshRegistry: '', dshVersion: '', dshReinstall: false, dshNoOpen: true, avoidTaskbar: true, edgeTop: 0, edgeRight: 0, edgeBottom: 0, edgeLeft: 0, opacity: 100, passThrough: false }
 }
 // dsh 注册源：只接受 http(s) 或空（默认官方源）
 function normRegistry(v) {
@@ -56,7 +56,7 @@ function readConfig() {
     scale: clampNum(p.scale, MIN_SCALE, MAX_SCALE, dft.scale),
     vol: clampNum(p.vol, 0, 1, dft.vol),
     soundOn: p.soundOn !== false,
-    soundSet: p.soundSet === 'fx1' ? 'fx1' : 'duck',
+    soundSet: p.soundSet === 'fx1' ? 'fx1' : p.soundSet === 'custom' ? 'custom' : 'duck',
     usageMode: p.usageMode === 'token' ? 'token' : 'ledger',
     peakMode: p.peakMode === 'liangwen' || p.peakMode === 'qiangqiang' ? p.peakMode : 'default',
     peakRemindOn: p.peakRemindOn !== false,
@@ -88,6 +88,8 @@ function readConfig() {
     edgeRight: Math.round(clampNum(p.edgeRight, 0, 400, dft.edgeRight)),
     edgeBottom: Math.round(clampNum(p.edgeBottom, 0, 400, dft.edgeBottom)),
     edgeLeft: Math.round(clampNum(p.edgeLeft, 0, 400, dft.edgeLeft)),
+    opacity: Math.round(clampNum(p.opacity, 20, 100, 100)),
+    passThrough: p.passThrough === true,
   }
 }
 function writeConfig(cfg) {
@@ -127,6 +129,8 @@ function writeConfig(cfg) {
     edgeRight: Math.round(clampNum(cfg.edgeRight, 0, 400, 0)),
     edgeBottom: Math.round(clampNum(cfg.edgeBottom, 0, 400, 0)),
     edgeLeft: Math.round(clampNum(cfg.edgeLeft, 0, 400, 0)),
+    opacity: Math.round(clampNum(cfg.opacity, 20, 100, 100)),
+    passThrough: cfg.passThrough === true,
     updatedAt: new Date().toISOString(),
   })
 }
@@ -136,7 +140,7 @@ function patchConfig(patch) {
   if (p.scale !== undefined) cfg.scale = Math.round(clampNum(p.scale, MIN_SCALE, MAX_SCALE, cfg.scale) * 10) / 10
   if (p.vol !== undefined) cfg.vol = clampNum(p.vol, 0, 1, cfg.vol)
   if (p.soundOn !== undefined) cfg.soundOn = !!p.soundOn
-  if (p.soundSet !== undefined) cfg.soundSet = p.soundSet === 'fx1' ? 'fx1' : 'duck'
+  if (p.soundSet !== undefined) cfg.soundSet = (p.soundSet === 'fx1' || p.soundSet === 'custom') ? p.soundSet : 'duck'
   if (p.usageMode !== undefined) cfg.usageMode = p.usageMode === 'token' ? 'token' : 'ledger'
   if (p.peakMode !== undefined) cfg.peakMode = (p.peakMode === 'liangwen' || p.peakMode === 'qiangqiang') ? p.peakMode : 'default'
   if (p.peakRemindOn !== undefined) cfg.peakRemindOn = !!p.peakRemindOn
@@ -175,6 +179,9 @@ function patchConfig(patch) {
   if (p.edgeRight !== undefined) cfg.edgeRight = Math.round(clampNum(p.edgeRight, 0, 400, cfg.edgeRight))
   if (p.edgeBottom !== undefined) cfg.edgeBottom = Math.round(clampNum(p.edgeBottom, 0, 400, cfg.edgeBottom))
   if (p.edgeLeft !== undefined) cfg.edgeLeft = Math.round(clampNum(p.edgeLeft, 0, 400, cfg.edgeLeft))
+  // 窗口透明度（20–100%）与鼠标穿透总开关
+  if (p.opacity !== undefined) cfg.opacity = Math.round(clampNum(p.opacity, 20, 100, cfg.opacity))
+  if (p.passThrough !== undefined) cfg.passThrough = !!p.passThrough
   writeConfig(cfg)
   return cfg
 }
@@ -187,49 +194,161 @@ function todayKey() {
   const p2 = (n) => String(n).padStart(2, '0')
   return d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate())
 }
+// 记账防误判阈值（判据在桌面端被真实事故验证过：赠送额度 271 元整块到期曾被误记为用量）
+const USAGE_JUMP_LIMIT = 20 // 元：间隔再短，一次下降超过 20 元即判为非消费
+const USAGE_JUMP_RATE = 5   // 元/小时：距上次采样越久，容忍上限越宽
+const ADJUST_LOG_KEEP = 20
+const CALIBRATE_LOG_KEEP = 20
+
+function round4(n) {
+  return Math.round((Number(n) || 0) * 10000) / 10000
+}
+// API Key 指纹：只留 sha1 前 8 位用于判断「是不是同一本账」，不落任何可还原密钥的信息
+function keyFingerprint(key) {
+  const s = String(key || '')
+  if (!s) return ''
+  try {
+    return require('crypto').createHash('sha1').update(s, 'utf8').digest('hex').slice(0, 8)
+  } catch (err) { return '' }
+}
+function freshLedger() {
+  return {
+    date: todayKey(), lastBalance: null, lastCurrency: '', todayUsage: 0, history: {},
+    // 赠送/充值分项余额与上次采样时间：识别赠送额度整块到期用
+    lastGranted: null, lastToppedUp: null, lastSampleAt: '',
+    // 当前账本绑定的 Key 指纹：换 Key 只重置基准，不把两边差额记成用量
+    lastKeyId: '',
+    // 判定为「非消费」的余额变动：今日合计 + 明细（at/amount/why）
+    todayAdjust: 0, adjustLog: [], lastAdjustWhy: '', lastAdjustAt: '',
+    // 手动校准记录
+    calibrateLog: [],
+  }
+}
 function readLedger() {
+  let raw = null
   try {
     const led = utools.dbStorage.getItem(K.ledger)
-    if (led && typeof led === 'object' && typeof led.date === 'string') {
-      return {
-        date: led.date,
-        lastBalance: typeof led.lastBalance === 'number' ? led.lastBalance : null,
-        lastCurrency: typeof led.lastCurrency === 'string' ? led.lastCurrency : '',
-        todayUsage: typeof led.todayUsage === 'number' ? led.todayUsage : 0,
-        history: led.history && typeof led.history === 'object' ? led.history : {},
-      }
-    }
+    if (led && typeof led === 'object' && typeof led.date === 'string') raw = led
   } catch (err) {}
-  return { date: todayKey(), lastBalance: null, lastCurrency: '', todayUsage: 0, history: {} }
+  if (!raw) return freshLedger()
+  const numOr = (v, d) => (typeof v === 'number' && isFinite(v) ? v : d)
+  return {
+    date: String(raw.date),
+    lastBalance: typeof raw.lastBalance === 'number' ? raw.lastBalance : null,
+    lastCurrency: typeof raw.lastCurrency === 'string' ? raw.lastCurrency : '',
+    todayUsage: numOr(raw.todayUsage, 0),
+    history: raw.history && typeof raw.history === 'object' ? raw.history : {},
+    lastGranted: typeof raw.lastGranted === 'number' ? raw.lastGranted : null,
+    lastToppedUp: typeof raw.lastToppedUp === 'number' ? raw.lastToppedUp : null,
+    lastSampleAt: typeof raw.lastSampleAt === 'string' ? raw.lastSampleAt : '',
+    lastKeyId: typeof raw.lastKeyId === 'string' ? raw.lastKeyId : '',
+    todayAdjust: numOr(raw.todayAdjust, 0),
+    adjustLog: Array.isArray(raw.adjustLog) ? raw.adjustLog.slice(-ADJUST_LOG_KEEP) : [],
+    lastAdjustWhy: typeof raw.lastAdjustWhy === 'string' ? raw.lastAdjustWhy : '',
+    lastAdjustAt: typeof raw.lastAdjustAt === 'string' ? raw.lastAdjustAt : '',
+    calibrateLog: Array.isArray(raw.calibrateLog) ? raw.calibrateLog.slice(-CALIBRATE_LOG_KEEP) : [],
+  }
 }
-// 记账：余额正差值累计当天用量；跨天归档（保留 30 天）；币种切换只重置基准不记差值
-function recordLedgerUsage(currentBalance, currency) {
+// 余额下降是否「不像用掉的」：1) 赠送额度整块消失（到期/平台收回）；2) 短时间异常大跳变。
+// 返回原因字符串；'' 表示正常消费，计入今日已用。
+function balanceDropReason(led, delta, granted, gapSec) {
+  const pg = typeof led.lastGranted === 'number' ? led.lastGranted : null
+  if (pg !== null && granted !== null && delta >= 0.5) {
+    const gone = pg - granted
+    if (gone > 0 && gone >= delta - 0.05 && granted <= Math.max(0.05, pg * 0.02)) {
+      return '赠送额度到期/被收回'
+    }
+  }
+  const limit = Math.max(USAGE_JUMP_LIMIT, USAGE_JUMP_RATE * Math.max(0, gapSec) / 3600)
+  if (delta > limit) return '余额下降超过可信上限'
+  return ''
+}
+// 记账：余额正差值累计当天用量；跨天归档（保留 30 天）；换币种/换 Key 只重置基准不记差值。
+// extra = { granted, toppedUp, keyId }：赠送/充值分项与 Key 指纹，用于防误判。
+// 返回 { ledger, adjust }；adjust 非空表示本轮下降未计入用量（气泡向用户解释）。
+function recordLedgerUsage(currentBalance, currency, extra) {
+  const ex = extra && typeof extra === 'object' ? extra : {}
+  const granted = isFinite(Number(ex.granted)) && Number(ex.granted) >= 0 ? round4(Number(ex.granted)) : null
+  const toppedUp = isFinite(Number(ex.toppedUp)) && Number(ex.toppedUp) >= 0 ? round4(Number(ex.toppedUp)) : null
+  const keyId = ex.keyId ? String(ex.keyId) : ''
+  const nowIso = new Date().toISOString()
+
   const t = todayKey()
   const led = readLedger()
   const cur = String(currency || '')
   const currencyChanged =
     led.lastCurrency !== '' && cur !== '' && led.lastCurrency !== cur
+  const keyChanged = !!(led.lastKeyId && keyId && led.lastKeyId !== keyId)
+  let adjust = null
+
   if (led.date !== t) {
-    if (led.date && typeof led.todayUsage === 'number') led.history[led.date] = led.todayUsage
+    if (led.date) led.history[led.date] = led.todayUsage
     led.date = t
-    led.lastBalance = currentBalance
-    led.lastCurrency = cur
     led.todayUsage = 0
-  } else if (currencyChanged) {
+    led.todayAdjust = 0
+    led.adjustLog = []
+    led.lastAdjustWhy = ''
+    led.lastAdjustAt = ''
     led.lastBalance = currentBalance
     led.lastCurrency = cur
-  } else {
-    const prev = typeof led.lastBalance === 'number' ? led.lastBalance : currentBalance
-    if (typeof prev === 'number' && typeof currentBalance === 'number' && currentBalance < prev) {
-      led.todayUsage = (typeof led.todayUsage === 'number' ? led.todayUsage : 0) + (prev - currentBalance)
+  } else if (currencyChanged || keyChanged) {
+    // 换币种/换 Key：两边余额不可比，只重置基准
+    led.lastBalance = currentBalance
+    led.lastCurrency = cur
+  } else if (typeof currentBalance === 'number' && isFinite(currentBalance)) {
+    const prev = typeof led.lastBalance === 'number' ? led.lastBalance : null
+    if (prev !== null && currentBalance < prev) {
+      const delta = round4(prev - currentBalance)
+      // 老账本没有采样时间，按一轮刷新间隔（60s）从严判定
+      let gap = 60
+      if (led.lastSampleAt) {
+        const g = (Date.parse(nowIso) - Date.parse(led.lastSampleAt)) / 1000
+        if (isFinite(g) && g >= 0) gap = g
+      }
+      const why = balanceDropReason(led, delta, granted, gap)
+      if (why) {
+        led.todayAdjust = round4((led.todayAdjust || 0) + delta)
+        led.adjustLog.push({ at: nowIso, amount: delta, why: why })
+        if (led.adjustLog.length > ADJUST_LOG_KEEP) led.adjustLog = led.adjustLog.slice(-ADJUST_LOG_KEEP)
+        led.lastAdjustWhy = why
+        led.lastAdjustAt = nowIso
+        adjust = { amount: delta, why: why }
+      } else {
+        led.todayUsage = round4((led.todayUsage || 0) + delta)
+      }
     }
     led.lastBalance = currentBalance
     led.lastCurrency = cur
   }
+  // 分项余额/Key 指纹/采样时间无论计不计差都更新，作为下一轮比较基准
+  if (granted !== null) led.lastGranted = granted
+  if (toppedUp !== null) led.lastToppedUp = toppedUp
+  if (keyId) led.lastKeyId = keyId
+  led.lastSampleAt = nowIso
+
   const keys = Object.keys(led.history).sort()
   while (keys.length > 30) delete led.history[keys.shift()]
   try { utools.dbStorage.setItem(K.ledger, led) } catch (err) { logErr('[whale][ledger] 写账本失败', err && err.message) }
-  return led
+  return { ledger: led, adjust: adjust }
+}
+// 手动校准今日已用：只改当天累计值，不动余额基准（后续记账仍按真实余额差值累加）。
+// 令牌模式下平台今日总量是权威值、会覆盖校准结果，因此该入口只对记账模式有意义。
+function calibrateTodayUsage(amount) {
+  const n = Number(amount)
+  if (!isFinite(n) || n < 0) return { ok: false, error: '请输入不小于 0 的金额' }
+  const led = readLedger()
+  const from = round4(led.todayUsage || 0)
+  const to = round4(n)
+  if (to === from) return { ok: true, from: from, to: to, todayAdjust: led.todayAdjust || 0 }
+  led.todayUsage = to
+  led.calibrateLog = Array.isArray(led.calibrateLog) ? led.calibrateLog : []
+  led.calibrateLog.push({ at: new Date().toISOString(), from: from, to: to })
+  if (led.calibrateLog.length > CALIBRATE_LOG_KEEP) led.calibrateLog = led.calibrateLog.slice(-CALIBRATE_LOG_KEEP)
+  try { utools.dbStorage.setItem(K.ledger, led) } catch (err) {
+    logErr('[whale][ledger] 校准写账本失败', err && err.message)
+    return { ok: false, error: '校准写入失败：' + ((err && err.message) || err) }
+  }
+  return { ok: true, from: from, to: to, todayAdjust: led.todayAdjust || 0 }
 }
 // 导入：把 [{ date, usage }] 合并进账本历史（同日覆盖），按日期升序只保留最近 30 天。
 // 当天（led.date）需同步写入 todayUsage，否则趋势图的当天柱仍取实时累计值，导入的当天行会被忽略；
@@ -337,6 +456,8 @@ module.exports = {
   todayKey,
   readLedger,
   recordLedgerUsage,
+  calibrateTodayUsage,
+  keyFingerprint,
   mergeLedgerHistory,
   setTodayUsage,
   readTimer,

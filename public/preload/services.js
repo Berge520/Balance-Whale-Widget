@@ -12,9 +12,9 @@
  *  settings.js   对外 window.services（设置页 API）
  */
 const { log, logErr, LOG_FILE } = require('./lib/log')
-const { readConfig } = require('./lib/store')
+const { readConfig, patchConfig } = require('./lib/store')
 const { checkUpdate } = require('./lib/api')
-const { ensureWidget, toggleWidget } = require('./lib/widget')
+const { ensureWidget, toggleWidget, pushConfig } = require('./lib/widget')
 const { registerIpc } = require('./lib/ipc')
 const dsh = require('./lib/dsh')
 
@@ -27,6 +27,7 @@ function winType() {
 // 对外 API（设置页）
 // ──────────────────────────────────────────────
 window.services = require('./lib/settings')
+const settingsApi = window.services
 
 // 启动横幅：dev 下写入 %TEMP%\whale-debug.log（进程被杀不丢，用于事后排查生命周期问题）
 log('[whale][boot] preload 已加载', { windowType: winType(), logFile: LOG_FILE || '(仅控制台)' })
@@ -48,6 +49,23 @@ try {
     // 「切换挂件」指令：通常由全局快捷键触发（feature.mainHide 使搜索框不弹出）
     if (code === 'whale-toggle') {
       toggleWidget()
+      return
+    }
+    // 「切换鼠标穿透」指令：为穿透态留一条不依赖设置页的逃生通道 ——
+    // 穿透后挂件连自己的菜单都点不到，若进入方式是「只显示挂件」，用户只能靠这条指令
+    // （或重新搜索进入设置页）关掉它。同样 mainHide，可绑全局快捷键一键进出一秒切换。
+    if (code === 'whale-passthrough') {
+      const next = !readConfig().passThrough
+      patchConfig({ passThrough: next })
+      pushConfig()
+      // 设置页开着时同步开关状态（emitConfigChange 只在本窗口有订阅者时生效）
+      try { settingsApi.emitConfigChange() } catch (err) {}
+      // 系统通知：穿透态下气泡可能被计时/峰谷占用，这条保证用户一定得到反馈
+      try {
+        utools.showNotification(next
+          ? '鼠标穿透已开启：挂件不再接收鼠标；在鲸鱼上停留约 1 秒可临时接管'
+          : '鼠标穿透已关闭：挂件恢复点击与拖拽', 'whale')
+      } catch (err) { logErr('[whale][lifecycle] 穿透切换通知失败', err && err.message) }
       return
     }
     // 「打开设置」兜底入口：挂件菜单在「显示挂件」模式下用 utools.redirect('余额挂件') 重定向进入。

@@ -82,6 +82,22 @@ function pushLog(text) {
 }
 
 // ──────────────────────────────────────────────
+// 状态变更广播
+// 挂件菜单只在点击操作时拉一次快照，而 3080 就绪 / 进程退出 / 安装完成 / 版本查完
+// 都是稍后才发生的异步事件 —— 不主动广播，挂件状态会一直停在「启动中…」「正在结束…」
+// （设置页靠每 4s 轮询能自愈，挂件不轮询）。由 IPC 层订阅后转发给挂件窗口。
+// ──────────────────────────────────────────────
+const changeListeners = []
+function onChange(cb) { if (typeof cb === 'function') changeListeners.push(cb) }
+function broadcast() {
+  if (!changeListeners.length) return
+  let s = null
+  for (const cb of changeListeners) {
+    try { cb(s || (s = snapshot())) } catch (err) {}
+  }
+}
+
+// ──────────────────────────────────────────────
 // Node.js 目录解析
 // ──────────────────────────────────────────────
 function exeNames(base) {
@@ -325,6 +341,7 @@ function stopExternal(pid, done) {
       probe.name = ''
       pushLog('已结束外部启动的 dsh（pid=' + pid + '）')
     }
+    broadcast() // 复查/可能的 UAC 提权要 1.5–15s，结束后主动推一次
     if (done) done(snapshot())
   }
   // 等 waitMs 后复查；还没起来就再等 rounds 轮（每轮 1.5s，用于等用户点 UAC）
@@ -520,10 +537,17 @@ function watchReady() {
   let ticks = 0
   state.readyTimer = setInterval(() => {
     ticks++
-    if (!state.child || ticks > 150) {
+    if (!state.child) { // 进程退出：exit 事件会广播并经 clearReady 停掉轮询
       clearInterval(state.readyTimer)
       state.readyTimer = null
       return
+    }
+    if (ticks > 150) {
+      // 超过 3 分钟仍未监听：不放弃（dsh 晚启动成功也能补上就绪），重置计数继续等，
+      // 顺手推一次快照让界面别停在旧状态
+      ticks = 0
+      pushLog('3080 仍未就绪，继续等待（dsh 启动异常请看设置页日志）')
+      broadcast()
     }
     probePort((pid) => {
       if (!pid) return
@@ -532,6 +556,7 @@ function watchReady() {
       const sec = state.startedAt ? ((state.readyAt - state.startedAt) / 1000).toFixed(1) + 's' : '未知'
       pushLog('3080 已就绪（启动用时 ' + sec + '）')
       if (state.readyTimer) { clearInterval(state.readyTimer); state.readyTimer = null }
+      broadcast() // 关键推送：挂件状态从「启动中…（3080 未就绪）」变「运行中 · pid」
     })
   }, 1200)
 }
@@ -554,6 +579,7 @@ function captureWebUrl(text) {
   if (!url || url === state.webUrl) return
   state.webUrl = url
   pushLog('已捕获带 token 的页面地址，「打开页面」会用它')
+  broadcast()
 }
 
 function start() {
@@ -610,6 +636,7 @@ function start() {
     pushLog(state.error)
     logErr('[whale][dsh] 启动失败', err && err.message)
     if (state.child === child) { state.child = null; state.pid = 0; state.runVersion = '' }
+    broadcast()
   })
   child.on('exit', (code, signal) => {
     pushLog('dsh 已退出（code=' + code + (signal ? '，signal=' + signal : '') + '）')
@@ -622,6 +649,11 @@ function start() {
     if (state.child === child) { state.child = null; state.pid = 0; state.stopping = false; state.runVersion = '' }
     state.exitCode = code
     state.exitAt = Date.now()
+    // 关键推送：taskkill 完成后进程真正退出在这里发生，不广播挂件会一直显示「正在结束…」。
+    // Windows 下 shell 包了一层 cmd，probe 缓存的监听 pid 与 state.pid 不同，
+    // 先重新探测再推，避免把刚结束的进程短暂误报成「外部 dsh」（端口此刻若被真·外部 dsh
+    // 接住，探测结果也会如实显示它）
+    probePort(() => broadcast())
   })
   log('[whale][dsh] 已启动', { pid: state.pid, node: node.dir })
   return snapshot()
@@ -654,8 +686,19 @@ function stop(done) {
   setCmd(WIN ? 'taskkill /pid ' + pid + ' /T /F' : 'kill -TERM -' + pid + '（进程组）')
   state.stopping = true
   clearReady()
+  const onKillErr = (err) => {
+    if (!err) return
+    pushLog('结束命令返回错误：' + ((err && err.code !== undefined) ? err.code : (err && err.message) || err))
+    // 进程可能已经自己退了 —— 那种情况 exit 事件会清状态并广播；确实没退掉才解除 stopping 报错，
+    // 否则界面会永远停在「正在结束…」
+    if (state.child === child) {
+      state.stopping = false
+      state.error = '结束失败：' + ((err && err.message) || err) + '（可重试，或以管理员身份运行 uTools）'
+      broadcast()
+    }
+  }
   try {
-    if (WIN) execFile('taskkill', ['/pid', String(pid), '/T', '/F'], () => {})
+    if (WIN) execFile('taskkill', ['/pid', String(pid), '/T', '/F'], (err) => onKillErr(err))
     else {
       // 进程组整体结束（spawnCmd 用了 detached: true）
       try { process.kill(-pid, 'SIGTERM') } catch (err) { child.kill('SIGTERM') }
@@ -664,6 +707,7 @@ function stop(done) {
     logErr('[whale][dsh] 结束失败', err && err.message)
     state.stopping = false
     state.error = '结束失败：' + ((err && err.message) || err)
+    broadcast()
   }
   if (done) done(snapshot())
   return snapshot()
@@ -675,7 +719,7 @@ function restart(done) {
   const ext = externalPid()
   if (!state.child && !ext) { const s = start(); if (done) done(s); return }
   stop(() => {
-    if (state.error) { if (done) done(snapshot()); return }
+    if (state.error) { broadcast(); if (done) done(snapshot()); return }
     let tries = 0
     const timer = setInterval(() => {
       tries++
@@ -683,6 +727,7 @@ function restart(done) {
         if (!pid || tries > 20) {
           clearInterval(timer)
           const s = start()
+          broadcast() // 重启的启动发生在数秒后，原来的请求回调早已结束，必须主动推
           if (done) done(s)
         }
       })
@@ -725,6 +770,7 @@ function update() {
     if (state.error) {
       state.busy = ''
       pushLog('更新中止：' + state.error)
+      broadcast()
       return
     }
     // 等 3080 真正释放（刚 taskkill 完可能还没退干净，文件也还被占用）
@@ -748,12 +794,14 @@ function installDsh(done, busyKind) {
     state.busy = ''
     state.error = '未找到 Node.js：请在设置页「DeepSeek Harness」里指定 Node.js 目录'
     pushLog(state.error)
+    broadcast() // 多为「启动 → 自动安装」链路里走到这，原始请求回复的是「安装中」，这里要再推
     return snapshot()
   }
   if (!node.npm) {
     state.busy = ''
     state.error = 'Node.js 目录里没有 npm（' + node.dir + '），请重新指定目录'
     pushLog(state.error)
+    broadcast()
     return snapshot()
   }
   // 已有全局安装就更新它（省一份重复下载），否则装到插件目录
@@ -775,7 +823,9 @@ function installDsh(done, busyKind) {
     state.globalWritable = null // 装过之后重新判定可写性
     if (before && after !== before) pushLog('安装完成：' + before + ' → ' + after)
     else pushLog('安装完成：' + after)
+    // done 通常是「用新版启动 dsh」：先跑回调再广播，推出去的快照就是「启动中/已运行」
     if (done) done()
+    broadcast()
   }
   // 全局安装目录常只对管理员可写：先探测，不可写就直接提权，免得白跑一遍再抛 EPERM
   const globalBase = target === 'global' ? path.dirname(path.dirname(g.pkgDir)) : ''
@@ -794,6 +844,7 @@ function installDsh(done, busyKind) {
     state.busy = ''
     state.error = '安装失败：' + ((err && err.message) || err)
     pushLog(state.error)
+    broadcast()
     return snapshot()
   }
   bindOutput(child)
@@ -826,11 +877,13 @@ function installDsh(done, busyKind) {
     state.busy = ''
     state.error = '安装失败' + (code ? '（退出码 ' + code + '）' : '') + (why || '') + '：详见设置页日志'
     pushLog(state.error)
+    broadcast()
   }
   child.on('error', (err) => {
     state.busy = ''
     state.error = '安装失败：' + ((err && err.message) || err)
     pushLog(state.error)
+    broadcast()
   })
   child.on('exit', (code) => finish(code))
   return snapshot()
@@ -877,12 +930,16 @@ function listVersions() {
   }
   try { child.stdout && child.stdout.on('data', (d) => { out += String(d) }) } catch (err) {}
   bindOutput(child)
-  child.on('error', (err) => { state.busy = ''; state.error = '查询版本失败：' + ((err && err.message) || err); pushLog(state.error) })
+  child.on('error', (err) => {
+    state.busy = ''; state.error = '查询版本失败：' + ((err && err.message) || err); pushLog(state.error)
+    broadcast()
+  })
   child.on('exit', (code) => {
     state.busy = ''
     if (code !== 0) {
       state.error = '查询版本失败（退出码 ' + code + '），详见设置页日志'
       pushLog(state.error)
+      broadcast()
       return
     }
     let list = []
@@ -899,6 +956,7 @@ function listVersions() {
     if (!list.length && !tag) {
       state.error = '没有查到可用版本'
       pushLog(state.error)
+      broadcast()
       return
     }
     state.versions = {
@@ -908,6 +966,7 @@ function listVersions() {
     }
     saveVersions()
     pushLog('可用版本 ' + list.length + ' 个，latest 标签：' + (state.versions.latest || '未知'))
+    broadcast() // 版本列表 / 「有新版本」提示落库后推一次
   })
   return snapshot()
 }
@@ -1082,6 +1141,7 @@ module.exports = {
   stopOnQuit,
   probePort,
   snapshot,
+  onChange,
   resolveNode,
   // 校验某个目录里是否有 node 可执行文件（设置页选择目录时用）
   nodeInDir(dir) { return !!hasNode(dir) },

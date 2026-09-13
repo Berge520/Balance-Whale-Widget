@@ -5,7 +5,7 @@ export interface WhaleConfig {
   scale: number
   vol: number
   soundOn: boolean
-  soundSet: 'duck' | 'fx1'
+  soundSet: 'duck' | 'fx1' | 'custom'
   usageMode: 'ledger' | 'token'
   peakMode: 'default' | 'liangwen' | 'qiangqiang'
   // 峰/谷时段切换时，用气泡提醒当前价格时段
@@ -25,6 +25,10 @@ export interface WhaleConfig {
   edgeRight: number
   edgeBottom: number
   edgeLeft: number
+  // 窗口整体透明度 20–100（%），以页面根元素 CSS opacity 生效（透明窗不能用 win.setOpacity）
+  opacity: number
+  // 鼠标穿透总开关：开启后挂件完全不接收鼠标（含鲸鱼本体），只能回设置页关闭
+  passThrough: boolean
   // 计时到点时弹系统通知
   timerNotifyOn: boolean
   // 记住计时状态：重载插件/重建挂件后继续计时
@@ -98,6 +102,8 @@ export interface ClearDataResult {
     ledger: boolean
     // 窗口位置与更新缓存
     window: boolean
+    // 自定义音效（音频文件 + 元信息）
+    sounds: boolean
   }
   error?: string
 }
@@ -105,6 +111,37 @@ export interface ClearDataResult {
 export interface UsageHistoryResult {
   currency: string
   days: Array<{ date: string; usage: number }>
+  // 今日被防误判拦下、未计入用量的余额变动合计（赠送额度到期/被收回、异常跳变）
+  todayAdjust?: number
+  // 最近一次未计入变动的原因与时间（ISO）
+  lastAdjustWhy?: string
+  lastAdjustAt?: string
+}
+
+export interface CalibrateResult {
+  ok: boolean
+  // 校准前/后的今日已用
+  from?: number
+  to?: number
+  // 当前未计入用量的变动合计
+  todayAdjust?: number
+  error?: string
+}
+
+// 自定义音效元信息（名称仅用于展示；音频本体由宿主按 ext 从本地读）
+export interface SoundMeta {
+  name: string
+  ext: string
+  at: number
+}
+
+export interface SoundImportResult {
+  ok: boolean
+  role?: string
+  name?: string
+  ext?: string
+  canceled?: boolean
+  error?: string
 }
 
 export interface UsageCsvResult {
@@ -264,10 +301,16 @@ export interface WhaleServices {
   testApiKey(apiKey: string): Promise<BalanceTestResult>
   testPlatformToken(platformToken: string): Promise<PlatformUsageTestResult>
   getUsageHistory(days?: number): UsageHistoryResult
+  // 手动校准今日已用（仅记账模式有意义；令牌模式下平台返回会覆盖）
+  calibrateTodayUsage(amount: number): CalibrateResult
+  // —— 自定义音效（按压/释放两段；文件复制进 userData/whale-sounds） ——
+  getSounds(): { press: SoundMeta | null; release: SoundMeta | null }
+  importSound(role: 'press' | 'release'): SoundImportResult
+  removeSound(role: 'press' | 'release'): { ok: boolean; role: string; error?: string }
   exportUsageCsv(days?: number): UsageCsvResult
   importUsageCsv(): UsageCsvImportResult
   // 按项清除本地数据：true 的项才会被清除
-  clearAllData(opts?: { secrets?: boolean; config?: boolean; ledger?: boolean; window?: boolean }): ClearDataResult
+  clearAllData(opts?: { secrets?: boolean; config?: boolean; ledger?: boolean; window?: boolean; sounds?: boolean }): ClearDataResult
   ensureWidget(): WidgetResult
   showWidget(): WidgetResult
   getWidgetError(): string | null

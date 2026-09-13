@@ -1,6 +1,6 @@
 <script lang="ts" setup>
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
-import type { BackupPreviewResult, WhaleServices } from './types/services'
+import type { BackupPreviewResult, SoundMeta, WhaleServices } from './types/services'
 
 // 主窗 preload（services.js）注入的宿主 API
 const services: Partial<WhaleServices> = window.services || {}
@@ -11,8 +11,11 @@ const secrets = reactive({ apiKey: '', platformToken: '' })
 const guides = reactive({ apiKey: false, token: false })
 // 「挂件窗口」卡片的说明默认折叠，点标题才展开（help=使用说明，trouble=故障排查）
 const widgetFolds = reactive({ help: false, trouble: false })
-const secretsMsg = ref('')
-const secretsOk = ref(false)
+// 统一的消息态：msg=文案、err=是否错误态；模板用 msgCls(f) 生成 class（合并原先 11 组 msg/err ref）
+type Flash = { msg: string; err: boolean }
+function useFlash(): Flash { return reactive({ msg: '', err: false }) }
+function msgCls(f: Flash) { return { ok: !f.err, err: f.err } }
+const secretsFlash: Flash = useFlash()
 const testing = ref(false)
 const testResults = ref<Array<{ label: string; ok: boolean; msg: string }>>([])
 const lastTestAt = ref(0)
@@ -48,6 +51,9 @@ const cfg = reactive({
   edgeRight: 0,
   edgeBottom: 0,
   edgeLeft: 0,
+  // 窗口透明度 20–100（%）与鼠标穿透总开关（开启后只能回设置页关闭）
+  opacity: 100,
+  passThrough: false,
   timerNotifyOn: true,
   timerPersistOn: true,
   enterMode: 'both',
@@ -59,16 +65,14 @@ const cfg = reactive({
   dshNoOpen: true,
 })
 const widgetVisible = ref(true)
-const widgetMsg = ref('')
-const widgetErr = ref(false)
+const widgetFlash: Flash = useFlash()
 // 挂件错误查看：errDetail 为宿主记录的最后一条创建/加载错误，空串表示无错误
 const errDetail = ref('')
-const errMsg = ref('')
-const errMsgErr = ref(false)
+const errFlash: Flash = useFlash()
 const clearConfirm = ref(false)
-// 「数据与隐私」按项清除：勾选的项才会被清除（凭据 / 设置 / 账本 / 窗口位置与更新缓存）
-const clearItems = reactive({ secrets: true, config: true, ledger: true, window: true })
-const anyClearItem = computed(() => clearItems.secrets || clearItems.config || clearItems.ledger || clearItems.window)
+// 「数据与隐私」按项清除：勾选的项才会被清除（凭据 / 设置 / 账本 / 窗口位置与更新缓存 / 自定义音效）
+const clearItems = reactive({ secrets: true, config: true, ledger: true, window: true, sounds: true })
+const anyClearItem = computed(() => clearItems.secrets || clearItems.config || clearItems.ledger || clearItems.window || clearItems.sounds)
 // 二次确认时把「将清除哪些项」写清楚，避免误删
 const clearItemNames = computed(() => {
   const names: string[] = []
@@ -76,13 +80,12 @@ const clearItemNames = computed(() => {
   if (clearItems.config) names.push('挂件设置')
   if (clearItems.ledger) names.push('账本用量记录')
   if (clearItems.window) names.push('窗口位置与更新缓存')
+  if (clearItems.sounds) names.push('自定义音效')
   return names.join('、')
 })
-const dataMsg = ref('')
-const dataErr = ref(false)
+const dataFlash: Flash = useFlash()
 // 诊断日志：dev 下同步落盘（%TEMP%\whale-debug.log），插件进程被 uTools 结束也不丢
-const diagMsg = ref('')
-const diagErr = ref(false)
+const diagFlash: Flash = useFlash()
 // 诊断日志入口只在 uTools 开发者模式（日志真正落盘）时出现，正式版不显示
 const diagReady = !!services.isDev?.()
 
@@ -96,8 +99,7 @@ const dsh = reactive({
   versions: { at: 0, latest: '', list: [] as string[] },
   external: false, externalPid: 0, externalName: '', portOther: '', webUrl: '', installed: '',
 })
-const dshMsg = ref('')
-const dshErr = ref(false)
+const dshFlash: Flash = useFlash()
 const dshLogOpen = ref(false)
 const dshLogEl = ref<HTMLElement | null>(null)
 // 折叠区（默认收起，卡片更短）：高级选项 / 使用说明 / 故障排查
@@ -171,29 +173,30 @@ function dshStatus(deep = false) {
     if (deep) window.setTimeout(() => { try { dshApply(services.dshStatus?.()) } catch (err) {} }, 600)
   } catch (err) {}
 }
-// 打开/回到本页时自动探测并持续刷新（每 4s，页面不可见时跳过）
-let dshTimer = 0
-function dshPollStart() {
-  dshPollStop()
-  dshTimer = window.setInterval(() => {
-    if (document.visibilityState === 'hidden') return
-    dshStatus(true)
-  }, 4000)
+// 轮询统一管理：start 幂等（先停再起），stop 可重复调用；页面隐藏时跳过本轮，
+// 避免后台空跑（dsh 状态与任务栏状态两处共用，见下方 dshPolling / taskbarPolling）
+function usePolling(fn: () => void, ms: number, immediate = false) {
+  let timer = 0
+  const stop = () => { if (timer) { window.clearInterval(timer); timer = 0 } }
+  const start = () => {
+    stop()
+    if (immediate) fn()
+    timer = window.setInterval(() => { if (document.visibilityState !== 'hidden') fn() }, ms)
+  }
+  return { start, stop }
 }
-function dshPollStop() {
-  if (dshTimer) { window.clearInterval(dshTimer); dshTimer = 0 }
-  dshTickSync(false, true)
-}
+// 打开/回到本页时自动探测并持续刷新 dsh 状态（每 4s）
+const dshPolling = usePolling(() => dshStatus(true), 4000)
 // 启动/结束是同步返回；重启要等旧进程退出、更新要下载，之后再补一次状态
 function dshDo(action: 'start' | 'stop' | 'restart' | 'update') {
   try {
     const api = services as any
     const fn = action === 'start' ? api.dshStart : action === 'stop' ? api.dshStop : action === 'restart' ? api.dshRestart : api.dshUpdate
     dshApply(fn?.())
-    dshErr.value = false
+    dshFlash.err = false
     // 启动/重启/更新都要等一会儿（首次安装要下载），自动展开日志方便看进度
     if (action !== 'stop') dshLogOpen.value = true
-    dshMsg.value = action === 'start' ? '已启动 dsh（首次会自动下载安装，稍等片刻再看状态）'
+    dshFlash.msg = action === 'start' ? '已启动 dsh（首次会自动下载安装，稍等片刻再看状态）'
       : action === 'stop' ? '已结束 dsh'
         : action === 'restart' ? '正在重启 dsh…'
           : '正在更新 dsh（结束旧进程 → 重新安装 → 用新版启动）…'
@@ -201,69 +204,69 @@ function dshDo(action: 'start' | 'stop' | 'restart' | 'update') {
     const delays = action === 'restart' ? [2500, 6000] : action === 'update' ? [5000, 20000, 45000, 90000] : action === 'stop' ? [900, 2400] : [800]
     for (const ms of delays) window.setTimeout(dshStatus, ms)
   } catch (err: any) {
-    dshErr.value = true
-    dshMsg.value = '操作失败：' + String(err?.message || err)
+    dshFlash.err = true
+    dshFlash.msg = '操作失败：' + String(err?.message || err)
   }
 }
 // 清空内存日志
 function dshClearLog() {
   try {
     dshApply(services.dshClearLog?.())
-    dshErr.value = false
-    dshMsg.value = '已清空日志'
+    dshFlash.err = false
+    dshFlash.msg = '已清空日志'
   } catch (err: any) {
-    dshErr.value = true
-    dshMsg.value = '清空失败：' + String(err?.message || err)
+    dshFlash.err = true
+    dshFlash.msg = '清空失败：' + String(err?.message || err)
   }
 }
 // 维护类操作：点第一次变确认，点第二次执行（避免误删）
 function dshMaintain(kind: 'remove-plugin' | 'clean-npx') {
-  if (dshConfirm.value !== kind) { dshConfirm.value = kind; dshMsg.value = ''; return }
+  if (dshConfirm.value !== kind) { dshConfirm.value = kind; dshFlash.msg = ''; return }
   dshConfirm.value = ''
   try {
     const s = kind === 'remove-plugin' ? services.dshRemovePlugin?.() : services.dshCleanNpxCache?.()
     dshApply(s)
-    dshErr.value = !!dsh.error
-    dshMsg.value = kind === 'remove-plugin' ? '已删除插件目录里的 dsh' : '已清理 npx 旧缓存（详见日志）'
+    dshFlash.err = !!dsh.error
+    dshFlash.msg = kind === 'remove-plugin' ? '已删除插件目录里的 dsh' : '已清理 npx 旧缓存（详见日志）'
     dshLogOpen.value = true
   } catch (err: any) {
-    dshErr.value = true
-    dshMsg.value = '操作失败：' + String(err?.message || err)
+    dshFlash.err = true
+    dshFlash.msg = '操作失败：' + String(err?.message || err)
   }
 }
 function dshCopyPath(p: string, label: string) {
-  if (!p) { dshErr.value = true; dshMsg.value = '暂无' + label; return }
+  if (!p) { dshFlash.err = true; dshFlash.msg = '暂无' + label; return }
   const ok = services.copyText?.(p)
-  dshErr.value = !ok
-  dshMsg.value = ok ? '已复制' + label + '：' + p : '复制失败，请手动选中复制。'
+  dshFlash.err = !ok
+  dshFlash.msg = ok ? '已复制' + label + '：' + p : '复制失败，请手动选中复制。'
 }
 function dshOpenPage() {
   try {
     const url = services.dshOpenWeb?.()
     if (!url) {
-      dshErr.value = true
-      dshMsg.value = '打开失败：无法调用系统浏览器'
+      dshFlash.err = true
+      dshFlash.msg = '打开失败：无法调用系统浏览器'
       return
     }
-    dshErr.value = !dsh.webUrl
-    dshMsg.value = dsh.webUrl
+    dshFlash.err = !dsh.webUrl
+    dshFlash.msg = dsh.webUrl
       ? '已用系统浏览器打开：' + url
       : '已打开 ' + url + '（还没拿到带 token 的地址：若提示需要认证，等 dsh 完全启动后再点一次）'
   } catch (err: any) {
-    dshErr.value = true
-    dshMsg.value = '打开失败：' + String(err?.message || err)
+    dshFlash.err = true
+    dshFlash.msg = '打开失败：' + String(err?.message || err)
   }
 }
 function dshCopyUrl() {
   const url = dsh.webUrl || dsh.url
   if (!url) {
-    dshErr.value = true
-    dshMsg.value = '暂无地址'
+    dshFlash.err = true
+    dshFlash.msg = '暂无地址'
     return
   }
   const ok = services.copyText?.(url)
-  dshErr.value = !ok
-  dshMsg.value = ok ? '已复制页面地址：' + url : '复制失败，请手动选中上面的地址复制。'
+  dshFlash.err = !ok
+  dshFlash.msg = ok ? '已复制页面地址：' + url : '复制失败，请手动选中上面的地址复制。'
 }
 // 选择 Node.js 安装目录（校验目录里有 node 可执行文件）
 function dshPickDir() {
@@ -271,35 +274,35 @@ function dshPickDir() {
     const r = services.dshPickNodeDir?.()
     if (!r || r.canceled) return
     if (!r.ok) {
-      dshErr.value = true
-      dshMsg.value = r.error || '目录无效'
+      dshFlash.err = true
+      dshFlash.msg = r.error || '目录无效'
       return
     }
     patchCfg({ dshNodeDir: r.dir })
-    dshMsg.value = 'Node.js 目录已设为 ' + r.dir
-    dshErr.value = false
+    dshFlash.msg = 'Node.js 目录已设为 ' + r.dir
+    dshFlash.err = false
     window.setTimeout(dshStatus, 400)
   } catch (err: any) {
-    dshErr.value = true
-    dshMsg.value = '选择失败：' + String(err?.message || err)
+    dshFlash.err = true
+    dshFlash.msg = '选择失败：' + String(err?.message || err)
   }
 }
 function dshAutoDir() {
   patchCfg({ dshNodeDir: '' })
-  dshMsg.value = '已改为自动探测（PATH → 常见安装位置）'
-  dshErr.value = false
+  dshFlash.msg = '已改为自动探测（PATH → 常见安装位置）'
+  dshFlash.err = false
   window.setTimeout(dshStatus, 400)
 }
 function dshCopyLog() {
   const text = dsh.log || ''
   if (!text) {
-    dshErr.value = true
-    dshMsg.value = '暂无日志：启动/更新 dsh 后这里会显示它的输出。'
+    dshFlash.err = true
+    dshFlash.msg = '暂无日志：启动/更新 dsh 后这里会显示它的输出。'
     return
   }
   const ok = services.copyText?.(text)
-  dshErr.value = !ok
-  dshMsg.value = ok ? '已复制 dsh 日志（' + text.split('\n').length + ' 行）' : '复制失败，请手动选中日志复制。'
+  dshFlash.err = !ok
+  dshFlash.msg = ok ? '已复制 dsh 日志（' + text.split('\n').length + ' 行）' : '复制失败，请手动选中日志复制。'
 }
 const dshNodeText = computed(() => {
   if (cfg.dshNodeDir) return cfg.dshNodeDir + (dsh.nodeDir && dsh.nodeDir !== cfg.dshNodeDir ? '（无效，实际用 ' + dsh.nodeDir + '）' : '')
@@ -345,12 +348,12 @@ const dshVersionOptions = computed(() => {
 function dshQueryVersions() {
   try {
     services.dshListVersions?.()
-    dshErr.value = false
-    dshMsg.value = '正在查询可用版本…'
+    dshFlash.err = false
+    dshFlash.msg = '正在查询可用版本…'
     for (const ms of [2000, 5000, 9000]) window.setTimeout(dshStatus, ms)
   } catch (err: any) {
-    dshErr.value = true
-    dshMsg.value = '查询失败：' + String(err?.message || err)
+    dshFlash.err = true
+    dshFlash.msg = '查询失败：' + String(err?.message || err)
   }
 }
 
@@ -363,10 +366,25 @@ const updateMsg = ref('')
 // —— 近 7 天用量趋势 ——
 const usageHistory = ref<Array<{ date: string; usage: number }>>([])
 const usageCurrency = ref('CNY')
-const exportMsg = ref('')
-const exportErr = ref(false)
-const importMsg = ref('')
-const importErr = ref(false)
+const exportFlash: Flash = useFlash()
+const importFlash: Flash = useFlash()
+// 今日被防误判拦下的余额变动（赠送额到期/异常跳变，未计入今日已用）
+const todayAdjust = ref(0)
+const lastAdjustWhy = ref('')
+const lastAdjustAt = ref('')
+// 手动校准今日已用
+const calibrateInput = ref<number | null>(null)
+const calibrateFlash: Flash = useFlash()
+const adjustTimeText = computed(() => {
+  const t = Date.parse(lastAdjustAt.value)
+  if (!isFinite(t)) return ''
+  const d = new Date(t)
+  const p2 = (n: number) => String(n).padStart(2, '0')
+  return p2(d.getHours()) + ':' + p2(d.getMinutes())
+})
+// v-model.number 清空输入框时值为 ''（未输入时为 null），两种都视为未填
+const calibrateInputEmpty = computed(() =>
+  calibrateInput.value === null || (calibrateInput.value as unknown) === '')
 const historyMax = computed(() => {
   let m = 0
   for (const d of usageHistory.value) if (d.usage > m) m = d.usage
@@ -384,44 +402,44 @@ function fmtMoney(v: number) {
 }
 // 导出账本用量为 CSV（宿主弹系统保存框；用户取消时静默）
 function exportUsageCsv() {
-  exportMsg.value = ''
-  exportErr.value = false
+  exportFlash.msg = ''
+  exportFlash.err = false
   try {
     const r = services.exportUsageCsv?.(usageHistory.value.length || 7)
     if (!r) {
-      exportErr.value = true
-      exportMsg.value = '导出失败：宿主 API 不可用'
+      exportFlash.err = true
+      exportFlash.msg = '导出失败：宿主 API 不可用'
     } else if (r.ok) {
-      exportMsg.value = '已导出到：' + (r.path || '')
+      exportFlash.msg = '已导出到：' + (r.path || '')
     } else if (!r.canceled) {
-      exportErr.value = true
-      exportMsg.value = '导出失败：' + (r.error || '未知错误')
+      exportFlash.err = true
+      exportFlash.msg = '导出失败：' + (r.error || '未知错误')
     }
   } catch (err: any) {
-    exportErr.value = true
-    exportMsg.value = '导出失败：' + String(err?.message || err)
+    exportFlash.err = true
+    exportFlash.msg = '导出失败：' + String(err?.message || err)
   }
 }
 // 导入账本用量 CSV（宿主弹系统打开框；合并后刷新趋势；用户取消时静默）
 function importUsageCsv() {
-  importMsg.value = ''
-  importErr.value = false
+  importFlash.msg = ''
+  importFlash.err = false
   try {
     const r = services.importUsageCsv?.()
     if (!r) {
-      importErr.value = true
-      importMsg.value = '导入失败：宿主 API 不可用'
+      importFlash.err = true
+      importFlash.msg = '导入失败：宿主 API 不可用'
     } else if (r.ok) {
       const ignored = r.invalid ? '，忽略 ' + r.invalid + ' 行非法数据' : ''
-      importMsg.value = `已导入 ${r.imported} 天${ignored}；账本现有 ${r.kept} 天（${r.from} ~ ${r.to}）`
+      importFlash.msg = `已导入 ${r.imported} 天${ignored}；账本现有 ${r.kept} 天（${r.from} ~ ${r.to}）`
       refreshHistory()
     } else if (!r.canceled) {
-      importErr.value = true
-      importMsg.value = '导入失败：' + (r.error || '未知错误')
+      importFlash.err = true
+      importFlash.msg = '导入失败：' + (r.error || '未知错误')
     }
   } catch (err: any) {
-    importErr.value = true
-    importMsg.value = '导入失败：' + String(err?.message || err)
+    importFlash.err = true
+    importFlash.msg = '导入失败：' + String(err?.message || err)
   }
 }
 // 近 7 天用量：令牌模式下挂件刷新后今日总量会写入账本，
@@ -431,6 +449,40 @@ function refreshHistory() {
   if (h && Array.isArray(h.days)) {
     usageHistory.value = h.days
     usageCurrency.value = h.currency || 'CNY'
+    todayAdjust.value = Number(h.todayAdjust) || 0
+    lastAdjustWhy.value = h.lastAdjustWhy || ''
+    lastAdjustAt.value = h.lastAdjustAt || ''
+  }
+}
+// 手动校准今日已用：记账漏采/误判后可直接改成真实金额，余额基准不动，之后继续实时累加
+function calibrateToday() {
+  calibrateFlash.msg = ''
+  calibrateFlash.err = false
+  // v-model.number 清空输入框会得到 ''，Number('')===0，必须先拦掉，否则会误把用量清零
+  if (calibrateInputEmpty.value) {
+    calibrateFlash.err = true
+    calibrateFlash.msg = '请先输入实际金额'
+    return
+  }
+  const v = Number(calibrateInput.value)
+  if (!isFinite(v) || v < 0) {
+    calibrateFlash.err = true
+    calibrateFlash.msg = '请输入不小于 0 的金额'
+    return
+  }
+  try {
+    const r = services.calibrateTodayUsage?.(v)
+    if (!r || !r.ok) {
+      calibrateFlash.err = true
+      calibrateFlash.msg = '校准失败：' + (r?.error || '宿主 API 不可用')
+      return
+    }
+    calibrateFlash.msg = `已将今日已用校准为 ${fmtMoney(r.to ?? v)}（原 ${fmtMoney(r.from ?? 0)}），之后余额继续实时记账`
+    calibrateInput.value = null
+    refreshHistory()
+  } catch (err: any) {
+    calibrateFlash.err = true
+    calibrateFlash.msg = '校准失败：' + String(err?.message || err)
   }
 }
 
@@ -465,6 +517,62 @@ function onScaleCommit() {
 function patchCfg(p: Record<string, any>) {
   services.saveConfig?.(p)
 }
+// —— 窗口透明度：拖动实时预览（只推 CSS opacity 不写存储），松手持久化 ——
+function clampOpacity(v: number) {
+  return Math.round(Math.max(20, Math.min(100, Number(v) || 100)))
+}
+function onOpacityLive() {
+  cfg.opacity = clampOpacity(cfg.opacity)
+  services.saveConfig?.({ opacity: cfg.opacity, __live: true })
+}
+function onOpacityCommit() {
+  cfg.opacity = clampOpacity(cfg.opacity)
+  services.saveConfig?.({ opacity: cfg.opacity })
+}
+// —— 自定义音效（按压/释放两段，文件复制进本地数据目录） ——
+const soundsMeta = ref<{ press: SoundMeta | null; release: SoundMeta | null }>({ press: null, release: null })
+const soundFlash: Flash = useFlash()
+function refreshSounds() {
+  const m = services.getSounds?.()
+  if (m) soundsMeta.value = { press: m.press || null, release: m.release || null }
+}
+function doImportSound(role: 'press' | 'release') {
+  soundFlash.msg = ''
+  soundFlash.err = false
+  try {
+    const r = services.importSound?.(role)
+    if (!r) {
+      soundFlash.err = true
+      soundFlash.msg = '宿主 API 不可用'
+      return
+    }
+    if (r.canceled) return
+    if (!r.ok) {
+      soundFlash.err = true
+      soundFlash.msg = '导入失败：' + (r.error || '未知错误')
+      return
+    }
+    soundFlash.msg = `已导入${role === 'press' ? '按压' : '释放'}音效「${r.name || ''}」`
+    refreshSounds()
+  } catch (err: any) {
+    soundFlash.err = true
+    soundFlash.msg = '导入失败：' + String(err?.message || err)
+  }
+}
+function doRemoveSound(role: 'press' | 'release') {
+  soundFlash.msg = ''
+  soundFlash.err = false
+  try {
+    const r = services.removeSound?.(role)
+    if (r && r.ok) {
+      soundFlash.msg = `已删除${role === 'press' ? '按压' : '释放'}音效`
+      refreshSounds()
+    }
+  } catch (err: any) {
+    soundFlash.err = true
+    soundFlash.msg = '删除失败：' + String(err?.message || err)
+  }
+}
 // 切用量模式：趋势图的今日柱取数来源会变（记账累计 ↔ 平台今日总量），立即重拉一次
 function onUsageModeChange() {
   patchCfg({ usageMode: cfg.usageMode })
@@ -473,9 +581,8 @@ function onUsageModeChange() {
 
 function saveSecrets() {
   const r = services.saveSecrets?.({ apiKey: secrets.apiKey.trim(), platformToken: secrets.platformToken.trim() })
-  secretsOk.value = true
-  secretsMsg.value = r && r.hasApiKey ? '已加密保存' : '已保存（未填写 API Key，挂件将提示未配置）'
-  setTimeout(() => { secretsOk.value = false }, 3000)
+  secretsFlash.msg = r && r.hasApiKey ? '已加密保存' : '已保存（未填写 API Key，挂件将提示未配置）'
+  setTimeout(() => { secretsFlash.msg = '' }, 3000)
 }
 
 async function testKey() {
@@ -530,14 +637,14 @@ function showWidget() {
   const r = services.showWidget?.() || { ok: true }
   widgetVisible.value = true
   if (r && r.ok && !r.error) {
-    widgetErr.value = false
+    widgetFlash.err = false
     // 开发模式才显示调试提示；正式打包（dist）只给普通确认
-    widgetMsg.value = import.meta.env.DEV
+    widgetFlash.msg = import.meta.env.DEV
       ? '挂件窗口已创建。若桌面看不到鲸鱼，请打开开发者工具（主窗右键→检查）查看 [whale][widget] 日志。'
       : '挂件窗口已创建。'
   } else {
-    widgetErr.value = true
-    widgetMsg.value = '挂件创建失败：' + ((r && r.error) || '未知错误')
+    widgetFlash.err = true
+    widgetFlash.msg = '挂件创建失败：' + ((r && r.error) || '未知错误')
       + (import.meta.env.DEV ? '（详见开发者工具控制台 [whale][widget] 日志）' : '')
   }
   checkWidgetError(true)
@@ -545,67 +652,73 @@ function showWidget() {
 function hideWidget() {
   services.hideWidget?.()
   widgetVisible.value = false
-  widgetMsg.value = ''
+  widgetFlash.msg = ''
 }
 // 读取宿主记录的最后一条挂件创建失败原因；silent=true 时不显示「无错误」提示（用于自动检查）
 function checkWidgetError(silent = false) {
   if (!silent) {
-    errMsg.value = ''
-    errMsgErr.value = false
+    errFlash.msg = ''
+    errFlash.err = false
   }
   try {
     const e = services.getWidgetError?.()
     errDetail.value = e || ''
-    if (!silent && !e) errMsg.value = '当前没有记录到挂件错误。'
+    if (!silent && !e) errFlash.msg = '当前没有记录到挂件错误。'
   } catch (err: any) {
     errDetail.value = ''
     if (!silent) {
-      errMsgErr.value = true
-      errMsg.value = '读取失败：' + String(err?.message || err)
+      errFlash.err = true
+      errFlash.msg = '读取失败：' + String(err?.message || err)
     }
   }
 }
 function copyWidgetError() {
   const ok = services.copyText?.(errDetail.value)
-  errMsgErr.value = !ok
-  errMsg.value = ok ? '错误信息已复制到剪贴板。' : '复制失败，请手动选中上方文本复制。'
+  errFlash.err = !ok
+  errFlash.msg = ok ? '错误信息已复制到剪贴板。' : '复制失败，请手动选中上方文本复制。'
 }
 // 清除本地数据：按勾选项清除，需二次确认，避免误触
 function clearSelectedData() {
   if (!anyClearItem.value) return
   if (!clearConfirm.value) {
     clearConfirm.value = true
-    dataMsg.value = ''
-    dataErr.value = false
+    dataFlash.msg = ''
+    dataFlash.err = false
     return
   }
   clearConfirm.value = false
-  const picked = { secrets: clearItems.secrets, config: clearItems.config, ledger: clearItems.ledger, window: clearItems.window }
+  const picked = { secrets: clearItems.secrets, config: clearItems.config, ledger: clearItems.ledger, window: clearItems.window, sounds: clearItems.sounds }
+  // 清音效时宿主会把音色从「自定义」回退为「小黄鸭」，先记下原值用于提示文案
+  const wasCustomSound = cfg.soundSet === 'custom'
   try {
     const r = services.clearAllData?.(picked) || { ok: false }
-    dataErr.value = !(r && r.ok)
+    dataFlash.err = !(r && r.ok)
     if (r && r.ok) {
       const names: string[] = []
       if (picked.secrets) names.push('凭据')
       if (picked.config) names.push('挂件设置')
       if (picked.ledger) names.push('账本用量记录')
       if (picked.window) names.push('窗口位置与更新缓存')
-      dataMsg.value = `已清除：${names.join('、')}。`
+      if (picked.sounds) names.push('自定义音效')
+      dataFlash.msg = `已清除：${names.join('、')}。`
         + (picked.config || picked.window ? '挂件已按默认配置重建。' : '')
+        + (picked.sounds && !picked.config && wasCustomSound ? '音色已回退为「小黄鸭」。' : '')
       if (picked.secrets) {
         secrets.apiKey = ''
         secrets.platformToken = ''
-        secretsOk.value = false
+        secretsFlash.msg = ''
       }
-      if (picked.config) applyConfig(services.getConfig?.())
+      // 清音效可能改了音色（自定义 → 小黄鸭），因此与清设置一样要重新套用配置
+      if (picked.config || picked.sounds) applyConfig(services.getConfig?.())
       if (picked.ledger) usageHistory.value = []
       else refreshHistory()
+      if (picked.sounds) refreshSounds() // 音效卡片（音色「自定义」）回显为「未导入」
     } else {
-      dataMsg.value = '清除失败：' + ((r && r.error) || '未知错误')
+      dataFlash.msg = '清除失败：' + ((r && r.error) || '未知错误')
     }
   } catch (err: any) {
-    dataErr.value = true
-    dataMsg.value = '清除失败：' + String(err?.message || err)
+    dataFlash.err = true
+    dataFlash.msg = '清除失败：' + String(err?.message || err)
   }
 }
 // —— 备份与恢复（数据与隐私卡片）——
@@ -613,8 +726,7 @@ const backupFolds = reactive({ open: false })
 const backupWithSecrets = ref(false)
 const backupPassword = ref('')
 const backupBusy = ref(false)
-const backupMsg = ref('')
-const backupErr = ref(false)
+const backupFlash: Flash = useFlash()
 const backupConfirm = ref(false)
 const backupPreview = ref<BackupPreviewResult | null>(null)
 const backupPicks = reactive<Record<string, boolean>>({ config: true, ledger: true, window: true, timer: true, secrets: true })
@@ -632,22 +744,22 @@ const backupNames = (list?: string[]) => (list || []).map(backupItemLabel).join(
 function backupExport() {
   if (backupBusy.value) return
   backupBusy.value = true
-  backupMsg.value = ''
-  backupErr.value = false
+  backupFlash.msg = ''
+  backupFlash.err = false
   try {
     const r = services.backupExport?.({ secrets: backupWithSecrets.value, password: backupPassword.value })
     if (!r || (!r.ok && !r.canceled)) {
-      backupErr.value = true
-      backupMsg.value = '导出失败：' + ((r && r.error) || '未知错误')
+      backupFlash.err = true
+      backupFlash.msg = '导出失败：' + ((r && r.error) || '未知错误')
     } else if (r.canceled) {
-      backupMsg.value = '已取消导出'
+      backupFlash.msg = '已取消导出'
     } else {
       backupPassword.value = '' // 密码不留在内存/界面上
-      backupMsg.value = '已导出备份：' + r.path + (r.withSecrets ? '（含加密凭据）' : '（不含凭据）')
+      backupFlash.msg = '已导出备份：' + r.path + (r.withSecrets ? '（含加密凭据）' : '（不含凭据）')
     }
   } catch (err: any) {
-    backupErr.value = true
-    backupMsg.value = '导出失败：' + String(err?.message || err)
+    backupFlash.err = true
+    backupFlash.msg = '导出失败：' + String(err?.message || err)
   } finally {
     backupBusy.value = false
   }
@@ -655,25 +767,25 @@ function backupExport() {
 function backupPick() {
   if (backupBusy.value) return
   backupBusy.value = true
-  backupMsg.value = ''
-  backupErr.value = false
+  backupFlash.msg = ''
+  backupFlash.err = false
   backupConfirm.value = false
   backupPreview.value = null
   try {
     const r = services.backupPick?.()
     if (!r || (!r.ok && !r.canceled)) {
-      backupErr.value = true
-      backupMsg.value = '读取失败：' + ((r && r.error) || '未知错误')
+      backupFlash.err = true
+      backupFlash.msg = '读取失败：' + ((r && r.error) || '未知错误')
     } else if (r.canceled) {
-      backupMsg.value = '已取消导入'
+      backupFlash.msg = '已取消导入'
     } else {
       backupPreview.value = r as BackupPreviewResult
       backupItems.forEach((it) => { backupPicks[it.key] = backupHas(it.key) })
-      backupMsg.value = '已读取备份，请勾选要恢复的项，再点「恢复选中项」'
+      backupFlash.msg = '已读取备份，请勾选要恢复的项，再点「恢复选中项」'
     }
   } catch (err: any) {
-    backupErr.value = true
-    backupMsg.value = '读取失败：' + String(err?.message || err)
+    backupFlash.err = true
+    backupFlash.msg = '读取失败：' + String(err?.message || err)
   } finally {
     backupBusy.value = false
   }
@@ -682,8 +794,8 @@ function backupApply() {
   if (backupBusy.value || !backupAnyItem.value) return
   if (!backupConfirm.value) {
     backupConfirm.value = true
-    backupMsg.value = ''
-    backupErr.value = false
+    backupFlash.msg = ''
+    backupFlash.err = false
     return
   }
   backupConfirm.value = false
@@ -695,17 +807,17 @@ function backupApply() {
     })
     const applied = (r && r.applied) || []
     if (!r || !r.ok) {
-      backupErr.value = true
-      backupMsg.value = '恢复失败：' + ((r && (r.errors || [])[0]) || (r && r.error) || '未知错误')
+      backupFlash.err = true
+      backupFlash.msg = '恢复失败：' + ((r && (r.errors || [])[0]) || (r && r.error) || '未知错误')
     } else {
       let msg = '已恢复：' + backupNames(applied) + '。'
       if (r.skipped && r.skipped.length) msg += '备份里没有：' + backupNames(r.skipped) + '。'
       if (r.widgetRebuilt) msg += '挂件已按恢复的设置重建。'
-      backupErr.value = false
-      if (r.errors && r.errors.length) { msg += r.errors.join('；'); backupErr.value = true }
+      backupFlash.err = false
+      if (r.errors && r.errors.length) { msg += r.errors.join('；'); backupFlash.err = true }
       backupPassword.value = ''
       backupPreview.value = null
-      backupMsg.value = msg
+      backupFlash.msg = msg
       // 让页面回显跟上：设置 / 账本 / 凭据分别刷新
       if (applied.indexOf('config') >= 0) applyConfig(services.getConfig?.())
       if (applied.indexOf('ledger') >= 0) refreshHistory()
@@ -715,13 +827,11 @@ function backupApply() {
           secrets.apiKey = s.apiKey || ''
           secrets.platformToken = s.platformToken || ''
         }
-        secretsOk.value = true
-        setTimeout(() => { secretsOk.value = false }, 3000)
       }
     }
   } catch (err: any) {
-    backupErr.value = true
-    backupMsg.value = '恢复失败：' + String(err?.message || err)
+    backupFlash.err = true
+    backupFlash.msg = '恢复失败：' + String(err?.message || err)
   } finally {
     backupBusy.value = false
   }
@@ -729,24 +839,24 @@ function backupApply() {
 function backupCancelPick() {
   backupPreview.value = null
   backupConfirm.value = false
-  backupMsg.value = ''
+  backupFlash.msg = ''
   try { services.backupCancel?.() } catch (err) {}
 }
 // 复制指令名，便于粘贴到 uTools「全局功能」新增全局快捷键
-function copyHotkeyCmd() {
-  const ok = services.copyText?.('显示/隐藏挂件')
-  widgetErr.value = !ok
-  widgetMsg.value = ok
-    ? '已复制「显示/隐藏挂件」，粘贴到 uTools「全局功能」的指令框即可。'
-    : '复制失败，请手动输入指令名：显示/隐藏挂件'
+function copyHotkeyCmd(label = '显示/隐藏挂件') {
+  const ok = services.copyText?.(label)
+  widgetFlash.err = !ok
+  widgetFlash.msg = ok
+    ? `已复制「${label}」，粘贴到 uTools「全局功能」的指令框即可。`
+    : `复制失败，请手动输入指令名：${label}`
 }
 // 跳转 uTools「全局功能」并直接新增一条待绑定项（快捷键被删除后可用它重新添加）
 // 注意：每次点击都会新增一条，uTools 无「只跳转不新增」的接口
-function addHotkey() {
-  const ok = services.redirectHotKeySetting?.('显示/隐藏挂件')
-  widgetErr.value = !ok
-  widgetMsg.value = ok
-    ? '已跳转 uTools「全局功能」并新增一条待绑定项，按下组合键即可完成绑定。'
+function addHotkey(label = '显示/隐藏挂件') {
+  const ok = services.redirectHotKeySetting?.(label)
+  widgetFlash.err = !ok
+  widgetFlash.msg = ok
+    ? `已跳转 uTools「全局功能」并新增一条待绑定项（指令：${label}），按下组合键即可完成绑定。`
     : '跳转失败，请手动打开 uTools 设置 → 全局功能 添加。'
 }
 // 复制诊断日志：uTools 结束插件进程会连带清空控制台，日志已同步落盘，可从文件取回
@@ -755,31 +865,31 @@ function copyDebugLog() {
     const r = services.getDebugLog?.()
     const text = (r && r.text) || ''
     if (!text) {
-      diagErr.value = true
-      diagMsg.value = '暂无可复制的日志：控制台日志仅在 uTools 开发者模式下落盘。'
+      diagFlash.err = true
+      diagFlash.msg = '暂无可复制的日志：控制台日志仅在 uTools 开发者模式下落盘。'
       return
     }
     const ok = services.copyText?.(text)
-    diagErr.value = !ok
-    diagMsg.value = ok
+    diagFlash.err = !ok
+    diagFlash.msg = ok
       ? `已复制诊断日志末尾 ${text.split('\n').length} 行。文件：${(r && r.path) || ''}`
       : '复制失败，可点「打开日志文件」手动查看。'
   } catch (err: any) {
-    diagErr.value = true
-    diagMsg.value = '读取失败：' + String(err?.message || err)
+    diagFlash.err = true
+    diagFlash.msg = '读取失败：' + String(err?.message || err)
   }
 }
 // 用系统默认程序打开日志文件，便于人工查看或另存
 function openLogFile() {
   try {
     const r = services.openLogFile?.()
-    diagErr.value = !(r && r.ok)
-    diagMsg.value = r && r.ok
+    diagFlash.err = !(r && r.ok)
+    diagFlash.msg = r && r.ok
       ? '已用系统默认程序打开日志文件：' + (r.path || '')
       : '打开失败：' + ((r && r.path) ? r.path : '控制台日志仅在 uTools 开发者模式下落盘。')
   } catch (err: any) {
-    diagErr.value = true
-    diagMsg.value = '打开失败：' + String(err?.message || err)
+    diagFlash.err = true
+    diagFlash.msg = '打开失败：' + String(err?.message || err)
   }
 }
 
@@ -839,6 +949,8 @@ function applyConfig(c: any) {
   cfg.edgeRight = typeof c.edgeRight === 'number' ? c.edgeRight : 0
   cfg.edgeBottom = typeof c.edgeBottom === 'number' ? c.edgeBottom : 0
   cfg.edgeLeft = typeof c.edgeLeft === 'number' ? c.edgeLeft : 0
+  cfg.opacity = typeof c.opacity === 'number' ? c.opacity : 100
+  cfg.passThrough = c.passThrough === true
 }
 
 // —— 任务栏状态（宿主实时识别；本页每 2s 同步一次，用来展示现在是隐藏还是显示） ——
@@ -861,18 +973,8 @@ const taskbarText = computed(() => {
   }
   return '未识别到任务栏，挂件按屏幕边缘贴边'
 })
-let taskbarTimer = 0
-function taskbarPollStart() {
-  taskbarPollStop()
-  taskbarSync()
-  taskbarTimer = window.setInterval(() => {
-    if (document.visibilityState === 'hidden') return
-    taskbarSync()
-  }, 2000)
-}
-function taskbarPollStop() {
-  if (taskbarTimer) { window.clearInterval(taskbarTimer); taskbarTimer = 0 }
-}
+// 任务栏状态每 2s 同步一次（immediate：启动时先同步一次，不必等第一个间隔）
+const taskbarPolling = usePolling(taskbarSync, 2000, true)
 
 // 宿主推送的配置变更订阅（挂件菜单改设置时，让本页开关同步）
 let unsubConfig: (() => void) | undefined
@@ -898,9 +1000,10 @@ onMounted(() => {
     checkWidgetError(true)
     appVersion.value = services.getVersion?.() || ''
     refreshHistory()
+    refreshSounds()
     dshStatus(true) // 打开插件就先探测一次（识别外部终端里跑的 dsh）
-    dshPollStart()
-    taskbarPollStart()
+    dshPolling.start()
+    taskbarPolling.start()
   } catch (err) {}
   window.addEventListener('focus', onWindowActive)
   document.addEventListener('visibilitychange', onWindowActive)
@@ -909,8 +1012,9 @@ onMounted(() => {
 
 onUnmounted(() => {
   try { unsubConfig?.() } catch (err) {}
-  dshPollStop()
-  taskbarPollStop()
+  dshPolling.stop()
+  dshTickSync(false, true)
+  taskbarPolling.stop()
   window.removeEventListener('focus', onWindowActive)
   document.removeEventListener('visibilitychange', onWindowActive)
 })
@@ -965,7 +1069,7 @@ onUnmounted(() => {
           {{ testing ? '测试中…' : '测试连接' }}
         </button>
       </div>
-      <p v-if="secretsMsg" class="msg ok">{{ secretsMsg }}</p>
+      <p v-if="secretsFlash.msg" class="msg" :class="msgCls(secretsFlash)">{{ secretsFlash.msg }}</p>
       <div v-if="testResults.length" class="test-list">
         <div v-for="(r, i) in testResults" :key="i" class="test-item" :class="r.ok ? 'ok' : 'err'">
           <span class="test-icon">{{ r.ok ? '✓' : '✕' }}</span>
@@ -978,9 +1082,9 @@ onUnmounted(() => {
       </div>
     </section>
 
-    <!-- 挂件设置 -->
+    <!-- 挂件外观：大小 / 音效 / 气泡等展示项 -->
     <section class="card">
-      <h2>挂件设置</h2>
+      <h2>挂件外观</h2>
 
       <label class="field row">
         <span class="label">大小</span>
@@ -1000,8 +1104,28 @@ onUnmounted(() => {
         <select v-model="cfg.soundSet" :disabled="!cfg.soundOn" @change="patchCfg({ soundSet: cfg.soundSet })">
           <option value="duck">小黄鸭</option>
           <option value="fx1">音效1</option>
+          <option value="custom">自定义</option>
         </select>
       </label>
+
+      <template v-if="cfg.soundSet === 'custom'">
+        <div class="field row">
+          <span class="label">按压音</span>
+          <span class="sound-file" :title="soundsMeta.press ? soundsMeta.press.name : ''">{{ soundsMeta.press ? soundsMeta.press.name : '未导入' }}</span>
+          <button class="export-btn" type="button" @click="doImportSound('press')">导入</button>
+          <button class="export-btn" type="button" v-if="soundsMeta.press" @click="doRemoveSound('press')">删除</button>
+        </div>
+        <div class="field row">
+          <span class="label">释放音</span>
+          <span class="sound-file" :title="soundsMeta.release ? soundsMeta.release.name : ''">{{ soundsMeta.release ? soundsMeta.release.name : '未导入（可选）' }}</span>
+          <button class="export-btn" type="button" @click="doImportSound('release')">导入</button>
+          <button class="export-btn" type="button" v-if="soundsMeta.release" @click="doRemoveSound('release')">删除</button>
+        </div>
+        <p class="hint">
+          音效会复制到本地数据目录（不引用源文件）。支持 mp3 / wav / ogg 等，单文件 ≤5MB，建议 1 秒左右的短音效；未导入按压音时回退为「小黄鸭」。
+        </p>
+        <p v-if="soundFlash.msg" class="msg" :class="msgCls(soundFlash)">{{ soundFlash.msg }}</p>
+      </template>
 
       <label class="field row">
         <span class="label">音量</span>
@@ -1009,6 +1133,26 @@ onUnmounted(() => {
                :disabled="!cfg.soundOn" @input="patchCfg({ vol: cfg.vol })" />
         <span class="num-text">{{ Math.round(cfg.vol * 100) }}%</span>
       </label>
+
+      <label class="field row check">
+        <span class="label">思考气泡</span>
+        <input type="checkbox" v-model="cfg.bubbleOn" @change="patchCfg({ bubbleOn: cfg.bubbleOn })" />
+      </label>
+
+      <label class="field row check">
+        <span class="label">小鲸鱼报时 <em>（气泡首行显示当前时间）</em></span>
+        <input type="checkbox" v-model="cfg.timeBubbleOn" @change="patchCfg({ timeBubbleOn: cfg.timeBubbleOn })" />
+      </label>
+
+      <label class="field row check">
+        <span class="label">挂件右上角菜单按钮</span>
+        <input type="checkbox" v-model="cfg.menuBtn" @change="patchCfg({ menuBtn: cfg.menuBtn })" />
+      </label>
+    </section>
+
+    <!-- 挂件行为：用量口径 / 峰谷 / 计时 / 预警 -->
+    <section class="card">
+      <h2>挂件行为</h2>
 
       <label class="field row">
         <span class="label">用量</span>
@@ -1043,51 +1187,6 @@ onUnmounted(() => {
       </label>
 
       <label class="field row check">
-        <span class="label">思考气泡</span>
-        <input type="checkbox" v-model="cfg.bubbleOn" @change="patchCfg({ bubbleOn: cfg.bubbleOn })" />
-      </label>
-
-      <label class="field row check">
-        <span class="label">小鲸鱼报时 <em>（气泡首行显示当前时间）</em></span>
-        <input type="checkbox" v-model="cfg.timeBubbleOn" @change="patchCfg({ timeBubbleOn: cfg.timeBubbleOn })" />
-      </label>
-
-      <label class="field row check">
-        <span class="label">挂件右上角菜单按钮</span>
-        <input type="checkbox" v-model="cfg.menuBtn" @change="patchCfg({ menuBtn: cfg.menuBtn })" />
-      </label>
-
-      <label class="field row check">
-        <span class="label">锁定位置 <em>（禁止拖拽与滚轮缩放，点击刷新仍可用）</em></span>
-        <input type="checkbox" v-model="cfg.dragLock" @change="patchCfg({ dragLock: cfg.dragLock })" />
-      </label>
-
-      <label class="field row check">
-        <span class="label">窗口置顶</span>
-        <input type="checkbox" v-model="cfg.onTop" @change="patchCfg({ onTop: cfg.onTop })" />
-      </label>
-
-      <label class="field row check">
-        <span class="label">自动避让任务栏 <em>（实时识别任务栏隐藏/显示，弹出时让位、收起后贴回）</em></span>
-        <input type="checkbox" v-model="cfg.avoidTaskbar" @change="patchCfg({ avoidTaskbar: cfg.avoidTaskbar })" />
-      </label>
-      <p class="hint taskbar-hint">
-        任务栏：{{ taskbarText }}
-        <em v-if="!cfg.avoidTaskbar">（避让已关闭，挂件位置不再跟随任务栏变化）</em>
-      </p>
-
-      <label class="field row">
-        <span class="label">贴边间距</span>
-        <span class="edge-row">
-          <em>上</em><input class="num" type="number" min="0" max="400" step="4" v-model.number="cfg.edgeTop" @change="patchCfg({ edgeTop: cfg.edgeTop })" />
-          <em>右</em><input class="num" type="number" min="0" max="400" step="4" v-model.number="cfg.edgeRight" @change="patchCfg({ edgeRight: cfg.edgeRight })" />
-          <em>下</em><input class="num" type="number" min="0" max="400" step="4" v-model.number="cfg.edgeBottom" @change="patchCfg({ edgeBottom: cfg.edgeBottom })" />
-          <em>左</em><input class="num" type="number" min="0" max="400" step="4" v-model.number="cfg.edgeLeft" @change="patchCfg({ edgeLeft: cfg.edgeLeft })" />
-        </span>
-      </label>
-      <p class="hint">贴边间距：挂件贴到该边时留出的像素数（0＝紧贴）。开了「自动避让任务栏」时，任务栏占位的那条边会自动让位；任务栏收起后又回到这里设定的贴边位置。</p>
-
-      <label class="field row check">
         <span class="label">低余额预警</span>
         <input type="checkbox" v-model="cfg.lowAlertOn" @change="patchCfg({ lowAlertOn: cfg.lowAlertOn })" />
       </label>
@@ -1119,11 +1218,22 @@ onUnmounted(() => {
         </div>
       </div>
       <p v-else class="hint">暂无用量记录（挂件运行并记账后自动显示）。</p>
-      <p v-if="exportMsg" class="msg" :class="{ ok: !exportErr, err: exportErr }">{{ exportMsg }}</p>
-      <p v-if="importMsg" class="msg" :class="{ ok: !importErr, err: importErr }">{{ importMsg }}</p>
+      <p v-if="cfg.usageMode === 'ledger' && todayAdjust > 0" class="hint adjust-note">
+        今日另有 <strong>{{ fmtMoney(todayAdjust) }}</strong> 余额变动未计入用量<template v-if="lastAdjustWhy">（{{ lastAdjustWhy }}<template v-if="adjustTimeText">，{{ adjustTimeText }}</template>）</template>；如确为消费可用下方校准补回。
+      </p>
+      <div v-if="cfg.usageMode === 'ledger'" class="calibrate-row">
+        <span class="calibrate-label">校准今日已用</span>
+        <input class="num calibrate-input" type="number" min="0" step="0.01"
+               v-model.number="calibrateInput" placeholder="实际金额" @keyup.enter="calibrateToday" />
+        <button class="export-btn" :disabled="calibrateInputEmpty" @click="calibrateToday">校准</button>
+      </div>
+      <p v-else class="hint">当前为「平台令牌」用量模式，今日已用以平台返回为准，无需校准。</p>
+      <p v-if="calibrateFlash.msg" class="msg" :class="msgCls(calibrateFlash)">{{ calibrateFlash.msg }}</p>
+      <p v-if="exportFlash.msg" class="msg" :class="msgCls(exportFlash)">{{ exportFlash.msg }}</p>
+      <p v-if="importFlash.msg" class="msg" :class="msgCls(importFlash)">{{ importFlash.msg }}</p>
     </section>
 
-    <!-- 显隐 -->
+    <!-- 窗口：显隐、位置与窗口属性 -->
     <section class="card">
       <h2>挂件窗口</h2>
       <label class="field row">
@@ -1138,9 +1248,60 @@ onUnmounted(() => {
         <button @click="showWidget">显示挂件</button>
         <button class="secondary" @click="hideWidget">隐藏挂件</button>
       </div>
+
+      <label class="field row check">
+        <span class="label">窗口置顶</span>
+        <input type="checkbox" v-model="cfg.onTop" @change="patchCfg({ onTop: cfg.onTop })" />
+      </label>
+
+      <label class="field row check">
+        <span class="label">锁定位置 <em>（禁止拖拽与滚轮缩放，点击刷新仍可用）</em></span>
+        <input type="checkbox" v-model="cfg.dragLock" @change="patchCfg({ dragLock: cfg.dragLock })" />
+      </label>
+
+      <label class="field row">
+        <span class="label">窗口透明度</span>
+        <input class="range" type="range" min="20" max="100" step="5" v-model.number="cfg.opacity"
+               @input="onOpacityLive" @change="onOpacityCommit" />
+        <em class="range-val">{{ cfg.opacity }}%</em>
+      </label>
+      <p class="hint">透明度作用于整个挂件（含气泡与菜单）；拖动实时预览。</p>
+
+      <label class="field row check">
+        <span class="label">鼠标穿透 <em>（挂件完全不接收鼠标——点击/拖拽/菜单全部穿透；在鲸鱼上停留约 1 秒可临时接管）</em></span>
+        <input type="checkbox" v-model="cfg.passThrough" @change="patchCfg({ passThrough: cfg.passThrough })" />
+      </label>
+      <p class="hint">
+        穿透开启后挂件自身菜单也点不到，建议先绑定全局快捷键作为「逃生通道」：uTools 设置 → 全局功能 → 新增 → 指令填「切换鼠标穿透」→ 按下组合键。也可在鲸鱼上停留约 1 秒临时接管后再关。
+      </p>
       <div class="btn-row">
-        <button class="secondary" @click="copyHotkeyCmd">复制指令名</button>
-        <button class="secondary" @click="addHotkey">新增快捷键</button>
+        <button class="secondary" @click="copyHotkeyCmd('切换鼠标穿透')">复制「穿透」指令名</button>
+        <button class="secondary" @click="addHotkey('切换鼠标穿透')">新增「穿透」快捷键</button>
+      </div>
+
+      <label class="field row check">
+        <span class="label">自动避让任务栏 <em>（实时识别任务栏隐藏/显示，弹出时让位、收起后贴回）</em></span>
+        <input type="checkbox" v-model="cfg.avoidTaskbar" @change="patchCfg({ avoidTaskbar: cfg.avoidTaskbar })" />
+      </label>
+      <p class="hint taskbar-hint">
+        任务栏：{{ taskbarText }}
+        <em v-if="!cfg.avoidTaskbar">（避让已关闭，挂件位置不再跟随任务栏变化）</em>
+      </p>
+
+      <label class="field row">
+        <span class="label">贴边间距</span>
+        <span class="edge-row">
+          <em>上</em><input class="num" type="number" min="0" max="400" step="4" v-model.number="cfg.edgeTop" @change="patchCfg({ edgeTop: cfg.edgeTop })" />
+          <em>右</em><input class="num" type="number" min="0" max="400" step="4" v-model.number="cfg.edgeRight" @change="patchCfg({ edgeRight: cfg.edgeRight })" />
+          <em>下</em><input class="num" type="number" min="0" max="400" step="4" v-model.number="cfg.edgeBottom" @change="patchCfg({ edgeBottom: cfg.edgeBottom })" />
+          <em>左</em><input class="num" type="number" min="0" max="400" step="4" v-model.number="cfg.edgeLeft" @change="patchCfg({ edgeLeft: cfg.edgeLeft })" />
+        </span>
+      </label>
+      <p class="hint">贴边间距：挂件贴到该边时留出的像素数（0＝紧贴）。开了「自动避让任务栏」时，任务栏占位的那条边会自动让位；任务栏收起后又回到这里设定的贴边位置。</p>
+
+      <div class="btn-row">
+        <button class="secondary" @click="copyHotkeyCmd()">复制指令名</button>
+        <button class="secondary" @click="addHotkey()">新增快捷键</button>
       </div>
       <div v-if="errDetail" class="err-block">
         <p class="err-title">挂件窗口创建失败</p>
@@ -1151,14 +1312,14 @@ onUnmounted(() => {
         </div>
       </div>
       <button v-else class="link-btn" @click="checkWidgetError()">挂件异常？查看错误详情</button>
-      <p v-if="widgetMsg" class="msg" :class="{ ok: !widgetErr, err: widgetErr }">{{ widgetMsg }}</p>
-      <p v-if="errMsg" class="msg" :class="{ ok: !errMsgErr, err: errMsgErr }">{{ errMsg }}</p>
+      <p v-if="widgetFlash.msg" class="msg" :class="msgCls(widgetFlash)">{{ widgetFlash.msg }}</p>
+      <p v-if="errFlash.msg" class="msg" :class="msgCls(errFlash)">{{ errFlash.msg }}</p>
       <div class="fold">
         <button class="link-btn" @click="widgetFolds.help = !widgetFolds.help">{{ widgetFolds.help ? '收起使用说明' : '使用说明' }}</button>
         <div v-if="widgetFolds.help" class="guide">
           <p class="guide-use"><strong>进入插件时：</strong>选含挂件的模式后，挂件出现时会抢走焦点、本设置窗口自动收起；改设置请点挂件右上角菜单（或右键）→「打开设置」唤回本窗口。</p>
           <p class="guide-use"><strong>挂件操作：</strong>可拖拽到屏幕四边吸附，贴左缘会镜像翻转；点击鲸鱼刷新余额，悬停后点右上角菜单调整设置。</p>
-          <p class="guide-use"><strong>快捷键：</strong>按 Ctrl+, 打开 uTools 设置 → 全局功能 → 新增 → 指令填「显示/隐藏挂件」→ 按下组合键。可点上方「复制指令名」快速复制。</p>
+          <p class="guide-use"><strong>快捷键：</strong>按 Ctrl+, 打开 uTools 设置 → 全局功能 → 新增 → 指令填「显示/隐藏挂件」→ 按下组合键。可点上方「复制指令名」快速复制。想给「鼠标穿透」也绑一个，指令名填「切换鼠标穿透」。</p>
           <p class="guide-use"><strong>常驻：</strong>退出到后台挂件保留；关闭 Ctrl+D 分离窗口会直接结束插件运行、挂件消失，分离后请用「最小化」；重进插件会自动重建，配置不丢。</p>
         </div>
       </div>
@@ -1170,7 +1331,7 @@ onUnmounted(() => {
             <button class="secondary" @click="copyDebugLog">复制诊断日志</button>
             <button class="secondary" @click="openLogFile">打开日志文件</button>
           </div>
-          <p v-if="diagMsg" class="msg" :class="{ ok: !diagErr, err: diagErr }">{{ diagMsg }}</p>
+          <p v-if="diagFlash.msg" class="msg" :class="msgCls(diagFlash)">{{ diagFlash.msg }}</p>
         </div>
       </div>
     </section>
@@ -1178,7 +1339,7 @@ onUnmounted(() => {
     <!-- 数据与隐私 -->
     <section class="card">
       <h2>数据与隐私</h2>
-      <p class="hint">API Key 与平台 Token 通过 uTools 加密存储，账本与窗口位置也只保存在本机，不会上传到任何第三方服务器。</p>
+      <p class="hint">API Key 与平台 Token 通过 uTools 加密存储，账本、窗口位置与导入的自定义音效也只保存在本机，不会上传到任何第三方服务器。</p>
       <p class="hint">卸载 uTools 插件不会自动删除这些数据，需要彻底清除时请勾选下方要清除的内容（<strong>清除前建议先导出一份备份</strong>，见下方「备份与恢复」）：</p>
       <label class="field row check">
         <span class="label">凭据 <em>（API Key / 平台 Token）</em></span>
@@ -1196,6 +1357,10 @@ onUnmounted(() => {
         <span class="label">窗口位置与更新缓存 <em>（挂件回到默认位置）</em></span>
         <input type="checkbox" v-model="clearItems.window" @change="clearConfirm = false" />
       </label>
+      <label class="field row check">
+        <span class="label">自定义音效 <em>（删除导入的按压 / 释放音效文件，音色一并回退为「小黄鸭」）</em></span>
+        <input type="checkbox" v-model="clearItems.sounds" @change="clearConfirm = false" />
+      </label>
       <div class="btn-row">
         <button class="danger" :disabled="!anyClearItem" @click="clearSelectedData()">
           {{ clearConfirm ? '确认清除选中数据？不可恢复' : '清除选中数据' }}
@@ -1203,7 +1368,7 @@ onUnmounted(() => {
         <button v-if="clearConfirm" class="secondary" @click="clearConfirm = false">取消</button>
       </div>
       <p v-if="clearConfirm" class="hint">将清除：{{ clearItemNames || '（未选中任何项）' }}。此操作不可撤销。</p>
-      <p v-if="dataMsg" class="msg" :class="{ ok: !dataErr, err: dataErr }">{{ dataMsg }}</p>
+      <p v-if="dataFlash.msg" class="msg" :class="msgCls(dataFlash)">{{ dataFlash.msg }}</p>
 
       <div class="fold">
         <button class="link-btn" @click="backupFolds.open = !backupFolds.open">{{ backupFolds.open ? '收起备份与恢复' : '备份与恢复' }}</button>
@@ -1212,7 +1377,7 @@ onUnmounted(() => {
           <p class="guide-use"><strong>安全提示：</strong>密码不会保存到任何地方，忘记就无法解密（其余项仍可正常恢复）；备份文件本身含你的设置与用量记录，请妥善保管。</p>
           <label class="field row check">
             <span class="label">包含凭据 <em>（需设密码，加密后写入）</em></span>
-            <input type="checkbox" v-model="backupWithSecrets" @change="backupMsg = ''" />
+            <input type="checkbox" v-model="backupWithSecrets" @change="backupFlash.msg = ''" />
           </label>
           <label v-if="backupWithSecrets" class="field row">
             <span class="label">备份密码</span>
@@ -1241,7 +1406,7 @@ onUnmounted(() => {
               <button v-if="backupConfirm" class="secondary" @click="backupConfirm = false">取消</button>
             </div>
           </div>
-          <p v-if="backupMsg" class="msg" :class="{ ok: !backupErr, err: backupErr }">{{ backupMsg }}</p>
+          <p v-if="backupFlash.msg" class="msg" :class="msgCls(backupFlash)">{{ backupFlash.msg }}</p>
         </div>
       </div>
     </section>
@@ -1305,7 +1470,7 @@ onUnmounted(() => {
       </div>
       <pre v-if="dshLogOpen" ref="dshLogEl" class="log-box">{{ dsh.log || '（暂无日志：启动或更新 dsh 后再看）' }}</pre>
       <p v-if="dsh.error && !dshLogOpen" class="msg err">{{ dsh.error }}</p>
-      <p v-if="dshMsg" class="msg" :class="{ ok: !dshErr, err: dshErr }">{{ dshMsg }}</p>
+      <p v-if="dshFlash.msg" class="msg" :class="msgCls(dshFlash)">{{ dshFlash.msg }}</p>
 
       <div class="fold">
         <button class="link-btn" @click="dshFolds.advanced = !dshFolds.advanced">{{ dshFolds.advanced ? '收起高级选项' : '高级选项（版本 / 注册源 / Node 目录 / 行为）' }}</button>
@@ -1838,6 +2003,40 @@ input[type='checkbox'] {
   text-align: right;
 }
 /* 用量趋势 */
+.adjust-note strong {
+  color: var(--err);
+  font-weight: 600;
+}
+.calibrate-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+.calibrate-label {
+  font-size: 12px;
+  color: var(--fg-dim);
+  white-space: nowrap;
+}
+.calibrate-input {
+  width: 110px;
+}
+.sound-file {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--fg-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.range-val {
+  font-style: normal;
+  font-size: 12px;
+  color: var(--fg-dim);
+  min-width: 38px;
+  text-align: right;
+}
 .chart {
   display: flex;
   align-items: flex-end;
