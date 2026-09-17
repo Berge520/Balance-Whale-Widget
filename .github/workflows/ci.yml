@@ -18,10 +18,10 @@ jobs:
   check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # eslint 10 要求 node ^20.19.0 || ^22.13.0 || >=24，取 24 与本地开发环境对齐
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '24'
           cache: npm
