@@ -1,0 +1,76 @@
+# 发版：打 tag（形如 v1.5.0）时构建、打包并建 Release。
+#
+# 为什么用 tag 触发而不是 push main：版本号的单一来源是 package.json，
+# 而 tag 是「这一版确实要发」的显式动作。tag 与 package.json 对不上就直接失败，
+# 免得 Release 里的产物和版本号各说各话（prebuild 会把 package.json 的版本同步进
+# plugin.json 与 lib/constants.js，所以这里只校验 tag 与 package.json）。
+#
+# 边界：uTools 市场发布仍需人工（开发者工具里打包 .upx 上传），
+# 这里只负责「校验版本 → 跑检查 → 构建 → 打包 zip → 建 Release + 变更说明」。
+# 变更说明用 gh 的 --generate-notes（GitHub 按 commit / PR 自动生成），
+# README 的「版本记录」仍是人工整理的对外口径，两者互不替代。
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+# 建 Release 需要写 contents；其余权限一律不给
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # --generate-notes 要回溯上一个 tag 来划分区间，浅克隆拿不到历史
+          fetch-depth: 0
+
+      # 与 ci.yml 保持一致：eslint 10 要求 node ^20.19.0 || ^22.13.0 || >=24
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - run: npm ci
+
+      - name: 校验 tag 与 package.json 版本一致
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG="$(node -p "require('./package.json').version")"
+          if [ "$TAG" != "$PKG" ]; then
+            echo "tag 是 v$TAG，但 package.json 是 $PKG；版本号只改 package.json，tag 跟着它打" >&2
+            exit 1
+          fi
+
+      # 与 ci.yml 同一套本地命令：不额外引入工具链，保证「本地能过 = 这里能过」
+      - name: 静态检查（ESLint）
+        run: npm run lint
+
+      - name: 类型检查（vue-tsc）
+        run: npm run typecheck
+
+      - name: 单元测试
+        run: npm test
+
+      # prebuild 钩子会先跑 sync-version / check-shared，
+      # 因此这一步同时校验了「版本号单一来源」与「跨文件副本一致」
+      - name: 构建
+        run: npm run build
+
+      # dist/ 里就是可用的插件目录：解压后让 uTools 开发者工具的入口指向它即可
+      - name: 打包 dist
+        run: |
+          cd dist
+          zip -qr "../balance-whale-widget-${GITHUB_REF_NAME}.zip" .
+
+      - name: 建 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            "balance-whale-widget-${GITHUB_REF_NAME}.zip" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes

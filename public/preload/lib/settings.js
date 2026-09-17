@@ -2,14 +2,16 @@
  * 对外 API（CommonJS）：注入到主窗 window.services，供设置页调用。
  */
 const fs = require('fs')
-const { PLUGIN_VERSION, K } = require('./constants')
+const { PLUGIN_VERSION, K, MODEL_TEMPLATES, MODEL_MAX, DEFAULT_MAIN_MODEL } = require('./constants')
 const { DEV, logErr, LOG_FILE } = require('./log')
 const {
-  clampNum, readConfig, patchConfig, readSecrets, writeSecrets, readLedger,
+  clampNum, readConfig, patchConfig, readSecrets, writeSecrets, readLedger, historyKeepDays,
   resetAnchorCache, mergeLedgerHistory, clearTimer, calibrateTodayUsage,
+  defaultAnchor, writeAnchor, normModelId, normModel, sanitizeKey, dropModelState,
 } = require('./store')
 const {
   fetchBalanceWith, fetchPlatformUsage, checkUpdate, resetBalanceCache,
+  fetchModelBalance, refreshModels: refreshModelsApi, getModelsPayload,
 } = require('./api')
 const {
   ensureWidget, destroyWidget, winAlive, getWidgetError, getWindow,
@@ -18,11 +20,17 @@ const {
 } = require('./widget')
 const dsh = require('./dsh')
 const backup = require('./backup')
+const assets = require('./assets')
 const sounds = require('./sounds')
+const skins = require('./skins')
+const bubbles = require('./bubbles')
+const codex = require('./codex')
+const dshUsage = require('./dsh-usage')
 
-// 近 N 天用量（含今日，缺失日期补 0），按日期升序
+// 近 N 天用量（含今日，缺失日期补 0），按日期升序。
+// 上限 = 配置的账本保留天数（默认 365，最低 35）：设置页要算「本月汇总」，31 号那天窗口必须能回溯到 1 号。
 function usageDays(days) {
-  const n = clampNum(days, 1, 30, 7)
+  const n = clampNum(days, 1, historyKeepDays(), 7)
   const led = readLedger()
   const out = []
   const now = new Date()
@@ -42,6 +50,56 @@ function usageDays(days) {
     todayAdjust: typeof led.todayAdjust === 'number' ? led.todayAdjust : 0,
     lastAdjustWhy: led.lastAdjustWhy || '',
     lastAdjustAt: led.lastAdjustAt || '',
+    // 额度「不重置」口径的累计已用（归档累计 + 今天）
+    cumUsed: (typeof led.quotaUsed === 'number' ? led.quotaUsed : 0)
+      + (typeof led.todayUsage === 'number' ? led.todayUsage : 0),
+  }
+}
+
+// 账本明细：区间内每日用量 + 当天「未计入用量的余额变动」与「手动校准」记录，供设置页按日展开。
+// 明细日志（adjustLog / calibrateLog）由宿主跨天保留配置的保留天数，区间外查不到。
+// 检索交给设置页本地做（数据一次拿全，输入即过滤，不用每次按键都过一次 IPC）。
+function usageDetail(days) {
+  const n = clampNum(days, 1, historyKeepDays(), 7)
+  const led = readLedger()
+  const p2 = (x) => String(x).padStart(2, '0')
+  // 两条日志都带 ISO 时间戳，取前 10 位即日期
+  const byDate = {}
+  const collect = (list, build) => {
+    for (const e of Array.isArray(list) ? list : []) {
+      const at = e && typeof e.at === 'string' ? e.at : ''
+      if (!at) continue
+      const d = at.slice(0, 10)
+      if (!byDate[d]) byDate[d] = []
+      byDate[d].push(build(e, at))
+    }
+  }
+  collect(led.adjustLog, (e, at) => ({
+    at: at, kind: 'adjust', amount: Number(e.amount) || 0, why: String(e.why || ''),
+  }))
+  collect(led.calibrateLog, (e, at) => ({
+    at: at, kind: 'calibrate', from: Number(e.from) || 0, to: Number(e.to) || 0,
+  }))
+  const now = new Date()
+  const out = []
+  let total = 0
+  for (let i = n - 1; i >= 0; i--) {
+    const dt = new Date(now.getFullYear(), now.getMonth(), now.getDate() - i)
+    const key = dt.getFullYear() + '-' + p2(dt.getMonth() + 1) + '-' + p2(dt.getDate())
+    let usage = 0
+    if (key === led.date) usage = typeof led.todayUsage === 'number' ? led.todayUsage : 0
+    else if (typeof led.history[key] === 'number') usage = led.history[key]
+    out.push({
+      date: key,
+      usage: usage,
+      entries: (byDate[key] || []).sort((a, b) => (a.at < b.at ? -1 : 1)),
+    })
+    total += usage
+  }
+  return {
+    currency: led.lastCurrency || 'CNY',
+    days: out,
+    total: Math.round(total * 10000) / 10000,
   }
 }
 
@@ -78,6 +136,11 @@ function emitConfigChange() {
   for (const cb of configListeners) {
     try { cb(cfg) } catch (err) { logErr('[whale][config] 订阅回调异常', err && err.message) }
   }
+}
+
+// 模型列表/主显示变化后推给挂件（挂件菜单里的「模型」分组要立即跟着变）
+function pushModels() {
+  sendToWidget('whale:models', getModelsPayload())
 }
 
 module.exports = {
@@ -190,7 +253,8 @@ module.exports = {
     // 「自动避让任务栏」或四边间距变了：按当前锚点重摆一次，立刻能看到效果
     if (cfg.avoidTaskbar !== prev.avoidTaskbar
       || cfg.edgeTop !== prev.edgeTop || cfg.edgeRight !== prev.edgeRight
-      || cfg.edgeBottom !== prev.edgeBottom || cfg.edgeLeft !== prev.edgeLeft) {
+      || cfg.edgeBottom !== prev.edgeBottom || cfg.edgeLeft !== prev.edgeLeft
+      || cfg.scrollGapOn !== prev.scrollGapOn || cfg.scrollGapPx !== prev.scrollGapPx) {
       repositionFromAnchor()
     }
     if (cfg.avoidTaskbar !== prev.avoidTaskbar) syncTaskbarWatch()
@@ -214,7 +278,7 @@ module.exports = {
   },
   // 用给定平台 Token 直接验证用量接口（不落库）：成功返回 { amount, tokens }，失败返回 { error }
   testPlatformToken(platformToken) {
-    return fetchPlatformUsage(String(platformToken || '').trim()).then((r) => {
+    return fetchPlatformUsage(String(platformToken || '').trim(), readConfig().tokenPrice).then((r) => {
       // 「今日无用量」说明接口已连通，不算失败
       if (r && r.error === 'no usage') return { amount: 0, tokens: 0, empty: true }
       return r
@@ -224,14 +288,118 @@ module.exports = {
   getUsageHistory(days) {
     return usageDays(days)
   },
+  // 账本明细（近 N 天每日用量 + 当天的异常变动/校准记录），供设置页「账本明细」展开查看
+  getUsageDetail(days) {
+    return usageDetail(days)
+  },
+  // 今日各模型金额占比（按金额降序），供设置页「今日模型占比」。只走令牌模式：
+  // 记账模式只有总额没有模型明细（余额接口不给），返回 error 由页面提示。
+  getTodayModels() {
+    const token = readSecrets().platformToken
+    if (!token) return Promise.resolve({ ok: false, error: '未配置平台 Token' })
+    return fetchPlatformUsage(token, readConfig().tokenPrice).then((r) => {
+      if (r && r.error) return { ok: false, error: r.error }
+      return {
+        ok: true,
+        models: (r && r.byModel) || [],
+        amount: (r && r.amount) || 0,
+        tokens: (r && r.tokens) || 0,
+      }
+    })
+  },
   // 手动校准今日已用（记账模式）：只改当天累计、留校准记录，不动余额基准
   calibrateTodayUsage(amount) {
     return calibrateTodayUsage(amount)
   },
+  // —— 多厂商模型（余额 / 额度）——
+  // 列表（含内置 DeepSeek 那条）+ 当前主显示模型，供设置页与挂件菜单渲染
+  getModels() {
+    return getModelsPayload()
+  },
+  // 厂商模板表：设置页「添加模型」时按模板预填字段路径与接口地址
+  getModelTemplates() {
+    return { templates: MODEL_TEMPLATES, max: MODEL_MAX, mainModelId: DEFAULT_MAIN_MODEL }
+  },
+  // 完整模型配置（含接口地址与字段路径）：设置页行内编辑要原样回填。
+  // getModels() 的载荷是给挂件显示用的，只有余额/额度几个字段，回填会丢配置。
+  getModelsConfig() {
+    return readConfig().models
+  },
+  // 新增 / 编辑一个模型。key 传 undefined 表示「不动密钥」（编辑时用户可能不改）；
+  // 传空串表示清空该模型的密钥。
+  saveModel(model, key) {
+    const m = normModel(model)
+    if (!m) return { ok: false, error: '模型 ID 无效' }
+    const cfg = readConfig()
+    const list = cfg.models.slice()
+    const i = list.map((x) => x.id).indexOf(m.id)
+    if (i < 0 && list.length >= MODEL_MAX) {
+      return { ok: false, error: '最多添加 ' + MODEL_MAX + ' 个模型' }
+    }
+    if (i < 0) list.push(m)
+    else list[i] = m
+    patchConfig({ models: list })
+    if (key !== undefined) {
+      // writeSecrets 是「整体重建」，这里必须带上原有 apiKey/platformToken，
+      // 否则只改一个模型密钥会把 DeepSeek 的密钥一起清掉
+      const cur = readSecrets()
+      const models = Object.assign({}, cur.models)
+      const k = sanitizeKey(key)
+      if (k) models[m.id] = k
+      else delete models[m.id]
+      writeSecrets({ apiKey: cur.apiKey, platformToken: cur.platformToken, models: models })
+    }
+    pushModels()
+    return { ok: true, id: m.id, hasKey: !!readSecrets().models[m.id] }
+  },
+  // 删除模型：同时清掉运行时状态与密钥槽位；被删的是主显示时回退 DeepSeek
+  removeModel(id) {
+    const mid = normModelId(id)
+    if (!mid) return { ok: false, error: '模型 ID 无效' }
+    const cfg = readConfig()
+    // models 先于 mainModelId 处理：列表里已没有这个 id，主显示会自动回退
+    patchConfig({ models: cfg.models.filter((m) => m.id !== mid), mainModelId: cfg.mainModelId })
+    dropModelState(mid)
+    const cur = readSecrets()
+    const models = Object.assign({}, cur.models)
+    delete models[mid]
+    writeSecrets({ apiKey: cur.apiKey, platformToken: cur.platformToken, models: models })
+    pushModels()
+    return { ok: true }
+  },
+  // 切换挂件主显示的模型（'deepseek' 为内置）
+  setMainModel(id) {
+    const cfg = readConfig()
+    const mid = normModelId(id) || DEFAULT_MAIN_MODEL
+    if (mid !== DEFAULT_MAIN_MODEL && !cfg.models.some((m) => m.id === mid)) {
+      return { ok: false, error: '模型不存在' }
+    }
+    patchConfig({ mainModelId: mid })
+    pushModels()
+    return { ok: true, mainModelId: readConfig().mainModelId }
+  },
+  // 用给定条目直接验证（不落库）：key 省略时取该模型已保存的密钥
+  testModel(model, key) {
+    const m = normModel(model)
+    if (!m) return Promise.resolve({ ok: false, error: '模型 ID 无效' })
+    const k = sanitizeKey(key) || readSecrets().models[m.id] || ''
+    return fetchModelBalance(m, k)
+  },
+  // 刷新模型余额/额度（ids 省略 = 全部），结果落运行时状态并推给挂件
+  refreshModels(ids, force) {
+    return refreshModelsApi(ids, force).then(() => {
+      pushModels()
+      return { ok: true }
+    })
+  },
   // —— 自定义音效 ——
-  // 自定义音效元信息（按压/释放两段），供设置页展示当前文件名
+  // 自定义音效元信息（每槽位一个数组），供设置页展示已导入的段落
   getSounds() {
     return sounds.readMeta()
+  },
+  // 音效本体（base64 data URL），供设置页试听（元信息只有文件名，播不了）
+  getSoundData() {
+    return sounds.getSoundData()
   },
   // 导入（复制进 userData/whale-sounds）后推新音频数据给挂件
   importSound(role) {
@@ -239,10 +407,128 @@ module.exports = {
     if (r && r.ok) sendToWidget('whale:sounds', sounds.getSoundData())
     return r
   },
-  removeSound(role) {
-    const r = sounds.removeSound(role)
+  // 选音频但先不落盘：设置页拿到 data URL 后弹波形裁剪，确认了才走 importSoundFromData
+  pickSoundFile() {
+    return sounds.pickSoundFile()
+  },
+  // 写入裁剪后的 WAV（前端已转成 16-bit PCM）并推给挂件
+  importSoundFromData(role, name, dataUrl) {
+    const r = sounds.importSoundFromData(role, name, dataUrl)
     if (r && r.ok) sendToWidget('whale:sounds', sounds.getSoundData())
     return r
+  },
+  // 删一段（给 file）或清空整个槽位（不给 file，设置页的批量清除走这条）
+  removeSound(role, file) {
+    const r = sounds.removeSound(role, file)
+    if (r && r.ok) sendToWidget('whale:sounds', sounds.getSoundData())
+    return r
+  },
+  // —— 自定义挂件形象（画廊） ——
+  // 画廊列表：每项的元信息 + 缩略图 data URL（current = 挂件当前用的那张的 id）
+  listSkins() {
+    return skins.listSkins()
+  },
+  // 当前形象元信息（画廊为空时返回 null），供设置页展示当前文件名
+  getSkin() {
+    return skins.readMeta()
+  },
+  // 当前形象本体（base64 data URL，挂件 img.src 直接用）；空串表示无自定义形象
+  getSkinData() {
+    return skins.getSkinData()
+  },
+  // 导入/删除/切换后推新形象数据给挂件（空串表示无自定义形象，页面回退内置形象）
+  importSkin() {
+    const r = skins.importSkin()
+    if (r && r.ok) sendToWidget('whale:skin', skins.getSkinData())
+    return r
+  },
+  // 选图片但先不落盘：设置页拿到 data URL 后弹裁剪框，确认了才走 importSkinFromData
+  pickImageFile() {
+    return skins.pickImageFile()
+  },
+  // 已选好的文件直接复制（不裁剪）：动图走这条路径保留动画。thumb 是设置页 canvas 生成的缩略图
+  importSkinFromPath(filePath, name, thumb) {
+    const r = skins.importSkinFromPath(filePath, name, thumb)
+    if (r && r.ok) sendToWidget('whale:skin', skins.getSkinData())
+    return r
+  },
+  // 写入裁剪后的 PNG（保留透明通道）并推给挂件
+  importSkinFromData(name, dataUrl, thumb) {
+    const r = skins.importSkinFromData(name, dataUrl, thumb)
+    if (r && r.ok) sendToWidget('whale:skin', skins.getSkinData())
+    return r
+  },
+  // 换用画廊里的某一张
+  setSkinCurrent(id) {
+    const r = skins.setCurrent(id)
+    if (r && r.ok) sendToWidget('whale:skin', skins.getSkinData())
+    return r
+  },
+  // 把某一张移到画廊最前（不改变当前使用的那张）
+  pinSkin(id) {
+    return skins.pinSkin(id)
+  },
+  removeSkin(id) {
+    const r = skins.removeSkin(id)
+    if (r && r.ok) sendToWidget('whale:skin', skins.getSkinData())
+    return r
+  },
+  // —— 自定义气泡图片（点鲸鱼时随机显示一张，无「当前用哪张」概念） ——
+  // 列表：元信息 + 缩略图 data URL，供设置页网格展示
+  listBubbles() {
+    return bubbles.listBubbles()
+  },
+  // 选图片但先不落盘：设置页拿到 data URL 后生成缩略图，确认了才走 importBubbleFromData
+  pickBubbleFile() {
+    return bubbles.pickBubbleFile()
+  },
+  // 原图原样落盘（不裁剪不重编码，保住动图帧）并推给挂件
+  importBubbleFromData(name, dataUrl, thumb) {
+    const r = bubbles.importBubbleFromData(name, dataUrl, thumb)
+    if (r && r.ok) sendToWidget('whale:bubbles', bubbles.getBubbleData())
+    return r
+  },
+  removeBubble(id) {
+    const r = bubbles.removeBubble(id)
+    if (r && r.ok) sendToWidget('whale:bubbles', bubbles.getBubbleData())
+    return r
+  },
+  // —— 素材包（形象 + 音效 + 气泡图打包带走） ——
+  // 导出成一个 .whaleassets 单文件
+  assetsExport() {
+    return assets.exportAssets()
+  },
+  // 选择素材包并解析出预览（不写任何数据）
+  assetsPick() {
+    return assets.pickAssets()
+  },
+  // 按勾选项写入（形象/气泡图补充、音效同槽位覆盖），写完把新素材推给挂件
+  assetsApply(opts) {
+    const r = assets.applyAssets(opts)
+    if (r && r.ok) {
+      if (r.skins && r.skins.added > 0) sendToWidget('whale:skin', skins.getSkinData())
+      if (r.sounds && r.sounds.applied > 0) sendToWidget('whale:sounds', sounds.getSoundData())
+      if (r.bubbles && r.bubbles.added > 0) sendToWidget('whale:bubbles', bubbles.getBubbleData())
+    }
+    return r
+  },
+  // 放弃本次选择
+  assetsCancel() {
+    return assets.clearPending()
+  },
+  // Codex 本地会话统计：读 ~/.codex/sessions 下的 rollout JSONL，按天/模型聚合
+  codexSummary() {
+    return codex.codexSummary()
+  },
+  clearCodexCache() {
+    return codex.clearCodexCache()
+  },
+  // dsh 本地用量统计：读 $DSH_HOME（默认 ~/.dsh）下 dsh-usage 的账本与会话投影缓存，按天/模型聚合
+  dshUsageSummary() {
+    return dshUsage.dshUsageSummary()
+  },
+  clearDshUsageCache() {
+    return dshUsage.clearDshUsageCache()
   },
   // 导出近 N 天用量为 CSV（UTF-8 BOM，Excel 可直接打开）
   exportUsageCsv(days) {
@@ -302,7 +588,7 @@ module.exports = {
     const r = mergeLedgerHistory(rows)
     return { ok: true, path: filePath, imported: r.imported, invalid: invalid, kept: r.kept, from: r.from, to: r.to }
   },
-  // 按项清除本地数据：opts = { secrets, config, ledger, window, sounds }，为 true 的项才会被清除。
+  // 按项清除本地数据：opts = { secrets, config, ledger, window, sounds, skins, bubbles }，为 true 的项才会被清除。
   // 「窗口」项同时含窗口锚点与更新缓存。卸载 uTools 插件不会删除这些数据，需要彻底清除时由设置页调用。
   clearAllData(opts) {
     const o = opts && typeof opts === 'object' ? opts : {}
@@ -310,6 +596,8 @@ module.exports = {
     if (o.secrets) { try { utools.dbCryptoStorage.removeItem(K.secrets) } catch (err) {} }
     if (o.config) {
       try { utools.dbStorage.removeItem(K.config) } catch (err) {}
+      // 模型列表随配置一起没了，运行时快照（余额/额度）留着只会在下次同名重建时冒充新数据
+      try { utools.dbStorage.removeItem(K.models) } catch (err) {}
       clearTimer() // 设置被重置，一并清掉已落库的计时状态
     }
     if (o.ledger) { try { utools.dbStorage.removeItem(K.ledger) } catch (err) {} }
@@ -327,6 +615,22 @@ module.exports = {
         } catch (err) { logErr('[whale][settings] 回退音色失败', err && err.message) }
       }
     }
+    if (o.skins) {
+      try { skins.clearAll() } catch (err) { logErr('[whale][settings] 清除自定义形象失败', err && err.message) }
+      // 同音效：自定义形象没了，形象还停在「自定义」就无图可显示，回退到默认内置形象
+      if (!o.config) {
+        try {
+          if (readConfig().skin === 'custom') {
+            patchConfig({ skin: 'DSniang1' })
+            pushConfig()
+          }
+        } catch (err) { logErr('[whale][settings] 回退形象失败', err && err.message) }
+      }
+    }
+    if (o.bubbles) {
+      // 气泡图没有「当前用哪张」的概念，删光即自动回退内置 rua.gif，不必改配置
+      try { bubbles.clearAll() } catch (err) { logErr('[whale][settings] 清除自定义气泡图失败', err && err.message) }
+    }
     if (o.window) {
       try { utools.dbStorage.removeItem(K.win) } catch (err) {}
       try { utools.dbStorage.removeItem(K.update) } catch (err) {}
@@ -343,9 +647,20 @@ module.exports = {
     if (o.sounds) {
       try { sendToWidget('whale:sounds', sounds.getSoundData()) } catch (err) {}
     }
+    // 同理：自定义形象被清除后推空串，挂件立刻回退内置形象
+    if (o.skins) {
+      try { sendToWidget('whale:skin', skins.getSkinData()) } catch (err) {}
+    }
+    // 同理：气泡图被清除后推空数组，挂件立刻回退内置 rua.gif
+    if (o.bubbles) {
+      try { sendToWidget('whale:bubbles', bubbles.getBubbleData()) } catch (err) {}
+    }
     return {
       ok: true,
-      cleared: { secrets: !!o.secrets, config: !!o.config, ledger: !!o.ledger, window: !!o.window, sounds: !!o.sounds },
+      cleared: {
+        secrets: !!o.secrets, config: !!o.config, ledger: !!o.ledger, window: !!o.window,
+        sounds: !!o.sounds, skins: !!o.skins, bubbles: !!o.bubbles,
+      },
     }
   },
   ensureWidget() {
@@ -381,6 +696,13 @@ module.exports = {
   showWidget() {
     ensureWidget()
     return { ok: winAlive(), error: getWidgetError() }
+  },
+  // 把挂件位置复位到默认锚点（右下角、紧贴边缘）并立即重摆。
+  // 换显示器 / 改分辨率 / 误拖到角落之后，靠它一键找回，不必手动拖拽。
+  resetWidgetPosition() {
+    writeAnchor(defaultAnchor())
+    const ok = repositionFromAnchor()
+    return { ok: ok, error: ok ? '' : '挂件窗口未显示，请先唤出挂件' }
   },
   getWidgetError() {
     return getWidgetError()

@@ -5,10 +5,42 @@
 
   // —— 常量 ——
   var MIN_SCALE = 0.6, MAX_SCALE = 2.5, CLICK_SQ = 9;
-  var REFRESH_MS = 60000, CHANGE_MS = 900, ANIM_MS = 700, BUBBLE_MS = 5000, BUBBLE_REMIND_MS = 8000;
+  var REFRESH_MS = 60000, CHANGE_MS = 900, ANIM_MS = 700, BUBBLE_MS = 5000;
+  // 提醒气泡（峰谷/预算/低余额/穿透说明）停留秒数，由设置页下发；0 = 常驻，手动点掉
+  var remindSec = 8;
   var TIMER_PEEK_MS = 2000; // 「只显计时」关闭时，点小鲸鱼先显示计时的时长（随后切回常规内容）
-  var IMG_URL = './whale/DSniang1.png';
+  // 内置挂件形象（相对插件根目录；用哪张由设置页的 skin 值决定）。
+  // 键 = public/whale/ 下的图片文件名，加形象时这里加一行、设置页「形象」下拉加一个 option；
+  // 宿主 store.js 的 normSkin 另有一份同值的合法值清单，三处要一起改。
+  // 统一用 WebP（有损 q90，带 alpha）：这 13 张原为 PNG 共 10.8MB，占插件包体积的 94%，
+  // 转 WebP 后约 1.0MB（形象 id 不含扩展名，故三处副本不受影响）。
+  // 用户导入的自定义形象仍是 PNG（见 lib/skins.js），走 data URL，与本表无关。
+  var BUILTIN_SKINS = {
+    liuy: './whale/liuy.webp',
+    black: './whale/black.webp',
+    ciya: './whale/ciya.webp',
+    DSniang1: './whale/DSniang1.webp',
+    DSniang02: './whale/DSniang02.webp',
+    DSniang3: './whale/DSniang3.webp',
+    DSniang4: './whale/DSniang4.webp',
+    DSniang5: './whale/DSniang5.webp',
+    DSniang6: './whale/DSniang6.webp',
+    DSniang7: './whale/DSniang7.webp',
+    glby: './whale/glby.webp',
+    Jian: './whale/Jian.webp',
+    '无稽之谈改': './whale/无稽之谈改.webp',
+  };
+  var DEFAULT_SKIN = 'DSniang1'; // 默认形象，也是配置里非法值 / v1.5.0 老值 'whale' 的落点
+  var BUILTIN_SKIN_IDS = Object.keys(BUILTIN_SKINS);
+  var IMG_URL = BUILTIN_SKINS[DEFAULT_SKIN];
   var GIF_URL = './whale/rua.gif';
+  // 气泡配色预设：floating.css 里气泡颜色全部走 CSS 变量，换主题只重写变量、不重建 DOM。
+  // 「低余额」的红色是状态色，不随主题变（见 .dshwv-low）
+  var THEMES = {
+    default: { text: '#536ba9', hint: '#9fb0d9', fill: '#FFFFFF', stroke: '#203170' },
+    dark:    { text: '#dbe4ff', hint: '#94a3c8', fill: '#1f2437', stroke: '#8fa3e0' },
+    sakura:  { text: '#a3486f', hint: '#c98aa8', fill: '#FFF3F8', stroke: '#d9789f' },
+  };
   var SOUND_FILES = {
     duck: { press: './whale/Ya1.mp3', release: './whale/Ya2.mp3' },
     fx1:  { press: './whale/D1.mp3',  release: './whale/D2.mp3' },
@@ -17,11 +49,12 @@
   // 宿主桥接（preload/floating.js 注入）；缺省空实现，单独打开页面也不报错
   var whaleApi = window.whale || {
     onInit: function () {}, onBalance: function () {}, onConfig: function () {}, onSnapped: function () {},
-    onSounds: function () {},
+    onSounds: function () {}, onSkin: function () {}, onBubbles: function () {}, onModels: function () {},
     ready: function () {}, refresh: function () {}, saveConfig: function () {},
     saveTimer: function () {}, notifyTimerDone: function () {},
     dragMove: function () {}, dragEnd: function () {}, setIgnoreMouse: function () {},
     openSettings: function () {}, dsh: function () {}, onDsh: function () {},
+    refreshModels: function () {}, setMainModel: function () {}, hideWidget: function () {},
   };
   // 是否有真实宿主桥接（没有时 dsh 等需要宿主的操作要给提示，而不是一直转圈）
   var HAS_BRIDGE = !!(window.whale && window.whale.__bridge);
@@ -47,16 +80,27 @@
   menuBtn.type = 'button';
   menuBtn.className = 'dshwv-menu-btn';
   menuBtn.title = '菜单';
+  menuBtn.setAttribute('aria-haspopup', 'true');
+  menuBtn.setAttribute('aria-expanded', 'false');
+  menuBtn.setAttribute('aria-label', '菜单');
   menuBtn.innerHTML = '<span></span><span></span><span></span>';
   menuBtn.addEventListener('click', function (e) { e.stopPropagation(); toggleMenu(); });
 
   var menuBox = document.createElement('div');
   menuBox.className = 'dshwv-menu';
+  // 面板是「对话框」而不是 menu/menuitem：里面是开关、下拉、滑块，套 menuitem 语义反而读不出来
+  menuBox.setAttribute('role', 'dialog');
+  menuBox.setAttribute('aria-label', '挂件菜单');
   function menuLabel(text) { var s = document.createElement('span'); s.className = 'dshwv-menu-label'; s.textContent = text; return s; }
   function menuRow() { var r = document.createElement('div'); r.className = 'dshwv-menu-row'; return r; }
 
+  // 菜单分组的展开状态（key → 布尔）：随 config.menuGroups 落盘，重开挂件后保持上次的组合
+  var menuGroups = { look: true, models: true, usage: false, timer: false, dsh: false };
+  var menuGroupEls = {};
+
   // 菜单分组：点标题折叠/展开。只默认展开常用组，避免菜单过长
-  function menuGroup(title, defaultOpen) {
+  // key：落盘标识；onExpand：展开时的回调（dsh 组用它按需拉状态：收着时状态行看不见，不必白探一次 3080）
+  function menuGroup(key, title, defaultOpen, onExpand) {
     var box = document.createElement('div');
     box.className = 'dshwv-group';
     var head = document.createElement('button');
@@ -70,20 +114,31 @@
     var bodyEl = document.createElement('div');
     bodyEl.className = 'dshwv-group-body';
     box.appendChild(head); box.appendChild(bodyEl);
-    var open = !!defaultOpen;
+    var open = typeof menuGroups[key] === 'boolean' ? menuGroups[key] : !!defaultOpen;
     function apply() {
       box.classList.toggle('dshwv-group-open', open);
       bodyEl.style.display = open ? '' : 'none';
       arrow.textContent = open ? '▾' : '▸';
+      head.setAttribute('aria-expanded', open ? 'true' : 'false');
     }
     head.addEventListener('click', function (e) {
       e.stopPropagation();
       open = !open;
+      menuGroups[key] = open;
       apply();
+      saveCfg(); // 记住展开组合：下次开菜单不用重新点开常用组
+      if (open && typeof onExpand === 'function') { try { onExpand() } catch (err) {} }
       positionMenu(); // 高度变化后重新夹取，保证菜单始终在按钮上方
     });
     apply();
-    return { el: box, body: bodyEl };
+    var api = {
+      el: box,
+      body: bodyEl,
+      // 配置回推（设置页 / 别的窗口改过）时同步展开态；不走 saveCfg，否则自己回写自己
+      setOpen: function (v) { open = !!v; apply(); },
+    };
+    menuGroupEls[key] = api;
+    return api;
   }
 
   var scaleInput = document.createElement('input');
@@ -258,6 +313,21 @@
   volInput.addEventListener('input', function () { setVol(volInput.value, false); });
   volInput.addEventListener('change', function () { setVol(volInput.value, true); });
 
+  // 菜单里的控件都没有可见 <label>（同行那个只是 span），补可访问名：
+  // title 只在悬停时可见，辅助技术读的是 aria-label
+  [
+    [scaleInput, '大小（滑块）'], [scaleNumber, '大小（1–20）'],
+    [soundToggle, '音效开关'], [soundSelect, '音色'], [volInput, '音量'],
+    [opacitySelect, '透明度'], [usageSelect, '用量口径'], [peakSelect, '峰谷方案'],
+    [bubbleToggle, '思考气泡'], [remindToggle, '峰谷提醒'], [remindSelect, '到点提醒停留时长'],
+    [timeToggle, '气泡报时'], [lockToggle, '锁定位置'],
+    [timerSelect, '计时模式'], [timerNum, '倒计时分钟'], [timerTime, '定时时刻'],
+    [notifyToggle, '到点通知'], [persistToggle, '记住计时状态'],
+    [pinToggle, '计时气泡常驻'], [onlyToggle, '计时中只显示计时'],
+  ].forEach(function (pair) {
+    pair[0].setAttribute('aria-label', pair[1]);
+  });
+
   var row1 = menuRow();
   row1.appendChild(menuLabel('大小')); row1.appendChild(scaleInput); row1.appendChild(scaleNumber);
   var row2 = menuRow();
@@ -302,6 +372,34 @@
     openSettings();
   });
   row9.appendChild(settingsBtn);
+  // 隐藏挂件：与设置页的「隐藏挂件」同一路径（宿主销毁悬浮窗），
+  // 之后可用「显示挂件」设置按钮或切换挂件快捷键再次唤出
+  var hideBtn = document.createElement('button');
+  hideBtn.type = 'button';
+  hideBtn.className = 'dshwv-menu-link dshwv-menu-link-2nd';
+  hideBtn.textContent = '隐藏挂件';
+  hideBtn.title = '隐藏挂件（设置页「显示挂件」或切换挂件快捷键可再次唤出）';
+  // 二次确认：它在菜单最底部、旁边就是「打开设置」，误触一下挂件就没了（虽然能唤回，
+  // 但用户未必知道路径）→ 首次点击只进确认态，3s 内再点一次才真隐藏
+  var hideConfirmTimer = null;
+  function resetHideBtn() {
+    if (hideConfirmTimer) { clearTimeout(hideConfirmTimer); hideConfirmTimer = null; }
+    hideBtn.classList.remove('dshwv-menu-link-warn');
+    hideBtn.textContent = '隐藏挂件';
+  }
+  hideBtn.addEventListener('click', function (e) {
+    e.stopPropagation();
+    if (!hideConfirmTimer) {
+      hideBtn.classList.add('dshwv-menu-link-warn');
+      hideBtn.textContent = '再点一次隐藏';
+      hideConfirmTimer = setTimeout(resetHideBtn, 3000);
+      return;
+    }
+    resetHideBtn();
+    closeMenu();
+    try { whaleApi.hideWidget(); } catch (err) {}
+  });
+  row9.appendChild(hideBtn);
   row9.classList.add('dshwv-menu-foot');
 
   // —— dsh（DeepSeek Harness，开发者）：启动 / 重启 / 结束 / 更新 + 打开页面 + 状态 ——
@@ -338,25 +436,106 @@
   rowDshCmd.appendChild(menuLabel('命令')); rowDshCmd.appendChild(dshCmdEl);
 
   // 分组：常用组默认展开，其余折叠，菜单整体高度约减半
-  var groupLook = menuGroup('外观与音效', true);
+  var groupLook = menuGroup('look', '外观与音效', true);
   groupLook.body.appendChild(row1); groupLook.body.appendChild(row2); groupLook.body.appendChild(row3);
   groupLook.body.appendChild(rowOpacity);
   groupLook.body.appendChild(row6); groupLook.body.appendChild(row7); groupLook.body.appendChild(row8);
-  var groupUsage = menuGroup('用量与峰谷', false);
+  var groupUsage = menuGroup('usage', '用量与峰谷', false);
   groupUsage.body.appendChild(row4); groupUsage.body.appendChild(row5);
   groupUsage.body.appendChild(rowRemind);
-  var groupTimer = menuGroup('计时', false);
+  var groupTimer = menuGroup('timer', '计时', false);
   groupTimer.body.appendChild(rowTimer); groupTimer.body.appendChild(rowTimerArg);
   groupTimer.body.appendChild(rowNotify); groupTimer.body.appendChild(rowOnly);
   groupTimer.body.appendChild(rowPin); groupTimer.body.appendChild(rowPersist);
-  var groupDsh = menuGroup('dsh（开发者）', false);
+  var groupDsh = menuGroup('dsh', 'dsh（开发者）', false, function () { dshSend('status') });
   groupDsh.body.appendChild(rowDsh); groupDsh.body.appendChild(rowDshPage);
   groupDsh.body.appendChild(rowDshState); groupDsh.body.appendChild(rowDshCmd);
+
+  // —— 多厂商模型：点一行即把它设为挂件主显示 ——
+  var groupModels = menuGroup('models', '模型', true);
+  var modelsListEl = document.createElement('div');
+  modelsListEl.className = 'dshwv-models';
+  var rowModelsRefresh = menuRow();
+  var modelsRefreshBtn = document.createElement('button');
+  modelsRefreshBtn.type = 'button';
+  modelsRefreshBtn.className = 'dshwv-menu-link';
+  modelsRefreshBtn.textContent = '刷新全部';
+  // 忙碌态只在「刷新完成」时收尾：宿主收到请求会先推一次旧快照、拉完再推一次带 refreshDone 的
+  // （见 preload/lib/ipc.js）。用定时器猜网络耗时不是提前解锁（慢了能连点）就是残留「刷新中…」。
+  // 兜底定时器只防极端情况（宿主异常 / 窗口重建丢了那次推送），不能让按钮永久禁用
+  var modelsRefreshTimer = null;
+  function setModelsRefreshBusy(busy) {
+    if (modelsRefreshTimer) { clearTimeout(modelsRefreshTimer); modelsRefreshTimer = null; }
+    modelsRefreshBtn.disabled = busy;
+    modelsRefreshBtn.textContent = busy ? '刷新中…' : '刷新全部';
+    if (busy) {
+      modelsRefreshTimer = setTimeout(function () {
+        modelsRefreshTimer = null;
+        setModelsRefreshBusy(false);
+      }, 30000);
+    }
+  }
+  modelsRefreshBtn.addEventListener('click', function (e) {
+    e.stopPropagation();
+    setModelsRefreshBusy(true);
+    whaleApi.refreshModels(null, true);
+  });
+  rowModelsRefresh.appendChild(menuLabel('余额'));
+  rowModelsRefresh.appendChild(modelsRefreshBtn);
+  groupModels.body.appendChild(modelsListEl);
+  groupModels.body.appendChild(rowModelsRefresh);
+
   menuBox.appendChild(groupLook.el);
+  menuBox.appendChild(groupModels.el);
   menuBox.appendChild(groupUsage.el);
   menuBox.appendChild(groupTimer.el);
   menuBox.appendChild(groupDsh.el);
   menuBox.appendChild(row9);
+
+  // 模型行的数值文案：额度型显示「已用 x%」，余额型显示原币种金额
+  function modelValueText(m) {
+    if (m.error) return '失败';
+    if (m.kind === 'quota') {
+      return (m.usedPct === null || m.usedPct === undefined) ? '--' : '已用 ' + Number(m.usedPct) + '%';
+    }
+    if (m.kind === 'codex') {
+      return (m.tokens === null || m.tokens === undefined) ? '--' : fmtTokens(m.tokens);
+    }
+    if (m.balance === null || m.balance === undefined) return '--';
+    return fmtModelMoney(m.balance, m.currency);
+  }
+  function renderModelsMenu() {
+    // 只有内置 DeepSeek 时整组收起，菜单保持原样；添加过模型才出现
+    var hasExtra = models.length > 1;
+    groupModels.el.style.display = hasExtra ? '' : 'none';
+    modelsListEl.textContent = '';
+    if (!hasExtra) return;
+    models.forEach(function (m) {
+      var row = document.createElement('button');
+      row.type = 'button';
+      var on = m.id === mainModelId;
+      row.className = 'dshwv-model-row' + (on ? ' dshwv-model-on' : '');
+      var mark = document.createElement('span');
+      mark.className = 'dshwv-model-mark';
+      mark.textContent = on ? '✓' : '';
+      var name = document.createElement('span');
+      name.className = 'dshwv-model-name';
+      name.textContent = m.name + (m.builtin ? '（内置）' : '');
+      var val = document.createElement('span');
+      val.className = 'dshwv-model-val' + (m.error ? ' dshwv-model-err' : '');
+      val.textContent = modelValueText(m);
+      // Codex 的订阅窗口塞进悬浮提示：菜单行只有一行，放不下窗口信息，鼠标停一下就能看到
+      var winTip = m.kind === 'codex' ? codexWinParts(m.codexWindows) : '';
+      row.title = (m.error ? m.error : (on ? '当前挂件主显示' : '点击设为挂件主显示')) + (winTip ? ' · ' + winTip : '');
+      row.appendChild(mark); row.appendChild(name); row.appendChild(val);
+      row.addEventListener('click', function (e) {
+        e.stopPropagation();
+        if (on) return;
+        whaleApi.setMainModel(m.id);
+      });
+      modelsListEl.appendChild(row);
+    });
+  }
 
   // dsh 状态渲染（宿主回推快照；菜单打开与启动时也会主动问一次）
   function dshRender(s) {
@@ -415,16 +594,17 @@
   var amountEl = document.createElement('div');
   amountEl.className = 'dshwv-amount';
   var hintEl = document.createElement('div');
-  hintEl.className = 'dshwv-hint';
+  // 常驻说明行默认就允许换行：它是三行里最长的一行，nowrap 会撑宽、把三行一起缩小（见 fitBubbleText）
+  hintEl.className = 'dshwv-hint dshwv-wrap';
   textBox.appendChild(labelEl); textBox.appendChild(amountEl); textBox.appendChild(hintEl);
 
   var bubbleBox = document.createElement('div');
   bubbleBox.className = 'dshwv-bubble';
   bubbleBox.innerHTML =
     '<svg viewBox="0 0 1026 700" preserveAspectRatio="xMidYMid meet" xmlns="http://www.w3.org/2000/svg">' +
-    '<path class="dshwv-bshape" fill="#FFFFFF" stroke="#203170" stroke-width="18" stroke-linejoin="round" stroke-linecap="round" d="M 827 248 A 373 232 0 1 0 81 246 A 373 232 0 0 0 301 465 A 57 32 10 0 0 413 484 A 373 232 0 0 0 827 248 Z"/>' +
-    '<ellipse class="dshwv-b1" cx="352" cy="561" rx="37.5" ry="26" fill="#FFFFFF" stroke="#203170" stroke-width="18"/>' +
-    '<ellipse class="dshwv-b2" cx="442" cy="646" rx="24.5" ry="18" fill="#FFFFFF" stroke="#203170" stroke-width="18"/>' +
+    '<path class="dshwv-bshape" stroke-width="18" stroke-linejoin="round" stroke-linecap="round" d="M 827 248 A 373 232 0 1 0 81 246 A 373 232 0 0 0 301 465 A 57 32 10 0 0 413 484 A 373 232 0 0 0 827 248 Z"/>' +
+    '<ellipse class="dshwv-b1" cx="352" cy="561" rx="37.5" ry="26" stroke-width="18"/>' +
+    '<ellipse class="dshwv-b2" cx="442" cy="646" rx="24.5" ry="18" stroke-width="18"/>' +
     '</svg>';
   var gifEl = document.createElement('img');
   gifEl.className = 'dshwv-gif';
@@ -432,7 +612,27 @@
   gifEl.alt = '';
   gifEl.draggable = false;
   var gifFailed = false;
-  gifEl.onerror = function () { gifFailed = true; };
+  // 当前 gifEl.src 对应的「原始值」：img.src 读出来是绝对 URL（相对路径会被解析成 file://…），
+  // 拿它跟 './whale/rua.gif' 比对永远不相等，只能自己记一份
+  var gifSrcSet = GIF_URL;
+  // 换图：自定义气泡图与内置 rua.gif 共用这一个 <img>。图变了才重设 src 并复位失败标记，
+  // 否则每次抽到同一张都会重新发起加载（data URL 也会白解码一遍）
+  function setGifSrc(url) {
+    var u = url || GIF_URL;
+    if (u === gifSrcSet) return;
+    gifSrcSet = u;
+    gifFailed = false;
+    try { gifEl.src = u; } catch (err) { gifFailed = true; }
+  }
+  gifEl.onerror = function () {
+    gifFailed = true;
+    // 自定义图加载失败：此时气泡已经切到「只显示图」的状态，光记标记会留下一片空白，
+    // 当场换成失败文案（下一次抽到别的图时 setGifSrc 会复位标记）
+    if (gifEl.style.display === 'block' && bubbleShown) {
+      bubbleRandomLines = singleCenter('A', pickOne(QUOTES.gifFail), '', true);
+      applyBubbleLines(bubbleRandomLines);
+    }
+  };
   bubbleBox.appendChild(gifEl);
   bubbleBox.appendChild(textBox);
   bubbleBox.addEventListener('click', function (e) {
@@ -441,13 +641,16 @@
     if (bubbleRandomActive || bubbleTimerActive) {
       // 「只显计时」关闭时计时只是先弹一下：点掉它要接着显示常规内容，而不是直接把气泡收起
       if (bubbleTimerActive && !timerTakesBubble()) { timerPeekDone(); return; }
+      // 依次播放：随机台词阶段再点一次切下一组，播完最后一组才收起
+      if (bubbleRandomActive && clickQueueOn && queueNext()) return;
       hideBubble(); // 再次点击：关闭（计时气泡收起后计时继续）
     } else {
-      // 首次点击：切随机台词，并重置自动关闭计时（保证第二段有完整停留时间）
+      // 首次点击：切随机台词（依次播放时从第一组开始），并重置自动关闭计时（保证第二段有完整停留时间）
       bubbleRemindActive = false; // 用户点击后让随机台词接管，避免被峰谷提醒覆盖
       bubbleRemindLines = null;
       bubbleRandomActive = true;
-      bubbleRandomLines = pickRandomLines();
+      queueIdx = 0;
+      bubbleRandomLines = clickQueueOn ? RANDOM_GROUPS[0].lines() : pickRandomLines();
       swapBubbleContent(function () { applyBubbleLines(bubbleRandomLines); });
       if (bubbleTimer) { clearTimeout(bubbleTimer); bubbleTimer = null; }
       bubbleTimer = setTimeout(hideBubble, BUBBLE_MS);
@@ -464,17 +667,31 @@
   document.body.appendChild(menuBox);
 
   // —— 状态 ——
-  var state = { balance: null, currency: null, todayUsage: null, isPeak: false, status: 'loading', message: '', adjustNote: null };
+  var state = { balance: null, currency: null, todayUsage: null, isPeak: false, peakNextAt: 0, budgetOver: false, lowOver: false, status: 'loading', message: '', adjustNote: null };
+  // 多厂商模型（宿主 whale:models 推送）：list 含内置 DeepSeek 那条，mainModelId 决定挂件主显示
+  var models = [];
+  var mainModelId = 'deepseek';
+  // 币种前缀与宿主 constants.js 的 MODEL_MONEY_PREFIX 保持一致（浮动页没有 require，读不到宿主常量）
+  var MODEL_MONEY_PREFIX = { CNY: '¥ ', USD: '$' };
   var curScale = 1.5;
   var flipped = false;
   var animDelayTimer = null, drag = null, shown = null, animId = null;
   var bubbleShown = false, bubbleTimer = null, bubbleRandomActive = false, bubbleRandomLines = null;
   var bubbleRemindActive = false, bubbleRemindLines = null; // 峰谷提醒气泡（优先级高于随机台词）
+  var queueIdx = 0; // 「点按依次播放」当前播到第几组台词
   var bubbleTimerActive = false; // 计时气泡（正计时/倒计时/定时/时间到），优先级最高
   var BUBBLE_STYLE_CLASS = { A: 'dshwv-label', B: 'dshwv-amount', P: 'dshwv-period', C: 'dshwv-hint' };
 
   var soundOn = true, soundVol = 0.9, soundSet = 'duck';
-  var customSounds = { press: null, release: null }; // 宿主推送的 base64 data URL（whale:sounds）
+  // 宿主推送的 base64 data URL（whale:sounds），**每个槽位是一组**（同一类可导入多段，播放时随机取一条）。
+  // press/release 是「音色」两段，low/budget/peak/pass 是四类提醒各自的提醒音（没有内置回落，留空即静音）
+  var customSounds = { press: [], release: [], low: [], budget: [], peak: [], pass: [] };
+  var customSkin = '';         // 宿主推送的自定义形象 base64 data URL（whale:skin，空串=未导入）
+  // 宿主推送的自定义气泡图片（whale:bubbles，base64 data URL 数组）。与形象不同，这里没有
+  // 「当前用哪张」：抽到「动图组」时从里面随机取一张，空数组则回退内置 rua.gif
+  var customBubbles = [];
+  var skinId = DEFAULT_SKIN;   // 当前形象：BUILTIN_SKINS 的键，或 'custom'（用户导入）
+  var themeId = 'default';     // 当前气泡配色：'default' | 'dark' | 'sakura'
   var opacityPct = 100;        // 窗口透明度 20–100
   var passThroughOn = false;   // 鼠标穿透总开关：开启后连鲸鱼也穿透；悬停片刻可临时接管
   // 透明度：写成 CSS 变量 --dshw-opacity，由样式表消费（.dshwv-root 与菜单打开态各自相乘）。
@@ -483,6 +700,26 @@
   function applyOpacityCss() {
     try {
       document.documentElement.style.setProperty('--dshw-opacity', String(opacityPct / 100));
+    } catch (err) {}
+  }
+
+  // 套用挂件形象：内置形象走插件包内相对路径，自定义走宿主推来的 data URL。
+  // 命中测试画布是按图片像素建的，换图必须重建，否则透明区穿透判定还停留在旧形象的轮廓上。
+  function applySkin() {
+    var url = (skinId === 'custom' && customSkin) ? customSkin : (BUILTIN_SKINS[skinId] || BUILTIN_SKINS[DEFAULT_SKIN]);
+    if (url === IMG_URL) return;
+    IMG_URL = url;
+    try { img.src = url; } catch (err) { logErr('[whale][page] 切换形象失败', err && err.message); }
+    setupHitTest();
+  }
+  // 套用气泡配色：只重写 CSS 变量（颜色本体在样式表里，见 .dshwv-text / .dshwv-hint / 气泡 SVG）
+  function applyTheme() {
+    var t = THEMES[themeId] || THEMES.default;
+    try {
+      root.style.setProperty('--dshwv-text', t.text);
+      root.style.setProperty('--dshwv-hint', t.hint);
+      root.style.setProperty('--dshwv-fill', t.fill);
+      root.style.setProperty('--dshwv-stroke', t.stroke);
     } catch (err) {}
   }
 
@@ -520,8 +757,12 @@
     menuBtn.classList.remove('dshwv-menu-btn-visible');
     sendIgnoreMouse(true);
   }
-  // 穿透开关切换的一次性说明气泡（穿透只影响输入、不影响绘制，气泡照常可见）
-  function showPassNotice(on) {
+  // 提醒气泡自动收起：remindSec = 0 表示常驻，等用户点掉（设置页可配）
+  function setRemindAutoHide() {
+    if (remindSec > 0) bubbleTimer = setTimeout(hideBubble, remindSec * 1000);
+  }
+  // 提醒气泡统一入口：峰谷/预算/低余额/穿透说明都走这里（三行内容，停留秒数共用设置）
+  function showRemindBubble(lines) {
     if (!bubbleOn || timerActive()) return; // 计时进行中不打断（此时也有系统通知兜底）
     if (bubbleTimer) { clearTimeout(bubbleTimer); bubbleTimer = null; }
     if (gifFadeTimer) { clearTimeout(gifFadeTimer); gifFadeTimer = null; }
@@ -530,24 +771,25 @@
     bubbleRandomLines = null;
     bubbleTimerActive = false;
     bubbleRemindActive = true;
-    bubbleRemindLines = [
-      { t: on ? '【鼠标穿透】已开启' : '【鼠标穿透】已关闭', s: 'A', c: '' },
-      { t: on ? '穿透中' : '可操作', s: 'P', c: on ? '#e0433f' : '#2fa24c' },
-      {
-        t: on ? '在鲸鱼上停留约 1 秒可临时接管；也可用「切换鼠标穿透」快捷键关闭' : '点击、拖拽与菜单已恢复',
-        s: 'C', c: '', w: true,
-      },
-    ];
+    bubbleRemindLines = lines;
     restoreBubbleLines();
-    applyBubbleLines(bubbleRemindLines);
+    applyBubbleLines(lines);
     bubbleBox.classList.add('dshwv-bubble-open');
-    bubbleTimer = setTimeout(hideBubble, BUBBLE_REMIND_MS);
+    setRemindAutoHide();
+  }
+  // 穿透开关切换的一次性说明气泡（穿透只影响输入、不影响绘制，气泡照常可见）。
+  // 文案取设置页的「提醒文案」模板，红/绿沿用状态色（开=红，关=绿）
+  function showPassNotice(on) {
+    playAlertSound('pass');
+    showRemindBubble(alertLines(on ? 'passOn' : 'passOff', {}, on ? '#e0433f' : '#2fa24c'));
   }
   var timerNotifyOn = true, timerPersistOn = true; // 计时到点系统通知 / 计时状态持久化
   var usageMode = 'ledger', peakMode = 'default', bubbleOn = true;
   var peakRemindOn = true; // 峰/谷时段切换时用气泡提醒（需开启思考气泡）
   var menuBtnEnabled = true; // 挂件右上角菜单按钮开关（设置页可关）
   var lowAlertOn = true, lowAlertAmount = 10; // 低余额预警（余额低于阈值时数字变红）
+  var budgetOn = false, budgetAmount = 0; // 今日预算：用量超过预算额时提醒（0 = 未设置）
+  var clickQueueOn = false; // 点气泡依次播放台词（关掉则每次随机一组）
   var timeBubbleOn = true; // 报时：气泡首行显示当前时间
   var dragLock = false; // 锁定位置：禁止拖拽与滚轮缩放（点击刷新仍可用）
   var menuOpen = false;
@@ -556,8 +798,71 @@
   var lastIsPeak = null; // 上一次的峰谷状态，用于检测「进入峰时/谷时」的切换
 
   // —— 随机台词 ——
-  function pickOne(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
-  // 报时文案（鲸鱼娘语气，按时段变化）
+  // 台词库内置默认值：与宿主 store.js 的 QUOTES_DEFAULT 逐字一致（浮动页没有 require 读不到宿主常量，
+  // 靠 scripts/check-shared.mjs 在构建时比对，改一处忘另一处会构建失败）。
+  // hint / chat / dsh / short 是内置六组里那四个文本组的默认台词（设置页没配过组列表时用它拼出六组）；
+  // time 是白天报时模板（{t} 换当前时间）、gifFail 是动图加载失败的顶替文案 —— 这两项不走抽签，
+  // 固定就是这两份，设置页改过则由 applyConfig 覆盖。
+  var QUOTES = {
+    hint: ['好模型... ↓', '好女孩...↓'],
+    chat: ['不知道用户有什么用，先赶走吧~', '我...我...我也要挣钱吗？', '我去吃饭啦，测完叫我', '压力一只蓝色大肥鱼？！', 'DeepSleep...', '坏了...用户彻底怒了！'],
+    dsh: ['你目录里的dsh是什么...大烧货吗...?', '恭喜你实现token自由！token全跑了！', '真当我是便宜货啊...'],
+    short: ['哦鲸鲸...'],
+    time: ['现在是 {t}', '已经 {t} 啦', '都 {t} 了哦', '小鲸鱼报时：{t}'],
+    gifFail: ['gif 加载失败了...', '今天没有动图给你看~', '呜呜 动图不见了...'],
+  };
+  // 上面这两项（不走抽签的那两份）的 key：applyConfig 里逐个覆盖
+  var QUOTE_TEXT_KEYS = ['time', 'gifFail'];
+  // 随机取一条，且不与上次同组取到的重复（组内只有 1 条时无从避免，直接返回）。
+  // 记在数组自身引用上，所以每一组各记各的，不会互相干扰
+  var lastPicked = new WeakMap();
+  function pickOne(arr) {
+    if (arr.length < 2) return arr[0];
+    var last = lastPicked.get(arr);
+    var i = Math.floor(Math.random() * arr.length);
+    // 撞上上次那条就在「其余 len-1 条」里等概率重抽一个（不是简单 +1，避免总是抽到相邻那条）
+    if (i === last) i = (i + 1 + Math.floor(Math.random() * (arr.length - 1))) % arr.length;
+    lastPicked.set(arr, i);
+    return arr[i];
+  }
+  // 随机抽一张自定义气泡图（不连续重复，复用 pickOne 的 WeakMap 机制）；没导入时回空串，
+  // 调用方据此回退内置 rua.gif
+  function pickBubbleUrl() {
+    if (!customBubbles.length) return '';
+    return pickOne(customBubbles) || '';
+  }
+  // 提醒文案模板：内置默认值（与宿主 store.js 的 ALERTS_DEFAULT 保持一致，浮动页没有 require 读不到宿主常量）。
+  // 四类提醒（低余额 / 今日预算 / 峰谷切换 / 鼠标穿透）共用这一份，气泡与系统通知取同一套文案。
+  // 模板按行映射到气泡三行：第 1 行标题 / 第 2 行大字 / 第 3 行说明。设置页改过则由 applyConfig 覆盖。
+  var ALERTS = {
+    low: '【余额预警】\n仅剩 {balance}\n已低于预警阈值 {threshold}（设置页可改）',
+    budget: '【预算提醒】\n超预算 {over}\n今日已用 {used}，预算 {budget}（设置页可改）',
+    peakOn: '【峰时提醒】\n峰时\n叮咚～进入峰时段啦（北京时间）！{schedule}，其余谷时',
+    peakOff: '【谷时提醒】\n谷时\n好消息～进入谷时段啦（北京时间）！{schedule}外为谷时',
+    passOn: '【鼠标穿透】已开启\n穿透中\n在鲸鱼上停留约 1 秒可临时接管；也可用「切换鼠标穿透」快捷键关闭',
+    passOff: '【鼠标穿透】已关闭\n可操作\n点击、拖拽与菜单已恢复',
+  };
+  // 模板 → 气泡三行：替换 {占位符}（未提供的原样留着，便于发现写错），
+  // 行数不足对应槽位留空，超过三行的并入说明行（气泡只有三行，多了显示不出来）
+  function alertLines(key, vars, midColor) {
+    var v = vars || {};
+    var text = String(ALERTS[key] || '').replace(/\{(\w+)\}/g, function (m, k) {
+      return Object.prototype.hasOwnProperty.call(v, k) ? String(v[k]) : m;
+    });
+    var all = text.split('\n');
+    var rows = [];
+    for (var i = 0; i < all.length; i++) {
+      var s = all[i].replace(/^\s+|\s+$/g, '');
+      if (s) rows.push(s);
+    }
+    if (rows.length > 3) rows = [rows[0], rows[1], rows.slice(2).join(' ')];
+    return [
+      rows[0] ? { t: rows[0], s: 'A', c: '' } : null,
+      rows[1] ? { t: rows[1], s: 'P', c: midColor || '' } : null,
+      rows[2] ? { t: rows[2], s: 'C', c: '', w: true } : null,
+    ];
+  }
+  // 报时文案（鲸鱼娘语气，按时段变化）；白天几种说法可在设置页改，{t} 换成当前时间
   function timeLabel() {
     var d = new Date();
     var p2 = function (n) { return String(n).padStart(2, '0'); };
@@ -566,12 +871,7 @@
     if (h < 6) return '都 ' + t + ' 了，还不睡吗…';
     if (h >= 23) return '都 ' + t + ' 了，早点休息…';
     if (h < 11) return '早安~ 现在是 ' + t;
-    return pickOne([
-      '现在是 ' + t,
-      '已经 ' + t + ' 啦',
-      '都 ' + t + ' 了哦',
-      '小鲸鱼报时：' + t,
-    ]);
+    return pickOne(QUOTES.time).split('{t}').join(t);
   }
   function singleCenter(style, text, color, wrap) { return [null, { t: text, s: style, c: color || '', w: !!wrap }, null]; }
   function fmt(balance, currency) {
@@ -579,25 +879,179 @@
     var fixed = isFinite(num) ? num.toFixed(2) : '--';
     return currency === 'CNY' ? '¥ ' + fixed : fixed + ' ' + currency;
   }
+  // token 数按万/亿缩写（与设置页口径一致）：大字行放不下长串数字
+  function fmtTokens(n) {
+    var v = Number(n) || 0;
+    if (v >= 1e8) return (v / 1e8).toFixed(2) + ' 亿';
+    if (v >= 1e4) return (v / 1e4).toFixed(1) + ' 万';
+    return String(v);
+  }
+  // —— 多厂商模型：主显示取值 ——
+  function currentModel() {
+    for (var i = 0; i < models.length; i++) {
+      if (models[i].id === mainModelId) return models[i];
+    }
+    return null;
+  }
+  // 原币种金额（不折汇率：各模型余额彼此独立，不参与 DeepSeek 的账本记账）
+  function fmtModelMoney(v, currency) {
+    var num = Number(v);
+    var fixed = isFinite(num) ? num.toFixed(2) : '--';
+    var pre = MODEL_MONEY_PREFIX[currency];
+    return pre ? pre + fixed : fixed + ' ' + String(currency || '');
+  }
+  function resetTail(ms) {
+    var t = Number(ms) || 0;
+    if (!t) return '';
+    var d = new Date(t);
+    return ' · ' + (d.getMonth() + 1) + '-' + d.getDate() + ' ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes()) + ' 重置';
+  }
+  // 常规状态下的标题行：主显示不是 DeepSeek 时用该模型名（报时只属于内置 DeepSeek）
+  function defaultLabelText() {
+    if (mainModelId !== 'deepseek') {
+      var m = currentModel();
+      var suffix = m && m.kind === 'quota' ? ' 额度' : (m && m.kind === 'codex' ? ' 用量' : ' 余额');
+      return (m ? m.name : '模型') + suffix;
+    }
+    return timeBubbleOn ? timeLabel() : 'DeepSeek 余额';
+  }
+  // 「今日已用 ¥x」在常驻主显示、峰谷组、多厂商模型三处都要显示，措辞集中在这里，避免各写各的
+  function usedTodayText(money) { return '今日已用 ' + money; }
+  // Codex 订阅窗口文案（5h / 周）：与额度型多窗口同一写法 —— 逐窗口列已用%，尾部接首个窗口的重置时间。
+  // 窗口名优先按 window_minutes 推断（各 Codex 版本给的不一样），没给就按位置叫 5h / 周
+  function codexWinLabel(w, idx) {
+    var mins = Number(w.windowMinutes) || 0;
+    if (mins >= 1440) return Math.round(mins / 1440) + '天';
+    if (mins >= 60) return Math.round(mins / 60) + 'h';
+    if (mins > 0) return mins + '分钟';
+    return idx === 0 ? '5h' : '周';
+  }
+  function codexWinParts(w) {
+    if (!w) return '';
+    var list = [];
+    if (w.primary) list.push(w.primary);
+    if (w.secondary) list.push(w.secondary);
+    var out = [];
+    for (var i = 0; i < list.length; i++) {
+      var one = list[i];
+      if (one.usedPct === null || one.usedPct === undefined) continue;
+      out.push(codexWinLabel(one, i) + ' ' + Number(one.usedPct) + '%');
+    }
+    if (!out.length) return '';
+    return out.join(' · ') + (w.primary ? resetTail(w.primary.resetAt) : '');
+  }
+  // 主显示模型的金额行 + 说明行
+  function modelDisplay() {
+    var m = currentModel();
+    if (!m) return { amount: '…', hint: '加载中…' };
+    if (m.error) return { amount: '--', hint: String(m.error).slice(0, 14) };
+    if (m.kind === 'quota') {
+      if (m.usedPct === null || m.usedPct === undefined) return { amount: '…', hint: '额度查询中…' };
+      var left = Math.round((100 - Number(m.usedPct)) * 10) / 10;
+      // 多窗口接口（OpenCode Go 的 5h/周/月、MiniMax 的 5h/周）：大字取首个窗口的剩余，
+      // 说明行逐窗口列出已用% —— 只显示首个窗口的话，周/月额度在挂件上完全看不到
+      var ws = m.windows;
+      if (ws && ws.length > 1) {
+        var parts = [];
+        for (var i = 0; i < ws.length; i++) parts.push(ws[i].label + ' ' + Number(ws[i].usedPct) + '%');
+        return { amount: left + '%', hint: '已用 ' + parts.join(' · ') + resetTail(m.resetAt) };
+      }
+      return { amount: left + '%', hint: '已用 ' + Number(m.usedPct) + '%' + resetTail(m.resetAt) };
+    }
+    // Codex 本地会话统计：大字是今日 token，说明行给本月累计
+    if (m.kind === 'codex') {
+      if (m.tokens === null || m.tokens === undefined) return { amount: '…', hint: '统计中…' };
+      var mh = '今日 token';
+      if (m.monthTokens) mh += ' · 本月 ' + fmtTokens(m.monthTokens);
+      // 订阅窗口（5h / 周）：挂件上就能看到已用% 与重置时间，不必进设置页；没订阅时这段为空
+      var cw = codexWinParts(m.codexWindows);
+      if (cw) mh += ' · ' + cw;
+      return { amount: fmtTokens(m.tokens), hint: mh };
+    }
+    if (m.balance === null || m.balance === undefined) return { amount: '…', hint: '查询中…' };
+    // 今日已用是「本次余额 - 上次余额」估出来的（插件拦不到对话），所以带 ~ 标记
+    var used = (m.todayUsage === null || m.todayUsage === undefined)
+      ? (Number(m.at) ? '更新于 ' + fmtHm(m.at) : '')
+      : '~' + usedTodayText(fmtModelMoney(m.todayUsage, m.currency));
+    return { amount: fmtModelMoney(m.balance, m.currency), hint: used };
+  }
+  // 第 3 行（说明行）一律允许换行：它是三行里最长的一行，也是三行中唯一会超出可用宽
+  // （FIT_W=660u）的那行。若保持 nowrap，fitBubbleText 会按它算出缩放系数、把三行一起缩小
+  // —— 第 2 行的大字金额会跟着从 140u 掉到约 105u，挂件越小越看不清。
   function buildGroup1() {
+    // 峰谷时段是 DeepSeek 专属概念：主显示换成别的模型时，这组台词改报该模型的余额/额度
+    if (mainModelId !== 'deepseek') {
+      var d = modelDisplay();
+      return [
+        { t: defaultLabelText(), s: 'A', c: '' },
+        { t: d.amount, s: 'P', c: '' },
+        { t: d.hint, s: 'C', c: '', w: true },
+      ];
+    }
     var peak = !!state.isPeak;
-    var offText = '空闲时段', peakText = '高峰时段';
-    if (peakMode === 'liangwen') { offText = '梁文谷'; peakText = '梁文峰'; }
-    else if (peakMode === 'qiangqiang') { offText = '!?谷谷?!'; peakText = '!?峰峰?!'; }
+    var tail = peakCountdownText();
     return [
       { t: '当前时间段为:', s: 'A', c: '' },
-      { t: peak ? peakText : offText, s: 'P', c: peak ? '#e0433f' : '#2fa24c' },
-      { t: '今日已用 ' + fmt(state.todayUsage, state.currency), s: 'C', c: '' },
+      { t: peakLabelText(peak), s: 'P', c: peak ? '#e0433f' : '#2fa24c' },
+      { t: usedTodayText(fmt(state.todayUsage, state.currency)) + (tail ? ' · ' + tail : ''), s: 'C', c: '', w: true },
     ];
   }
-  var RANDOM_GROUPS = [
-    { w: 45, lines: buildGroup1 },
-    { w: 7, lines: function () { return singleCenter('B', pickOne(['好模型... ↓', '好女孩...↓'])); } },
-    { w: 7, lines: function () { return singleCenter('A', pickOne(['不知道用户有什么用，先赶走吧~', '我...我...我也要挣钱吗？', '我去吃饭啦，测完叫我', '压力一只蓝色大肥鱼？！', 'DeepSleep...', '坏了...用户彻底怒了！']), '', true); } },
-    { w: 10, lines: function () { return { gif: true }; } },
-    { w: 3, lines: function () { return singleCenter('A', pickOne(['你目录里的dsh是什么...大烧货吗...?', '恭喜你实现token自由！token全跑了！', '真当我是便宜货啊...']), '', true); } },
-    { w: 1, lines: function () { return singleCenter('B', '哦鲸鲸... '); } },
-  ];
+  // 内置默认组：与宿主 store.js 的 QUOTE_GROUPS_DEFAULT 一一对应（顺序、权重、样式都要一致）。
+  // 权重沿用整理前写死在挂件页里的那套（45 / 7 / 7 / 10 / 3 / 1）
+  function defaultRandomGroups() {
+    return [
+      { kind: 'card', w: 45 },
+      { kind: 'text', w: 7, style: 'B', lines: QUOTES.hint },
+      { kind: 'text', w: 7, style: 'A', lines: QUOTES.chat },
+      { kind: 'image', w: 10 },
+      { kind: 'text', w: 3, style: 'A', lines: QUOTES.dsh },
+      { kind: 'text', w: 1, style: 'B', lines: QUOTES.short },
+    ];
+  }
+  // 台词占位符：{balance} 当前主显示金额 / {today} 今日已用 / {peak} 当前时段 / {next} 距下次峰谷切换。
+  // 后三项都是 DeepSeek 口径：主显示换成别的模型时 state.isPeak / peakNextAt 不再更新
+  // （见 handleBalance 的提前返回），此时给空串而不是旧值，免得台词里报出一个早就过期的时段。
+  // 认不出的占位符原样保留（与提醒文案 alertLines 同一口径），便于用户发现写错。
+  function linePlaceholderValue(k) {
+    if (k === 'balance') return mainAmountText();
+    if (k !== 'today' && k !== 'peak' && k !== 'next') return null;
+    if (mainModelId !== 'deepseek') return '';
+    if (k === 'today') return (state.todayUsage === null || state.todayUsage === undefined) ? '--' : fmt(state.todayUsage, state.currency);
+    if (k === 'peak') return peakLabelText(!!state.isPeak);
+    return peakCountdownLeftText();
+  }
+  // 占位符在「这一组真被抽到」时才替换：抽签那一刻换会拿到上一轮刷新的旧余额
+  function renderLinePlaceholders(text) {
+    return String(text == null ? '' : text).replace(/\{(\w+)\}/g, function (m, k) {
+      var v = linePlaceholderValue(k);
+      return v === null ? m : v;
+    });
+  }
+  // 文本组 → 抽签项：组内随机抽一条；A 允许换行（长句折行），B 不换行（靠挂件按可用宽度整体缩放）
+  function textGroupLines(list, style) {
+    return function () { return singleCenter(style, renderLinePlaceholders(pickOne(list)), '', style === 'A'); };
+  }
+  // 图片组 → 抽签项：抽一张自定义气泡图（没导入过时回空串，渲染层据此回退内置 rua.gif）
+  function imageGroupLines() { return { gif: true, src: pickBubbleUrl() }; }
+  // 组配置 → 抽签项列表。card 是内置的余额 / 时段卡（内容按当前数据现算，文本不可编辑）；
+  // 文本组没有有效台词就整组丢掉（清空 = 这组不出现，与宿主 normQuotes 口径一致）；
+  // 一组不剩时回退内置六组 —— 全空会让「随机台词」整个功能消失。
+  function buildRandomGroups(groups) {
+    var src = Array.isArray(groups) && groups.length ? groups : defaultRandomGroups();
+    var out = [];
+    for (var i = 0; i < src.length; i++) {
+      var g = src[i] || {};
+      var w = Number(g.w);
+      if (!(w > 0)) w = 1; // 宿主已把权重压在 1–999，这里只是兜底（0 / NaN 会让抽签把该组当兜底项）
+      if (g.kind === 'card') { out.push({ w: w, lines: buildGroup1 }); continue; }
+      if (g.kind === 'image') { out.push({ w: w, lines: imageGroupLines }); continue; }
+      var list = Array.isArray(g.lines) ? g.lines : [];
+      if (!list.length) continue;
+      out.push({ w: w, lines: textGroupLines(list, g.style === 'B' ? 'B' : 'A') });
+    }
+    return out.length ? out : buildRandomGroups(defaultRandomGroups());
+  }
+  var RANDOM_GROUPS = buildRandomGroups(null);
   function pickRandomLines() {
     var total = 0, i;
     for (i = 0; i < RANDOM_GROUPS.length; i++) total += RANDOM_GROUPS[i].w;
@@ -608,24 +1062,89 @@
     }
     return RANDOM_GROUPS[RANDOM_GROUPS.length - 1].lines();
   }
+  // 「依次播放」：展示下一组台词；已是最后一组时返回 false，由调用方收起气泡
+  function queueNext() {
+    if (queueIdx + 1 >= RANDOM_GROUPS.length) { queueIdx = 0; return false; }
+    queueIdx += 1;
+    bubbleRandomLines = RANDOM_GROUPS[queueIdx].lines();
+    swapBubbleContent(function () { applyBubbleLines(bubbleRandomLines); });
+    if (bubbleTimer) { clearTimeout(bubbleTimer); bubbleTimer = null; }
+    bubbleTimer = setTimeout(hideBubble, BUBBLE_MS);
+    return true;
+  }
 
   // —— 峰谷时段提醒 ——
   // 时段表在页面内按内置规则拼出（浮动页没有 require，读不到宿主 constants）
   var PEAK_HOURS = [[9, 12], [14, 18]]; // 工作日峰时（北京时间）
+  // 模板里的 {schedule}：只给时段表本身，前后缀（「其余谷时」/「外为谷时」）写在模板里，用户可改
   function scheduleText() {
-    var ranges = PEAK_HOURS.map(function (h) { return h[0] + '-' + h[1]; }).join('/');
-    return '峰时' + ranges + '点，其余谷时';
+    return '峰时' + PEAK_HOURS.map(function (h) { return h[0] + '-' + h[1]; }).join('/') + '点';
   }
-  // 气泡只有三行，把「标题 / 正文 / 时段表」压缩映射为 A=标题、P=时段、C=正文+时段表
+  // 气泡只有三行，模板按行映射为 A=标题、P=时段、C=正文（见 alertLines）
   function peakRemindLines(isPeak) {
-    var body = isPeak
-      ? '叮咚～进入峰时段啦（北京时间）！' + scheduleText()
-      : '好消息～进入谷时段啦（北京时间）！峰时' + PEAK_HOURS.map(function (h) { return h[0] + '-' + h[1]; }).join('/') + '点外为谷时';
-    return [
-      { t: isPeak ? '【峰时提醒】' : '【谷时提醒】', s: 'A', c: '' },
-      { t: isPeak ? '峰时' : '谷时', s: 'P', c: isPeak ? '#e0433f' : '#2fa24c' },
-      { t: body, s: 'C', c: '', w: true },
-    ];
+    return alertLines(isPeak ? 'peakOn' : 'peakOff', { schedule: scheduleText() },
+      isPeak ? '#e0433f' : '#2fa24c');
+  }
+  // 距下次峰谷切换的剩余时间（1h23m / 23m）。切换时刻由宿主按 constants 里的同一套规则下发
+  // （payload.peakNextAt），页面只做 at − now 换算，不在页面里实现第二套时段规则（页面拿不到宿主 constants）。
+  // 时刻缺失或已过点（left <= 0）返回空串：等下一轮刷新拿到新时刻
+  function peakCountdownLeftText() {
+    var at = Number(state.peakNextAt) || 0;
+    if (!at) return '';
+    var left = at - Date.now() / 1000;
+    if (left <= 0) return '';
+    var m = Math.max(1, Math.round(left / 60));
+    var h = Math.floor(m / 60);
+    return h > 0 ? h + 'h' + pad2(m % 60) + 'm' : m + 'm';
+  }
+  // 气泡第三行的倒计时尾巴（不足 1 小时按分钟显示）
+  function peakCountdownText() {
+    var left = peakCountdownLeftText();
+    return left ? '距' + (state.isPeak ? '谷时' : '峰时') + ' ' + left : '';
+  }
+  // 峰谷两种状态的叫法（跟随设置页的「峰谷」模式）：余额卡与台词占位符 {peak} 共用，避免两处各写一套
+  function peakLabelText(peak) {
+    if (peakMode === 'liangwen') return peak ? '梁文峰' : '梁文谷';
+    if (peakMode === 'qiangqiang') return peak ? '!?峰峰?!' : '!?谷谷?!';
+    return peak ? '高峰时段' : '空闲时段';
+  }
+
+  // —— 今日预算 ——
+  // 超出预算的金额；未开启 / 未设金额 / 未超出都返回 null
+  function budgetOverAmount() {
+    if (!budgetOn || !(budgetAmount > 0)) return null;
+    var used = Number(state.todayUsage);
+    if (!isFinite(used) || used <= budgetAmount) return null;
+    return used - budgetAmount;
+  }
+  function budgetRemindLines(over) {
+    return alertLines('budget', {
+      used: fmt(state.todayUsage, state.currency),
+      budget: fmt(budgetAmount, state.currency),
+      over: fmt(over, state.currency),
+    }, '#e0433f');
+  }
+  // 首次超出预算时提醒一次（复用提醒气泡通道）；计时进行中不打断，宿主侧另有系统通知兜底
+  function showBudgetRemind(over) {
+    playAlertSound('budget');
+    showRemindBubble(budgetRemindLines(over));
+  }
+
+  // —— 低余额预警 ——
+  // 与数字变红同一判据（开关 + 阈值），这里额外在首次跌破阈值时弹一次提醒气泡
+  function lowBalanceHit() {
+    return lowAlertOn && state.balance !== null && isFinite(Number(state.balance))
+      && Number(state.balance) < lowAlertAmount;
+  }
+  function lowRemindLines() {
+    return alertLines('low', {
+      balance: fmt(state.balance, state.currency),
+      threshold: fmt(lowAlertAmount, state.currency),
+    }, '#e0433f');
+  }
+  function showLowRemind() {
+    playAlertSound('low');
+    showRemindBubble(lowRemindLines());
   }
 
   // —— 计时 / 定时 / 倒计时（结果显示在思考气泡内，每秒刷新） ——
@@ -937,12 +1456,15 @@
 
   // —— 气泡内容 ——
   var bubbleSwapTimer = null, hintFadeTimer = null, gifFadeTimer = null, lastHintText = null;
-  // 气泡自适应：三行字号固定，长文案换行后可能撑出气泡，这里按可用区域测量后等比缩小字号
+  // 气泡自适应：三行字号固定（数值与 floating.css 的 .dshwv-label/amount/period/hint 必须一致），
+  // 长文案换行后可能撑出气泡，这里按可用区域测量后等比缩小字号
   // （只缩不放，正常内容保持原字号）；单位 u = 挂件基准 / 1026，与 CSS 的 --dshw-u 一致
-  var BUBBLE_FONT = { 'dshwv-label': 66, 'dshwv-amount': 128, 'dshwv-period': 104, 'dshwv-hint': 56 };
+  var BUBBLE_FONT = { 'dshwv-label': 72, 'dshwv-amount': 140, 'dshwv-period': 114, 'dshwv-hint': 72 };
   // 气泡内文字可用区域（单位 u = 挂件基准/1026）。与 CSS 里 .dshwv-bubble 的放大倍数(1.18)保持一致：
-  // 圆圈放大多少，这里就放大多少，字号才会跟着变大而不是被压小
-  var FIT_W = 660, FIT_H = 390, FIT_MIN = 0.5;
+  // 圆圈放大多少，这里就放大多少，字号才会跟着变大而不是被压小。
+  // FIT_H 430 是按「说明行折成两行」定的：三行全展开约 404u（72×1.15 + 140×1.05 + 9 + 2×72×1.15），
+  // 留到 430u 才不会被折行后的高度反压回去；再大就顶到大椭圆下缘（内高约 547u，居中后下侧仅 251u）
+  var FIT_W = 660, FIT_H = 430, FIT_MIN = 0.5;
   function resetBubbleFont() {
     labelEl.style.fontSize = '';
     amountEl.style.fontSize = '';
@@ -984,8 +1506,10 @@
   }
   function applyBubbleLines(lines) {
     if (lines && lines.gif) {
+      // 有自定义气泡图就用它，否则回退内置 rua.gif（lines.src 为空串 = 用内置）
+      setGifSrc(lines.src);
       if (gifFailed) {
-        lines = singleCenter('A', pickOne(['gif 加载失败了...', '今天没有动图给你看~', '呜呜 动图不见了...']), '', true);
+        lines = singleCenter('A', pickOne(QUOTES.gifFail), '', true);
       } else {
         if (gifFadeTimer) { clearTimeout(gifFadeTimer); gifFadeTimer = null; }
         gifEl.style.display = 'block';
@@ -1054,13 +1578,13 @@
     gifEl.style.opacity = '';
     labelEl.style.display = '';
     labelEl.className = 'dshwv-label';
-    labelEl.textContent = timeBubbleOn ? timeLabel() : 'DeepSeek 余额';
+    labelEl.textContent = defaultLabelText();
     labelEl.style.color = '';
     amountEl.style.display = '';
     amountEl.className = 'dshwv-amount';
     amountEl.style.color = '';
     hintEl.style.display = '';
-    hintEl.className = 'dshwv-hint';
+    hintEl.className = 'dshwv-hint dshwv-wrap'; // 与初始化一致：常驻说明行允许换行
     hintEl.style.color = '';
     render();
   }
@@ -1113,20 +1637,10 @@
     bubbleBox.classList.add('dshwv-bubble-open');
     if (autoHideMs) bubbleTimer = setTimeout(thenNormal ? timerPeekDone : hideBubble, autoHideMs);
   }
-  // 峰/谷时段切换提醒：独立于随机台词，停留更久（内容多一行时段表）
+  // 峰/谷时段切换提醒：独立于随机台词，内容多一行时段表
   function showPeakRemind(isPeak) {
-    if (!bubbleOn || timerActive()) return; // 计时进行中不打断
-    if (bubbleTimer) { clearTimeout(bubbleTimer); bubbleTimer = null; }
-    if (gifFadeTimer) { clearTimeout(gifFadeTimer); gifFadeTimer = null; }
-    bubbleShown = true;
-    bubbleRandomActive = false;
-    bubbleRandomLines = null;
-    bubbleRemindActive = true;
-    bubbleRemindLines = peakRemindLines(isPeak);
-    restoreBubbleLines();
-    applyBubbleLines(bubbleRemindLines);
-    bubbleBox.classList.add('dshwv-bubble-open');
-    bubbleTimer = setTimeout(hideBubble, BUBBLE_REMIND_MS);
+    playAlertSound('peak');
+    showRemindBubble(peakRemindLines(isPeak));
   }
   function hideBubble() {
     if (bubbleTimer) { clearTimeout(bubbleTimer); bubbleTimer = null; }
@@ -1168,9 +1682,17 @@
     animId = requestAnimationFrame(step);
   }
   function applyLowAlert() {
-    var low = lowAlertOn && state.balance !== null && isFinite(Number(state.balance)) && Number(state.balance) < lowAlertAmount;
+    var low = mainModelId !== 'deepseek' ? modelLowHit() : lowBalanceHit();
     amountEl.classList.toggle('dshwv-low', low);
     hintEl.classList.toggle('dshwv-low', low);
+  }
+  // 主显示模型的低余额判定：开关与阈值取该模型自己的条目（内置 DeepSeek 走 lowBalanceHit）
+  function modelLowHit() {
+    var m = currentModel();
+    if (!m || m.kind !== 'balance' || !m.lowAlertOn) return false;
+    if (!(Number(m.lowAlertAmount) > 0)) return false;
+    if (m.balance === null || m.balance === undefined) return false;
+    return Number(m.balance) < Number(m.lowAlertAmount);
   }
   // 「这笔余额下降没算进用量」的解释在第三行停留 12s（赠送额到期/异常跳变时由后端下发）
   var ADJUST_NOTE_MS = 12000;
@@ -1186,18 +1708,31 @@
       ? '赠送额到期 ' + money + '，未计用量'
       : '少了 ' + money + ' 太快，未计用量';
   }
+  // 主显示金额（大字行）的文本：render() 与台词占位符 {balance} 共用同一份状态判断，
+  // 免得两处各写一套、日后改口径漏掉一处
+  function mainAmountText() {
+    // 主显示是别的模型：DeepSeek 的加载 / 错误态都不参与展示
+    if (mainModelId !== 'deepseek') return modelDisplay().amount;
+    if (state.status === 'error') return shown !== null ? fmt(shown, state.currency) : '--';
+    if (state.balance === null) return shown !== null ? fmt(shown, state.currency) : '…';
+    return shown !== null ? fmt(shown, state.currency) : fmt(state.balance, state.currency);
+  }
   function render() {
-    var amount, hint;
+    var hint;
     var note = activeAdjustNote();
-    if (state.status === 'error') {
-      amount = shown !== null ? fmt(shown, state.currency) : '--';
+    var amount = mainAmountText();
+    if (mainModelId !== 'deepseek') {
+      // 主显示是别的模型：DeepSeek 的状态（错误/加载/今日已用/预算/调整说明）都不参与展示
+      hint = modelDisplay().hint;
+    } else if (state.status === 'error') {
       hint = state.message ? state.message.slice(0, 14) : '获取失败 · 点击重试';
     } else if (state.balance === null) {
-      amount = shown !== null ? fmt(shown, state.currency) : '…';
       hint = '加载中…';
     } else {
-      amount = shown !== null ? fmt(shown, state.currency) : fmt(state.balance, state.currency);
-      hint = note ? note.text : '今日已用 ' + (state.todayUsage !== null && state.todayUsage !== undefined ? fmt(state.todayUsage, state.currency) : '--');
+      var usedText = (state.todayUsage !== null && state.todayUsage !== undefined) ? fmt(state.todayUsage, state.currency) : '--';
+      var overAmt = budgetOverAmount();
+      // 超预算后第三行常驻显示，不依赖「首次超出」那次提醒气泡
+      hint = note ? note.text : usedTodayText(usedText) + (overAmt !== null ? ' · 超预算 ' + fmt(overAmt, state.currency) : '');
     }
     amountEl.textContent = amount;
     if (bubbleTimerActive && timerActive()) {
@@ -1221,8 +1756,13 @@
     pendingManual = !!manual;
     if (manual || state.balance === null) { state.status = 'loading'; render(); }
     whaleApi.refresh(manual);
+    // 主显示不是内置 DeepSeek 时另外刷该模型：force 让它与 DeepSeek 同频（60s 一次）
+    if (mainModelId !== 'deepseek') whaleApi.refreshModels([mainModelId], true);
   }
   function handleBalance(data, manual) {
+    // 主显示不是内置 DeepSeek 时，DeepSeek 的余额变动、峰谷/预算/低余额提醒都不该出现：
+    // 它的数字滚动动画会直接改写当前显示，提醒气泡也会盖掉模型内容
+    if (mainModelId !== 'deepseek') return;
     if (data && data.ok) {
       var nb = Number(data.totalBalance);
       var nc = String(data.currency || 'CNY');
@@ -1233,6 +1773,7 @@
       state.message = '';
       state.todayUsage = data.todayUsage !== undefined ? data.todayUsage : null;
       state.isPeak = !!data.isPeak;
+      state.peakNextAt = Number(data.peakNextAt) || 0;
       // 本轮下降被判定为非消费（赠送额到期等）：第三行解释 12s；正常采样不带此字段
       state.adjustNote = (data.adjust && data.adjust.amount)
         ? { text: adjustNoteText(data.adjust), until: Date.now() + ADJUST_NOTE_MS }
@@ -1241,6 +1782,18 @@
       var peakChanged = lastIsPeak !== null && lastIsPeak !== state.isPeak;
       lastIsPeak = state.isPeak;
       if (peakChanged && peakRemindOn) showPeakRemind(state.isPeak);
+      // 今日预算：首次超出时提醒（比峰谷提醒更该被看到，所以放在其后覆盖）；
+      // 与峰谷提醒一致，插件刚进入时已有状态的那一次不弹，第三行的「超预算」常驻提示照常显示
+      var overAmt = budgetOverAmount();
+      var budgetCrossed = overAmt !== null && !state.budgetOver && !firstBalance;
+      state.budgetOver = overAmt !== null;
+      if (budgetCrossed) showBudgetRemind(overAmt);
+      // 低余额预警：首次跌破阈值时提醒。放在预算之后，两者同时命中时以「余额不足」为准（更紧急）；
+      // 同样不在插件刚进入那一次补弹，但数字变红照常
+      var lowHit = lowBalanceHit();
+      var lowCrossed = lowHit && !state.lowOver && !firstBalance;
+      state.lowOver = lowHit;
+      if (lowCrossed) showLowRemind();
       if (changed && !currencyChanged) {
         if (!manual && !firstBalance) {
           // 自动刷新发现余额变动：气泡弹出，0.3s 后数字滚动
@@ -1277,6 +1830,29 @@
     }
   }
 
+  // —— 多厂商模型（宿主 whale:models 推送）——
+  // 峰谷/预算/用量口径都是 DeepSeek 专属：主显示换成别的模型时把「用量与峰谷」整组收起
+  function applyModelVisibility() {
+    groupUsage.el.style.display = mainModelId === 'deepseek' ? '' : 'none';
+  }
+  function handleModels(data) {
+    if (!data || typeof data !== 'object') return;
+    // refreshDone = 宿主刷新流程收尾那次推送（先前那次只是把旧快照推来垫显示）→ 解锁「刷新全部」
+    if (data.refreshDone) setModelsRefreshBusy(false);
+    var prev = mainModelId;
+    models = Array.isArray(data.list) ? data.list : [];
+    mainModelId = String(data.mainModelId || 'deepseek');
+    renderModelsMenu();
+    applyModelVisibility();
+    positionMenu(); // 行数变化后重新夹取高度，避免菜单被窗口边缘裁掉
+    if (mainModelId !== 'deepseek') {
+      render();
+    } else if (prev !== mainModelId) {
+      // 切回内置 DeepSeek：状态可能已是一分钟前的，立刻要一次新的（handleBalance 已放行）
+      refresh(true);
+    }
+  }
+
   // —— 配置（菜单改动 → 上报宿主；宿主回推 config 统一 apply） ——
   function saveCfg() {
     whaleApi.saveConfig({
@@ -1291,6 +1867,8 @@
       timerRemindSec: timerRemindSec,
       timerBubblePin: timerBubblePin,
       timerBubbleOnly: timerBubbleOnly,
+      // 分组展开组合（整份提交；宿主侧逐组合并，不会影响其余组）
+      menuGroups: menuGroups,
     });
   }
   function scaleToDisplay(s) {
@@ -1318,7 +1896,7 @@
     soundVol = next;
     volInput.value = String(next);
     volPct.textContent = Math.round(next * 100) + '%';
-    try { if (pressAudio) pressAudio.volume = next; if (releaseAudio) releaseAudio.volume = next; } catch (err) {}
+    applySoundVolume();
     if (commit) saveCfg(); // 拖动中只改本地音量，松手才持久化（避免高频存储写入）
   }
   function setSoundSet(v) {
@@ -1361,7 +1939,7 @@
     timeBubbleOn = !!v;
     timeToggle.checked = timeBubbleOn;
     saveCfg();
-    if (bubbleShown && !bubbleRandomActive) labelEl.textContent = timeBubbleOn ? timeLabel() : 'DeepSeek 余额';
+    if (bubbleShown && !bubbleRandomActive) labelEl.textContent = defaultLabelText();
   }
   function setPeakRemindOn(v) {
     peakRemindOn = !!v;
@@ -1452,14 +2030,40 @@
         if (menuOpen) closeMenu();
       }
     }
+    // 菜单分组展开态：设置页 / 别的窗口改过就同步过来；不在这里回写（saveCfg），
+    // 否则自己刚存的展开组合会被自己再提交一遍
+    if (cfg.menuGroups && typeof cfg.menuGroups === 'object') {
+      Object.keys(menuGroupEls).forEach(function (k) {
+        if (typeof cfg.menuGroups[k] !== 'boolean') return;
+        menuGroups[k] = cfg.menuGroups[k];
+        menuGroupEls[k].setOpen(cfg.menuGroups[k]);
+      });
+      positionMenu(); // 展开组合变了，菜单高度跟着变
+    }
     if (typeof cfg.lowAlertOn === 'boolean') lowAlertOn = cfg.lowAlertOn;
     if (typeof cfg.lowAlertAmount === 'number' && isFinite(cfg.lowAlertAmount)) lowAlertAmount = Math.max(0, cfg.lowAlertAmount);
+    // 阈值/开关变化后同步「已低于阈值」状态，避免下一次刷新把旧状态当越线又弹一次
+    state.lowOver = lowBalanceHit();
     applyLowAlert();
+    // 提醒气泡停留秒数（0 = 常驻）
+    if (typeof cfg.remindSec === 'number' && isFinite(cfg.remindSec)) {
+      var rs = Math.round(cfg.remindSec);
+      remindSec = (rs === 0 || rs === 5 || rs === 8 || rs === 15) ? rs : 8;
+    }
+    // 今日预算：开关/金额变化后即时刷新第三行的「超预算」，同时同步「已超出」状态，
+    // 避免改完设置下一次刷新又弹一遍首次提醒气泡
+    if (typeof cfg.budgetOn === 'boolean' || (typeof cfg.budgetAmount === 'number' && isFinite(cfg.budgetAmount))) {
+      if (typeof cfg.budgetOn === 'boolean') budgetOn = cfg.budgetOn;
+      if (typeof cfg.budgetAmount === 'number' && isFinite(cfg.budgetAmount)) budgetAmount = Math.max(0, cfg.budgetAmount);
+      state.budgetOver = budgetOverAmount() !== null;
+      if (!bubbleShown) render();
+    }
+    if (typeof cfg.clickQueueOn === 'boolean') clickQueueOn = cfg.clickQueueOn;
     if (typeof cfg.timeBubbleOn === 'boolean') {
       timeBubbleOn = cfg.timeBubbleOn;
       timeToggle.checked = timeBubbleOn;
       // 气泡正显示且未切随机台词时，即时更新首行报时文案
-      if (bubbleShown && !bubbleRandomActive) labelEl.textContent = timeBubbleOn ? timeLabel() : 'DeepSeek 余额';
+      if (bubbleShown && !bubbleRandomActive) labelEl.textContent = defaultLabelText();
     }
     if (typeof cfg.peakRemindOn === 'boolean') {
       peakRemindOn = cfg.peakRemindOn;
@@ -1499,42 +2103,88 @@
     if (!timerActive() && (cfg.timerMode === 'off' || cfg.timerMode === 'up' || cfg.timerMode === 'down' || cfg.timerMode === 'at')) {
       timerMode = cfg.timerMode;
     }
+    // 挂件形象与气泡配色：值没变时 applySkin/applyTheme 内部自己短路，不必先比对
+    if (typeof cfg.skin === 'string') {
+      skinId = (cfg.skin === 'custom' || BUILTIN_SKIN_IDS.indexOf(cfg.skin) >= 0) ? cfg.skin : DEFAULT_SKIN;
+      applySkin();
+    }
+    if (typeof cfg.theme === 'string') {
+      themeId = (cfg.theme === 'dark' || cfg.theme === 'sakura') ? cfg.theme : 'default';
+      applyTheme();
+    }
+    // 台词库：time / gifFail 是非空字符串数组才覆盖（空数组会让报时/降级文案没字）；
+    // groups 是随机组的抽签配置，整份重建（宿主侧已清洗过，这里只做抽签项装配）
+    if (cfg.quotes && typeof cfg.quotes === 'object') {
+      for (var qi = 0; qi < QUOTE_TEXT_KEYS.length; qi++) {
+        var qk = QUOTE_TEXT_KEYS[qi];
+        if (Array.isArray(cfg.quotes[qk]) && cfg.quotes[qk].length) QUOTES[qk] = cfg.quotes[qk].slice();
+      }
+      RANDOM_GROUPS = buildRandomGroups(cfg.quotes.groups);
+    }
+    // 提醒文案模板：只接受非空字符串（空模板会让气泡没字），逐条覆盖
+    if (cfg.alerts && typeof cfg.alerts === 'object') {
+      for (var ak in ALERTS) {
+        if (typeof cfg.alerts[ak] === 'string' && cfg.alerts[ak]) ALERTS[ak] = cfg.alerts[ak];
+      }
+    }
     syncTimerMenu();
-    try { if (pressAudio) pressAudio.volume = soundVol; if (releaseAudio) releaseAudio.volume = soundVol; } catch (err) {}
+    applySoundVolume();
   }
 
   // —— 音效 ——
   var SQUISH = 'scaleY(0.88) scaleX(1.05)';
+  // 每个槽位是一组音频，播放时随机取一条（听久了不腻）。Audio 对象按 URL 缓存并预加载：
+  // 每次播放都新建会多一次解码等待，而 pressUp 还要读当前按压音的 duration 才能决定何时接释放音
+  var audioPool = {};
+  function audioFor(url) {
+    if (!url) return null;
+    if (!audioPool[url]) {
+      try {
+        var a = new Audio(url);
+        a.preload = 'auto';
+        a.volume = soundVol;
+        audioPool[url] = a;
+      } catch (err) { return null; }
+    }
+    return audioPool[url];
+  }
+  // 宿主推来的一律是数组；不是数组时按「单段」兜底，免得拿字符串当数组用（取出来是半个字符）
+  function toList(v) { return Array.isArray(v) ? v : (v ? [v] : []); }
+  function pickUrl(list) { return list && list.length ? list[Math.floor(Math.random() * list.length)] : null; }
+  // 池里只留当前引用的 URL：删掉/换掉一段音效后，旧的 data URL 不该继续占着内存（一段 wav 可能近 1MB）
+  function prunePool() {
+    var keep = {};
+    var lists = [pressList, releaseList, alertUrls.low, alertUrls.budget, alertUrls.peak, alertUrls.pass];
+    for (var i = 0; i < lists.length; i++) {
+      for (var j = 0; j < lists[i].length; j++) keep[lists[i][j]] = true;
+    }
+    for (var url in audioPool) { if (!keep[url]) delete audioPool[url]; }
+  }
+  var pressList = [], releaseList = [];
   var pressAudio = null, releaseAudio = null;
   var pressing = false, pressEnded = false, releasePlayed = false, releaseTimer = null;
   function applySoundSet() {
-    try {
-      var f;
-      if (soundSet === 'custom') {
-        // 自定义：以按压音为准；没导入按压音时整体回退小黄鸭（避免「点了没反应」）
-        // 释放音可缺：松开时静音，音效仍比整段回退自然
-        if (customSounds.press) {
-          f = { press: customSounds.press, release: customSounds.release || null };
-        } else {
-          f = SOUND_FILES.duck;
-        }
-      } else {
-        f = SOUND_FILES[soundSet] || SOUND_FILES.duck;
-      }
-      pressAudio = f.press ? new Audio(f.press) : null;
-      if (pressAudio) {
-        pressAudio.preload = 'auto';
-        pressAudio.volume = soundVol;
-      }
-      releaseAudio = f.release ? new Audio(f.release) : null;
-      if (releaseAudio) {
-        releaseAudio.preload = 'auto';
-        releaseAudio.volume = soundVol;
-      }
-    } catch (err) { logErr('[whale][page] 初始化音效失败', err && err.message); }
+    if (soundSet === 'custom') {
+      // 自定义：以按压音为准；没导入按压音时整体回退小黄鸭（避免「点了没反应」）
+      // 释放音可缺：松开时静音，音效仍比整段回退自然
+      var hasPress = customSounds.press.length > 0;
+      pressList = hasPress ? customSounds.press : toList(SOUND_FILES.duck.press);
+      releaseList = hasPress ? customSounds.release : toList(SOUND_FILES.duck.release);
+    } else {
+      var f = SOUND_FILES[soundSet] || SOUND_FILES.duck;
+      pressList = toList(f.press);
+      releaseList = toList(f.release);
+    }
+    pressAudio = null;
+    releaseAudio = null;
+    for (var i = 0; i < pressList.length; i++) audioFor(pressList[i]); // 预加载，按下即响
+    for (var j = 0; j < releaseList.length; j++) audioFor(releaseList[j]);
+    prunePool();
   }
   function playPress() {
-    if (!pressAudio || !soundOn) return;
+    if (!soundOn) return;
+    pressAudio = audioFor(pickUrl(pressList));
+    if (!pressAudio) return;
     try {
       if (releaseTimer) { clearTimeout(releaseTimer); releaseTimer = null; }
       if (releaseAudio) { releaseAudio.pause(); releaseAudio.currentTime = 0; }
@@ -1550,7 +2200,9 @@
     } catch (err) {}
   }
   function playRelease() {
-    if (releasePlayed || !releaseAudio || !soundOn) return;
+    if (releasePlayed || !soundOn) return;
+    releaseAudio = audioFor(pickUrl(releaseList));
+    if (!releaseAudio) return;
     releasePlayed = true;
     try {
       releaseAudio.currentTime = 0;
@@ -1580,19 +2232,78 @@
       releaseTimer = setTimeout(function () { releaseTimer = null; playRelease(); }, Math.max(0, remainMs - 100));
     }
   }
+  // 音量统一落到所有音频对象上（含提醒音）：菜单滑块与设置页滑块两条路径共用。
+  // 池里已收着全部音频对象，遍历它一处即够，免得新增槽位后漏掉某一处
+  function applySoundVolume() {
+    try {
+      for (var url in audioPool) { if (audioPool[url]) audioPool[url].volume = soundVol; }
+    } catch (err) {}
+  }
+
+  // —— 提醒音（低余额 / 预算 / 峰谷 / 穿透，每类可多段，随机播一条） ——
+  // 与上面的「音色」相互独立：press/release 缺失时回退内置音色，提醒音没有回落 ——
+  // 不打扰是默认，没导入就不响。播放只受「音效开关 + 音量」影响，不受音色选择影响。
+  var alertUrls = { low: [], budget: [], peak: [], pass: [] };
+  function applyAlertSounds() {
+    for (var role in alertUrls) {
+      alertUrls[role] = toList(customSounds[role]);
+      for (var i = 0; i < alertUrls[role].length; i++) audioFor(alertUrls[role][i]);
+    }
+    prunePool();
+  }
+  function playAlertSound(role) {
+    if (!soundOn) return;
+    var a = audioFor(pickUrl(alertUrls[role]));
+    if (!a) return; // 未导入 = 静音
+    try {
+      a.currentTime = 0;
+      var p = a.play();
+      if (p && typeof p.catch === 'function') p.catch(function () {});
+    } catch (err) {}
+  }
 
   // —— 菜单 ——
   function toggleMenu() {
     menuOpen = !menuOpen;
-    if (menuOpen) { positionMenu(); dshSend('status'); }
+    if (menuOpen) {
+      positionMenu();
+      menuBox.scrollTop = 0; // 小尺寸挂件上菜单可滚动：重开时回到顶部，否则停在上次滚到的位置
+      // dsh 分组收着时状态行看不见，不必白探一次 3080；展开时才拉（见 menuGroup 的 onExpand）
+      if (groupDsh.el.classList.contains('dshwv-group-open')) dshSend('status');
+      // 模型列表懒加载：宿主侧有 5 分钟节流，反复开菜单不会一直打网络
+      whaleApi.refreshModels(null, false);
+      // 菜单里的数字不该是几分钟前的。余额侧有 25s 缓存 + 请求去重（见 preload/lib/api.js），
+      // 这个补充很便宜；走的是与轮询同一条路径，所以不会切到 loading 态
+      refresh(false);
+    }
     menuBox.classList.toggle('dshwv-menu-open', menuOpen);
+    menuBtn.setAttribute('aria-expanded', menuOpen ? 'true' : 'false');
     if (menuOpen) menuBtn.classList.add('dshwv-menu-btn-visible');
   }
   function closeMenu() {
     menuOpen = false;
     menuBox.classList.remove('dshwv-menu-open');
+    menuBtn.setAttribute('aria-expanded', 'false');
+    resetHideBtn(); // 关菜单即退出「隐藏挂件」确认态，免得下次打开时按钮还停在「再点一次隐藏」
+  }
+  // Esc 关菜单：挂件窗口默认 focusable=false（见 preload/lib/widget.js），键盘事件只在
+  // 「显示挂件」夺焦模式下才送得到；收到就关，收不到也不影响原有的点空白关闭
+  window.addEventListener('keydown', function (e) {
+    if (menuOpen && (e.key === 'Escape' || e.key === 'Esc')) closeMenu();
+  });
+  // 挂件到工作区上/下边缘的空白（宿主随 init / snapped 下发，见 preload/lib/widget.js 的 spaceAround）。
+  // 窗口留白（--whale-pad）之外的部分落在屏幕外，菜单摆过去也看不见，必须扣掉
+  var menuSpace = null;
+  function padPx() {
+    try {
+      var n = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--whale-pad'));
+      if (isFinite(n) && n > 0) return n;
+    } catch (err) {}
+    return 0;
   }
   function positionMenu() {
+    // 菜单没打开时不定位：模型行数变化等会无条件调到，白量一次自然高度（强制 layout）
+    if (!menuOpen) return;
     try {
       var b = menuBtn.getBoundingClientRect();
       var vw = window.innerWidth || document.documentElement.clientWidth || 300;
@@ -1602,25 +2313,43 @@
         var wb = img.getBoundingClientRect();
         b = { left: wb.right - 30, top: wb.top + 4, right: wb.right, bottom: wb.top + 30, width: 26, height: 26 };
       }
+      // 先解除高度限制量出自然高度：判断「向上是否装得下」（装得下就向上，不遮小鲸鱼）
+      menuBox.style.maxHeight = 'none';
+      var natural = menuBox.offsetHeight || 0;
+      var pad = padPx();
+      // 上/下可用高度 = 屏幕内可见的窗口留白 + 按钮到挂件本体边缘的距离
+      var up = b.top;
+      var down = vh - b.bottom;
+      if (menuSpace && pad > 0) {
+        up = Math.min(menuSpace.up, pad) + Math.max(0, b.top - pad);
+        down = Math.min(menuSpace.down, pad) + Math.max(0, vh - b.bottom - pad);
+      }
+      // 挂件贴在屏幕上边时上方只剩挂件内那点空间 → 改向按钮下方展开（否则菜单上半截在屏幕外）
+      var openDown = down > up && up < natural + 8;
       // 用按钮的「视觉」中心判断左右（根元素左吸附时整体 scaleX(-1) 镜像，
       // getBoundingClientRect 已反映镜像后的实际位置，不能再用根布局中心判断）
       var btnCx = b.left + b.width / 2;
       var onLeft = btnCx < vw / 2;
-      // 菜单在按钮上方展开，锚定按钮同侧下角
       if (onLeft) {
         menuBox.style.left = Math.max(4, b.left) + 'px';
         menuBox.style.right = 'auto';
-        menuBox.style.transformOrigin = 'bottom left';
+        menuBox.style.transformOrigin = openDown ? 'top left' : 'bottom left';
       } else {
         menuBox.style.right = Math.max(4, (vw - b.right)) + 'px';
         menuBox.style.left = 'auto';
-        menuBox.style.transformOrigin = 'bottom right';
+        menuBox.style.transformOrigin = openDown ? 'top right' : 'bottom right';
       }
-      // 菜单始终在按钮上方展开：底边贴按钮上沿，可用高度不足时压缩高度并在菜单内滚动，
-      // 避免（原逻辑）把菜单向下压到挂件上遮住小鲸鱼
-      menuBox.style.bottom = Math.max(0, vh - b.top) + 'px';
-      menuBox.style.top = 'auto';
-      menuBox.style.maxHeight = Math.max(120, b.top - 8) + 'px';
+      menuBox.classList.toggle('dshwv-menu-down', openDown);
+      // 高度不足时压缩并在菜单内滚动（不把菜单压到屏幕外）
+      if (openDown) {
+        menuBox.style.top = Math.max(0, b.bottom) + 'px';
+        menuBox.style.bottom = 'auto';
+        menuBox.style.maxHeight = Math.max(0, down - 8) + 'px';
+      } else {
+        menuBox.style.bottom = Math.max(0, vh - b.top) + 'px';
+        menuBox.style.top = 'auto';
+        menuBox.style.maxHeight = Math.max(0, up - 8) + 'px';
+      }
     } catch (err) {}
   }
 
@@ -1628,6 +2357,7 @@
   var hitCanvas = null, hitReady = false;
   function setupHitTest() {
     try {
+      hitReady = false; // 换形象时先失效，避免旧轮廓还在生效
       hitCanvas = document.createElement('canvas');
       hitCanvas.width = 610;
       hitCanvas.height = 610;
@@ -1769,7 +2499,13 @@
     if (e.target && e.target.closest) {
       if (e.target.closest('.dshwv-bubble') || e.target.closest('.dshwv-menu') || e.target.closest('.dshwv-menu-btn')) return;
     }
-    if (menuOpen) { closeMenu(); return; }
+    if (menuOpen) {
+      // 关菜单这一下：按在鲸鱼上就照常当点击/拖拽用（否则得先点一下关菜单、再点一下才能拖），
+      // 按在别处（透明留白）只关菜单，并立刻重算穿透/按钮显隐
+      var onWhale = isWhaleHit(e);
+      closeMenu();
+      if (!onWhale || (e.button !== 0 && e.pointerType === 'mouse')) { hoverAt(e); return; }
+    }
     if (e.button !== 0 && e.pointerType === 'mouse') return;
     if (!isWhaleHit(e)) return;
     try { e.preventDefault(); e.stopPropagation(); } catch (err) {}
@@ -1841,6 +2577,10 @@
     toggleMenu();
   }, true);
 
+  // 窗口尺寸变化（滚轮缩放在鲸鱼上实时预览时宿主会连续 setSize）：
+  // 菜单是按按钮的旧位置摆的，不重摆就会和按钮错位
+  window.addEventListener('resize', function () { positionMenu(); });
+
   // 滚轮缩放：指针在鲸鱼上时滚动调整大小（滚动中实时预览，停手 260ms 后持久化）
   // 锁定位置时禁用缩放（锁定 = 位置与大小都固定），仅保留点击刷新
   var wheelCommitTimer = null;
@@ -1882,17 +2622,30 @@
 
   whaleApi.onInit(function (data) {
     if (!data) return;
+    // 自定义形象本体必须先于 applyConfig 落地：applyConfig 会按 skin 值立刻套图，
+    // 此时 customSkin 若还是空串，会先闪一下内置形象再换成自定义
+    customSkin = data.skin || '';
+    customBubbles = toList(data.bubbles);
     applyConfig(data.config);
     passNoticeReady = true; // 之后的配置变更（快捷键/设置页切换）才弹说明气泡
     if (data.sounds) {
-      customSounds.press = data.sounds.press || null;
-      customSounds.release = data.sounds.release || null;
+      customSounds.press = toList(data.sounds.press);
+      customSounds.release = toList(data.sounds.release);
+      customSounds.low = toList(data.sounds.low);
+      customSounds.budget = toList(data.sounds.budget);
+      customSounds.peak = toList(data.sounds.peak);
+      customSounds.pass = toList(data.sounds.pass);
       if (soundSet === 'custom') applySoundSet();
+      applyAlertSounds();
     }
     if (data.anchor) {
       flipped = !!data.anchor.flipped;
       root.classList.toggle('dshwv-left', flipped);
     }
+    // 挂件到工作区上下边缘的空白：菜单展开方向据此判断（见 positionMenu）
+    if (data.space) menuSpace = data.space;
+    // 模型列表必须先落地：handleBalance 要按主显示决定是否参与展示
+    if (data.models) handleModels(data.models);
     if (data.balance) handleBalance(data.balance, false);
     restoreTimer(data.timer); // 「计时保存」开启时恢复上次的计时状态
     if (!document.hidden) startPolling();
@@ -1902,15 +2655,33 @@
     pendingManual = false;
   });
   whaleApi.onConfig(function (cfg) { applyConfig(cfg); });
+  whaleApi.onModels(function (data) { handleModels(data); });
   whaleApi.onSounds(function (data) {
-    // 设置页导入/删除自定义音效后宿主重推；当前正用自定义音色时立即换源
-    customSounds.press = (data && data.press) || null;
-    customSounds.release = (data && data.release) || null;
+    // 设置页导入/删除自定义音效后宿主重推；当前正用自定义音色时立即换源，
+    // 提醒音与音色无关，每次都要重建（导入即生效、删除即静音）
+    customSounds.press = toList(data && data.press);
+    customSounds.release = toList(data && data.release);
+    customSounds.low = toList(data && data.low);
+    customSounds.budget = toList(data && data.budget);
+    customSounds.peak = toList(data && data.peak);
+    customSounds.pass = toList(data && data.pass);
     if (soundSet === 'custom') applySoundSet();
+    applyAlertSounds();
+  });
+  whaleApi.onSkin(function (data) {
+    // 设置页导入/删除自定义形象后宿主重推；当前正用自定义形象时立即换图
+    customSkin = data || '';
+    if (skinId === 'custom') applySkin();
+  });
+  whaleApi.onBubbles(function (data) {
+    // 设置页导入/删除自定义气泡图后宿主重推；没有「当前用哪张」，下次抽到动图组自然生效
+    customBubbles = toList(data);
   });
   whaleApi.onSnapped(function (data) {
     flipped = !!(data && data.flipped);
     root.classList.toggle('dshwv-left', flipped);
+    // 吸附后位置变了，菜单展开方向要跟着重算
+    if (data && data.space) menuSpace = data.space;
   });
 
   // —— 启动 ——

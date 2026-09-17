@@ -273,20 +273,48 @@ function psExe() {
   try { if (fs.existsSync(p)) return p } catch (err) {}
   return 'powershell'
 }
+// 提权失败的原因：UAC 被取消（用户点了「否」）还是 npm 在管理员权限下仍然失败
+function elevateWhy(info) {
+  if (info && info.canceled) return '：UAC 提权被取消（弹窗里点了「否」），可重试并在弹窗点「是」'
+  return '：管理员权限下 npm 安装失败（原因见上方日志）'
+}
 // 以管理员权限跑一次 npm（UAC 弹窗）；用于全局安装目录只对管理员可写的情况
-// 用 -Wait -PassThru 拿 npm 的退出码，避免「提权被取消」却被当成成功
+// 提权进程会另开一个控制台窗口，它的输出不会回到父进程（npm 报错一闪而过，日志里只剩「提权未成功」），
+// 所以用临时 .cmd 包一层把输出重定向到文件，跑完读回来 —— 失败时才有据可查。
+// -Wait -PassThru 拿 npm 的退出码，避免「提权被取消」却被当成成功
 function elevateInstall(npmExe, args, onDone) {
   const q = (s) => "'" + String(s).replace(/'/g, "''") + "'"
-  const ps = '$p = Start-Process -FilePath ' + q(npmExe) + ' -ArgumentList '
-    + args.map(q).join(',') + ' -Verb RunAs -Wait -PassThru; exit $p.ExitCode'
+  const cq = (s) => '"' + String(s) + '"'
+  const stamp = 'whale-elev-' + process.pid + '-' + Date.now()
+  const bat = path.join(os.tmpdir(), stamp + '.cmd')
+  const outFile = path.join(os.tmpdir(), stamp + '.log')
+  let ps = ''
+  try {
+    fs.writeFileSync(bat, '@echo off\r\n' + [npmExe].concat(args).map(cq).join(' ')
+      + ' > ' + cq(outFile) + ' 2>&1\r\nexit /b %ERRORLEVEL%\r\n')
+    ps = '$p = Start-Process -FilePath "cmd.exe" -ArgumentList ' + q('/c') + ',' + q(bat)
+      + ' -Verb RunAs -Wait -PassThru; exit $p.ExitCode'
+  } catch (err) {
+    pushLog('提权安装未成功（无法创建临时脚本）：' + ((err && err.message) || err))
+    if (onDone) onDone(err, { code: 0, canceled: false })
+    return
+  }
+  const cleanup = () => {
+    try { fs.rmSync(bat, { force: true }) } catch (err) {}
+    try { fs.rmSync(outFile, { force: true }) } catch (err) {}
+  }
   execFile(psExe(), ['-NoProfile', '-Command', ps], { windowsHide: true, encoding: 'buffer' }, (err, so, se) => {
-    const out = (decodeOut(so) + decodeOut(se)).trim()
-    if (out) pushLog(out)
-    if (err) {
-      const code = err && err.code !== undefined ? err.code : '未知'
-      pushLog('提权安装未成功（退出码 ' + code + '，可能是取消了 UAC）：' + ((err && err.message) || ''))
-    }
-    if (onDone) onDone(err)
+    let npmOut = ''
+    try { npmOut = decodeOut(fs.readFileSync(outFile)).trim() } catch (err2) {}
+    if (npmOut) pushLog(npmOut)
+    cleanup()
+    const own = (decodeOut(so) + decodeOut(se)).trim()
+    if (own) pushLog(own)
+    // 取消 UAC 时 powershell 自己会报错（stderr 非空）；npm 失败则是它的退出码 + 上面读回来的输出
+    const canceled = !!own && /cancel|取消|拒绝访问|access is denied/i.test(own)
+    const code = err && err.code !== undefined ? err.code : 0
+    if (err) pushLog('提权安装未成功（退出码 ' + code + (canceled ? '，UAC 被取消' : '，管理员权限下 npm 仍失败') + '）')
+    if (onDone) onDone(err, { code: code, canceled: canceled })
   })
 }
 function processName(pid, cb) {
@@ -516,8 +544,6 @@ function configure(cfg) {
 function syncConfig() {
   try { configure(readConfig()) } catch (err) { logErr('[whale][dsh] 读取配置失败', err && err.message) }
 }
-// 「实际会跑」的版本＝全局优先、其次插件目录那份；都没有返回 ''
-function resolvedVersion() { const a = activeDsh(); return a ? a.version : '' }
 // 「要安装的版本」：配置固定了就用它，否则 latest（「更新」用这个）
 function installVersion() { return state.version || 'latest' }
 // 包名（@版本）
@@ -525,11 +551,11 @@ function pkgSpec(v) { return DSH_PKG + '@' + (v || installVersion()) }
 function regArgs() { return state.registry ? ['--registry=' + state.registry] : [] }
 // 子命令：默认带 --no-open（不自动弹浏览器，用「打开页面」打开）
 function webArgs() { return state.noOpen ? ['web', '--no-open'] : ['web'] }
-// npm 提速参数：跳过审计与赞助请求；固定版本时优先命中缓存
+// npm 提速参数：跳过审计与赞助请求
+// 不能加 --prefer-offline：它会跳过缓存新鲜度校验，用旧的 packument 解析依赖树，
+// 于是「刚发布的版本 / 它新带的子包」会被判成 ETARGET（选固定版本时最容易踩，缓存里的 tarball 本来就会命中）
 function fastArgs() {
-  const out = ['--no-audit', '--no-fund']
-  if (installVersion() !== 'latest') out.push('--prefer-offline')
-  return out
+  return ['--no-audit', '--no-fund']
 }
 // 启动后就绪检测：3080 真正开始监听才算可用（首次安装要下载，可能几十秒）
 function watchReady() {
@@ -832,10 +858,10 @@ function installDsh(done, busyKind) {
   if (target === 'global' && WIN && !canWriteDir(globalBase)) {
     triedElevate = true
     pushLog('全局安装目录 ' + globalBase + ' 普通用户不可写（需要管理员权限），改用管理员权限安装：请在 UAC 弹窗点「是」')
-    elevateInstall(node.npm, args, (elevErr) => {
+    elevateInstall(node.npm, args, (elevErr, info) => {
       const v2 = afterVersion()
       if (!elevErr && v2) succeed(v2)
-      else failInstall(0, '：全局安装需要管理员权限（提权未成功，可能取消了 UAC）')
+      else failInstall(info && info.code, elevateWhy(info))
     })
     return snapshot()
   }
@@ -858,10 +884,10 @@ function installDsh(done, busyKind) {
       triedElevate = true
       state.busy = busyKind || 'install'
       pushLog('全局安装目录 ' + globalBase + ' 普通用户不可写，改用管理员权限重试：请在 UAC 弹窗点「是」')
-      elevateInstall(node.npm, args, (elevErr) => {
+      elevateInstall(node.npm, args, (elevErr, info) => {
         const v2 = afterVersion()
         if (!elevErr && v2) succeed(v2)
-        else fail(code, '：全局安装需要管理员权限（提权未成功，可能取消了 UAC）')
+        else fail(info && info.code ? info.code : code, elevateWhy(info))
       })
       return
     }

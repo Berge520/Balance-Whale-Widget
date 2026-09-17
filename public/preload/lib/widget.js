@@ -5,8 +5,10 @@ const { MIN_SCALE, MAX_SCALE, BASE_MIN, BASE_CAP, BASE_MAX, WIN_PAD } = require(
 const { execFileSync } = require('child_process')
 const { log, logErr } = require('./log')
 const { clampNum, readConfig, readAnchor, writeAnchor, defaultAnchor, readTimer } = require('./store')
-const { getCachedBalance } = require('./api')
+const { getCachedBalance, getModelsPayload } = require('./api')
 const { getSoundData } = require('./sounds')
+const { getSkinData } = require('./skins')
+const { getBubbleData } = require('./bubbles')
 
 let win = null
 let winCreatedAt = 0 // 窗口创建时刻（ms），用于区分「刚创建尚未显示」与「被隐藏」
@@ -184,6 +186,12 @@ function usableArea(x, y) {
       m[tb.edge] = Math.max(m[tb.edge], tb.thickness)
     }
   }
+  // 避让滚动条：只影响右边缘（最大化窗口的纵向滚动条在右侧），
+  // 与手动 edgeRight 取较大值，不冲突
+  if (cfg.scrollGapOn) {
+    const gap = Math.max(0, Number(cfg.scrollGapPx) || 0)
+    m.right = Math.max(m.right, gap)
+  }
   if (!m.top && !m.right && !m.bottom && !m.left) return wa
   return {
     x: wa.x + m.left,
@@ -198,7 +206,7 @@ function repositionFromAnchor() {
   try {
     const sz = win.getSize()
     const pos = win.getPosition()
-    const winS = isFinite(sz[0]) ? sz[0] : WIN_PAD + BASE_MIN
+    const winS = isFinite(sz[0]) ? sz[0] : WIN_PAD * 2 + BASE_MIN
     const wa = usableArea(pos[0] + winS / 2, pos[1] + winS / 2)
     const p = anchorToRect(wa, winS, readAnchor())
     win.setPosition(Math.round(p.x), Math.round(p.y))
@@ -222,7 +230,7 @@ function watchTick() {
   try {
     const sz = win.getSize()
     const pos = win.getPosition()
-    const s = isFinite(sz[0]) ? sz[0] : WIN_PAD + BASE_MIN
+    const s = isFinite(sz[0]) ? sz[0] : WIN_PAD * 2 + BASE_MIN
     const x = isFinite(pos[0]) ? pos[0] : 0
     const y = isFinite(pos[1]) ? pos[1] : 0
     const info = displayInfo(x + s / 2, y + s / 2)
@@ -265,15 +273,41 @@ function baseSize(wa, scale) {
   return Math.round(Math.min(base, Math.max(BASE_MIN, maxFit)))
 }
 
-// 窗口尺寸 = 挂件本体 + 透明留白
+// 窗口尺寸 = 挂件本体 + 四周留白
 function winSize(wa, scale) {
-  return baseSize(wa, scale) + WIN_PAD
+  return baseSize(wa, scale) + WIN_PAD * 2
 }
 
-// 挂件本体在窗口内右下对齐：窗口左上角 -> 挂件本体左上角
+// 挂件本体在窗口内居中：窗口左上角 -> 挂件本体左上角
 function widgetOrigin(winX, winY) { return { x: winX + WIN_PAD, y: winY + WIN_PAD } }
 // 挂件本体左上角 -> 窗口左上角
 function winOrigin(wx, wy) { return { x: wx - WIN_PAD, y: wy - WIN_PAD } }
+// 窗口边长 -> 挂件本体边长
+function widgetSide(winS) { return winS - WIN_PAD * 2 }
+
+// 挂件本体到工作区上/下边缘的空白（px）。窗口留白只有 WIN_PAD，超出的部分落在屏幕外、
+// 菜单摆过去也看不见 —— 挂件贴屏幕上边时菜单必须改向下方展开（见 floating-page.js 的 positionMenu）
+function spaceAround(wa, winX, winY, winS) {
+  const s = widgetSide(winS)
+  const wt = winY + WIN_PAD // 挂件本体上缘
+  return {
+    up: Math.max(0, Math.round(wt - wa.y)),
+    down: Math.max(0, Math.round(wa.y + wa.height - (wt + s))),
+  }
+}
+// 当前挂件四周的上下空白（随初始数据下发给页面）；窗口不存在时给 null，页面按旧行为兜底
+function widgetSpace() {
+  if (!winAlive()) return null
+  try {
+    const sz = win.getSize()
+    const pos = win.getPosition()
+    const winS = isFinite(sz[0]) ? sz[0] : WIN_PAD * 2 + BASE_MIN
+    const x = isFinite(pos[0]) ? pos[0] : 0
+    const y = isFinite(pos[1]) ? pos[1] : 0
+    const s = widgetSide(winS)
+    return spaceAround(usableArea(x + winS / 2, y + WIN_PAD + s / 2), x, y, winS)
+  } catch (err) { return null }
+}
 
 // 把「挂件本体」矩形限制在工作区内（留白可越界）
 function clampWidget(wa, wx, wy, s) {
@@ -285,7 +319,7 @@ function clampWidget(wa, wx, wy, s) {
 
 // 锚点 → 窗口左上角坐标（锚点净距离以「挂件本体」边缘为准）
 function anchorToRect(wa, winS, anchor) {
-  const s = winS - WIN_PAD // 挂件本体边长
+  const s = widgetSide(winS) // 挂件本体边长
   const a = anchor || defaultAnchor()
   const wx = a.hAnchor === 'left' ? wa.x + a.hDist : wa.x + wa.width - s - a.hDist
   const wy = a.vAnchor === 'top' ? wa.y + a.vDist : wa.y + wa.height - s - a.vDist
@@ -293,18 +327,25 @@ function anchorToRect(wa, winS, anchor) {
   return winOrigin(c.x, c.y)
 }
 
-// 拖拽结束：中心点 1/4 区吸附；中间区域保留自由位（记录离最近边净距离）
+// 拖拽结束：中心点进入吸附区（默认各边 1/4 宽，设置页可调）→ 贴左/右、上/下（净距离 0）；
+// 中间区域保留自由位（记录离最近边净距离）。横纵独立 → 四角可组合。
+// 「关闭吸附」时两轴都走自由分支：位置照样以「最近边 + 净距离」记锚点，能原样还原，只是不再贴边。
 // 入参/出参均为「窗口」坐标；内部换算到挂件本体做判定
-function snapRect(wa, winX, winY, winW, winH) {
-  const s = winW - WIN_PAD
+function snapRect(wa, winX, winY, winW) {
+  const cfg = readConfig()
+  const snap = cfg.snapMode !== 'off'
+  // 吸附区宽度占可用区的比例；异常值回默认 1/4
+  const r = Number(cfg.snapRatio) / 100
+  const zone = r > 0 && r < 0.5 ? r : 0.25
+  const s = widgetSide(winW)
   const o = widgetOrigin(winX, winY)
   let x = o.x, y = o.y
   const cx = x + s / 2
   const cy = y + s / 2
   let hAnchor, hDist, nx = x
-  if (cx < wa.x + wa.width / 4) {
+  if (snap && cx < wa.x + wa.width * zone) {
     hAnchor = 'left'; hDist = 0; nx = wa.x
-  } else if (cx > wa.x + wa.width * 3 / 4) {
+  } else if (snap && cx > wa.x + wa.width * (1 - zone)) {
     hAnchor = 'right'; hDist = 0; nx = wa.x + wa.width - s
   } else {
     const leftDist = x - wa.x
@@ -314,9 +355,9 @@ function snapRect(wa, winX, winY, winW, winH) {
     nx = x
   }
   let vAnchor, vDist, ny = y
-  if (cy < wa.y + wa.height / 4) {
+  if (snap && cy < wa.y + wa.height * zone) {
     vAnchor = 'top'; vDist = 0; ny = wa.y
-  } else if (cy > wa.y + wa.height * 3 / 4) {
+  } else if (snap && cy > wa.y + wa.height * (1 - zone)) {
     vAnchor = 'bottom'; vDist = 0; ny = wa.y + wa.height - s
   } else {
     const topDist = y - wa.y
@@ -330,9 +371,12 @@ function snapRect(wa, winX, winY, winW, winH) {
   return { x: wp.x, y: wp.y, anchor: { hAnchor, hDist, vAnchor, vDist } }
 }
 
-// 仅左吸附（贴左缘）时镜像翻转
+// 朝向（是否镜像）：锚在左 → 翻转，锚在右 → 不翻 —— 保证鲸鱼始终朝屏幕内侧。
+// snapRect 的自由分支记的是「离最近的那条边」，所以 hAnchor 本身就编码了「挂件中心在中线的哪一侧」，
+// 不必再算一次中线：自由摆放也能跟着位置翻转（关闭吸附后同样生效）。
+// 另：缩放的不动点也用它选边（翻转侧保持挂件左缘不动、否则右缘），所以自由位缩放也不会朝边缘挤。
 function flippedOf(anchor) {
-  return !!anchor && anchor.hAnchor === 'left' && anchor.hDist === 0
+  return !!anchor && anchor.hAnchor === 'left'
 }
 
 function winAlive() {
@@ -353,11 +397,11 @@ function applyOnTop(onTop) {
 // 由 floating-page.js 的 applyConfig 消费。
 
 // 显式放开窗口最小尺寸：Windows 无边框/不可调整窗可能被钳制在创建时尺寸，
-// 导致 setSize 放大有效、缩小无效。窗口边长 = 挂件本体(base) + 留白(WIN_PAD)。
+// 导致 setSize 放大有效、缩小无效。窗口边长 = 挂件本体(base) + 四周留白(WIN_PAD)。
 function applySizeBounds() {
   if (!winAlive()) return
-  const minS = WIN_PAD + BASE_MIN - 40   // 允许缩到 base 下限以下一点（实际 base 已夹在 ≥122）
-  const maxS = WIN_PAD + BASE_MAX + 80
+  const minS = WIN_PAD * 2 + BASE_MIN - 40   // 允许缩到 base 下限以下一点（实际 base 已夹在 ≥122）
+  const maxS = WIN_PAD * 2 + BASE_MAX + 80
   try { if (typeof win.setMinimumSize === 'function') win.setMinimumSize(Math.round(minS), Math.round(minS)) } catch (err) {}
   try { if (typeof win.setMaximumSize === 'function') win.setMaximumSize(Math.round(maxS), Math.round(maxS)) } catch (err) {}
 }
@@ -445,11 +489,11 @@ function createWidget(focusable) {
       fullscreenable: false,
       enableLargerThanScreen: true, // 透明留白允许越出屏幕
       // 显式给最小/最大尺寸：否则 Windows 下无边框窗可能被钳制在“创建时尺寸”，
-      // 表现为放大有效、缩小无效。窗口 = 挂件本体(base) + 留白(WIN_PAD)。
-      minWidth: WIN_PAD + BASE_MIN - 40,
-      minHeight: WIN_PAD + BASE_MIN - 40,
-      maxWidth: WIN_PAD + BASE_MAX + 80,
-      maxHeight: WIN_PAD + BASE_MAX + 80,
+      // 表现为放大有效、缩小无效。窗口 = 挂件本体(base) + 四周留白(WIN_PAD)。
+      minWidth: WIN_PAD * 2 + BASE_MIN - 40,
+      minHeight: WIN_PAD * 2 + BASE_MIN - 40,
+      maxWidth: WIN_PAD * 2 + BASE_MAX + 80,
+      maxHeight: WIN_PAD * 2 + BASE_MAX + 80,
       skipTaskbar: true,
       // 关键：挂件窗口的可聚焦性按进入方式决定 ——
       //  - false（both/settings）：挂件只显示、不抢焦点，uTools 主窗（设置窗口）保有焦点，
@@ -535,11 +579,19 @@ function pushInit() {
   sendToWidget('whale:init', {
     config: cfg,
     anchor: { hAnchor: anchor.hAnchor, vAnchor: anchor.vAnchor, flipped: flippedOf(anchor) },
+    // 挂件到工作区上下边缘的空白：页面据此决定菜单向上还是向下展开（屏幕外的留白放不下菜单）
+    space: widgetSpace(),
     balance: getCachedBalance(),
     // 计时状态：仅当「计时保存」开启时恢复（关闭时不回推，页面按默认清空处理）
     timer: cfg.timerPersistOn ? readTimer() : null,
     // 自定义音效本体（base64 data URL；无自定义时两段均为 null）
     sounds: getSoundData(),
+    // 自定义挂件形象本体（base64 data URL；未导入时为空串，页面回退内置形象）
+    skin: getSkinData(),
+    // 自定义气泡图片本体（base64 data URL 数组；空数组时页面回退内置 rua.gif）
+    bubbles: getBubbleData(),
+    // 多厂商模型列表（含内置 DeepSeek 那条）+ 主显示模型
+    models: getModelsPayload(),
   })
 }
 
@@ -577,7 +629,7 @@ function applyScaleToWindow(scale, persist) {
     } else {
       // 持久化模式或首次实时：从窗口读取真实状态
       // 优先 getBounds（{x,y,width,height}），回退 getPosition+getSize（[x,y] / [w,h]）
-      let bx = 0, by = 0, bw = WIN_PAD + BASE_MIN
+      let bx = 0, by = 0, bw = WIN_PAD * 2 + BASE_MIN
       try {
         if (typeof win.getBounds === 'function') {
           const b = win.getBounds()
@@ -592,7 +644,7 @@ function applyScaleToWindow(scale, persist) {
           bw = isFinite(sz[0]) ? sz[0] : bw
         }
       } catch (err) { logErr('[whale][scale] 读取窗口几何异常', err && err.message) }
-      const oldS = bw - WIN_PAD // 旧挂件本体边长
+      const oldS = widgetSide(bw) // 旧挂件本体边长
       const wl = bx + WIN_PAD, wt = by + WIN_PAD // 旧挂件左上
       wa = usableArea(wl + oldS / 2, wt + oldS / 2)
       anchor = readAnchor()
@@ -601,7 +653,7 @@ function applyScaleToWindow(scale, persist) {
       pivotY = anchor.vAnchor === 'top' ? wt : wt + oldS
     }
     const newWin = winSize(wa, scale)
-    const newS = newWin - WIN_PAD
+    const newS = widgetSide(newWin)
     // 基于不动点反算挂件左上角
     const nwl = flippedOf(anchor) ? pivotX : pivotX - newS
     const nwt = anchor.vAnchor === 'top' ? pivotY : pivotY - newS
@@ -614,7 +666,7 @@ function applyScaleToWindow(scale, persist) {
     const hasSetBounds = typeof win.setBounds === 'function'
     const rx = Math.round(isFinite(wp.x) ? wp.x : 0)
     const ry = Math.round(isFinite(wp.y) ? wp.y : 0)
-    const rw = Math.round(isFinite(newWin) ? newWin : WIN_PAD + BASE_MIN)
+    const rw = Math.round(isFinite(newWin) ? newWin : WIN_PAD * 2 + BASE_MIN)
     if (hasSetBounds) {
       try {
         win.setBounds({ x: rx, y: ry, width: rw, height: rw })
@@ -666,6 +718,8 @@ module.exports = {
   winSize,
   widgetOrigin,
   winOrigin,
+  widgetSide,
+  spaceAround,
   clampWidget,
   anchorToRect,
   snapRect,

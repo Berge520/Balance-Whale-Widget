@@ -1,0 +1,44 @@
+# 持续集成：push / PR 时跑「静态检查 + 单测 + 构建」四关。
+#
+# 这四关全部是本地已有的 npm script，CI 里只是原样调用，不额外引入工具链 ——
+# 保证「本地能过」与「CI 能过」是同一件事，不会出现只有 CI 才报的怪错。
+#
+# 注意：这里是 uTools 插件仓库，构建产物（dist/）不上传、也不发布，
+# CI 只负责拦住「编译不过 / 类型错 / 单测挂 / 副本校验失败」的提交；
+# 真正发版走 release.yml（打 tag 触发，构建 + 打包 + 建 Release）。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # eslint 10 要求 node ^20.19.0 || ^22.13.0 || >=24，取 24 与本地开发环境对齐
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      # 用 ci 而非 install：严格按 package-lock.json 装，装不上就直接失败
+      - run: npm ci
+
+      - name: 静态检查（ESLint）
+        run: npm run lint
+
+      - name: 类型检查（vue-tsc）
+        run: npm run typecheck
+
+      - name: 单元测试
+        run: npm test
+
+      # prebuild 钩子会先跑 sync-version / check-shared，
+      # 因此这一步同时校验了「版本号单一来源」与「跨文件副本一致」
+      - name: 构建
+        run: npm run build

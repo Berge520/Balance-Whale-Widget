@@ -9,7 +9,7 @@
 const fs = require('fs')
 const path = require('path')
 const crypto = require('crypto')
-const { log, logErr } = require('./log')
+const { log } = require('./log')
 const { PLUGIN_VERSION } = require('./constants')
 const {
   readConfig, writeConfig, readSecrets, writeSecrets,
@@ -204,7 +204,7 @@ function applyBackup(opts) {
         const hist = d.ledger.history && typeof d.ledger.history === 'object' ? d.ledger.history : {}
         const entries = Object.keys(hist).map((date) => ({ date: date, usage: hist[date] }))
         if (d.ledger.date) entries.push({ date: String(d.ledger.date), usage: d.ledger.todayUsage })
-        mergeLedgerHistory(entries) // 同日覆盖，保留最近 30 天
+        mergeLedgerHistory(entries) // 同日覆盖，只保留配置的账本保留天数之内
         applied.push('ledger')
       } catch (err) { errors.push('账本：' + errMsg(err)) }
     }
@@ -233,7 +233,13 @@ function applyBackup(opts) {
       try {
         const s = decryptSecrets(d.secretsEnc, String(o.password || ''))
         if (!s || typeof s !== 'object') throw new Error('解密结果异常')
-        writeSecrets({ apiKey: String(s.apiKey || ''), platformToken: String(s.platformToken || '') })
+        writeSecrets({
+          apiKey: String(s.apiKey || ''),
+          platformToken: String(s.platformToken || ''),
+          // 多厂商模型的密钥槽位：老备份里没有这个字段，传 undefined 让 writeSecrets 沿用现值，
+          // 否则一次「只恢复凭据」会把用户已保存的各模型密钥清空
+          models: s.models === undefined ? undefined : s.models,
+        })
         applied.push('secrets')
       } catch (err) {
         // AES-GCM 认证标签不匹配 → 密码错或文件被改过

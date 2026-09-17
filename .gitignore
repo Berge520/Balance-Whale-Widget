@@ -7,10 +7,35 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
+# 凭据 / 环境变量：密钥、Token、证书一律不进仓库
+# （插件的 API Key / 平台 Token 存在 uTools dbCryptoStorage 里、本就不落仓库；
+#   这里防的是调试时顺手在仓库根放一份的明文密钥文件）
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+secrets.json
+
+# 插件运行时导出物
+# 设置页「备份与恢复」导出的 JSON：含挂件设置与账本，勾选「包含凭据」时还带加密的凭据块，
+# 默认存到下载目录，手动另存到仓库里时不要提交
+whale-backup-*.json
+# uTools 打包产物（`.upx` 拖进 uTools 即可安装，属于分发物不是源码）
+*.upx
+# 本地手动打包的 Release 包：CI 的 zip 建在仓库外（.github/workflows/release.yml），
+# 本地在仓库根 zip 出来的这份别提交
+balance-whale-widget-*.zip
+
 node_modules
 dist
 dist-ssr
 *.local
+# eslint 加 --cache 时会在根目录落这个缓存（当前 lint 脚本未开）
+.eslintcache
 
 # Editor directories and files
 .vscode/*
@@ -22,6 +47,12 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+# 手动备份：改 preload 前先存一份 `api.js.bak` 是常见习惯（preload 不热更、改完要在 uTools 里
+# 重载插件才生效，改坏了好回退），这类文件容易忘了删就跟着提交
+*.bak
+
+# AI 助手工作区配置（项目规则 / 技能），不进仓库
+.trae/
 
 # Windows OS junk
 Thumbs.db

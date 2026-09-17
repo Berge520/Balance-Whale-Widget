@@ -12,7 +12,7 @@
  *  settings.js   对外 window.services（设置页 API）
  */
 const { log, logErr, LOG_FILE } = require('./lib/log')
-const { readConfig, patchConfig } = require('./lib/store')
+const { readConfig, patchConfig, alertFor, alertOneLine } = require('./lib/store')
 const { checkUpdate } = require('./lib/api')
 const { ensureWidget, toggleWidget, pushConfig } = require('./lib/widget')
 const { registerIpc } = require('./lib/ipc')
@@ -55,16 +55,16 @@ try {
     // 穿透后挂件连自己的菜单都点不到，若进入方式是「只显示挂件」，用户只能靠这条指令
     // （或重新搜索进入设置页）关掉它。同样 mainHide，可绑全局快捷键一键进出一秒切换。
     if (code === 'whale-passthrough') {
-      const next = !readConfig().passThrough
+      const cfg = readConfig()
+      const next = !cfg.passThrough
       patchConfig({ passThrough: next })
       pushConfig()
       // 设置页开着时同步开关状态（emitConfigChange 只在本窗口有订阅者时生效）
       try { settingsApi.emitConfigChange() } catch (err) {}
-      // 系统通知：穿透态下气泡可能被计时/峰谷占用，这条保证用户一定得到反馈
+      // 系统通知：穿透态下气泡可能被计时/峰谷占用，这条保证用户一定得到反馈。
+      // 文案取设置页的「提醒文案」模板（与气泡同一份），换行合并成一行
       try {
-        utools.showNotification(next
-          ? '鼠标穿透已开启：挂件不再接收鼠标；在鲸鱼上停留约 1 秒可临时接管'
-          : '鼠标穿透已关闭：挂件恢复点击与拖拽', 'whale')
+        utools.showNotification(alertOneLine(alertFor(cfg, next ? 'passOn' : 'passOff')), 'whale')
       } catch (err) { logErr('[whale][lifecycle] 穿透切换通知失败', err && err.message) }
       return
     }

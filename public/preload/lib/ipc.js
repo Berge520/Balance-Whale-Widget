@@ -2,15 +2,15 @@
  * IPC 路由：悬浮窗 → 宿主（CommonJS）。
  */
 const { ipcRenderer } = require('electron')
-const { WIN_PAD } = require('./constants')
 const { log, logErr } = require('./log')
-const { getBalance } = require('./api')
+const { getBalance, refreshModels, getModelsPayload } = require('./api')
 const { readConfig, patchConfig, writeAnchor, writeTimer, clearTimer } = require('./store')
 const dsh = require('./dsh')
 const {
   pushInit, sendToWidget, applyScaleToWindow, applyOnTop, pushConfig,
   winAlive, getWindow, clearLiveScaleCtx, queueLiveScale, widgetOrigin,
-  winOrigin, clampWidget, usableArea, snapRect, flippedOf, syncTaskbarWatch,
+  winOrigin, widgetSide, spaceAround, clampWidget, usableArea, snapRect, flippedOf,
+  syncTaskbarWatch, destroyWidget,
 } = require('./widget')
 // 挂件菜单改配置后，通知已打开的设置窗口同步刷新开关（详见 settings.js 的 onConfigChange）
 const { emitConfigChange } = require('./settings')
@@ -38,6 +38,37 @@ function registerIpc() {
     getBalance(manual).then((payload) => {
       sendToWidget('whale:balance', payload)
     })
+  })
+
+  // 多厂商模型：挂件菜单打开时懒加载 / 点「刷新」时强制拉取。
+  // 先推一次现有快照，菜单立刻能显示上次结果，不用等网络回来；
+  // 刷新流程收尾（成功或失败）再推一次并带 refreshDone —— 挂件菜单「刷新全部」按钮靠它收尾，
+  // 用定时器猜网络耗时不是提前解锁（慢了能连点）就是残留「刷新中…」
+  ipcRenderer.on('whale:models-refresh', (event, data) => {
+    const ids = data && Array.isArray(data.ids) && data.ids.length ? data.ids : null
+    const force = !!(data && data.force)
+    const push = (done) => {
+      try {
+        const payload = getModelsPayload()
+        if (done) payload.refreshDone = true
+        sendToWidget('whale:models', payload)
+      } catch (err) {}
+    }
+    push(false)
+    refreshModels(ids, force).then(() => push(true)).catch((err) => {
+      logErr('[whale][ipc] 刷新模型余额失败', err && err.message)
+      push(true) // 失败也要收尾，否则挂件按钮会一直停在「刷新中…」
+    })
+  })
+
+  // 挂件菜单切换主显示模型（id 非法/不存在时 patchConfig 会回退内置 DeepSeek）
+  ipcRenderer.on('whale:set-main-model', (event, data) => {
+    try {
+      patchConfig({ mainModelId: String((data && data.id) || '') })
+      sendToWidget('whale:models', getModelsPayload())
+      // 反向同步设置页的「主显示」单选，否则两处显示会不一致
+      emitConfigChange()
+    } catch (err) { logErr('[whale][ipc] 切换主显示模型失败', err && err.message) }
   })
 
   ipcRenderer.on('whale:config', (event, patch) => {
@@ -68,7 +99,7 @@ function registerIpc() {
     try {
       const sz = w.getSize()
       const winS = sz[0]
-      const s = winS - WIN_PAD // 挂件本体边长
+      const s = widgetSide(winS) // 挂件本体边长
       const x = Number(data.x), y = Number(data.y) // 目标窗口左上角
       if (!isFinite(x) || !isFinite(y)) return
       const wgt = widgetOrigin(x, y) // 目标挂件左上角
@@ -87,19 +118,21 @@ function registerIpc() {
     try {
       const pos = w.getPosition()
       const sz = w.getSize()
-      const width = sz[0], height = sz[1]
+      const width = sz[0]
       const x = data && isFinite(Number(data.x)) ? Number(data.x) : pos[0]
       const y = data && isFinite(Number(data.y)) ? Number(data.y) : pos[1]
-      const s = width - WIN_PAD
+      const s = widgetSide(width)
       const wgt = widgetOrigin(x, y)
       const wa = usableArea(wgt.x + s / 2, wgt.y + s / 2)
-      const r = snapRect(wa, x, y, width, height)
+      const r = snapRect(wa, x, y, width)
       w.setPosition(Math.round(r.x), Math.round(r.y))
       writeAnchor(r.anchor)
       sendToWidget('whale:snapped', {
         hAnchor: r.anchor.hAnchor,
         vAnchor: r.anchor.vAnchor,
         flipped: flippedOf(r.anchor),
+        // 吸附后重算上下空白：页面据此决定菜单往上还是往下展开
+        space: spaceAround(wa, r.x, r.y, width),
       })
     } catch (err) {}
   })
@@ -131,6 +164,12 @@ function registerIpc() {
     //    showMainWindow 唤不回主窗，必须 redirect 重新「进入插件」（'余额挂件' 是 whale 的指令别名），
     //    由 onPluginEnter 的 redirect 分支显式 showMainWindow（重定向已让插件重新激活）。
     try { utools.redirect('余额挂件', '') } catch (err) { logErr('[whale][ipc] 跳转设置功能失败', err && err.message) }
+  })
+
+  // 挂件菜单请求隐藏挂件：直接销毁窗口（与设置页「隐藏挂件」同一路径），
+  // 下次显示时重建，保证加载的是最新的悬浮窗页面
+  ipcRenderer.on('whale:hide-widget', () => {
+    try { destroyWidget() } catch (err) { logErr('[whale][ipc] 隐藏挂件失败', err && err.message) }
   })
 
   // 计时状态落库（页面在开始/停止/到点时上报；state 为 null 表示清除）

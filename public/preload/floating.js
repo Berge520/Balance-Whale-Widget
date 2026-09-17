@@ -3,8 +3,10 @@
  *
  * 悬浮窗（floating.html）与主窗宿主（services.js）之间的薄桥接层：
  *  - 接收宿主推送：whale:init / whale:balance / whale:config / whale:snapped / whale:sounds
+ *              / whale:skin / whale:bubbles / whale:models
  *  - 向宿主上报：whale:ready / whale:refresh / whale:config / whale:timer / whale:timer-done
  *              / whale:drag-move / whale:drag-end / whale:ignore-mouse / whale:open-settings
+ *              / whale:models-refresh / whale:set-main-model / whale:hide-widget
  *
  * 页面侧统一通过 window.whale 调用，不直接碰 electron / utools。
  */
@@ -21,7 +23,7 @@ log('[whale][floating] preload 已加载', {
   logFile: LOG_FILE || '(仅控制台)',
 })
 
-const handlers = { init: [], balance: [], config: [], snapped: [], dsh: [], sounds: [] }
+const handlers = { init: [], balance: [], config: [], snapped: [], dsh: [], sounds: [], skin: [], bubbles: [], models: [] }
 
 function on(name, cb) {
   if (handlers[name] && typeof cb === 'function') handlers[name].push(cb)
@@ -42,6 +44,12 @@ ipcRenderer.on('whale:snapped', (event, data) => emit('snapped', data))
 ipcRenderer.on('whale:dsh', (event, data) => emit('dsh', data))
 // 自定义音效本体（base64 data URL；导入/删除后宿主重推）
 ipcRenderer.on('whale:sounds', (event, data) => emit('sounds', data))
+// 自定义挂件形象本体（base64 data URL；导入/删除后宿主重推，空串表示无自定义形象）
+ipcRenderer.on('whale:skin', (event, data) => emit('skin', data))
+// 自定义气泡图片本体（base64 data URL 数组；导入/删除后宿主重推，空数组表示回退内置 rua.gif）
+ipcRenderer.on('whale:bubbles', (event, data) => emit('bubbles', data))
+// 多厂商模型列表（含内置 DeepSeek 那条）+ 主显示模型
+ipcRenderer.on('whale:models', (event, data) => emit('models', data))
 
 // 悬浮窗 → 主窗。sendToParent 仅在 createBrowserWindow 创建的窗口中有效。
 function send(channel) {
@@ -61,6 +69,9 @@ const api = {
   onSnapped(cb) { on('snapped', cb) },
   onDsh(cb) { on('dsh', cb) },
   onSounds(cb) { on('sounds', cb) },
+  onSkin(cb) { on('skin', cb) },
+  onBubbles(cb) { on('bubbles', cb) },
+  onModels(cb) { on('models', cb) },
 
   // —— 向宿主上报 ——
   ready() { send('whale:ready') },
@@ -77,8 +88,16 @@ const api = {
   dragMove(x, y) { send('whale:drag-move', { x: Number(x), y: Number(y) }) },
   dragEnd() { send('whale:drag-end', {}) },
   setIgnoreMouse(ignore) { send('whale:ignore-mouse', { ignore: !!ignore }) },
+  // 多厂商模型：ids 省略 = 全部；force=false 时宿主按 5 分钟节流跳过（菜单打开时懒加载用）
+  refreshModels(ids, force) {
+    send('whale:models-refresh', { ids: Array.isArray(ids) ? ids : null, force: !!force })
+  },
+  // 切换挂件主显示的模型（'deepseek' 为内置）
+  setMainModel(id) { send('whale:set-main-model', { id: String(id || '') }) },
   // 请求宿主唤出 uTools 主窗（设置页），用于「只显示挂件」模式下的设置入口
   openSettings() { send('whale:open-settings') },
+  // 请求宿主隐藏挂件（销毁悬浮窗；下次「显示挂件」重新创建，加载最新页面）
+  hideWidget() { send('whale:hide-widget') },
 
   // 标记真实桥接已加载（页面据此区分空实现）
   __bridge: true,
