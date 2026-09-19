@@ -163,9 +163,12 @@
     /* border-box：max-height（CSS 兜底 + JS 内联夹取）必须包含内边距与边框。
        否则实测高度会多出 8px*2 内边距 + 1px*2 边框，顶边越出窗口被裁掉，左上/右上圆角变直角 */
     box-sizing: border-box;
-    /* 固定宽度＝原本「收缩到适应」的自然宽度（由「大小」行的 range 129px 决定）：
-       否则 dsh 状态/命令这类长文本（nowrap）会把面板撑得很宽 */
-    width: 275px;
+    /* 宽度跟着内容自适应：275px 是原先「收缩到适应」的自然宽度（由「大小」行的 range 129px 定）。
+       改成 min/max 夹取后，标签变长（自适应标签列）或出现双滑块时面板能自己变宽，
+       短内容时也不会留着大片空白。max-width 仍防 dsh 状态/命令这类 nowrap 长文本把面板撑爆 */
+    width: max-content;
+    min-width: 260px;
+    max-width: 320px;
     background: rgba(252,253,255,.96);
     -webkit-backdrop-filter: blur(14px) saturate(1.6);
     backdrop-filter: blur(14px) saturate(1.6);
@@ -206,7 +209,9 @@
     transition: background .15s ease;
   }
   .dshwv-menu-row:hover { background: rgba(47,87,214,.07); }
-  .dshwv-menu-label { flex: 0 0 50px; color: #5b6ba1; }
+  /* 标签列宽随内容自适应：固定 50px 会把「透明度」「点按依次播放」这类长标签挤到换行或撑破行。
+     min-width 保住短标签的纵向对齐，上限 72px 防止长标签把控件挤没（超出仍 nowrap 裁切） */
+  .dshwv-menu-label { flex: 0 0 auto; min-width: 50px; max-width: 72px; color: #5b6ba1; }
 
   /* —— 多厂商模型：一行一个模型，点一下设为挂件主显示 —— */
   /* 模型多时不给菜单无限加高（会把下面的组挤出可视区）：列表内部滚动。
@@ -247,6 +252,10 @@
   .dshwv-group-head:hover { background: rgba(47,87,214,.08); color: #1b2a5e; }
   .dshwv-group-arrow { width: 11px; font-size: 9px; opacity: .6; }
   .dshwv-group-body { padding: 0 0 4px; }
+  /* 组内嵌组（计时的「更多」）：去掉分隔线与缩进强调层级，缩进用左侧留白表示，
+     否则里外两层标题同字号同色，看起来像两个平级分组 */
+  .dshwv-group .dshwv-group { border-top: none; margin-left: 6px; }
+  .dshwv-group .dshwv-group > .dshwv-group-head { padding-left: 0; font-size: 10px; opacity: .85; }
   .dshwv-menu-foot { margin-top: 8px; padding: 8px 6px 2px; border-top: 1px solid rgba(32,49,112,.1); }
 
   /* —— 控件 —— */
@@ -338,12 +347,58 @@
   .dshwv-menu-foot .dshwv-menu-link.dshwv-menu-link-warn:hover { background: #c9362f; border-color: #c9362f; box-shadow: none; }
 
   .dshwv-volpct { width: 40px; text-align: right; color: #5b6ba1; font-size: 12px; font-variant-numeric: tabular-nums; }
-  /* 计时行：模式下拉 + 开始/暂停/继续按钮；「目标」行的分钟数 / 时刻输入按模式二选一显示 */
+  /* 计时行：模式下拉 + 开始/暂停/继续按钮；「目标」行的时/分/秒 / 时刻输入按模式二选一显示 */
   .dshwv-timer-btn { flex: 0 0 auto; width: 52px; padding: 4px 0; }
   .dshwv-timer-time { flex: 0 0 auto; width: 78px; }
+  /* 时/分/秒三段：比通用 .dshwv-number 窄（一行要放下 三段 + 三个单位 + 留言），
+     并显示 spinner —— 分钟档常用 25 → 5，手输不如点一下快 */
+  .dshwv-timer-seg { width: 38px; flex: 0 0 auto; padding: 3px 2px 3px 5px; text-align: center; }
+  .dshwv-timer-unit { flex: 0 0 auto; color: #8b9ac9; font-size: 11px; }
+  /* 到点留言：占满「留言」行剩余宽度 */
+  .dshwv-timer-note {
+    flex: 1; min-width: 0; box-sizing: border-box;
+    border: 1px solid rgba(32,49,112,.2); border-radius: 8px;
+    padding: 3px 6px; font-size: 12px; color: #2b3a6b; background: #fff;
+    transition: border-color .15s ease, box-shadow .15s ease;
+  }
+  .dshwv-timer-note:focus { outline: none; border-color: #2f57d6; box-shadow: 0 0 0 2px rgba(47,87,214,.18); }
+  .dshwv-timer-break { width: 46px; flex: 0 0 auto; }
   /* 重置：只在计时中/暂停时出现，占满「目标」行；用次要按钮配色与「开始」区分 */
   .dshwv-timer-reset { flex: 1; padding: 4px 0; border-color: rgba(32,49,112,.22); background: rgba(32,49,112,.06); color: #4a5a92; }
   .dshwv-timer-reset:hover { background: rgba(32,49,112,.12); border-color: rgba(32,49,112,.34); }
+
+  /* —— 到点动作条：气泡下方的「休息 / 再来一轮 / 知道了」 ——
+     刻意不复用 .dshwv-menu（那个是三点菜单的专属面板，含滚动/方向/透明度等一套逻辑）；
+     这里只是气泡下缘的一条按钮，位置由 JS 按气泡 rect 算好（positionTimerActions）。
+     也不跟随挂件透明度：到点提醒是此刻最该看清的东西 */
+  .dshwv-timer-actions {
+    position: fixed;
+    display: flex; align-items: center; gap: 6px;
+    padding: 5px 6px;
+    background: rgba(252,253,255,.97);
+    -webkit-backdrop-filter: blur(12px) saturate(1.5);
+    backdrop-filter: blur(12px) saturate(1.5);
+    border: 1px solid rgba(32,49,112,.16);
+    border-radius: 10px;
+    box-shadow: 0 8px 22px rgba(19,32,74,.24);
+    opacity: 0; transform: translateY(-6px) scale(.96);
+    transition: opacity .18s ease, transform .22s cubic-bezier(.34,1.56,.64,1);
+    pointer-events: none;
+    z-index: 10001; /* 高于菜单：到点那一刻它才是主角 */
+    color-scheme: light;
+  }
+  .dshwv-timer-actions.dshwv-actions-open { opacity: 1; transform: translateY(0) scale(1); pointer-events: auto; }
+  .dshwv-timer-act {
+    border: 1px solid rgba(47,87,214,.28); border-radius: 8px;
+    background: rgba(47,87,214,.1); color: #2b3a6b;
+    padding: 4px 9px; font-size: 12px; cursor: pointer;
+    font-variant-numeric: tabular-nums;
+    transition: background .15s ease, border-color .15s ease, transform .12s ease;
+  }
+  .dshwv-timer-act:hover { background: rgba(47,87,214,.2); border-color: rgba(47,87,214,.5); }
+  .dshwv-timer-act:active { transform: scale(.97); }
+  .dshwv-timer-act-main { background: #2f57d6; border-color: #2f57d6; color: #fff; }
+  .dshwv-timer-act-main:hover { background: #2446b8; border-color: #2446b8; }
 
   /* dsh（DeepSeek Harness）：4 个等宽小按钮 + 打开页面 + 状态文本（长错误省略，悬停看 title） */
   .dshwv-dsh-btn { flex: 1 1 0; min-width: 0; padding: 4px 0; }

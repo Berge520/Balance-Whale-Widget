@@ -3,7 +3,7 @@
  */
 const fs = require('fs')
 const { PLUGIN_VERSION, K, MODEL_TEMPLATES, MODEL_MAX, DEFAULT_MAIN_MODEL } = require('./constants')
-const { DEV, logErr, LOG_FILE } = require('./log')
+const { DEV, log, logErr, LOG_FILE } = require('./log')
 const {
   clampNum, readConfig, patchConfig, readSecrets, writeSecrets, readLedger, historyKeepDays,
   resetAnchorCache, mergeLedgerHistory, clearTimer, calibrateTodayUsage,
@@ -19,6 +19,8 @@ const {
   taskbarState, syncTaskbarWatch, sendToWidget,
 } = require('./widget')
 const dsh = require('./dsh')
+const hosts = require('./hosts')
+const { sendMail, mailSubject, notifySystem, sendMailAsync } = require('./notify')
 const backup = require('./backup')
 const assets = require('./assets')
 const sounds = require('./sounds')
@@ -143,6 +145,28 @@ function pushModels() {
   sendToWidget('whale:models', getModelsPayload())
 }
 
+// GitHub 加速操作的统一包装：开 op 日志 → 跑任务 → 按「结论函数」定终态与摘要。
+// 五个操作（开启/关闭/刷新/校验/检测）原本各写一遍 then/catch 样板，既要重复 opEnd，
+// 又要手写「什么算成功/取消」—— 抽成一处，新增操作只需给 run + verdict 两个函数。
+// verdict(res) 返回 [state, summary]，state 取 ok / fail / cancel；抛错一律记 fail。
+function runGhAccelOp(title, run, verdict) {
+  const op = hosts.opStart(title)
+  return Promise.resolve()
+    .then(() => run(op))
+    .then((res) => {
+      const v = verdict(res) || ['ok', '']
+      if (v[0] === 'fail') logErr('[whale][ghaccel] ' + title + '失败', v[1] || '')
+      else log('[whale][ghaccel] ' + title + (v[0] === 'cancel' ? '已取消' : '成功'), v[1] || '')
+      hosts.opEnd(op, v[0], v[1])
+      return res
+    })
+    .catch((err) => {
+      logErr('[whale][ghaccel] ' + title + '异常', err && err.message)
+      hosts.opEnd(op, 'fail', String((err && err.message) || err))
+      throw err
+    })
+}
+
 module.exports = {
   getConfig() {
     return readConfig()
@@ -239,6 +263,75 @@ module.exports = {
     }
     return { ok: true, dir: dir }
   },
+  // ──────────────────────────────────────────────
+  // GitHub 加速（hosts 方案，见 lib/hosts.js；纯设置页功能，不做新 IPC）
+  // ──────────────────────────────────────────────
+  // 实际状态：读 hosts 文件现算（块存在 = 生效），不依赖配置里的开关意图
+  ghAccelStatus() {
+    return hosts.ghAccelStatus()
+  },
+  // 最近一次 IP 获取的来源追踪（内存态）：每个域名最终 IP 从哪来（DoH/社区源表/当前表/兜底）
+  ghAccelTrace() {
+    return hosts.ghAccelTrace()
+  },
+  // 操作日志（内存态，最多 50 条）：一次操作 = 一条，含步骤与结果，供设置页「GitHub 加速日志」回看
+  ghAccelOpLogs() {
+    return hosts.ghAccelOpLogs()
+  },
+  // 清空操作日志（返回清掉的条数）。不写成一次 op：清日志本身记进日志会立刻又冒出一条，自相矛盾
+  ghAccelClearOpLogs() {
+    return { cleared: hosts.clearGhAccelOpLogs() }
+  },
+  // 块外已存在的目标域名条目（其它工具也写 hosts 时会覆盖本插件）
+  ghAccelScanConflicts() {
+    return hosts.scanConflicts()
+  },
+  // 开启/关闭：写标记块要 UAC 提权，返回 Promise；refresh=true 时开启前先静默刷新 GitHub520 并探测只写可达 IP
+  ghAccelEnable(ips, refresh) {
+    return runGhAccelOp(
+      // 标题不再写「先刷新 IP 表」：刷新现在与探测**并行**跑，源只作补测，不再是前置串行步骤
+      refresh ? '开启 GitHub 加速（并行刷新 IP 表）' : '开启 GitHub 加速 / 重新写入 hosts',
+      (op) => hosts.enable(ips, refresh, op),
+      (res) => {
+        if (!res.ok) return res.canceled ? ['cancel', 'UAC 弹窗被取消，hosts 未改动'] : ['fail', res.error]
+        // r.ips 是回写入配置的「用户表内」IP 条数，与真正写进 hosts 的行数不同
+        // （hosts 里有同域名多行的备用 IP 与兜底候选），文案按域名数说更贴近用户认知
+        const n = res.ips ? new Set(res.ips.map((it) => it.domain)).size : 0
+        const rows = res.ips ? res.ips.length : 0
+        return ['ok', n + ' 个域名已写入 hosts（共 ' + rows + ' 条，含备用 IP 回退），浏览器 / git / 下载立即生效']
+      }
+    )
+  },
+  ghAccelDisable() {
+    return runGhAccelOp('关闭 GitHub 加速（移除 hosts 标记块）', (op) => hosts.disable(op), (res) => {
+      if (!res.ok) return res.canceled ? ['cancel', 'UAC 弹窗被取消，标记块仍在'] : ['fail', res.error]
+      return ['ok', res.already ? 'hosts 里本就没有本插件的块，无需改动' : '标记块已移除，hosts 还原为开启前的内容']
+    })
+  },
+  // 一键刷新 IP 表（GitHub520 源）；current 传当前表，源里没有的域名沿用当前值
+  ghAccelRefreshIps(current) {
+    return runGhAccelOp('刷新 IP 表（拉取社区源）', (op) => hosts.refreshIps(current, op), (res) => {
+      if (!res.ok) return ['fail', res.error]
+      return ['ok', 'IP 表已更新为 ' + res.updated.length + ' 条，'
+        + (res.skipped ? res.skipped + ' 个域名源未覆盖、沿用旧值' : '全部域名来自社区源')
+        + '；需点「重新写入 hosts」才会对系统生效']
+    })
+  },
+  // 校验当前 IP 表：逐条探测，返回 { results, bad, stale }。只给结论不删表，删除由设置页确认后走 saveConfig
+  ghAccelVerifyIps(ips) {
+    return runGhAccelOp('校验 IP 表可用性', (op) => hosts.verifyIps(ips, op), (res) => {
+      const good = res.results.length - res.bad.length - res.stale.length
+      return ['ok', '共 ' + res.results.length + ' 条：可用 ' + good + ' 条，不可用 ' + res.bad.length
+        + ' 条' + (res.stale.length ? '，待复查 ' + res.stale.length + ' 条（探测失败但仍是当前 DNS 解析结果）' : '')]
+    })
+  },
+  // 连通性自检（HEAD https://github.com），开启前后各测一次做对比
+  ghAccelProbe() {
+    return runGhAccelOp('检测 GitHub 连接', (op) => hosts.probeConnectivity(op), (res) =>
+      res.ok
+        ? ['ok', 'github.com 可达，HTTP ' + res.status + '，耗时 ' + res.ms + 'ms']
+        : ['fail', '无法访问 github.com：' + (res.error || '未知错误')])
+  },
   saveConfig(patch) {
     // 设置页拖动滑块中的实时预览：只改窗口几何（rAF 合帧），不写存储、不广播
     if (patch && patch.__live) {
@@ -271,6 +364,63 @@ module.exports = {
     writeSecrets(next)
     resetBalanceCache() // 密钥变更后强制重新拉取
     return { hasApiKey: !!next.apiKey, hasPlatformToken: !!next.platformToken }
+  },
+  // 邮件通知的凭据（SMTP 服务器/端口/账号/授权码）：单独一个入口，因为它进的是加密存储，
+  // 而 saveSecrets 的调用方（备份恢复/DeepSeek 密钥卡）只会传 apiKey/platformToken。
+  // 另外 notifyMail 传 undefined 会被 writeSecrets 判为「沿用现值」—— 设置页每次提交的是完整对象，不受影响。
+  saveMailSecrets(mail) {
+    const cur = readSecrets()
+    const m = mail && typeof mail === 'object' ? mail : {}
+    // 授权码留空 = 沿用已保存的（设置页回填的是掩码，用户没重新输入时不能当成「清空」）
+    if (m.mailPass === undefined || m.mailPass === '') m.mailPass = cur.notifyMail.mailPass
+    writeSecrets(Object.assign({}, cur, { notifyMail: m }))
+    return readSecrets().notifyMail
+  },
+  // 发一封测试邮件：直接使用传入的 SMTP 配置（设置页「保存前先测一下」的场景），
+  // 不落库、不动余额缓存。返回 { ok } 或 { ok:false, error }，错误原样给用户看
+  async sendTestMail(mail) {
+    const cur = readSecrets()
+    const m = Object.assign({}, mail || {})
+    if (m.mailPass === undefined || m.mailPass === '') m.mailPass = cur.notifyMail.mailPass
+    // 发件人/收件人来自配置（非明文凭据区）。设置页会随参数带过来；这里退回读配置，
+    // 免得「表单填了但漏传」时只得到一句「发件邮箱格式不正确」，看不出该去哪儿补
+    if (!m.mailFrom) m.mailFrom = readConfig().mailFrom
+    if (!m.mailTo) m.mailTo = readConfig().mailTo
+    if (!String(m.mailFrom || '').trim()) return { ok: false, error: '还没填「发件人」，请在下方配置区补上（一般与账号一致）' }
+    if (!String(m.mailTo || '').trim()) return { ok: false, error: '还没填「收件人」，请在下方配置区补上' }
+    const body = '这是一封来自小鲸鱼余额挂件的测试邮件。\n\n收到它说明邮件通知已配置成功，' +
+      '之后低余额、今日预算、余额大幅波动、计时到点等提醒都会发到这里。'
+    return sendMail(m, mailSubject(body), body)
+  },
+  // 通知渠道自测：按当前开着的渠道各送一条，让用户确认「开关 + 配置」真的能送达。
+  // 系统通知走同一条 notifySystem（同步），邮件走 sendMailAsync（异步、要等服务器回包），
+  // 因此两者分开回执。刻意不做 notify 那套「每天一次」去重 —— 点一下就该有一条
+  async testNotify() {
+    const cfg = readConfig()
+    const body = '这是一条来自小鲸鱼余额挂件的测试通知。\n\n看到它说明通知渠道配置成功，' +
+      '之后低余额、今日预算、余额大幅波动、计时到点等提醒都会从这里送达。'
+    if (cfg.notifyMailOn === true && (!String(cfg.mailFrom || '').trim() || !String(cfg.mailTo || '').trim())) {
+      return { ok: false, on: [], error: '邮件通知已开，但「发件人 / 收件人」还没填，请先在下方补上' }
+    }
+    // 邮件走 sendMailAsync —— 与自动提醒**同一条**路径，这样测通了就一定能收到真实提醒。
+    // 早先这里另拼一份参数，结果漏了收件人，测出来「失败」而实际配置是好的
+    let mail = null
+    if (cfg.notifyMailOn === true) {
+      mail = sendMailAsync(cfg, body)
+    }
+    const on = []
+    let sysOk = false
+    if (cfg.notifySystemOn !== false) {
+      try { sysOk = notifySystem('测试通知：通知渠道正常') === true } catch (err) { sysOk = false }
+      on.push('系统通知')
+    }
+    if (mail) on.push('邮件')
+    if (!on.length) return { ok: false, on, error: '系统通知与邮件通知都关着，没有可测试的渠道' }
+    if (mail) {
+      const r = await mail
+      if (!r.ok) return { ok: false, on, system: sysOk, error: r.error }
+    }
+    return { ok: true, on, system: sysOk }
   },
   // 用给定 API Key 直接验证（不落库）
   testApiKey(apiKey) {

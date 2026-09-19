@@ -5,6 +5,7 @@ const { ipcRenderer } = require('electron')
 const { log, logErr } = require('./log')
 const { getBalance, refreshModels, getModelsPayload } = require('./api')
 const { readConfig, patchConfig, writeAnchor, writeTimer, clearTimer } = require('./store')
+const { notify } = require('./notify')
 const dsh = require('./dsh')
 const {
   pushInit, sendToWidget, applyScaleToWindow, applyOnTop, pushConfig,
@@ -154,6 +155,38 @@ function registerIpc() {
     } catch (err) { ignoreMouseVal = null }
   })
 
+  // 挂件菜单里要打字（留言、时长、定时）：窗口是以 focusable:false 建的，
+  // 这类窗口在 Electron 里根本不接收键盘事件（点得进输入框却打不出字），
+  // 光调 w.focus() 没用。focusable 虽说是创建期选项，但 Electron 的 setFocusable()
+  // 可以在运行时改，所以打开菜单时置 true 并夺焦，关闭时置回 false 把焦点让出去。
+  //
+  // 兜底顺序：setFocusable(true) → focus()（w.focus 不可用/抛错时退到 utools 侧）。
+  // 关菜单时：setFocusable(false) 之后必须显式唤回 uTools 主窗，否则「设置窗」会
+  // 因为刚被挂件抢过焦点而失焦，按 uTools 原生行为自动隐藏 —— 看起来就是设置窗莫名消失。
+  ipcRenderer.on('whale:input-focus', (event, data) => {
+    if (!winAlive()) return
+    const w = getWindow()
+    const want = !!(data && data.focus)
+    try {
+      if (want) {
+        if (typeof w.setFocusable === 'function') w.setFocusable(true)
+        // 置为可聚焦后还要主动取一次焦点，否则输入光标不会落到菜单输入框上
+        try { w.focus() } catch (err) {}
+      } else {
+        try { w.blur() } catch (err) {}
+        if (typeof w.setFocusable === 'function') w.setFocusable(false)
+        // 交还焦点：唤回 uTools 主窗（设置页），避免它因失焦被自动隐藏
+        try {
+          if (typeof utools !== 'undefined' && utools && typeof utools.showMainWindow === 'function') {
+            utools.showMainWindow()
+          }
+        } catch (err) {}
+      }
+    } catch (err) {
+      logErr('[whale][ipc] 切换输入焦点失败', err && err.message)
+    }
+  })
+
   // 挂件菜单请求唤出主窗（设置页）：「显示挂件」模式下唯一入口
   ipcRenderer.on('whale:open-settings', () => {
     // 1) 主窗还在（如 both/settings 模式，或设置窗已分离）→ 直接唤回
@@ -187,11 +220,11 @@ function registerIpc() {
     })
   })
 
-  // 计时到点系统通知（页面对「到点通知」开关的判断在页面侧完成）
+  // 计时到点通知（页面对「到点通知」开关的判断在页面侧完成，并已在 text 为空时停发）
   ipcRenderer.on('whale:timer-done', (event, data) => {
     const text = String((data && data.text) || '').slice(0, 200)
     if (!text) return
-    try { utools.showNotification(text, 'whale') } catch (err) { logErr('[whale][ipc] 计时通知失败', err && err.message) }
+    notify(text, readConfig())
   })
 
   // DeepSeek Harness（dsh）控制：挂件菜单 → 宿主执行 → 回推状态快照。

@@ -1,8 +1,9 @@
 <script lang="ts" setup>
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
-import type { AssetsApplyResult, AssetsExportResult, AssetsPreviewResult, BackupPreviewResult, BubbleMeta, CodexSummaryResult, CodexWindow, CodexWindows, DshUsageResult, LedgerDetailDay, LedgerDetailEntry, ModelUsageRow, SkinGallery, SkinMeta, SoundMeta, SoundRole, WhaleModel, WhaleModelRow, WhaleModelTemplate, WhalePriceModel, WhaleServices, WhaleTokenPrice } from './types/services'
+import type { AssetsApplyResult, AssetsExportResult, AssetsPreviewResult, BackupPreviewResult, BubbleMeta, CodexSummaryResult, CodexWindow, CodexWindows, DshUsageResult, LedgerDetailDay, LedgerDetailEntry, ModelUsageRow, SkinGallery, SkinMeta, SoundMeta, SoundRole, WhaleMailSecrets, WhaleModel, WhaleModelRow, WhaleModelTemplate, WhalePriceModel, WhaleServices, WhaleTokenPrice } from './types/services'
 import SkinCropper from './components/SkinCropper.vue'
 import SoundTrimmer from './components/SoundTrimmer.vue'
+import AccelView from './views/AccelView.vue'
 
 // 主窗 preload（services.js）注入的宿主 API
 const services: Partial<WhaleServices> = window.services || {}
@@ -45,6 +46,13 @@ const secrets = reactive({ apiKey: '', platformToken: '' })
 const guides = reactive({ apiKey: false, token: false })
 // 「帮助」组里使用说明 / 故障排查的折叠态（默认收起，点标题才展开）
 const widgetFolds = reactive({ help: false, trouble: false })
+// 长卡片内部的折叠态：凭据（填一次就不动，默认收起）
+const toolOpen = reactive({ credentials: false })
+// 「挂件外观」卡内分组折叠：基础项（大小 / 形象）常改，留折叠外；
+// 气泡文案与音效属低频，默认收起，避免一屏铺开 11 组控件
+const lookFolds = reactive({ bubble: false, sound: false })
+// 「资源」页折叠态：内置资源纯查阅用，默认收起
+const assetFolds = reactive({ builtin: false })
 // —— 设置页顶部 Tab ——
 // 原先 12 张卡片竖排一屏到底（模板近千行），找一项要滚很久；按主题分 6 组，一次只看一组。
 // 每张卡片用 v-if="activeTab === 'xxx'" 归到组里（不额外套容器层，源码顺序即组内顺序）。
@@ -54,7 +62,7 @@ const TABS = [
   { key: 'assets', label: '资源', desc: '素材总览 · 形象画廊 · 音效 · 素材包' },
   { key: 'usage', label: '用量', desc: '趋势与账本 · 模型余额 · 提醒与通知' },
   { key: 'window', label: '窗口', desc: '显隐 · 位置 · 透明度 · 穿透' },
-  { key: 'data', label: '数据', desc: '凭据 · 清除数据 · 备份与恢复' },
+  { key: 'data', label: '数据', desc: '凭据设置 · 清除数据 · 备份与恢复' },
   { key: 'help', label: '帮助', desc: '使用说明 · 故障排查 · 关于与更新' },
   { key: 'dev', label: 'dsh', desc: 'DeepSeek Harness（dsh）· dsh 用量统计 · Codex 会话统计' },
 ] as const
@@ -132,7 +140,13 @@ const cfg = reactive({
   // 气泡配色主题：'default' | 'dark' | 'sakura'
   theme: 'default',
   timerNotifyOn: true,
+  // 计时到点的邮件通知（邮件总开关 notifyMailOn 未开时不生效）
+  timerMailOn: true,
   timerPersistOn: true,
+  // 计时时长（秒）与到点要做什么：留言 + 休息档。与挂件菜单「计时」组同一份配置
+  timerSec: 1500,
+  timerNote: '',
+  timerBreakMin: 5,
   enterMode: 'both',
   dshNodeDir: '',
   dshKeepAlive: false,
@@ -153,7 +167,30 @@ const cfg = reactive({
   tokenPrice: { ...TOKEN_PRICE_DEFAULT, models: [] as WhalePriceModel[] },
   // 账本历史保留天数（35–730）：决定趋势图 / 明细 / 导出能回溯多久
   historyKeepDays: HISTORY_KEEP.DEFAULT,
+  // GitHub 加速（hosts 方案）：on = 开关意图（实际是否生效以 hosts 标记块为准）；ips = 可编辑 IP 表
+  ghAccelOn: false,
+  ghAccelIps: [] as Array<{ domain: string; ip: string }>,
+  ghAccelRefreshedAt: 0,
+  // 通知渠道：系统通知（默认开）+ 邮件通知（默认关，需先配 SMTP）。
+  // 邮件的收发件人/显示名/主题前缀属于「配置」进这里；服务器、账号、授权码属于凭据，走 mail 表单
+  notifySystemOn: true,
+  notifyMailOn: false,
+  mailFrom: '',
+  mailTo: '',
+  mailFromName: '小鲸鱼余额挂件',
+  mailSubjectPrefix: '[小鲸鱼余额挂件]',
 })
+// 邮件通知的 SMTP 凭据：与 cfg 分开，因为它在宿主侧进的是加密存储（不进备份）。
+// mailPass 回填的是占位掩码而不是真实授权码 —— 只在用户没重新输入时保留原值，避免明文回显
+const mail = reactive({
+  mailHost: '',
+  mailPort: 465,
+  mailSecure: true,
+  mailUser: '',
+  mailPass: '',
+})
+// 已保存过授权码时为 true：用于把密码框的 placeholder 提示成「留空 = 不修改」
+const mailPassSaved = ref(false)
 const widgetVisible = ref(true)
 const widgetFlash: Flash = useFlash()
 // 挂件错误查看：errDetail 为宿主记录的最后一条创建/加载错误，空串表示无错误
@@ -1256,12 +1293,17 @@ function removeModelRow(id: string) {
 
 const MIN_SCALE = 0.6
 const MAX_SCALE = 2.5
+// 大小档位 1–15 线性映射到 MIN_SCALE–MAX_SCALE（原为 1–20，档位 20 即 2.5 倍太大，
+// 收到 15 后最大约 2.1 倍）。档位数改动必须同步：此处的 SCALE_STEPS、
+// numToScale 的钳制、scaleToNum 的分母，以及模板里 number 输入的 max，
+// 并与浮动页 floating-page.js 的三处保持同值。
+const SCALE_STEPS = 15
 function scaleToNum(s: number) {
-  return Math.round((s - MIN_SCALE) / ((MAX_SCALE - MIN_SCALE) / 19)) + 1
+  return Math.round((s - MIN_SCALE) / ((MAX_SCALE - MIN_SCALE) / (SCALE_STEPS - 1))) + 1
 }
 function numToScale(n: number) {
-  const v = Math.max(1, Math.min(20, Math.round(n)))
-  return MIN_SCALE + (v - 1) * ((MAX_SCALE - MIN_SCALE) / 19)
+  const v = Math.max(1, Math.min(SCALE_STEPS, Math.round(n)))
+  return MIN_SCALE + (v - 1) * ((MAX_SCALE - MIN_SCALE) / (SCALE_STEPS - 1))
 }
 function onScaleLive() {
   // 拖动中：实时改窗口几何（不写存储），避免高频保存卡顿
@@ -1294,6 +1336,39 @@ function onBudgetToggle() {
 function onDropToggle() {
   if (cfg.dropAlertOn && !(cfg.dropAlertAmount > 0)) cfg.dropAlertAmount = 5
   patchCfg({ dropAlertOn: cfg.dropAlertOn, dropAlertAmount: cfg.dropAlertAmount })
+}
+// —— 计时：时长三段输入 / 到点留言 / 「休息」档 ——
+// 配置里只存总秒数（timerSec），三段输入是它的展示形态；
+// 拆出来的 h/m/s 单独放一份本地状态，避免每次输入都被折算回秒再拆回来导致光标跳动
+const TIMER_NOTE_MAX = 60
+const timerHms = reactive({ h: 0, m: 0, s: 0 })
+function syncTimerHms() {
+  const sec = Math.max(0, Math.min(86399, Math.round(Number(cfg.timerSec) || 0)))
+  timerHms.h = Math.floor(sec / 3600)
+  timerHms.m = Math.floor((sec % 3600) / 60)
+  timerHms.s = sec % 60
+}
+// 三段全填 0 时按 25 分钟兜底：否则「填了 0 就开不了计时」，且宿主侧清洗也会把它拉回默认值
+function commitTimerHms() {
+  const sec = Math.round(Number(timerHms.h) || 0) * 3600 + Math.round(Number(timerHms.m) || 0) * 60 + Math.round(Number(timerHms.s) || 0)
+  cfg.timerSec = Math.max(1, Math.min(86399, sec || 1500))
+  syncTimerHms()
+  patchCfg({ timerSec: cfg.timerSec })
+}
+// 「休息」档：0 分钟 = 不显示休息按钮（与挂件菜单 hideBubble 后的按钮显隐同口径）
+const timerBreakOn = computed({
+  get: () => cfg.timerBreakMin > 0,
+  set: (v: boolean) => { if (v && !(cfg.timerBreakMin > 0)) cfg.timerBreakMin = 5 },
+})
+const timerBreakMinEdit = computed({
+  get: () => Math.max(1, cfg.timerBreakMin || 5),
+  set: (v: number) => { cfg.timerBreakMin = Math.max(1, Math.min(120, Math.round(Number(v) || 5))) },
+})
+function onTimerBreakToggle() {
+  patchCfg({ timerBreakMin: timerBreakOn.value ? (cfg.timerBreakMin > 0 ? cfg.timerBreakMin : 5) : 0 })
+}
+function commitTimerBreak() {
+  patchCfg({ timerBreakMin: timerBreakMinEdit.value })
 }
 // —— 窗口透明度：拖动实时预览（只推 CSS opacity 不写存储），松手持久化 ——
 function clampOpacity(v: number) {
@@ -1615,6 +1690,15 @@ async function onSkinCropConfirm(p: { dataUrl: string; name: string }) {
     skinFlash.msg = '导入失败：' + String(err?.message || err)
   }
 }
+// 随机换一个内置形象；「自定义」是用户自己导入的那张，不在抽签范围里。
+// 抽到当前这张时再抽一次（只有一张内置形象的极端情况会抽不出来，那就保持原样）
+function doRandomSkin() {
+  const pool = BUILTIN_SKINS.filter(s => s !== cfg.skin)
+  const pick = pool.length ? pool[Math.floor(Math.random() * pool.length)] : cfg.skin
+  cfg.skin = pick
+  patchCfg({ skin: pick })
+}
+
 // 换用画廊里的某一张（顺带把「形象」切到自定义，否则点了没反应）
 function doUseSkin(id: string) {
   skinFlash.msg = ''
@@ -2022,6 +2106,9 @@ const QUOTE_TEXT_FIELDS: Array<{ key: 'time' | 'gifFail'; label: string; hint: s
   { key: 'gifFail', label: '动图降级', hint: '动图（rua.gif）加载失败时顶替显示的文案' },
 ]
 const quoteFolds = reactive({ open: false })
+// 文案卡默认折叠：整张卡是「一次配好就不再动」的内容，展开要占一屏多，
+// 收起来后「外观」页只剩常用项（大小 / 形象 / 气泡 / 音效）
+const quoteCardFolds = reactive({ open: false })
 const quoteResetConfirm = ref(false)
 // 「有未保存改动」提示：基线由 applyConfig 每次回填后写入（保存 / 恢复默认 / 导入配置 / 清除数据都会经过它），
 // 与当前编辑内容序列化比对即可，不必再挂深层 watcher。null = 还没回填过，此时不提示
@@ -2144,6 +2231,153 @@ const alertFolds = reactive({ open: false })
 // 同「文案」卡：与上次回填的内容比对，用于「未保存」提示
 const alertsBaseline = ref<string | null>(null)
 const alertsDirty = computed(() => alertsBaseline.value !== null && JSON.stringify(cfg.alerts) !== alertsBaseline.value)
+
+// —— 邮件通知（SMTP） ——
+const mailFlash: Flash = useFlash()
+const mailTesting = ref(false)
+// SMTP 配置区的展开态。三个来源共同决定，见下面 mailOpen 的注释
+const mailFold = reactive({ open: false, touched: false })
+// 配置是否已齐全：服务器 / 发件人 / 收件人。只看「有没有填过」这个持久事实，
+// 不看本次测试成没成 —— 折叠态要能跨会话稳定重现，不依赖一次性的运行时结果。
+// **刻意不要求账号与授权码**：账号留空是合法用法（多数服务器直接拿发件人地址当账号，
+// 宿主 SmtpClient.send 也是 `if (user)` 才发 AUTH），授权码同理 —— 本机可匿名中继的
+// 内网 SMTP 根本不需要。早先要求这两项非空，用户账号留空时永远判「未配置」，
+// 于是每次重载都弹回整张空表格，看着就像「保存丢了」
+const mailConfigured = computed(() => !!(
+  mail.mailHost.trim() && cfg.mailFrom.trim() && cfg.mailTo.trim()
+))
+// 展开条件：手动展开过、或配置还没齐（空表格就是要催用户去填）、或刚点了「重新配置」。
+// 配置齐全且用户没动过 → 收起，只留一行「已配置」摘要，把卡片位置让给上面的提醒开关。
+// `touched` 是关键：否则用户点「修改」展开后，一改动输入框就会因「已配置」立刻收起，
+// 出现「点开就自动关上」的失焦感
+const mailOpen = computed(() => mailFold.touched || !mailConfigured.value || mailFold.open)
+// 通知渠道自测（「通知方式」小节的「测试通知」按钮）：与邮件测试分开两个消息态，
+// 因为它同时覆盖系统通知渠道，消息文案也不同
+const notifyFlash: Flash = useFlash()
+const notifyTesting = ref(false)
+let notifyFlashTimer: number | undefined
+function notifyFlashShow(msg: string, err = false) {
+  notifyFlash.msg = msg
+  notifyFlash.err = err
+  if (notifyFlashTimer) clearTimeout(notifyFlashTimer)
+  notifyFlashTimer = window.setTimeout(() => { notifyFlash.msg = '' }, 4000)
+}
+let mailFlashTimer: number | undefined
+function mailFlashShow(msg: string, err = false) {
+  mailFlash.msg = msg
+  mailFlash.err = err
+  if (mailFlashTimer) clearTimeout(mailFlashTimer)
+  mailFlashTimer = window.setTimeout(() => { mailFlash.msg = '' }, 4000)
+}
+// 从宿主读回 SMTP 凭据：授权码不返明文，只回「有没有存过」的标记，
+// 所以密码框留空提交时后端会沿用旧值（见 saveMailSecrets）。
+// 入参是「SMTP 凭据本体」（**两种来源形状必须一致**）：
+//   - getSecrets() 返回整个 WhaleSecrets，SMTP 挂在 `notifyMail` 子对象下，要下沉一层
+//   - saveMailSecrets() 直接返回该子对象（WhaleMailSecrets），不能下沉
+// 早先这里写成 `s.mailHost` 取顶层、而 saveMailSecrets 又直接返回子对象，
+// 两条路径形状对不上，回填恒为空 → 每次重启都判「未配置」
+function applyMailSecrets(m: WhaleMailSecrets | undefined) {
+  if (!m || typeof m !== 'object') return
+  mail.mailHost = String(m.mailHost || '')
+  mail.mailPort = Number(m.mailPort) > 0 ? Number(m.mailPort) : 465
+  mail.mailSecure = m.mailSecure !== false
+  mail.mailUser = String(m.mailUser || '')
+  mailPassSaved.value = !!m.mailPass
+  mail.mailPass = ''
+}
+function loadMailSecrets() {
+  // 预期分支：读存储失败/宿主未就绪时保持空表单，用户重填即可
+  try { applyMailSecrets(services.getSecrets?.()?.notifyMail) } catch (err) {}
+}
+// 「重新配置 / 收起」：touched 一旦置位就不再自动收起，把展开态完全交还给用户，
+// 避免填到一半被 computed 判成「已配置」而自己合上
+function toggleMailFold() {
+  mailFold.touched = true
+  mailFold.open = !mailFold.open
+}
+function saveMailSettings() {
+  mailFlash.msg = ''
+  try {
+    // 非敏感字段（开关 / 收件人 / 主题前缀）进配置；服务器与授权码进加密存储，两条路分开写
+    patchCfg({
+      notifySystemOn: cfg.notifySystemOn,
+      notifyMailOn: cfg.notifyMailOn,
+      mailFrom: cfg.mailFrom.trim(),
+      mailTo: cfg.mailTo.trim(),
+      mailFromName: cfg.mailFromName.trim(),
+      mailSubjectPrefix: cfg.mailSubjectPrefix.trim(),
+    })
+    const saved = services.saveMailSecrets?.({
+      mailHost: mail.mailHost.trim(),
+      mailPort: Number(mail.mailPort) || 465,
+      mailSecure: mail.mailSecure,
+      mailUser: mail.mailUser.trim(),
+      mailPass: mail.mailPass,
+    })
+    applyMailSecrets(saved)
+    mailFlashShow('已保存')
+  } catch (err: any) {
+    mailFlashShow('保存失败：' + String(err?.message || err), true)
+  }
+}
+async function testNotify() {
+  if (notifyTesting.value) return
+  notifyTesting.value = true
+  notifyFlash.msg = ''
+  try {
+    const r = await services.testNotify?.()
+    if (r && r.ok) {
+      const sys = (r.on || []).includes('系统通知')
+      notifyFlashShow(sys
+        ? '已按当前渠道发出：' + (r.on || []).join(' + ') + '（系统通知应已弹出，邮件请查收含垃圾箱）'
+        : '已发出：' + (r.on || []).join(' + ') + '，请查收（含垃圾箱）')
+      // 邮件这条渠道也验证通过 → 与「发送测试邮件」同样收起配置区
+      if ((r.on || []).includes('邮件')) mailFold.open = false
+    } else {
+      // 邮件渠道失败时展开配置区，否则错误提示会被折叠藏住
+      if ((r && r.on || []).includes('邮件')) mailFold.open = true
+      notifyFlashShow('发送失败：' + ((r && r.error) || '未知错误'), true)
+    }
+  } catch (err: any) {
+    notifyFlashShow('发送失败：' + String(err?.message || err), true)
+  } finally {
+    notifyTesting.value = false
+  }
+}
+async function testMail() {
+  if (mailTesting.value) return
+  mailTesting.value = true
+  mailFlash.msg = ''
+  try {
+    const r = await services.sendTestMail?.({
+      mailHost: mail.mailHost.trim(),
+      mailPort: Number(mail.mailPort) || 465,
+      mailSecure: mail.mailSecure,
+      mailUser: mail.mailUser.trim(),
+      mailPass: mail.mailPass,
+      // 发件人 / 收件人在「当前表单」里（cfg），不在凭据区 —— 漏传就会被宿主判成空串，
+      // 报「发件邮箱格式不正确」，用户看表单里明明填了
+      mailFrom: cfg.mailFrom.trim(),
+      mailTo: cfg.mailTo.trim(),
+      mailFromName: cfg.mailFromName.trim(),
+    })
+    if (r && r.ok) {
+      mailFlashShow('测试邮件已发出，请查收（含垃圾箱）')
+      // 发信成功 = 这组参数确实能送达，此时自动收起配置区，卡片回到「一行摘要」的清爽态。
+      // 只清 open、留 touched=true：展开权已交给用户，之后不会再自己弹开
+      mailFold.open = false
+    } else {
+      // 失败时反而要展开，否则错误提示会跟着配置区一起藏在折叠里，用户只看到一片空白
+      mailFold.open = true
+      mailFlashShow('发送失败：' + ((r && r.error) || '未知错误'), true)
+    }
+  } catch (err: any) {
+    mailFold.open = true
+    mailFlashShow('发送失败：' + String(err?.message || err), true)
+  } finally {
+    mailTesting.value = false
+  }
+}
 
 function saveSecrets() {
   const r = services.saveSecrets?.({ apiKey: secrets.apiKey.trim(), platformToken: secrets.platformToken.trim() })
@@ -2529,7 +2763,12 @@ function applyConfig(c: any) {
   cfg.updateCheckOn = c.updateCheckOn === true
   cfg.dragLock = c.dragLock === true
   cfg.timerNotifyOn = c.timerNotifyOn !== false
+  cfg.timerMailOn = c.timerMailOn !== false
   cfg.timerPersistOn = c.timerPersistOn !== false
+  cfg.timerSec = typeof c.timerSec === 'number' && c.timerSec > 0 ? Math.round(c.timerSec) : 1500
+  cfg.timerNote = typeof c.timerNote === 'string' ? c.timerNote : ''
+  cfg.timerBreakMin = typeof c.timerBreakMin === 'number' ? c.timerBreakMin : 5
+  syncTimerHms()
   cfg.enterMode = c.enterMode === 'widget' || c.enterMode === 'settings' ? c.enterMode : 'both'
   cfg.dshNodeDir = typeof c.dshNodeDir === 'string' ? c.dshNodeDir : ''
   cfg.dshKeepAlive = c.dshKeepAlive === true
@@ -2571,6 +2810,19 @@ function applyConfig(c: any) {
     : []
   // 账本历史保留天数：宿主已归一化过，这里只做类型兜底
   cfg.historyKeepDays = typeof c.historyKeepDays === 'number' ? c.historyKeepDays : HISTORY_KEEP.DEFAULT
+  // GitHub 加速：开关意图 + IP 表（宿主已清洗过非法条目，这里只做类型兜底）
+  cfg.ghAccelOn = c.ghAccelOn === true
+  cfg.ghAccelIps = Array.isArray(c.ghAccelIps)
+    ? c.ghAccelIps.filter((it: any) => it && typeof it === 'object').map((it: any) => ({ domain: String(it.domain || ''), ip: String(it.ip || '') }))
+    : []
+  cfg.ghAccelRefreshedAt = typeof c.ghAccelRefreshedAt === 'number' && c.ghAccelRefreshedAt > 0 ? c.ghAccelRefreshedAt : 0
+  // 通知渠道：系统通知默认开（沿用旧行为）；邮件通知的服务器/授权码不在这里（走 secrets）
+  cfg.notifySystemOn = c.notifySystemOn !== false
+  cfg.notifyMailOn = c.notifyMailOn === true
+  cfg.mailFrom = typeof c.mailFrom === 'string' ? c.mailFrom : ''
+  cfg.mailTo = typeof c.mailTo === 'string' ? c.mailTo : ''
+  cfg.mailFromName = typeof c.mailFromName === 'string' ? c.mailFromName : ''
+  cfg.mailSubjectPrefix = typeof c.mailSubjectPrefix === 'string' ? c.mailSubjectPrefix : ''
   // 台词库：宿主回的是清洗后的结构（time / gifFail 是字符串数组，groups 是随机组列表），
   // 编辑区按「一行一条」显示（缺字段/异常值按空处理）
   const q = c.quotes && typeof c.quotes === 'object' ? c.quotes : {}
@@ -2640,6 +2892,7 @@ onMounted(() => {
       secrets.apiKey = s.apiKey || ''
       secrets.platformToken = s.platformToken || ''
     }
+    loadMailSecrets()
     widgetVisible.value = services.isWidgetVisible?.() !== false
     checkWidgetError(true)
     appVersion.value = services.getVersion?.() || ''
@@ -2653,6 +2906,8 @@ onMounted(() => {
     dshStatus(true) // 打开插件就先探测一次（识别外部终端里跑的 dsh）
     dshPolling.start()
     taskbarPolling.start()
+    // GitHub 加速（hosts 实际状态）不在这里预读：它已抽到 AccelView，
+    // 由该组件在切到帮助 Tab 时自行刷新，父级无需代劳
   } catch (err) {}
   window.addEventListener('focus', onWindowActive)
   document.addEventListener('visibilitychange', onWindowActive)
@@ -2684,60 +2939,66 @@ onUnmounted(() => {
       <p class="tab-desc">{{ activeTabDesc }}</p>
     </nav>
 
-    <!-- [数据] 凭据：填一次就不动，收进「数据」组，不再占着页面最顶 -->
+    <!-- [数据] 凭据：填一次就不动，默认收起（展开状态见 toolOpen.credentials） -->
     <section v-if="activeTab === 'data'" class="card">
-      <h2>DeepSeek 凭据</h2>
-      <label class="field">
-        <span class="label">API Key</span>
-        <input v-model="secrets.apiKey" type="password" placeholder="sk-..." autocomplete="off" />
-      </label>
-      <button class="link-btn" @click="guides.apiKey = !guides.apiKey">
-        {{ guides.apiKey ? '收起教程' : '如何获取 API Key？' }}
-      </button>
-      <div v-if="guides.apiKey" class="guide">
-        <p class="guide-use"><strong>用途：</strong>读取账户余额，挂件显示余额必需（<strong>必填</strong>）。</p>
-        <ol class="guide-steps">
-          <li>登录 <a href="#" @click.prevent="openDoc('https://platform.deepseek.com')">platform.deepseek.com</a>。</li>
-          <li>左侧进「API keys」→「创建 API key」。</li>
-          <li>复制 <code>sk-</code> 开头的密钥（仅完整显示一次）。</li>
-          <li>粘贴到上方，点「保存凭据」。</li>
-        </ol>
-        <p class="guide-meta"><strong>保存与安全：</strong>存于本机 uTools 加密存储，仅本插件可读、不上传服务器；只随请求发往 <code>api.deepseek.com</code>，不写日志。API Key 长期有效，泄露可在平台删旧 key 后换新。</p>
-        <p class="guide-note">注意：这是接口密钥，不是「平台 Token」；请勿泄露。</p>
-      </div>
-      <label class="field">
-        <span class="label">平台 Token <em>（可选，「实时·令牌」用量模式需要）</em></span>
-        <input v-model="secrets.platformToken" type="password" placeholder="platform.deepseek.com 令牌" autocomplete="off" />
-      </label>
-      <button class="link-btn" @click="guides.token = !guides.token">
-        {{ guides.token ? '收起教程' : '如何获取平台 Token？' }}
-      </button>
-      <div v-if="guides.token" class="guide">
-        <p class="guide-use"><strong>用途：</strong>可选。用于「实时·令牌」用量模式；不填则本地记账。</p>
-        <ol class="guide-steps">
-          <li>登录 <a href="#" @click.prevent="openDoc('https://platform.deepseek.com')">platform.deepseek.com</a>，按 <code>F12</code> 打开 Network。</li>
-          <li>刷新「用量」页，找到 <code>usage/by_api_key/amount</code> 请求。</li>
-          <li>复制其 Request Headers 里 <code>Authorization</code> 的值（<code>Bearer eyJ...</code>）。</li>
-          <li>粘贴到上方，点「保存凭据」。</li>
-        </ol>
-        <p class="guide-meta"><strong>保存与安全：</strong>同 API Key，本机加密存储、不上传服务器；只随请求发往 <code>platform.deepseek.com</code>。它属网页会话令牌，重登后可能失效，届时自动回落本地记账，重新复制一次即可。</p>
-      </div>
-      <div class="btn-row">
-        <button @click="saveSecrets">保存凭据（加密存储）</button>
-        <button class="secondary" :disabled="testing || (!secrets.apiKey.trim() && !secrets.platformToken.trim())" @click="testKey">
-          {{ testing ? '测试中…' : '测试连接' }}
+      <div class="fold">
+        <button class="link-btn" @click="toolOpen.credentials = !toolOpen.credentials">
+          {{ toolOpen.credentials ? '收起凭据设置' : 'DeepSeek 凭据（API Key / 平台 Token）' }}
         </button>
-      </div>
-      <p v-if="secretsFlash.msg" class="msg" :class="msgCls(secretsFlash)">{{ secretsFlash.msg }}</p>
-      <div v-if="testResults.length" class="test-list">
-        <div v-for="(r, i) in testResults" :key="i" class="test-item" :class="r.ok ? 'ok' : 'err'">
-          <span class="test-icon">{{ r.ok ? '✓' : '✕' }}</span>
-          <div class="test-body">
-            <div class="test-label">{{ r.label }}</div>
-            <div class="test-msg">{{ r.msg }}</div>
+        <div v-if="toolOpen.credentials" class="guide">
+          <label class="field">
+            <span class="label">API Key</span>
+            <input v-model="secrets.apiKey" type="password" placeholder="sk-..." autocomplete="off" />
+          </label>
+          <button class="link-btn" @click="guides.apiKey = !guides.apiKey">
+            {{ guides.apiKey ? '收起教程' : '如何获取 API Key？' }}
+          </button>
+          <div v-if="guides.apiKey" class="guide2">
+            <p class="guide-use"><strong>用途：</strong>读取账户余额，挂件显示余额必需（<strong>必填</strong>）。</p>
+            <ol class="guide-steps">
+              <li>登录 <a href="#" @click.prevent="openDoc('https://platform.deepseek.com')">platform.deepseek.com</a>。</li>
+              <li>左侧进「API keys」→「创建 API key」。</li>
+              <li>复制 <code>sk-</code> 开头的密钥（仅完整显示一次）。</li>
+              <li>粘贴到上方，点「保存凭据」。</li>
+            </ol>
+            <p class="guide-meta"><strong>保存与安全：</strong>存于本机 uTools 加密存储，仅本插件可读、不上传服务器；只随请求发往 <code>api.deepseek.com</code>，不写日志。API Key 长期有效，泄露可在平台删旧 key 后换新。</p>
+            <p class="guide-note">注意：这是接口密钥，不是「平台 Token」；请勿泄露。</p>
+          </div>
+          <label class="field">
+            <span class="label">平台 Token <em>（可选，「实时·令牌」用量模式需要）</em></span>
+            <input v-model="secrets.platformToken" type="password" placeholder="platform.deepseek.com 令牌" autocomplete="off" />
+          </label>
+          <button class="link-btn" @click="guides.token = !guides.token">
+            {{ guides.token ? '收起教程' : '如何获取平台 Token？' }}
+          </button>
+          <div v-if="guides.token" class="guide2">
+            <p class="guide-use"><strong>用途：</strong>可选。用于「实时·令牌」用量模式；不填则本地记账。</p>
+            <ol class="guide-steps">
+              <li>登录 <a href="#" @click.prevent="openDoc('https://platform.deepseek.com')">platform.deepseek.com</a>，按 <code>F12</code> 打开 Network。</li>
+              <li>刷新「用量」页，找到 <code>usage/by_api_key/amount</code> 请求。</li>
+              <li>复制其 Request Headers 里 <code>Authorization</code> 的值（<code>Bearer eyJ...</code>）。</li>
+              <li>粘贴到上方，点「保存凭据」。</li>
+            </ol>
+            <p class="guide-meta"><strong>保存与安全：</strong>同 API Key，本机加密存储、不上传服务器；只随请求发往 <code>platform.deepseek.com</code>。它属网页会话令牌，重登后可能失效，届时自动回落本地记账，重新复制一次即可。</p>
+          </div>
+          <div class="btn-row">
+            <button @click="saveSecrets">保存凭据（加密存储）</button>
+            <button class="secondary" :disabled="testing || (!secrets.apiKey.trim() && !secrets.platformToken.trim())" @click="testKey">
+              {{ testing ? '测试中…' : '测试连接' }}
+            </button>
+          </div>
+          <p v-if="secretsFlash.msg" class="msg" :class="msgCls(secretsFlash)">{{ secretsFlash.msg }}</p>
+          <div v-if="testResults.length" class="test-list">
+            <div v-for="(r, i) in testResults" :key="i" class="test-item" :class="r.ok ? 'ok' : 'err'">
+              <span class="test-icon">{{ r.ok ? '✓' : '✕' }}</span>
+              <div class="test-body">
+                <div class="test-label">{{ r.label }}</div>
+                <div class="test-msg">{{ r.msg }}</div>
+              </div>
+            </div>
+            <div v-if="lastTestText" class="test-time">上次测试 {{ lastTestText }}</div>
           </div>
         </div>
-        <div v-if="lastTestText" class="test-time">上次测试 {{ lastTestText }}</div>
       </div>
     </section>
 
@@ -2756,7 +3017,7 @@ onUnmounted(() => {
         <span class="label">大小</span>
         <input class="range" type="range" min="0.6" max="2.5" step="0.1" v-model.number="cfg.scale"
                @input="onScaleLive" @change="onScaleCommit" />
-        <input class="num" type="number" min="1" max="20" step="1" v-model.number="cfg.scaleNum"
+        <input class="num" type="number" min="1" :max="SCALE_STEPS" step="1" v-model.number="cfg.scaleNum"
                @input="onScaleNumLive" @change="onScaleCommit" />
       </label>
 
@@ -2766,6 +3027,7 @@ onUnmounted(() => {
           <option v-for="s in BUILTIN_SKINS" :key="s" :value="s">{{ s }}</option>
           <option value="custom">自定义</option>
         </select>
+        <button class="export-btn" type="button" title="随机换一个内置形象" @click="doRandomSkin()">随机</button>
       </label>
       <p v-if="cfg.skin === 'custom' && !skinMeta" class="hint">
         还没有导入形象，去「资源」页加一张后这里才有「自定义」可用（当前会回退为「默认形象」）。
@@ -2777,78 +3039,88 @@ onUnmounted(() => {
         当前使用：{{ skinMeta.name }}（{{ assetSize(skinMeta) }}）。
       </p>
 
-      <label class="field row">
-        <span class="label">气泡主题</span>
-        <select v-model="cfg.theme" @change="patchCfg({ theme: cfg.theme })">
-          <option value="default">默认（蓝白）</option>
-          <option value="dark">深色</option>
-          <option value="sakura">樱花</option>
-        </select>
-      </label>
+      <div class="fold">
+        <button class="link-btn" @click="lookFolds.bubble = !lookFolds.bubble">{{ lookFolds.bubble ? '收起气泡与文案' : '气泡与文案（主题 · 峰谷 · 报时 · 点按播放）' }}</button>
+        <div v-if="lookFolds.bubble">
+          <label class="field row">
+            <span class="label">气泡主题</span>
+            <select v-model="cfg.theme" @change="patchCfg({ theme: cfg.theme })">
+              <option value="default">默认（蓝白）</option>
+              <option value="dark">深色</option>
+              <option value="sakura">樱花</option>
+            </select>
+          </label>
 
-      <label class="field row">
-        <span class="label">峰谷文案</span>
-        <select v-model="cfg.peakMode" @change="patchCfg({ peakMode: cfg.peakMode })">
-          <option value="default">默认（空闲/高峰）</option>
-          <option value="liangwen">梁文峰谷</option>
-          <option value="qiangqiang">!?强强?!</option>
-        </select>
-      </label>
+          <label class="field row">
+            <span class="label">峰谷文案</span>
+            <select v-model="cfg.peakMode" @change="patchCfg({ peakMode: cfg.peakMode })">
+              <option value="default">默认（空闲/高峰）</option>
+              <option value="liangwen">梁文峰谷</option>
+              <option value="qiangqiang">!?强强?!</option>
+            </select>
+          </label>
 
-      <label class="field row check">
-        <span class="label">思考气泡</span>
-        <input type="checkbox" v-model="cfg.bubbleOn" @change="patchCfg({ bubbleOn: cfg.bubbleOn })" />
-      </label>
+          <label class="field row check">
+            <span class="label">思考气泡</span>
+            <input type="checkbox" v-model="cfg.bubbleOn" @change="patchCfg({ bubbleOn: cfg.bubbleOn })" />
+          </label>
 
-      <label class="field row check">
-        <span class="label">小鲸鱼报时 <em>（气泡首行显示当前时间）</em></span>
-        <input type="checkbox" v-model="cfg.timeBubbleOn" @change="patchCfg({ timeBubbleOn: cfg.timeBubbleOn })" />
-      </label>
+          <label class="field row check">
+            <span class="label">小鲸鱼报时 <em>（气泡首行显示当前时间）</em></span>
+            <input type="checkbox" v-model="cfg.timeBubbleOn" @change="patchCfg({ timeBubbleOn: cfg.timeBubbleOn })" />
+          </label>
 
-      <label class="field row check">
-        <span class="label">挂件右上角菜单按钮</span>
-        <input type="checkbox" v-model="cfg.menuBtn" @change="patchCfg({ menuBtn: cfg.menuBtn })" />
-      </label>
+          <label class="field row check">
+            <span class="label">挂件右上角菜单按钮</span>
+            <input type="checkbox" v-model="cfg.menuBtn" @change="patchCfg({ menuBtn: cfg.menuBtn })" />
+          </label>
 
-      <label class="field row check">
-        <span class="label">点按依次播放 <em>（点气泡按顺序播放台词，播完才收起；关闭则每次随机一组）</em></span>
-        <input type="checkbox" v-model="cfg.clickQueueOn" @change="patchCfg({ clickQueueOn: cfg.clickQueueOn })" />
-      </label>
+          <label class="field row check">
+            <span class="label">点按依次播放 <em>（点气泡按顺序播放台词，播完才收起；关闭则每次随机一组）</em></span>
+            <input type="checkbox" v-model="cfg.clickQueueOn" @change="patchCfg({ clickQueueOn: cfg.clickQueueOn })" />
+          </label>
+        </div>
+      </div>
 
-      <label class="field row check">
-        <span class="label">音效开关</span>
-        <input type="checkbox" v-model="cfg.soundOn" @change="patchCfg({ soundOn: cfg.soundOn })" />
-      </label>
+      <div class="fold">
+        <button class="link-btn" @click="lookFolds.sound = !lookFolds.sound">{{ lookFolds.sound ? '收起音效' : '音效（开关 · 音色 · 音量）' }}</button>
+        <div v-if="lookFolds.sound">
+          <label class="field row check">
+            <span class="label">音效开关</span>
+            <input type="checkbox" v-model="cfg.soundOn" @change="patchCfg({ soundOn: cfg.soundOn })" />
+          </label>
 
-      <label class="field row">
-        <span class="label">音色</span>
-        <select v-model="cfg.soundSet" :disabled="!cfg.soundOn" @change="patchCfg({ soundSet: cfg.soundSet })">
-          <option value="duck">小黄鸭</option>
-          <option value="fx1">音效1</option>
-          <option value="custom">自定义</option>
-        </select>
-      </label>
+          <label class="field row">
+            <span class="label">音色</span>
+            <select v-model="cfg.soundSet" :disabled="!cfg.soundOn" @change="patchCfg({ soundSet: cfg.soundSet })">
+              <option value="duck">小黄鸭</option>
+              <option value="fx1">音效1</option>
+              <option value="custom">自定义</option>
+            </select>
+          </label>
 
-      <label class="field row">
-        <span class="label">音量</span>
-        <input class="range" type="range" min="0" max="1" step="0.05" v-model.number="cfg.vol"
-               :disabled="!cfg.soundOn" @input="patchCfg({ vol: cfg.vol })" />
-        <span class="num-text">{{ Math.round(cfg.vol * 100) }}%</span>
-      </label>
+          <label class="field row">
+            <span class="label">音量</span>
+            <input class="range" type="range" min="0" max="1" step="0.05" v-model.number="cfg.vol"
+                   :disabled="!cfg.soundOn" @input="patchCfg({ vol: cfg.vol })" />
+            <span class="num-text">{{ Math.round(cfg.vol * 100) }}%</span>
+          </label>
 
-      <p v-if="cfg.soundSet === 'custom' && !soundsMeta.press.length" class="hint">
-        还没有导入按压音，去「资源」页加一个后这里才有「自定义」可用（当前会回退为「小黄鸭」）。
-      </p>
-      <p v-else-if="soundUnused" class="hint">
-        已导入但当前未使用：「音效开关」没开，或「音色」选的不是「自定义」。
-      </p>
-      <p v-else-if="soundsMeta.press.length" class="hint">
-        自定义音色：按压音 {{ soundLabel('press') }}<template v-if="soundsMeta.release.length"> · 释放音 {{ soundLabel('release') }}</template><template v-else> · 释放音未导入（松开时静音）</template>。
-      </p>
-      <p class="hint">
-        四类提醒音（低余额 / 预算 / 峰谷 / 穿透）留空 = 静音，不打扰是默认，
-        只在对应提醒真的弹出时响一次（系统通知不受影响）。
-      </p>
+          <p v-if="cfg.soundSet === 'custom' && !soundsMeta.press.length" class="hint">
+            还没有导入按压音，去「资源」页加一个后这里才有「自定义」可用（当前会回退为「小黄鸭」）。
+          </p>
+          <p v-else-if="soundUnused" class="hint">
+            已导入但当前未使用：「音效开关」没开，或「音色」选的不是「自定义」。
+          </p>
+          <p v-else-if="soundsMeta.press.length" class="hint">
+            自定义音色：按压音 {{ soundLabel('press') }}<template v-if="soundsMeta.release.length"> · 释放音 {{ soundLabel('release') }}</template><template v-else> · 释放音未导入（松开时静音）</template>。
+          </p>
+          <p class="hint">
+            四类提醒音（低余额 / 预算 / 峰谷 / 穿透）留空 = 静音，不打扰是默认，
+            只在对应提醒真的弹出时响一次（系统通知不受影响）。
+          </p>
+        </div>
+      </div>
     </section>
 
     <!-- [资源] 素材集中管理：概览（占用 / 清理 / 素材包）· 导入的形象 · 导入的音效 · 内置资源对照。
@@ -3027,35 +3299,43 @@ onUnmounted(() => {
       <p v-if="soundFlash.msg" class="msg" :class="msgCls(soundFlash)">{{ soundFlash.msg }}</p>
     </section>
 
-    <!-- [资源] 内置资源：随插件附带、不可删，只作对照（选哪个在「挂件外观」） -->
+    <!-- [资源] 内置资源：随插件附带、不可删，只作对照（选哪个在「挂件外观」）。
+         纯查阅用，默认收起，避免与「导入的…」三张卡一起铺满一屏 -->
     <section v-if="activeTab === 'assets'" class="card">
-      <h2>内置资源</h2>
-      <p class="hint">随插件附带、不可删除，列在这里只作对照；换形象 / 音色请到「挂件外观」。</p>
-      <p class="group-title">内置形象 <em>（{{ BUILTIN_SKINS.length }} 张，当前：{{ cfg.skin === 'custom' ? '自定义' : cfg.skin }}）</em></p>
-      <div class="skin-grid">
-        <div v-for="s in BUILTIN_SKINS" :key="s" class="skin-cell" :class="{ active: cfg.skin === s }">
-          <img class="skin-cell-img" :src="builtinSkinUrl(s)" :alt="s" :title="s" />
-          <span class="skin-cell-tag">{{ s }}</span>
+      <div class="fold">
+        <button class="link-btn" @click="assetFolds.builtin = !assetFolds.builtin">{{ assetFolds.builtin ? '收起内置资源' : '内置资源（随插件附带，只作对照）' }}</button>
+        <div v-if="assetFolds.builtin">
+          <p class="hint">随插件附带、不可删除，列在这里只作对照；换形象 / 音色请到「挂件外观」。</p>
+          <p class="group-title">内置形象 <em>（{{ BUILTIN_SKINS.length }} 张，当前：{{ cfg.skin === 'custom' ? '自定义' : cfg.skin }}）</em></p>
+          <div class="skin-grid">
+            <div v-for="s in BUILTIN_SKINS" :key="s" class="skin-cell" :class="{ active: cfg.skin === s }">
+              <img class="skin-cell-img" :src="builtinSkinUrl(s)" :alt="s" :title="s" />
+              <span class="skin-cell-tag">{{ s }}</span>
+            </div>
+          </div>
+          <p class="group-title">内置音色 <em>（两组，在「挂件外观 → 音色」里选；提醒音没有内置回落）</em></p>
+          <div class="field row" v-for="g in BUILTIN_SOUND_SETS" :key="g.key">
+            <span class="label">{{ g.label }}</span>
+            <span class="sound-file">按压 {{ g.press }} · 释放 {{ g.release }}</span>
+            <button class="export-btn" type="button" @click="doPreviewBuiltin(g.press)">试听按压</button>
+            <button class="export-btn" type="button" @click="doPreviewBuiltin(g.release)">试听释放</button>
+          </div>
+          <p class="hint">
+            内置形象与音色是插件包里的文件，不占本地数据目录空间，也不会被「清除素材」删掉。
+          </p>
+          <p v-if="builtinFlash.msg" class="msg" :class="msgCls(builtinFlash)">{{ builtinFlash.msg }}</p>
         </div>
       </div>
-      <p class="group-title">内置音色 <em>（两组，在「挂件外观 → 音色」里选；提醒音没有内置回落）</em></p>
-      <div class="field row" v-for="g in BUILTIN_SOUND_SETS" :key="g.key">
-        <span class="label">{{ g.label }}</span>
-        <span class="sound-file">按压 {{ g.press }} · 释放 {{ g.release }}</span>
-        <button class="export-btn" type="button" @click="doPreviewBuiltin(g.press)">试听按压</button>
-        <button class="export-btn" type="button" @click="doPreviewBuiltin(g.release)">试听释放</button>
-      </div>
-      <p class="hint">
-        内置形象与音色是插件包里的文件，不占本地数据目录空间，也不会被「清除素材」删掉。
-      </p>
-      <p v-if="builtinFlash.msg" class="msg" :class="msgCls(builtinFlash)">{{ builtinFlash.msg }}</p>
     </section>
 
     <!-- [外观] 文案：只剩台词库（随机台词组 + 6 个多行文本 + 保存 / 恢复默认）。
          提醒文案结构相同但属「提醒」主题，已并入「用量 → 提醒与通知」卡，免得调一类提醒要跳两个 Tab -->
     <section v-if="activeTab === 'look'" class="card">
       <div class="card-head">
-        <h2>文案</h2>
+        <button class="fold-title" type="button" @click="quoteCardFolds.open = !quoteCardFolds.open">
+          <span class="fold-caret">{{ quoteCardFolds.open ? '▾' : '▸' }}</span>
+          文案
+        </button>
         <div class="head-actions">
           <span v-if="quotesDirty" class="dirty-tag">未保存</span>
           <button class="export-btn" type="button" @click="saveQuotes()">保存</button>
@@ -3065,6 +3345,10 @@ onUnmounted(() => {
           <button v-if="quoteResetConfirm" class="export-btn" type="button" @click="quoteResetConfirm = false">取消</button>
         </div>
       </div>
+      <p v-if="!quoteCardFolds.open" class="hint">
+        台词库（随机台词组 / 报时 / 动图降级）与固定文案；默认收起，改完记得点「保存」。
+      </p>
+      <template v-if="quoteCardFolds.open">
       <p v-if="quoteResetConfirm" class="hint">
         将丢弃当前全部自定义台词与固定文案，恢复为内置默认，此操作不可撤销。
       </p>
@@ -3136,6 +3420,7 @@ onUnmounted(() => {
         气泡只有三行，超出部分显示不出来。挂件已开着的话保存后立即生效。
       </p>
       <p v-if="quoteFlash.msg" class="msg" :class="msgCls(quoteFlash)">{{ quoteFlash.msg }}</p>
+      </template>
     </section>
 
     <!-- [用量] 用量与账本：用量口径（记账 / 令牌）+ 趋势 + 明细 + 额度 + 校准。
@@ -3389,6 +3674,34 @@ onUnmounted(() => {
         <input type="checkbox" v-model="cfg.timerPersistOn" @change="patchCfg({ timerPersistOn: cfg.timerPersistOn })" />
       </label>
 
+      <!-- 计时时长：与挂件菜单「倒计时」三段输入同一份配置（cfg.timerSec 存秒），
+           这里用三个数字框拆开展示，任一段改动都折算回秒提交 -->
+      <div class="field row">
+        <span class="label">倒计时时长 <em>（挂件菜单「计时」里也能改；0 时 0 分 0 秒按 25 分钟算）</em></span>
+        <input class="num" type="number" min="0" max="23" step="1" v-model.number="timerHms.h" @change="commitTimerHms" />
+        <span class="num-text">时</span>
+        <input class="num" type="number" min="0" max="59" step="1" v-model.number="timerHms.m" @change="commitTimerHms" />
+        <span class="num-text">分</span>
+        <input class="num" type="number" min="0" max="59" step="1" v-model.number="timerHms.s" @change="commitTimerHms" />
+        <span class="num-text">秒</span>
+      </div>
+
+      <label class="field row">
+        <span class="label">到点提醒我 <em>（开始计时前写一句「结束后要做什么」，到点时显示在气泡与通知里）</em></span>
+        <input type="text" v-model="cfg.timerNote" :maxlength="TIMER_NOTE_MAX" placeholder="例如：起来喝水、活动一下"
+               @change="patchCfg({ timerNote: cfg.timerNote })" />
+      </label>
+
+      <label class="field row check">
+        <span class="label">到点后给「休息」快捷键 <em>（气泡旁的按钮点一下直接开始休息计时）</em></span>
+        <input type="checkbox" v-model="timerBreakOn" @change="onTimerBreakToggle" />
+      </label>
+      <label v-if="timerBreakOn" class="field row">
+        <span class="label">休息时长</span>
+        <input class="num" type="number" min="1" max="120" step="1" v-model.number="timerBreakMinEdit" @change="commitTimerBreak" />
+        <span class="num-text">分钟</span>
+      </label>
+
       <label class="field row check">
         <span class="label">低余额预警 <em>（余额低于阈值时数字变红，并弹一次提醒气泡 + 每天一次系统通知）</em></span>
         <input type="checkbox" v-model="cfg.lowAlertOn" @change="patchCfg({ lowAlertOn: cfg.lowAlertOn })" />
@@ -3426,6 +3739,105 @@ onUnmounted(() => {
         跨天、换币种、换 API Key 时两边余额不可比，不会误报。免打扰时段内静默不发通知。
       </p>
 
+      <!-- 通知渠道：上面这些提醒「用什么方式送达」。系统通知 = 桌面弹窗；邮件 = SMTP 直发。
+           渠道是总开关，与具体哪几类提醒要开无关 —— 后者在上面各自的开关里 -->
+      <h3 class="sub">通知方式</h3>
+
+      <label class="field row check">
+        <span class="label">系统通知 <em>（桌面弹窗；关闭后所有自动提醒与计时都不再弹窗）</em></span>
+        <input type="checkbox" v-model="cfg.notifySystemOn" @change="patchCfg({ notifySystemOn: cfg.notifySystemOn })" />
+      </label>
+
+      <label class="field row check">
+        <span class="label">邮件通知 <em>（把提醒发到邮箱；需先填下方 SMTP 配置）</em></span>
+        <input type="checkbox" v-model="cfg.notifyMailOn" @change="patchCfg({ notifyMailOn: cfg.notifyMailOn })" />
+      </label>
+
+      <!-- 测试按钮：按当前开着的渠道各发一条，用来确认「开关 + 配置」确实能送达。
+           系统通知渠道 = 宿主 notifySystem；邮件 = 宿主 sendMailAsync；都不做「每天一次」去重 -->
+      <div class="btn-row">
+        <button class="export-btn" type="button" :disabled="notifyTesting" @click="testNotify()">
+          {{ notifyTesting ? '发送中…' : '测试通知' }}
+        </button>
+      </div>
+      <p v-if="notifyFlash.msg" class="msg" :class="msgCls(notifyFlash)">{{ notifyFlash.msg }}</p>
+
+      <!-- SMTP 配置：只在「邮件通知」开着时出现。配置齐全后自动收起成一行摘要，
+           把卡片位置让回给上面的提醒开关；点「重新配置」可再展开（见 mailOpen） -->
+      <div v-if="cfg.notifyMailOn" class="fold">
+        <p v-if="mailConfigured && !mailOpen" class="mail-summary">
+          <span class="ok-tag">已配置</span>
+          {{ mail.mailHost }}:{{ mail.mailPort }} → {{ cfg.mailTo || '（未填收件人）' }}
+          <button class="link-btn inline" type="button" @click="toggleMailFold()">重新配置</button>
+        </p>
+        <button v-else class="link-btn" type="button" @click="toggleMailFold()">
+          {{ mailConfigured ? '收起 SMTP 配置' : 'SMTP 配置（必填）' }}
+        </button>
+
+        <div v-if="mailOpen" class="guide">
+          <label class="field row">
+            <span class="label">SMTP 服务器</span>
+            <input v-model="mail.mailHost" type="text" placeholder="smtp.qq.com" autocomplete="off" />
+          </label>
+          <label class="field row">
+            <span class="label">端口</span>
+            <input class="num" type="number" min="1" max="65535" v-model.number="mail.mailPort" />
+          </label>
+          <label class="field row check">
+            <span class="label">SSL/TLS 直连 <em>（465 端口勾上；587 / 25 取消勾选，连上后自动 STARTTLS 升级）</em></span>
+            <input type="checkbox" v-model="mail.mailSecure" />
+          </label>
+
+          <label class="field row">
+            <span class="label">账号</span>
+            <input v-model="mail.mailUser" type="text" placeholder="you@qq.com" autocomplete="off" />
+          </label>
+          <label class="field row">
+            <span class="label">授权码</span>
+            <input v-model="mail.mailPass" type="password" :placeholder="mailPassSaved ? '已保存，留空则不修改' : '邮箱授权码（非登录密码）'" autocomplete="off" />
+          </label>
+          <p class="hint">
+            授权码存于 uTools 加密存储，<b>不进备份文件</b>；填过一次后留空即表示沿用已保存的值。
+            多数邮箱（QQ / 163 / Gmail）需要在邮箱设置里单独开启 SMTP 并生成授权码，不能直接填登录密码。
+          </p>
+
+          <label class="field row">
+            <span class="label">发件人</span>
+            <input v-model="cfg.mailFrom" type="text" placeholder="与上方账号一致" autocomplete="off" />
+          </label>
+          <label class="field row">
+            <span class="label">收件人</span>
+            <input v-model="cfg.mailTo" type="text" placeholder="收提醒的邮箱（可与发件人相同）" autocomplete="off" />
+          </label>
+          <label class="field row">
+            <span class="label">发件人显示名</span>
+            <input v-model="cfg.mailFromName" type="text" placeholder="小鲸鱼余额挂件" autocomplete="off" />
+          </label>
+          <label class="field row">
+            <span class="label">主题前缀</span>
+            <input v-model="cfg.mailSubjectPrefix" type="text" placeholder="[小鲸鱼余额挂件]" autocomplete="off" />
+          </label>
+
+          <label class="field row check">
+            <span class="label">计时到点也发邮件 <em>（除系统通知外，到点另发一封邮件；关掉则只有系统通知）</em></span>
+            <input type="checkbox" v-model="cfg.timerMailOn" @change="patchCfg({ timerMailOn: cfg.timerMailOn })" />
+          </label>
+
+          <div class="btn-row">
+            <button class="export-btn" type="button" @click="saveMailSettings()">保存邮件设置</button>
+            <button class="export-btn" type="button" :disabled="mailTesting" @click="testMail()">
+              {{ mailTesting ? '发送中…' : '发送测试邮件' }}
+            </button>
+          </div>
+          <p v-if="mailFlash.msg" class="msg" :class="msgCls(mailFlash)">{{ mailFlash.msg }}</p>
+          <p class="hint">
+            测试邮件用的是上方「当前填的内容」（未保存也会用），方便先验证再保存；<b>发送成功会自动收起本区</b>。
+            改完记得点「保存邮件设置」——上方「测试通知」读的是已保存的配置，两者分工不同。
+            免打扰时段内邮件与系统通知一并静默（计时到点不受免打扰影响）。
+          </p>
+        </div>
+      </div>
+
       <!-- 低频的「提醒表现 + 时段 + 文案」收在一处折叠，卡片默认只留「哪几类提醒要开」 -->
       <div class="fold">
         <button class="link-btn" @click="alertFolds.open = !alertFolds.open">
@@ -3454,7 +3866,7 @@ onUnmounted(() => {
             <input class="time" type="time" v-model="cfg.quietTo" @change="patchCfg({ quietTo: cfg.quietTo })" />
           </label>
           <p v-if="cfg.quietOn" class="hint">
-            免打扰静默「今日预算」「低余额」「余额大幅波动」三类自动通知：前两类不占用当天名额（出时段后仍会补发一次），
+            免打扰静默「今日预算」「低余额」「余额大幅波动」三类自动通知（邮件一并静默）：前两类不占用当天名额（出时段后仍会补发一次），
             波动通知本身就是一次性的、不补发。计时到点是你主动设定的一次性提醒，照常通知。
           </p>
 
@@ -4185,6 +4597,15 @@ onUnmounted(() => {
       </div>
     </section>
 
+    <!-- [帮助] GitHub 加速（hosts 方案）：已抽成独立组件，显隐仍由本页的 Tab 决定 -->
+    <AccelView
+      v-if="activeTab === 'help'"
+      :cfg="cfg"
+      :services="services"
+      :active-tab="activeTab"
+      @patch="patchCfg"
+    />
+
     <!-- 导入裁剪弹层：宿主选完文件（还没落盘）才显示，确认后才写盘 -->
     <SkinCropper
       v-if="skinCrop"
@@ -4218,6 +4639,7 @@ onUnmounted(() => {
   --input-bg: #ffffff;
   --ok: #2fa24c;
   --err: #e0433f;
+  --warn: #c07d1a;
   /* 顶部 Tab 吸顶时的底色，必须与 main.css 里 body 的背景一致，否则滚到一半内容会从导航下面透出来 */
   --bar-bg: #f4f4f4;
   /* 让原生控件（下拉列表、复选框等）跟随本页主题，否则深色模式下
@@ -4242,6 +4664,7 @@ onUnmounted(() => {
     --input-bg: #2b3145;
     --ok: #4ec46b;
     --err: #ff6b66;
+    --warn: #e0a63c;
     --bar-bg: #303133;
     color-scheme: dark;
   }
@@ -4321,6 +4744,30 @@ h1 {
 .card-head h2 {
   margin: 0;
 }
+/* 可折叠卡片的标题本身是按钮：抹掉 button 默认外观，视觉上对齐 .card-head h2，
+   让用户仍然一眼认出这是标题（有 hover 反馈暗示可点） */
+.fold-title {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fg-dim);
+  cursor: pointer;
+}
+.fold-title:hover {
+  color: var(--fg);
+}
+/* 箭头单独占位，展开 / 收起时标题不会左右横跳 */
+.fold-caret {
+  width: 1em;
+  font-size: 12px;
+}
 .head-actions {
   display: flex;
   gap: 8px;
@@ -4397,11 +4844,25 @@ h1 {
 }
 .field.check {
   justify-content: flex-start;
+  /* 标签换行成多行时，复选框跟首行对齐 —— 居中对齐会飘到两行之间，看起来像对错了行 */
+  align-items: flex-start;
 }
 .label {
   font-size: 13px;
-  flex: 0 0 auto;
+  /* 短标签保持 72px 起始宽度、纵向对齐（同组控件左侧对齐）；
+     flex-shrink 允许长标签（常带 <em> 说明）在窄卡片里收缩换行，
+     而不是顶住不缩把同行控件乃至整张卡片撑出边界 */
+  flex: 0 1 auto;
   min-width: 72px;
+  /* 长标签的换行点：中文没有空格，靠 break-word 才能在盒子内折行 */
+  overflow-wrap: anywhere;
+}
+/* 勾选行（.field.check）：标签独占剩余宽度，复选框固定靠右不被挤出卡片。
+   这类标签的 <em> 补充说明最长（如 dsh 的三条），是横向溢出的主要来源 */
+.field.check .label {
+  flex: 1 1 auto;
+  min-width: 0;
+  line-height: 1.5;
 }
 .field:not(.row) .label {
   display: block;
@@ -4545,6 +5006,8 @@ input[type='checkbox'] {
   display: flex;
   gap: 10px;
   margin-top: 12px;
+  /* IP 表这排最多会到 4 个按钮（添加/保存/校验/清除），窄窗下换行而不是把文字挤成竖排 */
+  flex-wrap: wrap;
 }
 .btn-row button {
   flex: 1;
@@ -4612,6 +5075,17 @@ input[type='checkbox'] {
 .guide > .link-btn:first-child {
   margin-top: 0;
 }
+/* 嵌套说明（折叠面板内的教程）：比外层 .guide 再退一层，靠左侧色条区分层级，
+   否则两层同色边框叠在一起会糊成一块 */
+.guide2 {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border-left: 2px solid var(--accent);
+  background: var(--card-bg);
+  font-size: 12px;
+  line-height: 1.6;
+}
 /* 分组折叠（使用说明 / 故障排查）：组间留白并用分隔线隔开 */
 .fold {
   margin-top: 12px;
@@ -4622,6 +5096,31 @@ input[type='checkbox'] {
 .fold + .fold {
   padding-top: 12px;
   border-top: 1px solid var(--line);
+}
+/* SMTP 已配置时的一行摘要：替代整块表单，让「提醒与通知」卡回到「只有开关」的清爽态。
+   与 .link-btn 的 inline 变体配合 —— 摘要里嵌一个「重新配置」链接 */
+.mail-summary {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: var(--fg-dim);
+}
+/* 覆盖 .link-btn 的 margin-top / 下划线，避免在 flex 摘要里把行高撑开 */
+.link-btn.inline {
+  margin-top: 0;
+  font-size: 12px;
+}
+/* 「已配置」徽标：用成功色描边而非实心填充 —— --card-bg 是半透明色，实心底上的字会糊 */
+.ok-tag {
+  padding: 1px 6px;
+  border-radius: 4px;
+  border: 1px solid var(--ok);
+  color: var(--ok);
+  font-size: 11px;
+  line-height: 1.5;
 }
 .guide-steps {
   margin: 8px 0 0;

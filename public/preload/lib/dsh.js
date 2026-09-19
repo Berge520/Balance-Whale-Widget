@@ -1169,6 +1169,8 @@ module.exports = {
   snapshot,
   onChange,
   resolveNode,
+  // 提权用 powershell 绝对路径（hosts.js 的 UAC 写 hosts 复用）
+  psExe,
   // 校验某个目录里是否有 node 可执行文件（设置页选择目录时用）
   nodeInDir(dir) { return !!hasNode(dir) },
 }

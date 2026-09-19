@@ -88,6 +88,9 @@ const api = {
   dragMove(x, y) { send('whale:drag-move', { x: Number(x), y: Number(y) }) },
   dragEnd() { send('whale:drag-end', {}) },
   setIgnoreMouse(ignore) { send('whale:ignore-mouse', { ignore: !!ignore }) },
+  // 菜单里的输入框要打字：窗口是 focusable:false 建的，键盘事件进不到页面，
+  // 打开菜单时让宿主把焦点给挂件，关闭时交还（详见 preload/lib/ipc.js 的 whale:input-focus）
+  setInputFocus(focus) { send('whale:input-focus', { focus: !!focus }) },
   // 多厂商模型：ids 省略 = 全部；force=false 时宿主按 5 分钟节流跳过（菜单打开时懒加载用）
   refreshModels(ids, force) {
     send('whale:models-refresh', { ids: Array.isArray(ids) ? ids : null, force: !!force })

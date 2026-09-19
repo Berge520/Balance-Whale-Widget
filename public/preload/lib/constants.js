@@ -13,7 +13,7 @@ const FETCH_TIMEOUT_MS = 20000
 const UPDATE_CHECK_URL = 'https://ghfast.top/https://raw.githubusercontent.com/Berge520/Balance-Whale-Widget/refs/heads/main/package.json'
 // 当前插件版本。uTools 未提供读取插件自身版本的 API，此处由 scripts/sync-version.mjs
 // 在构建前从 package.json 的 version 自动写入，无需手动维护
-const PLUGIN_VERSION = '1.5.0'
+const PLUGIN_VERSION = '1.6.0'
 const UPDATE_TTL_MS = 12 * 3600 * 1000
 
 const MIN_SCALE = 0.6
@@ -59,6 +59,44 @@ const TOKEN_RATE_MAX = 1000
 // 「按模型覆盖」的条目数上限：够覆盖常见几档模型，也挡住整段粘贴
 const TOKEN_PRICE_MODELS_MAX = 20
 
+// ──────────────────────────────────────────────
+// GitHub 加速（hosts 方案，见 lib/hosts.js）
+// ──────────────────────────────────────────────
+// 只挑日常访问 GitHub 的高频域名；域名表同时被 store.js（normIps 归一化）与
+// hosts.js（写块 / 冲突扫描 / 刷新）引用，放常量避免两份清单漂移。
+const GH_DOMAINS = [
+  'github.com',
+  'api.github.com',
+  'raw.githubusercontent.com',
+  'objects.githubusercontent.com',
+  'codeload.github.com',
+  'github.githubassets.com',
+  'avatars.githubusercontent.com',
+  'user-images.githubusercontent.com',
+  'camo.githubusercontent.com',
+  'github.global.ssl.fastly.net',
+  'github.dev',
+  'education.github.com',
+  'resources.github.com',
+  'uploads.github.com',
+  'archiveprogram.github.com',
+  'githubusercontent.com',
+  'githubapp.com',
+  'github.io',
+  // gist 单独补上：之前遗漏。gist.github.com 是页面入口，
+  // gist.githubusercontent.com 是 gist 内容（代码片段 / raw 文件）的实际落点，
+  // 少了后者照样打不开 gist 内容；两个都要。源表（GitHub520）覆盖这两个域名。
+  'gist.github.com',
+  'gist.githubusercontent.com',
+  // 非 GitHub 域名：GitHub520 源不覆盖，只能靠写入前探测（可达才写），可用设置页 IP 表手动加
+  'huggingface.co',
+  'hub.docker.com',
+  'greasyfork.org',
+]
+// 一键刷新用的社区源（GitHub520 每日更新 hosts）；仅解析上面关心的域名
+const GH520_HOSTS_URL = 'https://raw.hellogithub.com/hosts'
+
+
 const K = {
   secrets: 'whale:secrets', // dbCryptoStorage：{ apiKey, platformToken, models }
   config: 'whale:config',   // dbStorage：挂件配置
@@ -93,6 +131,9 @@ const MODEL_AUTHS = ['bearer', 'raw']
 // 单次查询超时与「打开菜单后多久算过期」的懒加载间隔
 const MODEL_FETCH_TIMEOUT_MS = 15000
 const MODEL_STALE_MS = 5 * 60 * 1000
+// 计时到点留言的长度上限。宿主清洗、菜单输入框 maxLength（floating-page.js 的 TIMER_NOTE_MAX）
+// 与设置页输入框三处同值，改要一起改
+const TIMER_NOTE_MAX = 60
 
 // 内置厂商模板：选中后自动带好 URL / 认证 / 字段路径 / 币种，用户可再改。
 // 只收录「能用 API key 直接查到余额或订阅额度」的厂商 —— 其余厂商官方没有这类接口，
@@ -224,6 +265,8 @@ module.exports = {
   TOKEN_PRICE_MAX,
   TOKEN_RATE_MAX,
   TOKEN_PRICE_MODELS_MAX,
+  GH_DOMAINS,
+  GH520_HOSTS_URL,
   K,
   MODEL_MAX,
   DEFAULT_MAIN_MODEL,
@@ -232,5 +275,6 @@ module.exports = {
   MODEL_AUTHS,
   MODEL_FETCH_TIMEOUT_MS,
   MODEL_STALE_MS,
+  TIMER_NOTE_MAX,
   MODEL_TEMPLATES,
 }

@@ -3,9 +3,40 @@
  */
 const {
   K, MIN_SCALE, MAX_SCALE, MODEL_MAX, MODEL_TEMPLATES, DEFAULT_MAIN_MODEL, LOW_ALERT_BY_CURRENCY,
-  TOKEN_PRICE_DEFAULT, TOKEN_PRICE_MAX, TOKEN_RATE_MAX, TOKEN_PRICE_MODELS_MAX,
+  TOKEN_PRICE_DEFAULT, TOKEN_PRICE_MAX, TOKEN_RATE_MAX, TOKEN_PRICE_MODELS_MAX, TIMER_NOTE_MAX,
 } = require('./constants')
 const { logErr } = require('./log')
+
+// GitHub 加速 IP 表归一化：domain 去空白转小写限长、ip 必须是合法 IPv4，非法条目丢弃。
+// 传 null/非数组 = 空表（不再内置 IP 快照：没有拿得到新鲜 IP 的途径时，宁可不写 hosts 也不写一批
+// 可能过时的地址——写入前探测会把不可达的滤掉，真正生效的只有当天可达的那些）；
+// hosts.js 的写块 / 刷新结果也用它清洗（IP 表存进配置一起走备份/恢复）。
+function isIpv4(s) {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(s)
+  return !!m && m.slice(1).every((n) => Number(n) <= 255)
+}
+function normIps(v) {
+  if (!Array.isArray(v)) return []
+  const out = []
+  const seen = new Set()
+  for (const it of v) {
+    if (!it || typeof it !== 'object') continue
+    const domain = String(it.domain == null ? '' : it.domain).trim().toLowerCase().slice(0, 253)
+    // 与 domain 一样显式转字符串：源里 ip 可能是数字，声明给设置页的类型是 string，
+    // 不转的话「number 漏进 string 字段」，设置页侧类型对不上
+    const ip = String(it.ip == null ? '' : it.ip).trim()
+    if (!domain || !isIpv4(ip) || seen.has(domain)) continue
+    seen.add(domain)
+    out.push({ domain: domain, ip: ip })
+    if (out.length >= 64) break // 上限：挡住整段粘贴，正常域名用不到这么多
+  }
+  return out
+}
+
+// GitHub 加速表龄时间戳归一化：epoch ms，非法值/非正数回 0（0 = 从未刷新过）
+function normGhAccelRefreshedAt(v) {
+  return typeof v === 'number' && isFinite(v) && v > 0 ? Math.round(v) : 0
+}
 
 // ──────────────────────────────────────────────
 // 密钥
@@ -23,6 +54,20 @@ function readSecretModels(v) {
   }
   return out
 }
+// 邮件通知凭据（SMTP）。授权码等同密码，必须进加密存储 —— 若跟着 config 走，
+// 导出的备份文件里就是明文密码。字段名与「非凭据的邮件配置」（收件人/端口/开关）
+// 刻意分开：后者进 config（可备份、设置页回填），前者只在这里。
+function readSecretMail(v) {
+  const p = v && typeof v === 'object' ? v : {}
+  const s = (x, n) => String(x == null ? '' : x).trim().slice(0, n)
+  return {
+    mailHost: s(p.mailHost, 200),
+    mailPort: Math.round(clampNum(p.mailPort, 1, 65535, 465)),
+    mailSecure: p.mailSecure !== false,
+    mailUser: s(p.mailUser, 200),
+    mailPass: String(p.mailPass == null ? '' : p.mailPass).slice(0, 200),
+  }
+}
 function readSecrets() {
   try {
     const s = utools.dbCryptoStorage.getItem(K.secrets)
@@ -31,10 +76,11 @@ function readSecrets() {
         apiKey: String(s.apiKey || ''),
         platformToken: String(s.platformToken || ''),
         models: readSecretModels(s.models),
+        notifyMail: readSecretMail(s.notifyMail),
       }
     }
   } catch (err) {}
-  return { apiKey: '', platformToken: '', models: {} }
+  return { apiKey: '', platformToken: '', models: {}, notifyMail: readSecretMail(null) }
 }
 function sanitizeKey(s) {
   // 密钥只允许字母数字及常见符号；粘贴常带入空格/换行/制表符，统一剔除
@@ -45,10 +91,14 @@ function writeSecrets(secrets) {
   // models 槽位「未提供」时沿用现值：恢复备份只带 apiKey/platformToken，
   // 若在这里整体重建，用户已保存的各模型密钥会被一次恢复抹掉。
   const models = s.models === undefined ? readSecrets().models : readSecretModels(s.models)
+  // 同理：notifyMail 只由设置页的 saveMailSecrets 单独传，恢复备份走的保存路径不带它，
+  // 未提供时必须沿用现值，否则保存一次 API Key 就把 SMTP 密码清了。
+  const notifyMail = s.notifyMail === undefined ? readSecrets().notifyMail : readSecretMail(s.notifyMail)
   utools.dbCryptoStorage.setItem(K.secrets, {
     apiKey: sanitizeKey(s.apiKey),
     platformToken: sanitizeKey(s.platformToken),
     models: models,
+    notifyMail: notifyMail,
   })
 }
 
@@ -234,8 +284,14 @@ const SNAP_RATIO_DEFAULT = 25
 const SCROLL_GAP_DEFAULT = 17
 
 // 挂件菜单的分组展开状态（每组一个布尔）。落配置是为了重开挂件 / 重载插件后
-// 保持用户上次的展开组合，而不是每次都回到默认那两组
-const MENU_GROUPS_DEFAULT = { look: true, models: true, usage: false, timer: false, dsh: false }
+// 保持用户上次的展开组合，而不是每次都回到默认那两组。
+// 默认只展开 models（切模型最高频）；look 组有 7 行控件，展开会把菜单塞满，故默认收起。
+//
+// menuGroupsRev 是「默认展开态」的版本号：改了上面任一组的默认值就 +1。
+// 页面侧（floating-page.js）在配置里读到旧版本号时，会把受影响的组强制回到新默认，
+// 否则老配置里存过的旧默认值会一直盖着新默认值，看起来像改动没生效。
+// timerAdv 是「计时」组内的子折叠（只显计时 / 气泡常驻 / 计时保存）
+const MENU_GROUPS_DEFAULT = { look: false, models: true, usage: false, timer: false, timerAdv: false, dsh: false }
 function normMenuGroups(v) {
   const p = v && typeof v === 'object' ? v : {}
   const out = {}
@@ -245,8 +301,12 @@ function normMenuGroups(v) {
   return out
 }
 
+function normMenuGroupsRev(v) {
+  const n = Math.round(clampNum(v, 0, 1e6, 0))
+  return n
+}
 function defaultConfig() {
-  return { scale: 1.5, vol: 0.9, soundOn: true, soundSet: 'duck', usageMode: 'ledger', peakMode: 'default', peakRemindOn: true, bubbleOn: true, menuBtn: true, onTop: true, lowAlertOn: true, lowAlertAmount: LOW_ALERT_BY_CURRENCY.CNY, budgetOn: false, budgetAmount: 0, dropAlertOn: false, dropAlertAmount: 5, clickQueueOn: false, remindSec: 8, quietOn: false, quietFrom: '23:00', quietTo: '07:00', timeBubbleOn: true, updateCheckOn: false, dragLock: false, enterMode: 'both', timerNotifyOn: true, timerPersistOn: true, timerMode: 'off', timerMin: 25, timerAt: '07:30', timerRemindSec: 8, timerBubblePin: true, timerBubbleOnly: true, dshNodeDir: '', dshKeepAlive: false, dshRegistry: '', dshVersion: '', dshReinstall: false, dshNoOpen: true, avoidTaskbar: true, edgeTop: 0, edgeRight: 0, edgeBottom: 0, edgeLeft: 0, scrollGapOn: false, scrollGapPx: SCROLL_GAP_DEFAULT, snapMode: 'ratio', snapRatio: SNAP_RATIO_DEFAULT, opacity: 100, passThrough: false, skin: 'DSniang1', theme: 'default', quotes: normQuotes(null), alerts: normAlerts(null), quotaTotal: 0, quotaReset: 'monthly', tokenPrice: normTokenPrice(null), historyKeepDays: HISTORY_KEEP_DEFAULT, models: [], mainModelId: DEFAULT_MAIN_MODEL, menuGroups: normMenuGroups(null) }
+  return { scale: 1.5, vol: 0.9, soundOn: true, soundSet: 'duck', usageMode: 'ledger', peakMode: 'default', peakRemindOn: true, bubbleOn: true, menuBtn: true, onTop: true, lowAlertOn: true, lowAlertAmount: LOW_ALERT_BY_CURRENCY.CNY, budgetOn: false, budgetAmount: 0, dropAlertOn: false, dropAlertAmount: 5, clickQueueOn: false, remindSec: 8, quietOn: false, quietFrom: '23:00', quietTo: '07:00', timeBubbleOn: true, updateCheckOn: false, dragLock: false, enterMode: 'both', timerNotifyOn: true, timerMailOn: true, timerPersistOn: true, timerMode: 'off', timerSec: 1500, timerAt: '07:30', timerNote: '', timerBreakMin: 5, timerRemindSec: 8, timerBubblePin: true, timerBubbleOnly: true, dshNodeDir: '', dshKeepAlive: false, dshRegistry: '', dshVersion: '', dshReinstall: false, dshNoOpen: true, avoidTaskbar: true, edgeTop: 0, edgeRight: 0, edgeBottom: 0, edgeLeft: 0, scrollGapOn: false, scrollGapPx: SCROLL_GAP_DEFAULT, snapMode: 'ratio', snapRatio: SNAP_RATIO_DEFAULT, opacity: 100, passThrough: false, skin: 'DSniang1', theme: 'default', quotes: normQuotes(null), alerts: normAlerts(null), quotaTotal: 0, quotaReset: 'monthly', tokenPrice: normTokenPrice(null), historyKeepDays: HISTORY_KEEP_DEFAULT, models: [], mainModelId: DEFAULT_MAIN_MODEL, menuGroups: normMenuGroups(null), menuGroupsRev: 0, ghAccelOn: false, ghAccelIps: normIps(null), ghAccelRefreshedAt: 0, notifySystemOn: true, notifyMailOn: false, mailFrom: '', mailTo: '', mailFromName: '小鲸鱼余额挂件', mailSubjectPrefix: '[小鲸鱼余额挂件]' }
 }
 // dsh 注册源：只接受 http(s) 或空（默认官方源）
 function normRegistry(v) {
@@ -273,6 +333,11 @@ function clampNum(v, lo, hi, dft) {
   const n = Number(v)
   if (!isFinite(n)) return dft
   return Math.min(hi, Math.max(lo, n))
+}
+// 计时到点留言：单行纯文本（换行会让系统通知的标题/正文错位），超长截断。
+// 上限与 floating-page.js 的 TIMER_NOTE_MAX、菜单输入框 maxLength 同值，三处要一起改
+function normTimerNote(v) {
+  return String(v == null ? '' : v).replace(/\s+/g, ' ').trim().slice(0, TIMER_NOTE_MAX)
 }
 // 挂件形象：内置形象的 id（= public/whale/ 下的图片文件名）/ 'custom'（用户导入）。
 // 与 floating-page.js 的 BUILTIN_SKINS、设置页「形象」下拉三处同值，加形象要一起改。
@@ -472,10 +537,14 @@ function readConfig() {
     dragLock: p.dragLock === true,
     enterMode: p.enterMode === 'widget' || p.enterMode === 'settings' ? p.enterMode : 'both',
     timerNotifyOn: p.timerNotifyOn !== false,
+    // 计时到点的邮件通知（默认开）：未开邮件总开关时它不生效，保留值以便后开邮件时自动套用
+    timerMailOn: p.timerMailOn !== false,
     timerPersistOn: p.timerPersistOn !== false,
     timerMode: p.timerMode === 'up' || p.timerMode === 'down' || p.timerMode === 'at' ? p.timerMode : 'off',
-    timerMin: Math.round(clampNum(p.timerMin, 1, 1440, dft.timerMin)),
+    timerSec: Math.round(clampNum(p.timerSec, 1, 86399, dft.timerSec)),
     timerAt: /^\d{1,2}:\d{2}$/.test(String(p.timerAt || '')) ? String(p.timerAt) : dft.timerAt,
+    timerNote: normTimerNote(p.timerNote),
+    timerBreakMin: Math.round(clampNum(p.timerBreakMin, 0, 120, dft.timerBreakMin)),
     timerRemindSec: p.timerRemindSec === 0 || p.timerRemindSec === 5 || p.timerRemindSec === 8 || p.timerRemindSec === 15 ? p.timerRemindSec : dft.timerRemindSec,
     timerBubblePin: p.timerBubblePin !== false,
     timerBubbleOnly: p.timerBubbleOnly !== false,
@@ -512,6 +581,20 @@ function readConfig() {
     models: models,
     mainModelId: normMainModelId(p.mainModelId, models),
     menuGroups: normMenuGroups(p.menuGroups),
+    menuGroupsRev: normMenuGroupsRev(p.menuGroupsRev),
+    // GitHub 加速：on = 开关意图（实际是否生效以 hosts 文件里的标记块为准）；ips = 可编辑 IP 表；
+    // refreshedAt = 上次成功刷新的时间戳（epoch ms，0 = 从未刷新过，用于设置页表龄提醒）
+    ghAccelOn: p.ghAccelOn === true,
+    ghAccelIps: normIps(p.ghAccelIps),
+    ghAccelRefreshedAt: normGhAccelRefreshedAt(p.ghAccelRefreshedAt),
+    // 通知渠道：系统通知（默认开，沿用旧行为）+ 邮件通知（默认关，需先配好 SMTP）。
+    // 邮件凭据（服务器/端口/账号/授权码）不在配置里，见 readSecretMail —— 只这里存「非敏感」的收发件人与信头
+    notifySystemOn: p.notifySystemOn !== false,
+    notifyMailOn: p.notifyMailOn === true,
+    mailFrom: typeof p.mailFrom === 'string' ? p.mailFrom.trim().slice(0, 200) : dft.mailFrom,
+    mailTo: typeof p.mailTo === 'string' ? p.mailTo.trim().slice(0, 200) : dft.mailTo,
+    mailFromName: typeof p.mailFromName === 'string' ? p.mailFromName.trim().slice(0, 60) : dft.mailFromName,
+    mailSubjectPrefix: typeof p.mailSubjectPrefix === 'string' ? p.mailSubjectPrefix.trim().slice(0, 60) : dft.mailSubjectPrefix,
   }
 }
 function writeConfig(cfg) {
@@ -543,10 +626,13 @@ function writeConfig(cfg) {
     dragLock: cfg.dragLock === true,
     enterMode: cfg.enterMode === 'widget' || cfg.enterMode === 'settings' ? cfg.enterMode : 'both',
     timerNotifyOn: cfg.timerNotifyOn !== false,
+    timerMailOn: cfg.timerMailOn !== false,
     timerPersistOn: cfg.timerPersistOn !== false,
     timerMode: cfg.timerMode === 'up' || cfg.timerMode === 'down' || cfg.timerMode === 'at' ? cfg.timerMode : 'off',
-    timerMin: Math.round(clampNum(cfg.timerMin, 1, 1440, 25)),
+    timerSec: Math.round(clampNum(cfg.timerSec, 1, 86399, 1500)),
     timerAt: /^\d{1,2}:\d{2}$/.test(String(cfg.timerAt || '')) ? String(cfg.timerAt) : '07:30',
+    timerNote: normTimerNote(cfg.timerNote),
+    timerBreakMin: Math.round(clampNum(cfg.timerBreakMin, 0, 120, 5)),
     timerRemindSec: cfg.timerRemindSec === 0 || cfg.timerRemindSec === 5 || cfg.timerRemindSec === 8 || cfg.timerRemindSec === 15 ? cfg.timerRemindSec : 8,
     timerBubblePin: cfg.timerBubblePin !== false,
     timerBubbleOnly: cfg.timerBubbleOnly !== false,
@@ -578,6 +664,16 @@ function writeConfig(cfg) {
     models: models,
     mainModelId: normMainModelId(cfg.mainModelId, models),
     menuGroups: normMenuGroups(cfg.menuGroups),
+    menuGroupsRev: normMenuGroupsRev(cfg.menuGroupsRev),
+    ghAccelOn: cfg.ghAccelOn === true,
+    ghAccelIps: normIps(cfg.ghAccelIps),
+    ghAccelRefreshedAt: normGhAccelRefreshedAt(cfg.ghAccelRefreshedAt),
+    notifySystemOn: cfg.notifySystemOn !== false,
+    notifyMailOn: cfg.notifyMailOn === true,
+    mailFrom: String(cfg.mailFrom || '').trim().slice(0, 200),
+    mailTo: String(cfg.mailTo || '').trim().slice(0, 200),
+    mailFromName: String(cfg.mailFromName || '').trim().slice(0, 60),
+    mailSubjectPrefix: String(cfg.mailSubjectPrefix || '').trim().slice(0, 60),
     updatedAt: new Date().toISOString(),
   })
 }
@@ -616,9 +712,12 @@ function patchConfig(patch) {
   if (p.dragLock !== undefined) cfg.dragLock = !!p.dragLock
   if (p.enterMode !== undefined) cfg.enterMode = p.enterMode === 'widget' || p.enterMode === 'settings' ? p.enterMode : 'both'
   if (p.timerNotifyOn !== undefined) cfg.timerNotifyOn = !!p.timerNotifyOn
+  if (p.timerMailOn !== undefined) cfg.timerMailOn = !!p.timerMailOn
   if (p.timerPersistOn !== undefined) cfg.timerPersistOn = !!p.timerPersistOn
   if (p.timerMode !== undefined) cfg.timerMode = p.timerMode === 'up' || p.timerMode === 'down' || p.timerMode === 'at' ? p.timerMode : 'off'
-  if (p.timerMin !== undefined) cfg.timerMin = Math.round(clampNum(p.timerMin, 1, 1440, cfg.timerMin))
+  if (p.timerSec !== undefined) cfg.timerSec = Math.round(clampNum(p.timerSec, 1, 86399, cfg.timerSec))
+  if (p.timerNote !== undefined) cfg.timerNote = normTimerNote(p.timerNote)
+  if (p.timerBreakMin !== undefined) cfg.timerBreakMin = Math.round(clampNum(p.timerBreakMin, 0, 120, cfg.timerBreakMin))
   if (p.timerAt !== undefined) {
     const s = String(p.timerAt)
     if (/^\d{1,2}:\d{2}$/.test(s)) cfg.timerAt = s
@@ -674,6 +773,19 @@ function patchConfig(patch) {
       if (typeof p.menuGroups[k] === 'boolean') cfg.menuGroups[k] = p.menuGroups[k]
     })
   }
+  // 默认展开态的版本号：挂件迁移过 look 组后回报当前版本，下次启动不再重复迁移
+  if (p.menuGroupsRev !== undefined) cfg.menuGroupsRev = normMenuGroupsRev(p.menuGroupsRev)
+  // GitHub 加速：开关意图（hosts 实际状态由 hosts.js 读文件现算）与可编辑 IP 表
+  if (p.ghAccelOn !== undefined) cfg.ghAccelOn = !!p.ghAccelOn
+  if (p.ghAccelIps !== undefined) cfg.ghAccelIps = normIps(p.ghAccelIps)
+  if (p.ghAccelRefreshedAt !== undefined) cfg.ghAccelRefreshedAt = normGhAccelRefreshedAt(p.ghAccelRefreshedAt)
+  // 通知渠道开关 + 邮件的非敏感字段（SMTP 服务器/授权码走 saveMailSecrets，不经这里）
+  if (p.notifySystemOn !== undefined) cfg.notifySystemOn = !!p.notifySystemOn
+  if (p.notifyMailOn !== undefined) cfg.notifyMailOn = !!p.notifyMailOn
+  if (p.mailFrom !== undefined) cfg.mailFrom = String(p.mailFrom || '').trim().slice(0, 200)
+  if (p.mailTo !== undefined) cfg.mailTo = String(p.mailTo || '').trim().slice(0, 200)
+  if (p.mailFromName !== undefined) cfg.mailFromName = String(p.mailFromName || '').trim().slice(0, 60)
+  if (p.mailSubjectPrefix !== undefined) cfg.mailSubjectPrefix = String(p.mailSubjectPrefix || '').trim().slice(0, 60)
   writeConfig(cfg)
   return cfg
 }
@@ -1060,4 +1172,6 @@ module.exports = {
   resetAnchorCache,
   // 纯函数，仅导出给单测：归一化写错不会抛错，只会让填的值悄悄变形（见 test/store.test.mjs）
   normTokenPrice,
+  // GitHub 加速 IP 表归一化：hosts.js 写块 / 刷新结果与 store 配置共用
+  normIps,
 }

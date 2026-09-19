@@ -16,6 +16,7 @@ const {
   claimDailyNotice, readModelState, writeModelState, todayKey, alertFor, alertOneLine,
 } = require('./store')
 const { isPeakTime, nextPeakChangeAt, priceFor, customPriceTable, customModelPrice } = require('./pricing')
+const { notify } = require('./notify')
 const codex = require('./codex')
 
 // ──────────────────────────────────────────────
@@ -358,7 +359,7 @@ function notifyModelLow(model, balance, threshold, cfg) {
   if (inQuietHours(cfg)) return false
   const text = model.name + ' 余额仅剩 ' + modelMoney(balance, model.currency) +
     '，已低于预警阈值 ' + modelMoney(threshold, model.currency)
-  try { utools.showNotification(text, 'whale') } catch (err) { logErr('[whale][notify] 系统通知失败', err && err.message) }
+  notify(text, cfg)
   return true
 }
 
@@ -592,13 +593,13 @@ function inQuietHours(cfg) {
 function notifyDaily(text, cfg, kind) {
   if (inQuietHours(cfg)) return
   if (!claimDailyNotice(kind)) return // 今天已提醒过
-  try { utools.showNotification(text, 'whale') } catch (err) { logErr('[whale][notify] 系统通知失败', err && err.message) }
+  notify(text, cfg)
 }
 // 即时通知出口：只受免打扰时段约束，不占用「每天一次」的名额。
 // 用于「余额大幅波动」这类一次性事件——每次发生都值得知道，不该被当天已发过的通知挡掉。
 function notifyNow(text, cfg) {
   if (inQuietHours(cfg)) return
-  try { utools.showNotification(text, 'whale') } catch (err) { logErr('[whale][notify] 系统通知失败', err && err.message) }
+  notify(text, cfg)
 }
 // 今日预算：用量超过预算额时弹一次系统通知（同一天只弹一次）。
 // 挂件气泡侧另有一条「超预算」提示，两者互不依赖：气泡可能正被计时/峰谷占用。

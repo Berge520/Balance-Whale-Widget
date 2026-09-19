@@ -73,13 +73,19 @@ export interface WhaleConfig {
   historyKeepDays: number
   // 计时到点时弹系统通知
   timerNotifyOn: boolean
+  // 计时到点的邮件通知（总开关 notifyMailOn 没开时不生效）
+  timerMailOn: boolean
   // 记住计时状态：重载插件/重建挂件后继续计时
   timerPersistOn: boolean
-  // 计时偏好（重载后不用重新选）：模式 / 倒计时分钟数 / 定时时刻 / 到点气泡停留秒数（0=常驻）
+  // 计时偏好（重载后不用重新选）：模式 / 倒计时秒数（1–86399）/ 定时时刻 / 到点气泡停留秒数（0=常驻）
   timerMode: 'off' | 'up' | 'down' | 'at'
-  timerMin: number
+  timerSec: number
   timerAt: string
   timerRemindSec: 0 | 5 | 8 | 15
+  // 到点要做什么：预设留言（显示在到点气泡与通知里，最长 60 字）
+  timerNote: string
+  // 到点气泡旁「休息」按钮的分钟数（0 = 不显示该按钮）
+  timerBreakMin: number
   // 计时气泡是否常驻显示（false = 计时中只短暂显示，点小鲸鱼可随时查看）
   timerBubblePin: boolean
   // 气泡是否只显示计时（false = 计时中气泡照常显示余额/用量等全部内容）
@@ -100,6 +106,21 @@ export interface WhaleConfig {
   mainModelId: string
   // 挂件菜单五个分组的展开状态：重开挂件 / 重载插件后保持上次的组合
   menuGroups: { look: boolean; models: boolean; usage: boolean; timer: boolean; dsh: boolean }
+  // GitHub 加速（hosts 方案）：on = 开关意图（实际是否生效以 hosts 文件里的标记块为准）；
+  // ips = 可编辑 IP 表（{ domain, ip }，非法条目会在保存时被丢弃）
+  ghAccelOn: boolean
+  ghAccelIps: Array<{ domain: string; ip: string }>
+  // 上次成功刷新 IP 表的时间戳（epoch ms；0 = 从未刷新过，设置页据此提示表龄）
+  ghAccelRefreshedAt: number
+  // 通知渠道：系统通知（默认开）+ 邮件通知（默认关，需先在「提醒与通知」卡里配好 SMTP）
+  notifySystemOn: boolean
+  notifyMailOn: boolean
+  // 邮件通知的非敏感字段（发件人/收件人/发件人显示名/主题前缀）；
+  // SMTP 服务器、账号与授权码属于凭据，走 saveMailSecrets 进加密存储，不在这里
+  mailFrom: string
+  mailTo: string
+  mailFromName: string
+  mailSubjectPrefix: string
 }
 
 // 台词库：groups 是可增删的随机台词组（一组 = 一个抽签项），time 是白天报时模板（{t} = 当前时间），
@@ -153,9 +174,43 @@ export interface WhaleAlerts {
   passOff: string
 }
 
+// 邮件通知的 SMTP 凭据（存 dbCryptoStorage.whale:secrets.notifyMail，不进备份）
+export interface WhaleMailSecrets {
+  mailHost: string
+  mailPort: number
+  // true = 465 直连 TLS；false = 587/25 明文握手后 STARTTLS 升级
+  mailSecure: boolean
+  mailUser: string
+  mailPass: string
+}
+
+export interface WhaleMailResult {
+  ok: boolean
+  error?: string
+}
+
+// 测试邮件的入参 = SMTP 凭据 + 收件人相关字段。
+// 收件人/发件人来自配置（非加密存储），但发信必须带上，所以一并传（见 sendTestMail）
+export type WhaleMailTestInput = Partial<WhaleMailSecrets & Pick<
+  WhaleConfig,
+  'mailFrom' | 'mailTo' | 'mailFromName' | 'mailSubjectPrefix'
+>>
+
+// 通知渠道自测结果：on = 本次实际发过的渠道名（按配置现算）
+export interface WhaleNotifyTestResult {
+  ok: boolean
+  on: string[]
+  system?: boolean
+  error?: string
+}
+
 export interface WhaleSecrets {
   apiKey: string
   platformToken: string
+  // 逐模型密钥：键为模型 id，值为该模型的 API Key
+  models: Record<string, string>
+  // SMTP 凭据挂在子对象下，**不在顶层** —— 读的时候别直接取 s.mailHost
+  notifyMail: WhaleMailSecrets
 }
 
 export interface BalanceTestResult {
@@ -598,6 +653,98 @@ export interface DshDirPickResult {
   error?: string
 }
 
+// —— GitHub 加速（hosts 方案） ——
+// 实际状态：读 hosts 文件现算；on = 标记块是否存在，active = 块内解析出的生效域名
+export interface GhAccelStatus {
+  ok: boolean
+  on: boolean
+  // 块被其它工具挤出文件最前（对方在本插件之后又写 hosts），first-match 被抢、加速失效
+  degraded?: boolean
+  active: string[]
+  hostsPath: string
+  error?: string
+}
+// 块之外已存在的目标域名条目（first-match 解析会覆盖本插件的块）
+export interface GhAccelConflict {
+  domain: string
+  ip: string
+  line: string
+}
+// 最近一次 IP 获取的来源追踪（内存态，重开插件清空）：回答「每个域名的 IP 通过什么方式、从哪里获取」
+export interface GhAccelTrace {
+  at: number
+  // 本次 DoH 实时解析中实际返回过 A 记录的 DoH 入口（域名或直连 IP 形式）
+  dohResolvers: string[]
+  // DoH 实时解析出的逐域名 IP（并集，未过探测）；只含配置了实时解析的域名（主站 + 高频入口）
+  dohByDomain: Record<string, string[]>
+  // 上面每个 IP 具体由哪家 DoH 解析出（Cloudflare / Google），支撑「来源」列点名到厂商
+  dohOrigin: Record<string, string>
+  // 刷新用到的社区源 URL（GitHub520 主源或镜像），空 = 本次没刷新
+  refreshUrl: string
+  // 每个域名最终选中的 IP + 来源（带具体出处，如「DoH 实时解析 · Cloudflare」「社区源表 · raw.hellogithub.com」）
+  byDomain: Record<string, { ip: string; source: string }>
+}
+// 一次 GitHub 加速操作（开启 / 关闭 / 刷新 / 校验 / 检测）的步骤记录，供「GitHub 加速日志」回看
+export interface GhAccelOpStep {
+  // 这一步在干什么，如「拉取社区源 raw.hellogithub.com」
+  text: string
+  // done 正常完成 / fail 失败 / skip 跳过（条件不满足，非错误） / running 进行中
+  state: 'done' | 'fail' | 'skip' | 'running'
+  // 结果与关键数据，如「命中 13 个域名（源共 21 条目标条目）」
+  detail: string
+}
+export interface GhAccelOpLog {
+  id: number
+  at: number
+  // 操作名，如「刷新 IP 表（拉取社区源）」
+  title: string
+  // running 进行中；ok 成功；fail 失败；cancel 用户取消（UAC 点否）
+  state: 'running' | 'ok' | 'fail' | 'cancel'
+  // 一句话总结结果，running 时为空
+  summary: string
+  // 总耗时 ms，未结束时为 0
+  ms: number
+  steps: GhAccelOpStep[]
+}
+// 开启/关闭结果；canceled = UAC 被取消；already = 关闭时 hosts 里本来就没块（没弹 UAC）
+export interface GhAccelOpResult {
+  ok: boolean
+  canceled?: boolean
+  already?: boolean
+  error?: string
+  // 实际写入 hosts 的 IP 表（开启时可能已刷新 + 过滤不可达，与传入的表不同）
+  ips?: Array<{ domain: string; ip: string }>
+}
+// 一键刷新结果：updated = 新 IP 表，total = 源里目标域名条目数，skipped = 源里没有、保留旧值的域名数
+export interface GhAccelRefreshResult {
+  ok: boolean
+  updated?: Array<{ domain: string; ip: string }>
+  total?: number
+  skipped?: number
+  error?: string
+}
+// 连通性自检结果：ms = 往返耗时，status = HTTP 状态
+export interface GhAccelProbeResult {
+  ok: boolean
+  ms: number
+  status?: number
+  error?: string
+}
+// IP 表校验结果：results = 每条逐项探测结论；bad = 不可达（建议删除）；
+// stale = 不可达但命中当前实时 A 记录（多为探测抖动，界面不推荐删除）
+export interface GhAccelVerifyItem {
+  domain: string
+  ip: string
+  ok: boolean
+}
+export interface GhAccelVerifyResult {
+  ok: boolean
+  results: GhAccelVerifyItem[]
+  bad: GhAccelVerifyItem[]
+  stale: GhAccelVerifyItem[]
+  checkedAt: number
+}
+
 // 备份导出结果
 export interface BackupExportResult {
   ok: boolean
@@ -781,6 +928,12 @@ export interface WhaleServices {
   saveConfig(patch: Partial<WhaleConfig> & { __live?: boolean }): WhaleConfig
   getSecrets(): WhaleSecrets
   saveSecrets(secrets: Partial<WhaleSecrets>): { hasApiKey: boolean; hasPlatformToken: boolean }
+  // 邮件通知的 SMTP 凭据：走加密存储（不进备份）。mailPass 留空 = 沿用已保存的授权码
+  saveMailSecrets(mail: Partial<WhaleMailSecrets>): WhaleMailSecrets
+  // 用给定（或已保存的）SMTP 配置发一封测试邮件，不落库
+  sendTestMail(mail: WhaleMailTestInput): Promise<WhaleMailResult>
+  // 按当前开着的通知渠道各发一条测试通知（不做去重），不落库
+  testNotify(): Promise<WhaleNotifyTestResult>
   testApiKey(apiKey: string): Promise<BalanceTestResult>
   testPlatformToken(platformToken: string): Promise<PlatformUsageTestResult>
   getUsageHistory(days?: number): UsageHistoryResult
@@ -874,6 +1027,27 @@ export interface WhaleServices {
   dshCleanNpxCache(): DshStatus
   // 选择 Node.js 安装目录（文件夹选择器，校验目录里有 node）
   dshPickNodeDir(): DshDirPickResult
+  // —— GitHub 加速（hosts 方案，纯设置页功能） ——
+  // 实际状态：读 hosts 文件现算（标记块存在 = 生效），不依赖配置里的开关意图
+  ghAccelStatus(): GhAccelStatus
+  // 最近一次 IP 获取的来源追踪（内存态）：每个域名最终 IP 从哪来（DoH/社区源表/当前表/快照/兜底）
+  ghAccelTrace(): GhAccelTrace
+  // 块之外已存在的目标域名条目（其它工具也写 hosts 时会覆盖本插件，提示先关掉对方）
+  ghAccelScanConflicts(): GhAccelConflict[]
+  // 开启：refresh=true 时先静默刷新 GitHub520 并逐 IP 探测，只写当前网络可达的；
+  // 全不可达时拒绝写入并返回 error。结果 ips = 实际写入的表（刷新后可能与传入不同）
+  ghAccelEnable(ips?: Array<{ domain: string; ip: string }>, refresh?: boolean): Promise<GhAccelOpResult>
+  ghAccelDisable(): Promise<GhAccelOpResult>
+  // 一键刷新 IP 表（GitHub520 源）：current 传当前表，源里没有的域名沿用当前值，不会丢失
+  ghAccelRefreshIps(current?: Array<{ domain: string; ip: string }>): Promise<GhAccelRefreshResult>
+  // 校验 IP 表：逐条探测只给结论（不删表），删除由设置页确认后走 saveConfig
+  ghAccelVerifyIps(ips?: Array<{ domain: string; ip: string }>): Promise<GhAccelVerifyResult>
+  // GitHub 加速操作日志（内存态，最多 50 条，重开插件清空）
+  ghAccelOpLogs(): GhAccelOpLog[]
+  // 清空操作日志，cleared = 清掉的条数
+  ghAccelClearOpLogs(): { cleared: number }
+  // 连通性自检（HEAD https://github.com），开启前后各测一次做对比
+  ghAccelProbe(): Promise<GhAccelProbeResult>
   // —— 备份 / 恢复 ——
   // 导出备份（secrets=true 时用 password 加密后才写入凭据）
   backupExport(opts: { secrets?: boolean; password?: string }): BackupExportResult

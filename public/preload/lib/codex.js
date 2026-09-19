@@ -17,6 +17,17 @@ const fs = require('fs')
 const { K } = require('./constants')
 const { log, logErr } = require('./log')
 
+// ── 扫描上限 ──
+// 解析是同步的（readFileSync + split + 逐行 JSON.parse），整个插件主线程会被占住，
+// 所以要给「单个文件」和「单轮总量」都设上限：
+//   · 单文件超限：直接跳过，但**结果必须落缓存**。否则该文件的 size/mtime 每轮都在变、
+//     每轮都被判定为"变更"重读，而超大文件又必然在读入/解析时抛错（V8 字符串上限），
+//     错误发生在写缓存之前 → 永久复发，整个插件每轮都卡一次。
+//   · 单轮超预算：先返回已聚合的部分并标 deferred，剩下的留到下一轮（5 秒 memo + 调用方缓存承接）。
+const CODEX_MAX_FILE_BYTES = 32 * 1024 * 1024
+const CODEX_MAX_ROUND_FILES = 400
+const CODEX_MAX_ROUND_BYTES = 96 * 1024 * 1024
+
 // ── 工具 ──
 // 时间戳 → 'YYYY-MM-DD'（本地时区，用户在 Asia/Shanghai）
 function dayKeyFromTs(ts) {
@@ -70,6 +81,9 @@ function listCodexSessionFiles(root) {
   // sessions/ 下按 YYYY/MM/DD/rollout-*.jsonl 组织
   walk(path.join(root, 'sessions'), 0)
   walk(path.join(root, 'archived_sessions'), 0)
+  // 按路径排序：walk 依赖 readdirSync 的目录顺序，在不同文件系统上不稳定。
+  // 排序后同一批文件每轮顺序一致，"预算用尽时优先解析哪些"才有确定行为（新文件按名字靠前）。
+  out.sort()
   return out
 }
 
@@ -202,16 +216,52 @@ function codexSummary() {
   const files = listCodexSessionFiles(home)
   const keep = {}
   let changed = 0
+  let skipped = 0
+
+  // 先按「是否需要解析」分桶，并给每个文件取一次 stat。
+  // 之所以要先分桶：单轮预算必须优先花在**新变更**的文件上。若按目录顺序边扫边判，
+  // 前几个文件每轮都会先把预算吃光，后面的文件永远轮不到（反复重扫同一批，永不前进）。
+  const fresh = []   // 指纹变了、需要（重新）解析
+  const reused = []  // 指纹未变、直接复用缓存
+  let pendingCount = 0
   for (const f of files) {
     let st = null
     try { st = fs.statSync(f) } catch (_) { continue }
     const prev = cache.files[f]
-    if (prev && prev.size === st.size && prev.mtimeMs === st.mtimeMs && prev.days) { keep[f] = prev; continue }
+    if (prev && prev.size === st.size && prev.mtimeMs === st.mtimeMs && prev.days) { reused.push([f, st, prev]); continue }
+    // 超大文件：不解析，但把 size/mtime 记进缓存，下一轮指纹未变就不会再进来
+    if (st.size > CODEX_MAX_FILE_BYTES) {
+      keep[f] = { size: st.size, mtimeMs: st.mtimeMs, days: {}, rl: null, rlTs: 0, skipped: true }
+      skipped++
+      continue
+    }
+    fresh.push([f, st])
+  }
+
+  // 单轮预算：本轮只解析 fresh 里的前 N 个 / 前 X 字节，其余留到下一轮。
+  // 注意「留到下一轮」必须能在下一轮被优先处理，所以本轮未解析的一律不写缓存指纹，
+  // 下轮它们仍在 fresh 里、且排在已被 reuse 的那些之前。
+  let roundFiles = 0, roundBytes = 0, deferred = false
+  for (const [f, st] of fresh) {
+    if (roundFiles >= CODEX_MAX_ROUND_FILES || roundBytes + st.size > CODEX_MAX_ROUND_BYTES) {
+      deferred = true
+      pendingCount++
+      const prev = cache.files[f]
+      if (prev) keep[f] = prev // 有旧结果就先用旧的，至少不丢历史数据
+      continue
+    }
     const parsed = parseCodexFile(f)
     keep[f] = { size: st.size, mtimeMs: st.mtimeMs, days: parsed.days, rl: parsed.rl || null, rlTs: parsed.rlTs || 0 }
+    roundFiles++
+    roundBytes += st.size
     changed++
   }
-  if (changed > 0 || Object.keys(cache.files).length !== Object.keys(keep).length) {
+  for (const [f, , prev] of reused) keep[f] = prev
+  // 落缓存：pending 的文件不进缓存（下轮仍按"变更"优先解析），但本轮已解析的必须落盘，
+  // 否则进度无法跨轮累积，每轮都从同一批文件重来。
+  const cacheKeys = Object.keys(cache.files).length
+  const keepKeys = Object.keys(keep).length
+  if (changed > 0 || cacheKeys !== keepKeys + pendingCount) {
     writeCodexCache({ version: 2, files: keep, builtAt: Date.now() })
   }
   // 聚合
@@ -256,6 +306,8 @@ function codexSummary() {
   }
   memo = {
     ok: true, home, sessions: files.length, changed,
+    // 超大被跳过的文件数，以及本轮预算用尽未扫完（下轮补扫）
+    skipped, deferred,
     todayTokens, monthTokens, totalTokens,
     outTokens, reasonTokens, cachedTokens, turns,
     days7, byModel,
@@ -265,7 +317,8 @@ function codexSummary() {
     rateLimitsTs: bestRlTs > 0 ? bestRlTs : 0,
   }
   memoAt = now
-  log('[whale][codex] 统计完成', home, files.length, '文件', changed, '变更', todayTokens, '今日')
+  log('[whale][codex] 统计完成', home, files.length, '文件', changed, '变更', todayTokens, '今日',
+    skipped > 0 ? ('跳过 ' + skipped + ' 个超大日志') : '', deferred ? '本轮预算用尽，下轮续扫' : '')
   return memo
 }
 

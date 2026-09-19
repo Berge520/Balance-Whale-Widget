@@ -13,6 +13,7 @@
  */
 const { log, logErr, LOG_FILE } = require('./lib/log')
 const { readConfig, patchConfig, alertFor, alertOneLine } = require('./lib/store')
+const { notify } = require('./lib/notify')
 const { checkUpdate } = require('./lib/api')
 const { ensureWidget, toggleWidget, pushConfig } = require('./lib/widget')
 const { registerIpc } = require('./lib/ipc')
@@ -63,9 +64,7 @@ try {
       try { settingsApi.emitConfigChange() } catch (err) {}
       // 系统通知：穿透态下气泡可能被计时/峰谷占用，这条保证用户一定得到反馈。
       // 文案取设置页的「提醒文案」模板（与气泡同一份），换行合并成一行
-      try {
-        utools.showNotification(alertOneLine(alertFor(cfg, next ? 'passOn' : 'passOff')), 'whale')
-      } catch (err) { logErr('[whale][lifecycle] 穿透切换通知失败', err && err.message) }
+      notify(alertOneLine(alertFor(cfg, next ? 'passOn' : 'passOff')), cfg)
       return
     }
     // 「打开设置」兜底入口：挂件菜单在「显示挂件」模式下用 utools.redirect('余额挂件') 重定向进入。
@@ -101,14 +100,12 @@ try {
       ensureWidget({ focus: false })
       setTimeout(function () { try { utools.showMainWindow() } catch (err) {} }, 250)
     }
-    // 自动检查更新：开关关闭时跳过；仅新拉取到的结果触发一次系统通知
+    // 自动检查更新：开关关闭时跳过；仅新拉取到的结果触发一次通知
     try {
       if (readConfig().updateCheckOn) {
         checkUpdate(false).then((r) => {
           if (r && r.ok && r.fresh && r.hasUpdate) {
-            try {
-              utools.showNotification('小鲸鱼余额挂件有新版本 v' + r.latest + '（当前 v' + r.current + '）', 'whale')
-            } catch (err) { logErr('[whale][update] 发送更新通知失败', err && err.message) }
+            notify('小鲸鱼余额挂件有新版本 v' + r.latest + '（当前 v' + r.current + '）', readConfig())
           }
         })
       }
