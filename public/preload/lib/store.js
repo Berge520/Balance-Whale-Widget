@@ -773,8 +773,12 @@ function patchConfig(patch) {
       if (typeof p.menuGroups[k] === 'boolean') cfg.menuGroups[k] = p.menuGroups[k]
     })
   }
-  // 默认展开态的版本号：挂件迁移过 look 组后回报当前版本，下次启动不再重复迁移
-  if (p.menuGroupsRev !== undefined) cfg.menuGroupsRev = normMenuGroupsRev(p.menuGroupsRev)
+  // 默认展开态的版本号：挂件迁移过 look 组后回报当前版本，下次启动不再重复迁移。
+  // 只增不减：patchConfig 是「读现有配置 → 打补丁 → 整份写回」，而 readConfig 会把
+  // 缺失的 menuGroupsRev 归一成 0；若这里直接接受补丁里的值，任何不带该字段的补丁
+  // （设置页 patchCfg、改模型、改透明度…）都会把版本号冲回 0，
+  // 导致挂件每次启动都重跑一次 look 迁移、并把 dsh 组一并强制收起
+  if (p.menuGroupsRev !== undefined) cfg.menuGroupsRev = Math.max(cfg.menuGroupsRev, normMenuGroupsRev(p.menuGroupsRev))
   // GitHub 加速：开关意图（hosts 实际状态由 hosts.js 读文件现算）与可编辑 IP 表
   if (p.ghAccelOn !== undefined) cfg.ghAccelOn = !!p.ghAccelOn
   if (p.ghAccelIps !== undefined) cfg.ghAccelIps = normIps(p.ghAccelIps)

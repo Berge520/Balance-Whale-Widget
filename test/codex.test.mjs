@@ -20,10 +20,9 @@ import os from 'node:os'
 import path from 'node:path'
 import { createRequire } from 'node:module'
 
-// ── utools 桩：只需 dbStorage（缓存）+ isDev/getPath（log.js 用）──
+// ── utools 桩：只需 dbStorage（缓存）+ getPath（log.js 用）──
 const store = new Map()
 globalThis.utools = {
-  isDev: () => false,
   getPath: () => os.tmpdir(),
   dbStorage: {
     getItem: (k) => (store.has(k) ? store.get(k) : null),
@@ -208,8 +207,11 @@ test('clearCodexCache 后重扫得到与增量结果一致的总额', () => {
 test('今日 / 本月 token 按本地时区归日', () => {
   freshStart()
   writeSession('rollout-today.jsonl', { turns: 3, step: 100, ts: Date.now() })
-  // 昨天：拨回 26 小时，确保跨日
-  writeSession('rollout-old.jsonl', { turns: 5, step: 100, ts: Date.now() - 26 * 3600 * 1000 })
+  // 昨天：取「本地今天 00:00」再往前 1 小时，必落在昨天。
+  // 不能写 Date.now() - 26h —— 凌晨运行时回拨会跨到前天，days7[1] 就空了（曾因此在 CI 偶发失败）。
+  const d0 = new Date()
+  d0.setHours(0, 0, 0, 0)
+  writeSession('rollout-old.jsonl', { turns: 5, step: 100, ts: d0.getTime() - 3600 * 1000 })
 
   // 注意：这里不能调 nextRound()（会拨时钟），todayKey 必须与 codex 内部看到的「今天」同源。
   // 上一个用例可能改过 clockOffset，故先归零

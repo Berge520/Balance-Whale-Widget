@@ -212,10 +212,10 @@ const clearItemNames = computed(() => {
   return names.join('、')
 })
 const dataFlash: Flash = useFlash()
-// 诊断日志：dev 下同步落盘（%TEMP%\whale-debug.log），插件进程被 uTools 结束也不丢
+// 诊断日志：两版都同步落盘（%TEMP%\whale-debug.log），插件进程被 uTools 结束也不丢
 const diagFlash: Flash = useFlash()
-// 诊断日志入口只在 uTools 开发者模式（日志真正落盘）时出现，正式版不显示
-const diagReady = !!services.isDev?.()
+// 诊断日志入口恒显示：打包版同样落盘，不再按开发者模式隐藏
+const diagReady = true
 
 // —— DeepSeek Harness（dsh，开发者） ——
 const dsh = reactive({
@@ -714,7 +714,23 @@ const usageHistory = ref<Array<{ date: string; usage: number }>>([])
 const usageCurrency = ref('CNY')
 // 可选区间：上限就是保留天数，超出的天数账本里本来就没有
 const USAGE_RANGES = [7, 14, 30, 90, 180] as const
-const usageRange = ref<(typeof USAGE_RANGES)[number]>(7)
+type UsageRange = (typeof USAGE_RANGES)[number]
+// 区间是纯前端显示口径，不进宿主配置（没必要为它跑 IPC 与同步），但必须跨启动记住，
+// 否则每次重开插件都弹回 7 天。localStorage 在 uTools 的 file:// 下可用且按插件目录隔离
+const USAGE_RANGE_KEY = 'whale:usageRange'
+function loadUsageRange(): UsageRange {
+  try {
+    const n = Number(localStorage.getItem(USAGE_RANGE_KEY))
+    // 白名单校验：存过旧版本/被手改过的值可能已不在 USAGE_RANGES 里
+    if ((USAGE_RANGES as readonly number[]).includes(n)) return n as UsageRange
+  } catch (err) {}
+  return 7
+}
+const usageRange = ref<UsageRange>(loadUsageRange())
+function setUsageRange(r: UsageRange) {
+  usageRange.value = r
+  try { localStorage.setItem(USAGE_RANGE_KEY, String(r)) } catch (err) {}
+}
 // 保留天数之外的区间不显示（保留 35 天时点「180 天」只会看到一小段柱子，容易以为数据丢了）
 const usageRangeTabs = computed(() => USAGE_RANGES.filter((r) => r <= cfg.historyKeepDays))
 const exportFlash: Flash = useFlash()
@@ -1575,7 +1591,7 @@ function onHistoryKeepChange() {
   cfg.historyKeepDays = v
   patchCfg({ historyKeepDays: v })
   const tabs = usageRangeTabs.value
-  if (tabs.indexOf(usageRange.value) < 0) usageRange.value = tabs[tabs.length - 1]
+  if (tabs.indexOf(usageRange.value) < 0) setUsageRange(tabs[tabs.length - 1])
   refreshHistory()
   refreshDetail()
 }
@@ -2437,14 +2453,12 @@ function showWidget() {
   widgetVisible.value = true
   if (r && r.ok && !r.error) {
     widgetFlash.err = false
-    // 开发模式才显示调试提示；正式打包（dist）只给普通确认
-    widgetFlash.msg = import.meta.env.DEV
-      ? '挂件窗口已创建。若桌面看不到鲸鱼，请打开开发者工具（主窗右键→检查）查看 [whale][widget] 日志。'
-      : '挂件窗口已创建。'
+    // 打包版与开发版一致：均给出调试提示（日志两版都落盘）
+    widgetFlash.msg = '挂件窗口已创建。若桌面看不到鲸鱼，请打开开发者工具（主窗右键→检查）查看 [whale][widget] 日志。'
   } else {
     widgetFlash.err = true
     widgetFlash.msg = '挂件创建失败：' + ((r && r.error) || '未知错误')
-      + (import.meta.env.DEV ? '（详见开发者工具控制台 [whale][widget] 日志）' : '')
+      + '（详见开发者工具控制台 [whale][widget] 日志）'
   }
   checkWidgetError(true)
 }
@@ -2680,7 +2694,7 @@ function copyDebugLog() {
     const text = (r && r.text) || ''
     if (!text) {
       diagFlash.err = true
-      diagFlash.msg = '暂无可复制的日志：控制台日志仅在 uTools 开发者模式下落盘。'
+      diagFlash.msg = '暂无可复制的日志：日志文件尚未产生（插件重启后才会写入）。'
       return
     }
     const ok = services.copyText?.(text)
@@ -2700,7 +2714,7 @@ function openLogFile() {
     diagFlash.err = !(r && r.ok)
     diagFlash.msg = r && r.ok
       ? '已用系统默认程序打开日志文件：' + (r.path || '')
-      : '打开失败：' + ((r && r.path) ? r.path : '控制台日志仅在 uTools 开发者模式下落盘。')
+      : '打开失败：' + ((r && r.path) ? r.path : '日志文件尚未产生（插件重启后才会写入）。')
   } catch (err: any) {
     diagFlash.err = true
     diagFlash.msg = '打开失败：' + String(err?.message || err)
@@ -3431,7 +3445,7 @@ onUnmounted(() => {
         <div class="head-actions">
           <div class="range-tabs">
             <button v-for="r in usageRangeTabs" :key="r" class="range-tab"
-                    :class="{ 'range-tab-on': usageRange === r }" @click="usageRange = r">{{ r }} 天</button>
+                    :class="{ 'range-tab-on': usageRange === r }" @click="setUsageRange(r)">{{ r }} 天</button>
           </div>
           <button class="export-btn" @click="importUsageCsv">导入 CSV</button>
           <button class="export-btn" :disabled="historyMax <= 0" @click="exportUsageCsv">导出 CSV</button>
@@ -4188,7 +4202,7 @@ onUnmounted(() => {
       <div v-if="diagReady" class="fold">
         <button class="link-btn" @click="widgetFolds.trouble = !widgetFolds.trouble">{{ widgetFolds.trouble ? '收起故障排查' : '故障排查' }}</button>
         <div v-if="widgetFolds.trouble" class="guide">
-          <p class="guide-use">挂件消失或显示异常时，可复制诊断日志（仅 uTools 开发者模式下落盘）或用系统程序打开日志文件。</p>
+          <p class="guide-use">挂件消失或显示异常时，可复制诊断日志（%TEMP%\whale-debug.log）或用系统程序打开日志文件。</p>
           <div class="btn-row">
             <button class="secondary" @click="copyDebugLog">复制诊断日志</button>
             <button class="secondary" @click="openLogFile">打开日志文件</button>
@@ -4286,7 +4300,7 @@ onUnmounted(() => {
     <!-- [开发者] DeepSeek Harness（dsh） -->
     <section v-if="activeTab === 'dev'" class="card">
       <h2>DeepSeek Harness（dsh）</h2>
-      <p class="hint">在挂件菜单「dsh（开发者）」分组或本卡片里 启动 / 重启 / 结束 / 更新 dsh 并打开它的 Web UI（默认 <code>http://127.0.0.1:3080</code>）。<strong>优先用你已全局安装的那份</strong>（零重复占用、终端与插件同一版本），没有才装到插件数据目录。</p>
+      <p class="hint">在挂件菜单「dsh」分组或本卡片里 启动 / 重启 / 结束 / 更新 dsh 并打开它的 Web UI（默认 <code>http://127.0.0.1:3080</code>）。<strong>优先用你已全局安装的那份</strong>（零重复占用、终端与插件同一版本），没有才装到插件数据目录。</p>
 
       <label class="field row">
         <span class="label">状态</span>
@@ -4789,7 +4803,7 @@ h1 {
   color: var(--err);
   white-space: nowrap;
 }
-/* 用量趋势区间切换（7 / 14 / 30 天） */
+/* 用量趋势区间切换（7 / 14 / 30 / 90 / 180 天） */
 .range-tabs {
   display: flex;
   gap: 2px;

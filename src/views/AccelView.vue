@@ -35,21 +35,51 @@ const ghAccelBusy = ref(false) // 防重入：UAC 弹窗或联网刷新期间按
 function ghAccelAgeText() {
   const t = props.cfg.ghAccelRefreshedAt
   if (!t) return '从未刷新'
-  const min = Math.floor((Date.now() - t) / 60000)
+  // 用 nowTick 而不是 Date.now()：模板每次重渲染都会读到最新的 nowTick，
+  // 配合上面的 60s 心跳，表龄文案会自己往前走（否则停在进页面那一刻）
+  const min = Math.floor((nowTick.value - t) / 60000)
   if (min < 1) return '刚刚'
   if (min < 60) return min + ' 分钟前'
   const h = Math.floor(min / 60)
   if (h < 24) return h + ' 小时前'
   return Math.floor(h / 24) + ' 天前'
 }
+// 「现在」的分钟级心跳：表龄文案与「超 7 天未刷新」都基于 Date.now()，若只用 computed，
+// 页面开着不动就永远停在进入时的那个值 —— 挂着过夜、跨过 7 天阈值都不会自己变红，
+// 得切走再切回来才刷新。这里用一个 60s 心跳驱动重算，让提醒真的「到点就出现」。
+// 只在「帮助」Tab 选中时走跳，其它 Tab 不空转（本组件常驻，但没人看时不必算）
+const nowTick = ref(Date.now())
+let nowTimer: number | null = null
+watch(
+  () => props.activeTab,
+  (k) => {
+    if (k === 'help') {
+      nowTick.value = Date.now()
+      if (nowTimer === null) nowTimer = window.setInterval(() => { nowTick.value = Date.now() }, 60000)
+    } else if (nowTimer !== null) {
+      window.clearInterval(nowTimer)
+      nowTimer = null
+    }
+  },
+  { immediate: true }
+)
+onUnmounted(() => { if (nowTimer !== null) { window.clearInterval(nowTimer); nowTimer = null } })
 const ghAccelStale = computed(() => {
   const t = props.cfg.ghAccelRefreshedAt
-  return !!t && Date.now() - t > 7 * 24 * 3600 * 1000
+  // 依赖 nowTick 才能随时钟重算（见上）
+  return !!t && nowTick.value - t > 7 * 24 * 3600 * 1000
 })
 // hosts 实际状态（读文件现算，不依赖配置意图）；null = 还没查过
-const ghAccelActual = ref<{ on: boolean; degraded?: boolean; active: string[]; hostsPath: string } | null>(null)
+const ghAccelActual = ref<{ on: boolean; broken?: boolean; degraded?: boolean; active: string[]; hostsPath: string } | null>(null)
 // 块之外已存在的目标域名条目（其它工具也写 hosts；本插件的块写在最前，会压过它们）
-const ghAccelConflicts = ref<Array<{ domain: string; ip: string; line: string }>>([])
+const ghAccelConflicts = ref<Array<{ domain: string; ip: string; line: string; writer?: string }>>([])
+// 冲突条目里认出「是哪类工具写的」的那些结论（去重后用、号连起来）；全认不出时为空串，
+// 模板据此退回中性说法。宿主只对高置信特征给结论（回环 IP = 本地反代类），见 hosts.js guessWriter
+const ghAccelConflictWriters = computed(() => {
+  const s = new Set<string>()
+  for (const c of ghAccelConflicts.value) if (c.writer) s.add(c.writer)
+  return Array.from(s).join('、')
+})
 const ghAccelProbe = ref<{ ok: boolean; ms: number; status?: number; error?: string } | null>(null)
 const ghAccelProbing = ref(false)
 const ghAccelIpsFold = ref(false)
@@ -63,6 +93,25 @@ const ghAccelLogFold = ref(false)
 const ghAccelOps = ref<GhAccelOpLog[]>([])
 const ghAccelRunning = computed(() => ghAccelOps.value.find((o) => o.state === 'running') || null)
 const ghAccelOpsDone = computed(() => ghAccelOps.value.filter((o) => o.state !== 'running'))
+// 进行中操作里「最值得看的一行」：优先取正在 running 的步骤，没有就取最后一条，
+// 用它拼出主界面顶部的实时进度（用户点完开启就盯着这里，不必去展开日志）。
+// 探测那一步的 detail 会被 opProgress 反复改写为「已测 n/m 个」，正好是最想看到的数字
+const ghAccelLiveStep = computed(() => {
+  const run = ghAccelRunning.value
+  if (!run || !run.steps.length) return null
+  for (let i = run.steps.length - 1; i >= 0; i--) if (run.steps[i].state === 'running') return run.steps[i]
+  return run.steps[run.steps.length - 1]
+})
+// 顶部实时进度文案：没有进行中操作时为 null（模板据此不渲染这一块）
+const ghAccelLiveText = computed(() => {
+  const run = ghAccelRunning.value
+  if (!run) return null
+  const s = ghAccelLiveStep.value
+  if (!s) return run.title + '…'
+  // 探测步骤：只露出「已测 n/m」这个核心数字，标题太长不适合放在顶部
+  if (s.detail && /^已测 /.test(s.detail)) return '正在筛选可用 IP（' + s.detail.replace(/^已测\s*/, '') + '）'
+  return s.text + (s.detail ? '：' + s.detail : '') + '…'
+})
 function ghOpStateText(s: string) {
   if (s === 'ok') return '成功'
   if (s === 'fail') return '失败'
@@ -126,12 +175,13 @@ watch(
   { immediate: true, deep: true }
 )
 
-function refreshGhAccel() {
+async function refreshGhAccel() {
   if (!api.value.ghAccelStatus) return
   try {
-    const s = api.value.ghAccelStatus()
-    ghAccelActual.value = { on: s.on, degraded: !!s.degraded, active: s.active || [], hostsPath: s.hostsPath || '' }
-    ghAccelConflicts.value = api.value.ghAccelScanConflicts?.() || []
+    // 宿主读 hosts 走异步 fs（同进程直调，同步读会冻住渲染线程），故这里必须 await
+    const s = await api.value.ghAccelStatus()
+    ghAccelActual.value = { on: s.on, broken: !!s.broken, degraded: !!s.degraded, active: s.active || [], hostsPath: s.hostsPath || '' }
+    ghAccelConflicts.value = (await api.value.ghAccelScanConflicts?.()) || []
     ghAccelTrace.value = api.value.ghAccelTrace?.() || null
     pullGhAccelOps() // 日志与状态同一处刷新：切到帮助 Tab / 操作结束后都能看到最新记录
   } catch (err) {}
@@ -141,8 +191,17 @@ function refreshGhAccel() {
 // done 在结束时调（拿终态 + 耗时）。宿主是同步内存读取，开销可忽略
 function pullGhAccelOps() {
   try {
-    if (api.value.ghAccelOpLogs) ghAccelOps.value = api.value.ghAccelOpLogs()
+    if (!api.value.ghAccelOpLogs) return
+    // 设置页被切到后台（用户去看别的 Tab / 最小化）时没必要每 500ms 深拷贝一次日志：
+    // 宿主每次都会序列化最多 50 条 × N 步骤，探测中步骤一直在长，拷贝量并不小。
+    // 后台时不拉，回到前台由 visibilitychange 立刻补一次，视觉上不会缺帧
+    if (document.hidden) return
+    ghAccelOps.value = api.value.ghAccelOpLogs()
   } catch (err) {}
+}
+// 从后台切回来时立刻补一次，避免停在上次轮询的旧快照
+function onVisibilityChange() {
+  if (!document.hidden && ghAccelRunning.value) pullGhAccelOps()
 }
 // 进行中操作的步骤要「边跑边长」。宿主是另一个进程，push 不会通知渲染进程，
 // 只能定时轮询；宿主是同步内存读取，开销可忽略。仅在确实有 running 操作时轮询，
@@ -167,6 +226,8 @@ watch(ghAccelRunning, (now) => {
   }
 })
 onUnmounted(stopGhAccelOpPoll)
+document.addEventListener('visibilitychange', onVisibilityChange)
+onUnmounted(() => document.removeEventListener('visibilitychange', onVisibilityChange))
 // 打开日志折叠区时主动拉一次：否则用户没操作过就展开会看到空列表
 function toggleGhAccelLog() {
   ghAccelLogFold.value = !ghAccelLogFold.value
@@ -199,16 +260,22 @@ function setGhAccelOn(v: boolean) {
 // 勾选后先按新意图落 config，再交给 toggleGhAccel 真正去写 / 删 hosts；
 // 失败或取消 UAC 时由它把意图回弹，因此这里不必等回推
 function onGhAccelToggleChange(e: Event) {
-  setGhAccelOn(!!(e.target as HTMLInputElement).checked)
-  toggleGhAccel()
+  const want = !!(e.target as HTMLInputElement).checked
+  setGhAccelOn(want)
+  // 用户意图必须在这里显式传给 toggleGhAccel，**不能**让它在内部回头读 props.cfg.ghAccelOn。
+  // 原因：setGhAccelOn 是同步发 IPC，宿主 patchConfig 后同步 emitConfigChange 广播新配置，
+  // 监听回调同步执行 —— 等回到 toggleGhAccel 时 props 已被改写。正常情况下改写成的正是
+  // 刚才那个 want，看着没事；但「取消 UAC / 写入失败」的回弹路径会把 ghAccelOn 弹回旧值，
+  // 那次回弹与本次勾选交错时，读到的 props 就可能是 false —— 于是用户勾选开启，
+  // 执行到的却是 ghAccelDisable（移除标记块），即「勾选却走了关闭逻辑」。
+  // 传参把意图固定住，函数内部不再依赖任何会变的 props
+  toggleGhAccel(want)
 }
-async function toggleGhAccel() {
+async function toggleGhAccel(want: boolean) {
   if (ghAccelBusy.value || !api.value.ghAccelEnable || !api.value.ghAccelDisable) return
   ghAccelBusy.value = true
   ghAccelFlash.msg = ''
   pullGhAccelOps()
-  // 函数开头读一次意图，后面不再读 props.cfg.ghAccelOn：它可能因为回推 / 回弹而变
-  const want = !!props.cfg.ghAccelOn
   try {
     const r = want
       ? await api.value.ghAccelEnable(ips.value, true)
@@ -229,12 +296,23 @@ async function toggleGhAccel() {
       // 弹了 UAC 但没写入（取消/失败）：hosts 没动，意图状态不该保持，弹回原样
       setGhAccelOn(!want)
       ghAccelFlash.err = true
-      ghAccelFlash.msg = r.error || (r.canceled ? '已取消' : '操作失败')
+      // 失败原因很多（UAC 被取消 / hosts 只读 / 被杀软拦 / 提权进程没起来），但结果只有一种：
+      // 写入是「整文件单次覆盖」，失败即原文件未被碰过 —— 所以这里必须把「hosts 没变、
+      // 当前生效状态也没变」讲清楚。否则用户盯着「操作失败」不知道 hosts 到底改没改，
+      // 遇到解析异常时根本不会往「其实还开着」这个方向想。
+      // 关闭失败时尤其要点明「加速仍在生效」：此时开关已弹回开启态，与 hosts 的真实
+      // 状态一致（块还在），但用户容易以为「显示失败 = 已经关了」，须显式纠正
+      const why = r.canceled ? 'UAC 弹窗被取消' : (r.error || '操作失败')
+      ghAccelFlash.msg = (want ? '开启失败' : '关闭失败') + '（' + why + '），'
+        + 'hosts 未改动，' + (want ? '加速未开启' : '加速仍在生效')
+        + '。点开关可重试' + (r.canceled ? '，请在弹窗里点「是」' : '') + '。'
     }
   } catch (err: any) {
     setGhAccelOn(!want)
     ghAccelFlash.err = true
-    ghAccelFlash.msg = '操作失败：' + String(err?.message || err)
+    // IPC 抛异常同样意味着没走到写 hosts 那步（见上），口径与失败分支保持一致
+    ghAccelFlash.msg = (want ? '开启失败' : '关闭失败') + '（' + String(err?.message || err) + '），'
+      + 'hosts 未改动，' + (want ? '加速未开启' : '加速仍在生效') + '。可重试。'
   } finally {
     ghAccelBusy.value = false
     pullGhAccelOps()
@@ -289,6 +367,16 @@ async function doReapplyGhAccel() {
     pullGhAccelOps()
   }
 }
+// 一键关闭加速：供「已开启但 github.com 不可达」的内联出口调用。
+// 复用主开关的关闭分支（setGhAccelOn 落盘意图 + toggleGhAccel 真正删块），
+// 但 intent 显式传 false —— 与勾选路径同理，不能回头读会被回写的 props
+async function doGhAccelDisable() {
+  if (ghAccelBusy.value) return
+  setGhAccelOn(false)
+  await toggleGhAccel(false)
+  // 关闭成功后这次探测结论已无意义，清掉避免一直挂着「不可达」的旧提示
+  if (!ghAccelFlash.err) ghAccelProbe.value = null
+}
 // 一键刷新 IP 表（GitHub520 社区源）：成功直接替换配置里的表；失败保留旧表
 async function doRefreshGhAccelIps() {
   if (ghAccelBusy.value || !api.value.ghAccelRefreshIps) return
@@ -302,8 +390,12 @@ async function doRefreshGhAccelIps() {
       ghAccelTableDirty.value = false
       ghAccelVerify.value = null // 整表换新，旧校验结论全部作废
       ghAccelFlash.err = false
-      ghAccelFlash.msg = '已更新 ' + r.updated.length + ' 个域名' + (r.total ? '（源共 ' + r.total + ' 条）' : '') + (props.cfg.ghAccelOn ? '；已开启时请点「重新写入 hosts」生效' : '')
       refreshGhAccel() // 刷新源/来源追踪变了，「GitHub 加速日志」里的来源表跟着更新
+      // 已开启（hosts 里确实有标记块）时顺手重写一次，省掉用户再点一次「重新写入 hosts」
+      // 和那一次多余的 UAC；只对「真的生效中」这么做，避免给还没开启的人白弹一次提权。
+      // 失败不覆盖上面的成功提示 —— 表已经更新了，重写失败只写日志，用户仍可手动重试
+      if (ghAccelActual.value?.on) await doReapplyGhAccel()
+      else ghAccelFlash.msg = '已更新 ' + r.updated.length + ' 个域名' + (r.total ? '（源共 ' + r.total + ' 条）' : '') + (props.cfg.ghAccelOn ? '；已开启时请点「重新写入 hosts」生效' : '')
     } else {
       ghAccelFlash.err = true
       ghAccelFlash.msg = r.error || '刷新失败'
@@ -391,8 +483,14 @@ function removeGhAccelRow(i: number) {
   ghAccelTableDirty.value = true
   ghAccelVerify.value = null
 }
-// 进入帮助 Tab 时刷新一次 hosts 实际状态（其它时间可能被手动改过 hosts）
-watch(() => props.activeTab, (k) => { if (k === 'help') refreshGhAccel() })
+// 「实际状态」进 Tab 就要立刻显示，不能停在「读取中…」。
+// 本组件被父级 v-if="activeTab === 'help'" 挂着，进 Tab 时才**创建**，
+// 所以这里直接在 setup 阶段同步读一次（非响应式 `watch(props.activeTab)` 配 immediate
+// 看似等价，实则不行：watch 的 immediate 回调虽也同步执行，但回调里对模板 ref 的写入
+// 不会即刻参与本次挂载渲染 —— 而初值就是渲染的输入，必须同步落定）。
+// `ghAccelStatus()` 走异步读 hosts（同进程直调但 fs 是异步的），不阻塞首帧渲染
+refreshGhAccel()
+// 已在帮助 Tab 内、父级再切回来时组件被重建，上面那行同样覆盖到，无需额外监听
 // 离开帮助 Tab 就丢掉校验结论：探测结果有时效，下次进来重新测，避免用旧结论标色误导
 watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = null })
 </script>
@@ -411,6 +509,12 @@ watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = nu
            失败 / 取消 UAC 时函数内部会把开关回弹，所以这里不用等回推 -->
       <input type="checkbox" :checked="cfg.ghAccelOn" :disabled="ghAccelBusy" @change="onGhAccelToggleChange" />
     </label>
+    <!-- 实时进度：开启是最耗时的操作（DoH 解析 + 上百个候选探测，最坏数秒），
+         之前只在收起的日志区里看得到，用户点完勾选会觉得「卡住了」。
+         这里贴在最上方常驻显示当前在做什么、探测到第几条 -->
+    <p v-if="ghAccelLiveText" class="msg gh-live">
+      <span class="gh-live-dot"></span>{{ ghAccelLiveText }}
+    </p>
     <label class="field row">
       <span class="label">实际状态</span>
       <span class="ver" v-if="ghAccelActual">
@@ -431,25 +535,39 @@ watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = nu
     <p v-if="ghAccelActual?.on && ghAccelActual.degraded" class="msg err">
       检测到本插件写入的 hosts 块被其它工具<strong>挤到了文件后段</strong>（可能是在本插件之后又写过 hosts），会被其条目抢先解析。点「重新写入 hosts」把块移回文件最前。
     </p>
+    <!-- 块残缺：头标记在、尾标记不在（被其它工具或编辑器截断）。此时块内容不生效，
+         反而留下残留 —— 残留里若有失效 IP 会把域名解析到死地址，必须提示清掉 -->
+    <p v-if="ghAccelActual?.broken" class="msg err">
+      hosts 里本插件的标记块<strong>只有开头没有结尾</strong>（可能被其它工具或编辑器改坏/截断），该块内容不会生效且留有残留。点「重新写入 hosts」可修复为完整块。
+    </p>
     <p class="hint" v-if="ghAccelActual && ghAccelActual.hostsPath">hosts 文件：<code>{{ ghAccelActual.hostsPath }}</code></p>
     <!-- 冲突提示：其它工具常驻 127.0.0.1 条目；本插件块写在文件最前，first-match 优先生效 -->
     <!-- 故此处不是警告而是提示：无需先关对方 -->
+    <!-- 能按特征认出「是哪类工具」时把结论带上，省得用户对着 hosts 里一行 127.0.0.1 发愣；
+         认不出就用中性说法，绝不瞎猜（猜错会把用户引到错误的软件设置里翻） -->
     <p v-if="ghAccelConflicts.length" class="msg err">
-      检测到第三方条目（可能是其它加速工具写的）：{{ ghAccelConflicts.map(c => c.domain).join('、') }}。本插件块写在文件最前会优先生效，可直接使用；若要彻底替换对方，请先在其设置里关闭对应的 GitHub 加速。
+      检测到第三方条目<span v-if="ghAccelConflictWriters">（像是 {{ ghAccelConflictWriters }} 写的）</span><span v-else>（可能是其它加速工具写的）</span>：{{ ghAccelConflicts.map(c => c.domain).join('、') }}。本插件块写在文件最前会优先生效，可直接使用；若要彻底替换对方，请先在其设置里关闭对应的 GitHub 加速。
     </p>
     <div class="btn-row">
       <button class="secondary" :disabled="ghAccelProbing" @click="doGhAccelProbe">
         {{ ghAccelProbing ? '检测中…' : '检测连接' }}
       </button>
       <button class="secondary" :disabled="ghAccelBusy" @click="doRefreshGhAccelIps">刷新 IP 表</button>
-      <button v-if="cfg.ghAccelOn" class="secondary" :disabled="ghAccelBusy" @click="doReapplyGhAccel">重新写入 hosts</button>
+      <!-- 「重新写入」按**实际状态**显示，不能只看意图 cfg.ghAccelOn：
+           开启失败 / 取消 UAC 时意图会回弹成 false，但上一次成功的块可能仍在 hosts 里 ——
+           此时实际已生效，却因为意图是 false 而看不到「重新写入」，页面上也没有别的入口重写 -->
+      <button v-if="ghAccelActual?.on || cfg.ghAccelOn" class="secondary" :disabled="ghAccelBusy" @click="doReapplyGhAccel">重新写入 hosts</button>
     </div>
     <p v-if="ghAccelProbe" class="msg" :class="ghAccelProbe.ok ? 'ok' : 'err'">
       {{ ghAccelProbe.ok ? 'github.com 可达，耗时 ' + ghAccelProbe.ms + 'ms' + (ghAccelProbe.status ? '（HTTP ' + ghAccelProbe.status + '）' : '') : '无法访问 github.com：' + (ghAccelProbe.error || '未知错误') }}<template v-if="ghAccelProbe.ok && !ghAccelActual?.on"> —— 开启前已可达（可能靠其它加速工具或代理），hosts 直连可能绕开现有代理，建议开启后再测一次对比</template>
     </p>
-    <!-- 探测失败但块里确实有 github.com：写入的那个 IP 刚失效，重写一次让插件重新探测换 IP -->
+    <!-- 探测失败但块里确实有 github.com：写入的那个 IP 刚失效，重写一次让插件重新探测换 IP。
+         这里内联「重新写入」+「关闭加速」两个就近出口：用户此刻正卡在「开着却打不开」，
+         让他回顶部找复选框是本末倒置 -->
     <p v-if="ghAccelProbe && !ghAccelProbe.ok && ghAccelActual?.on && ghAccelActual.active.includes('github.com')" class="msg err">
       写入的 github.com IP 当前不可达（可能刚失效），点「重新写入 hosts」换一个可用 IP。
+      <button class="link-btn" :disabled="ghAccelBusy" @click="doReapplyGhAccel">重新写入 hosts</button>
+      <button class="link-btn" :disabled="ghAccelBusy" @click="doGhAccelDisable">关闭加速</button>
     </p>
     <p v-if="ghAccelFlash.msg" class="msg" :class="msgCls(ghAccelFlash)">{{ ghAccelFlash.msg }}</p>
     <!-- GitHub 加速日志：一次操作（开启/关闭/刷新/校验/检测）= 一条，默认只留一行摘要，点开看步骤。
@@ -672,6 +790,29 @@ watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = nu
 }
 .gh-accel .msg.err {
   color: var(--err);
+}
+/* 顶部实时进度：用「呼吸的小圆点」传达「还在动」，避免被误认为界面卡死 */
+.gh-accel .gh-live {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--fg-faint);
+}
+.gh-live-dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: gh-live-pulse 1s ease-in-out infinite;
+}
+@keyframes gh-live-pulse {
+  0%, 100% { opacity: 0.25; }
+  50% { opacity: 1; }
+}
+/* 尊重系统「减少动态效果」设置 */
+@media (prefers-reduced-motion: reduce) {
+  .gh-live-dot { animation: none; opacity: 0.7; }
 }
 .gh-accel .hint {
   margin: 10px 0 0;

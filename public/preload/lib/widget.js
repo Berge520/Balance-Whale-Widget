@@ -511,7 +511,8 @@ function createWidget(focusable) {
         // uTools 要求 preload 也是「相对于插件根目录」的路径（dev=public/，打包=dist/）
         preload: 'preload/floating.js',
         zoomFactor: 1,
-        devTools: utools.isDev(),
+        // 恒开（原先取 utools.isDev()）：打包版与开发版一致，焦点在挂件上按 Ctrl+Shift+I 均可调试
+        devTools: true,
       },
     }, function () {
       log('[whale][widget] createBrowserWindow callback: 页面加载完成')

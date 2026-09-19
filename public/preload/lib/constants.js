@@ -13,7 +13,7 @@ const FETCH_TIMEOUT_MS = 20000
 const UPDATE_CHECK_URL = 'https://ghfast.top/https://raw.githubusercontent.com/Berge520/Balance-Whale-Widget/refs/heads/main/package.json'
 // 当前插件版本。uTools 未提供读取插件自身版本的 API，此处由 scripts/sync-version.mjs
 // 在构建前从 package.json 的 version 自动写入，无需手动维护
-const PLUGIN_VERSION = '1.6.0'
+const PLUGIN_VERSION = '1.6.1'
 const UPDATE_TTL_MS = 12 * 3600 * 1000
 
 const MIN_SCALE = 0.6
@@ -64,6 +64,11 @@ const TOKEN_PRICE_MODELS_MAX = 20
 // ──────────────────────────────────────────────
 // 只挑日常访问 GitHub 的高频域名；域名表同时被 store.js（normIps 归一化）与
 // hosts.js（写块 / 冲突扫描 / 刷新）引用，放常量避免两份清单漂移。
+// 各域名都要单独做 DoH 解析 + 可达性探测（每域名多候选），列表越长开启越慢。
+// 因此只保留「实际下载 / 拉取代码必经」的域名；下面这几个已移除，理由是访问频率极低：
+//   education.github.com / resources.github.com / archiveprogram.github.com / githubapp.com
+// / uploads.github.com —— 上传 release 资产才会用到，日常 clone / pull 不经过
+// 移除后这些域名不再加速（退回系统 DNS），但也不会比不开启更糟。
 const GH_DOMAINS = [
   'github.com',
   'api.github.com',
@@ -76,12 +81,7 @@ const GH_DOMAINS = [
   'camo.githubusercontent.com',
   'github.global.ssl.fastly.net',
   'github.dev',
-  'education.github.com',
-  'resources.github.com',
-  'uploads.github.com',
-  'archiveprogram.github.com',
   'githubusercontent.com',
-  'githubapp.com',
   'github.io',
   // gist 单独补上：之前遗漏。gist.github.com 是页面入口，
   // gist.githubusercontent.com 是 gist 内容（代码片段 / raw 文件）的实际落点，

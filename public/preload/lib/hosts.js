@@ -68,7 +68,17 @@ function opStart(title) {
 }
 function opStep(entry, text, state, detail) {
   if (!entry) return
-  entry.steps.push({ text: text, state: state || 'done', detail: detail || '' })
+  const step = { text: text, state: state || 'done', detail: detail || '' }
+  entry.steps.push(step)
+  // 返回刚压入的 step，调用方可持有它并在后续原地改写 detail（逐条探测的进度回显）。
+  // 直接用 push 进数组的同一个对象，ghAccelOpLogs 深拷贝时会取到最新值，无需额外通知机制
+  return step
+}
+// 逐条探测的进度回显：不改文字，只把「已测 n / 共 m」写进该步骤的 detail，
+// 让设置页在探测期间能看到进展（探测是最耗时的一步，之前只有静止的「校验中…」）
+function opProgress(step, done, total, extra) {
+  if (!step) return
+  step.detail = '已测 ' + done + '/' + total + ' 条' + (extra ? '，' + extra : '')
 }
 function opEnd(entry, state, summary) {
   if (!entry) return
@@ -122,14 +132,17 @@ function isIpv4(s) {
 // ──────────────────────────────────────────────
 // 按字节读写 hosts（不改变原文编码）
 // ──────────────────────────────────────────────
+// 异步读：本模块所有代码都跑在渲染进程主线程上（services.js 把 lib/settings 直接挂 window，
+// 是**同进程直调**而非 IPC），同步 fs 会把 Vue 的渲染线程一起冻住。hosts 文件虽小，
+// 但读写发生在「点开启」的关键路径上，一律走异步版
 function readHostsBuf() {
-  try {
-    const b = fs.readFileSync(HOSTS_PATH)
-    return Buffer.isBuffer(b) ? b : Buffer.from(b)
-  } catch (err) {
-    // 读文件不需要管理员权限；读不到按空处理（enable 时会重建）
-    return Buffer.alloc(0)
-  }
+  return new Promise((resolve) => {
+    fs.readFile(HOSTS_PATH, (err, b) => {
+      // 读文件不需要管理员权限；读不到按空处理（enable 时会重建）
+      if (err) resolve(Buffer.alloc(0))
+      else resolve(Buffer.isBuffer(b) ? b : Buffer.from(b))
+    })
+  })
 }
 // 找到 pos 所在行的行首（不含换行）
 function lineStart(buf, pos) {
@@ -141,17 +154,25 @@ function lineEnd(buf, pos) {
   const nl = buf.indexOf(10, pos)
   return nl < 0 ? buf.length : nl
 }
-// 删除标记块（头在但尾不在 = 异常残留，也从行首删到文件尾）
+// 删除标记块。头在但尾不在 = 异常残留，也从行首删到文件尾。
+// 循环删除是为了处理「文件里存在多段块」：别的工具复制粘贴过、或上次写入异常残留。
+// 只删第一段会留下后段残块（含 IP 行时会误导解析，也污染用户 hosts），
+// 下次 enable 时它还会留在文件后段 —— 这里一次清干净。
 function stripBlock(buf) {
-  const i0 = buf.indexOf(Buffer.from(MARK_START))
-  if (i0 < 0) return buf
-  const iEnd = buf.indexOf(Buffer.from(MARK_END))
-  const s = lineStart(buf, i0)
-  let e = iEnd < 0 ? buf.length : lineEnd(buf, iEnd)
-  // 把块末尾的换行（\r\n 或 \n）一并删掉
-  if (e < buf.length && buf[e] === 13) e++
-  if (e < buf.length && buf[e] === 10) e++
-  return Buffer.concat([buf.slice(0, s), buf.slice(e)])
+  let cur = buf
+  for (;;) {
+    const i0 = cur.indexOf(Buffer.from(MARK_START))
+    if (i0 < 0) return cur
+    // 尾标记只找头之后的第一个：与 ghAccelStatus 的完整性判定同口径（只认第一段块），
+    // 否则删的范围会跨过第二段块的头，把中间的正常内容一起删掉
+    const iEnd = cur.indexOf(Buffer.from(MARK_END), i0)
+    const s = lineStart(cur, i0)
+    let e = iEnd < 0 ? cur.length : lineEnd(cur, iEnd)
+    // 把块末尾的换行（\r\n 或 \n）一并删掉
+    if (e < cur.length && cur[e] === 13) e++
+    if (e < cur.length && cur[e] === 10) e++
+    cur = Buffer.concat([cur.slice(0, s), cur.slice(e)])
+  }
 }
 // 把块写到文件最前：Windows 按首次匹配解析，其它工具常驻的「127.0.0.1 github.com」
 // 等条目排在后面就永远轮不到我们 —— 块写在最前才能压过它们，让 github 直连真实可达 IP。
@@ -192,11 +213,25 @@ function blockActive(buf) {
 // ──────────────────────────────────────────────
 // 状态与冲突扫描（读文件即可，不需要管理员权限）
 // ──────────────────────────────────────────────
-function ghAccelStatus() {
+async function ghAccelStatus() {
   if (!WIN) return { ok: false, on: false, active: [], hostsPath: HOSTS_PATH, error: '仅支持 Windows' }
-  const buf = readHostsBuf()
+  const buf = await readHostsBuf()
   const i0 = buf.indexOf(Buffer.from(MARK_START))
-  const on = i0 >= 0
+  // 完整性只看**第一段**块：取头标记之后的第一个尾标记。不能取 lastIndexOf(尾) —— 文件里
+  // 若存在两段块（别的工具复制粘贴过、或上次写入异常残留），末段完整而首段残缺时，
+  // lastIndexOf 会判成完整，但 Windows 解析生效的是**最靠前那段**，于是又变成
+  // 「显示已生效却打不开」的假成功。与 stripBlock / blockActive 统一按 indexOf 口径
+  // （删除和读内容都只动第一段），避免「判定说生效、删除删的是另一段」的自相矛盾。
+  const iEnd = i0 < 0 ? -1 : buf.indexOf(Buffer.from(MARK_END), i0)
+  // on 的判据是「头标记之后能找到尾标记」，而不是「找得到头标记」：
+  // 头在而尾缺失/被截断时块内容根本没生效，报 on 就是假成功。
+  // 与 Watt Toolkit HostsFileServiceImpl.ContainsHostsByTag() 同思路（它只认
+  // 「文件最后出现的标记是 End」的状态），但这里更严：只认第一段块的完整性。
+  const on = i0 >= 0 && iEnd > i0
+  // broken：头在但尾不在 —— 块被别的工具/编辑器截断或改坏。与「没开启」(!on) 语义不同：
+  // 没开启是不动 hosts；broken 是留下一段垃圾块，必须提示用户「重新写入 hosts」清掉，
+  // 否则那段残留里若有被墙的 IP，反而会把域名解析到死地址
+  const broken = i0 >= 0 && !on
   // degraded：块存在但已被挤出文件最前（块前有非空白/非注释内容）。块写在最前才能
   // 压过其它工具常驻的 127.0.0.1 条目（Windows first-match）；若对方在本插件
   // 之后又写了 hosts、把块挤到后段，就会失效 —— 设置页据此提示「重新写入 hosts」。
@@ -207,12 +242,22 @@ function ghAccelStatus() {
     const head = buf.slice(0, i0).toString('utf8').replace(/#[^\n]*/g, '').replace(/\s+/g, '')
     degraded = head !== ''
   }
-  return { ok: true, on: on, degraded: degraded, active: on ? blockActive(buf) : [], hostsPath: HOSTS_PATH, error: '' }
+  return { ok: true, on: on, broken: broken, degraded: degraded, active: on ? blockActive(buf) : [], hostsPath: HOSTS_PATH, error: '' }
 }
 // 块之外已有的目标域名条目：Windows 首次匹配解析，它们排在前会覆盖本插件的块
-function scanConflicts() {
+// 顺带按条目特征猜「是哪类工具写的」—— 只认高置信特征，判不准就返回空串，
+// 由调用方退回中性说法「第三方条目」。猜错比不猜更糟（用户会去错误的软件里翻设置），
+// 故这里宁可少说：宁可说「别的工具」，也不说「可能是 XX」然后其实不是。
+function guessWriter(ip) {
+  // 回环地址指向 GitHub 域名 = 典型的「本地反代」类工具（Watt Toolkit / FastGithub 等）：
+  // 先用 hosts 把域名劫持到本机，再由本地代理进程转发。用户手写 hosts 极少会把
+  // 这些域名指到 127.0.0.1（那样只会打不开），故这是高置信特征
+  if (ip === '127.0.0.1' || ip === '0.0.0.0') return '本地反代类工具'
+  return ''
+}
+async function scanConflicts() {
   if (!WIN) return []
-  const buf = stripBlock(readHostsBuf())
+  const buf = stripBlock(await readHostsBuf())
   const out = []
   const seen = new Set()
   for (const line of buf.toString('utf8').split('\n')) {
@@ -223,7 +268,7 @@ function scanConflicts() {
     const domain = p[1].toLowerCase()
     if (GH_DOMAINS.includes(domain) && !seen.has(domain)) {
       seen.add(domain)
-      out.push({ domain: domain, ip: p[0], line: line.trim() })
+      out.push({ domain: domain, ip: p[0], line: line.trim(), writer: guessWriter(p[0]) })
     }
   }
   return out
@@ -333,8 +378,16 @@ async function refreshIps(current, op) {
 function psStr(s) {
   return '"' + String(s).replace(/`/g, '``').replace(/"/g, '`"') + '"'
 }
-// 提权脚本只做三件事：首次备份原 hosts → 用父进程算好的文件覆盖 → 写结果文件。
+// 提权脚本只做四件事：首次备份原 hosts → 用父进程算好的文件覆盖 → 刷新 DNS 解析缓存 → 写结果文件。
 // 不做任何 hosts 内容处理 —— 内容处理在父进程按字节做完，避免提权进程里解码/编码出错。
+//
+// 为什么必须刷 DNS 缓存（ipconfig /flushdns）：hosts 改了不等于立刻生效。Windows 的 DNS Client
+// 服务会把解析结果缓存起来，浏览器 / git 还会各自再缓存一层 —— 不刷的话用户点完开启，访问
+// github.com 很可能仍走缓存的旧（被污染的）IP，看到的现象就是「明明显示已开启，却还是打不开」。
+// 放在提权脚本里是因为它必须在覆盖 hosts **之后**执行（顺序不能错），且 flushdns 需要管理员权限；
+// 提权进程本来就只弹一次 UAC，顺带做掉，不额外弹第二次。
+// 用 `| Out-Null` 吞掉 ipconfig 输出，避免污染结果文件之外的 stdout；失败也不影响主流程 ——
+// 缓存最坏就是多存活一会儿，下次自然过期，不该因此判写入失败。
 function buildElevatePs1(srcPath, backupPath, resultPath) {
   return [
     '$ErrorActionPreference = "Stop"',
@@ -344,6 +397,7 @@ function buildElevatePs1(srcPath, backupPath, resultPath) {
     'try {',
     '  if (-not (Test-Path -LiteralPath $backup)) { Copy-Item -LiteralPath "' + HOSTS_PATH.replace(/"/g, '`"') + '" -Destination $backup -Force }',
     '  Copy-Item -LiteralPath $src -Destination "' + HOSTS_PATH.replace(/"/g, '`"') + '" -Force',
+    '  try { ipconfig /flushdns 2>&1 | Out-Null } catch {}',
     '  [System.IO.File]::WriteAllText($result, "ok")',
     '} catch {',
     '  try { [System.IO.File]::WriteAllText($result, "fail:" + $_.Exception.Message) } catch {}',
@@ -352,16 +406,21 @@ function buildElevatePs1(srcPath, backupPath, resultPath) {
   ].join('\r\n')
 }
 // action: 'enable' | 'disable'；返回 Promise<{ ok, canceled?, already?, error? }>
-function applyHostsBlock(action, ips, op) {
+// async + 内部 new Promise：读 hosts 与写临时文件都要 await（异步 fs，见 readHostsBuf 的说明）
+async function applyHostsBlock(action, ips, op) {
   return new Promise((resolve) => {
     if (!WIN) {
       resolve({ ok: false, canceled: false, error: '仅支持 Windows' })
       return
     }
     // 父进程按字节算好「新 hosts」：enable = 删旧块后在文件最前重写块；disable = 只删块
+    void (async () => {
     let next
+    let prevLen = 0
     try {
-      next = action === 'enable' ? prependBlock(stripBlock(readHostsBuf()), ips) : stripBlock(readHostsBuf())
+      const cur = await readHostsBuf()
+      prevLen = cur.length
+      next = action === 'enable' ? prependBlock(stripBlock(cur), ips) : stripBlock(cur)
     } catch (err) {
       logErr('[whale][ghaccel] 计算新 hosts 内容失败', err && err.message)
       opStep(op, '计算新的 hosts 内容', 'fail', (err && err.message) || String(err))
@@ -369,7 +428,7 @@ function applyHostsBlock(action, ips, op) {
       return
     }
     opStep(op, '计算新的 hosts 内容', 'done', action === 'enable' ? '在原文件最前插入标记块（' + ips.length + ' 条域名）' : '移除标记块')
-    if (action === 'disable' && next.length === readHostsBuf().length) {
+    if (action === 'disable' && next.length === prevLen) {
       // hosts 里本来就没有本插件的块：无事可做，不弹 UAC
       opStep(op, '检查 hosts 里的标记块', 'skip', '没有本插件写入的块，无需提权')
       resolve({ ok: true, canceled: false, already: true })
@@ -381,11 +440,14 @@ function applyHostsBlock(action, ips, op) {
     const srcPath = path.join(os.tmpdir(), stamp + '.hosts')
     const resultPath = path.join(os.tmpdir(), stamp + '.result')
     const cleanup = () => {
-      for (const p of [scriptPath, srcPath, resultPath]) { try { fs.rmSync(p, { force: true }) } catch (err) {} }
+      for (const p of [scriptPath, srcPath, resultPath]) fs.rm(p, { force: true }, () => {})
     }
     try {
-      fs.writeFileSync(srcPath, next)
-      fs.writeFileSync(scriptPath, buildElevatePs1(srcPath, hostsBackupPath(), resultPath))
+      // 异步写：临时 hosts 文件可能有几 KB，同步写同样会冻住渲染线程
+      await Promise.all([
+        fs.promises.writeFile(srcPath, next),
+        fs.promises.writeFile(scriptPath, buildElevatePs1(srcPath, hostsBackupPath(), resultPath)),
+      ])
     } catch (err) {
       logErr('[whale][ghaccel] 写临时文件失败', err && err.message)
       cleanup()
@@ -397,15 +459,16 @@ function applyHostsBlock(action, ips, op) {
     const ps = '$p = Start-Process -FilePath ' + q(psExe())
       + ' -ArgumentList ' + ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-WindowStyle', 'Hidden', '-File', scriptPath].map(q).join(',')
       + ' -Verb RunAs -Wait -PassThru; exit $p.ExitCode'
-    execFile(psExe(), ['-NoProfile', '-Command', ps], { windowsHide: true, encoding: 'buffer', timeout: 120000 }, (err, so, se) => {
+    execFile(psExe(), ['-NoProfile', '-Command', ps], { windowsHide: true, encoding: 'buffer', timeout: 120000 }, async (err, so, se) => {
       let result = ''
-      try { result = fs.readFileSync(resultPath, 'utf8').trim() } catch (err2) {}
+      // 结果文件极小，但这里仍在渲染线程上，统一用异步读避免同步 IO
+      try { result = (await fs.promises.readFile(resultPath, 'utf8')).trim() } catch (err2) {}
       cleanup()
       const own = String(Buffer.isBuffer(so) ? so : so || '') + String(Buffer.isBuffer(se) ? se : se || '')
       if (result) {
         if (/^ok\b/.test(result)) {
           log('[whale][ghaccel] hosts 标记块', action === 'enable' ? '已写入' : '已移除')
-          opStep(op, '提权进程写 hosts', 'done', action === 'enable' ? '标记块已写入文件最前' : '标记块已移除')
+          opStep(op, '提权进程写 hosts', 'done', action === 'enable' ? '标记块已写入文件最前，已刷新 DNS 缓存' : '标记块已移除，已刷新 DNS 缓存')
           resolve({ ok: true, canceled: false })
         } else {
           const msg = result.replace(/^fail:?/, '').trim()
@@ -426,6 +489,7 @@ function applyHostsBlock(action, ips, op) {
         resolve({ ok: false, canceled: false, error: '提权进程未完成' + (own ? '：' + own.slice(0, 120) : '') })
       }
     })
+    })()
   })
 }
 
@@ -484,6 +548,9 @@ function probeIp(ip, servername) {
       rejectUnauthorized: false, timeout: PROBE_TIMEOUT_MS,
       // host 填的是 IP，这里必须显式把 Host 头指回域名，边缘按 Host+SNI 路由
       headers: { host: servername, 'user-agent': 'whale-ghaccel-probe/1.0' },
+      // 显式关掉 keep-alive：本探测是一次性的短连接，复用池没有收益，
+      // 反而会留下半死 socket 被后续请求捡到，造成「明明能通却报错」的假失败
+      agent: false,
     })
     let certOk = false
     req.once('socket', (socket) => {
@@ -673,7 +740,16 @@ async function filterReachable(ips, op) {
       cands.push({ domain: d, ip: ip, idx: idx, source: src[idx] || '候选链' })
     })
   }
-  const results = await Promise.all(cands.map((c) => probeIp(c.ip, c.domain)))
+  // 探测是最耗时的一步（每个候选最长 PROBE_TIMEOUT_MS，整体耗时取决于最慢的那个），
+  // 先把「running + 已测 0/n」压进日志，再逐条推进进度；否则用户看到的是一条静止的
+  // 「探测中…」，不知道还要等多久
+  const probeStep = opStep(op, '逐个候选 IP 做 HTTPS 探测 + 证书 SAN 校验（共 ' + cands.length + ' 个候选，单个超时 ' + PROBE_TIMEOUT_MS / 1000 + 's）', 'running', '已测 0/' + cands.length + ' 个')
+  let finished = 0
+  const results = await Promise.all(cands.map((c) => probeIp(c.ip, c.domain).then((r) => {
+    finished++
+    opProgress(probeStep, finished, cands.length, '个')
+    return r
+  })))
   // 每个域名保留**所有**可达候选（按候选链顺序），而不是只留第一个。
   // 这是 hosts 方案里唯一能拿到「运行期回退」的手段：同一个域名写多行不同 IP，
   // Windows 解析按顺序取第一条 —— 首选 IP 哪天挂了，系统自动落到下一条，
@@ -693,7 +769,7 @@ async function filterReachable(ips, op) {
       // 收集可达的再一次性落 Map（不用 forEach 边判边 push：那种写法靠 has() 当门闩，
       // 第一条就把键建好了，后面几条会全部漏进去，语义上等价于这里的结果但极难看懂）。
       // 注意此处**不会**与首轮结论混：能进到这个分支就说明首轮 github.com 一条都没过，
-      // 所以 set 是覆盖空位、不是覆盖已有结果；retry 返回布尔，故不涉及 idx 排序问题
+      // 所以 set 是覆盖空位、不是覆盖已有结果
       const alive = ghCands.filter((c, i) => retry[i])
       if (alive.length) byDomFinal.set('github.com', alive)
     }
@@ -711,9 +787,11 @@ async function filterReachable(ips, op) {
   for (const arr of byDomFinal.values()) for (const c of arr) reach.push({ domain: c.domain, ip: c.ip })
   const dropped = GH_DOMAINS.length - byDomFinal.size
   const extra = reach.length - byDomFinal.size
-  opStep(op, '逐个候选 IP 做 HTTPS 探测 + 证书 SAN 校验（共 ' + cands.length + ' 个候选，超时 ' + PROBE_TIMEOUT_MS / 1000 + 's）', 'done',
-    '选中 ' + byDomFinal.size + ' 个域名' + (extra > 0 ? '（含 ' + extra + ' 条备用 IP 一并写入，主 IP 失效时系统自动回退）' : '')
-      + (dropped > 0 ? '，' + dropped + ' 个域名无可达 IP 被丢弃' : ''))
+  // 结论回填到探测那一步（替换掉过程中的「已测 n/m 个」）
+  probeStep.state = 'done'
+  probeStep.detail = '选中 ' + byDomFinal.size + ' 个域名' + (extra > 0 ? '（含 ' + extra + ' 条备用 IP 一并写入，主 IP 失效时系统自动回退）' : '')
+    + (dropped > 0 ? '，' + dropped + ' 个域名无可达 IP 被丢弃' : '')
+  log('[whale][ghaccel] 探测完成：候选', cands.length, '最终可达', reach.length, '条 / 覆盖', byDomFinal.size, '个域名')
   return reach
 }
 
@@ -730,14 +808,24 @@ async function verifyIps(ips, op) {
   const dohBy = await dohIps(true)
   opStep(op, '强制刷新实时 A 记录（用于判断 IP 是否已过时）', Object.keys(dohBy).length ? 'done' : 'skip',
     Object.keys(dohBy).length ? Object.keys(dohBy).map((d) => d + ' → ' + dohBy[d].join('/')).join('；') : '未取到，仅按探测结果判定')
-  const results = await Promise.all(list.map((it) => probeIp(it.ip, it.domain)))
+  // 探测是最耗时的一步（每条最长 PROBE_TIMEOUT_MS），先把「running + 已测 0/n」压进日志，
+  // 再逐条推进进度；否则用户看到的是一条静止的「校验中…」，不知道还要等多久
+  const probeStep = opStep(op, '逐条 HTTPS 探测（单个超时 ' + PROBE_TIMEOUT_MS / 1000 + 's）', 'running', '已测 0/' + list.length + ' 条')
+  let finished = 0
+  const results = await Promise.all(list.map((it) => probeIp(it.ip, it.domain).then((r) => {
+    finished++
+    opProgress(probeStep, finished, list.length)
+    return r
+  })))
   const out = list.map((it, i) => ({ domain: it.domain, ip: it.ip, ok: !!results[i] }))
   // 「命中当前实时 A 记录」的 IP 单独标出来：这类 IP 探测可能因瞬时抖动失败，
   // 但它正是 DNS 此刻的答案，删掉纯属误伤，界面据此不推荐删除
   const bad = out.filter((r) => !r.ok && !(dohBy[r.domain] || []).includes(r.ip))
   const stale = out.filter((r) => !r.ok && (dohBy[r.domain] || []).includes(r.ip))
   const good = out.length - bad.length - stale.length
-  opStep(op, '逐条 HTTPS 探测（超时 ' + PROBE_TIMEOUT_MS / 1000 + 's）', 'done', '可达 ' + good + ' 条 / 不可达 ' + bad.length + ' 条 / 探测失败但仍是实时 A 记录 ' + stale.length + ' 条')
+  // 结论回填到同一个 step 上：进度文案换成最终统计，避免留下「已测 12/12 条」这种过程态
+  probeStep.state = 'done'
+  probeStep.detail = '可达 ' + good + ' 条 / 不可达 ' + bad.length + ' 条 / 探测失败但仍是实时 A 记录 ' + stale.length + ' 条'
   log('[whale][ghaccel] 校验 IP 表', out.length, '条，可达', good, '条，不可达', bad.length, '条，实时 A 记录但探测失败', stale.length, '条')
   return { ok: true, results: out, bad: bad, stale: stale, checkedAt: Date.now() }
 }

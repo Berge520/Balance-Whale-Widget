@@ -3,7 +3,7 @@
  */
 const fs = require('fs')
 const { PLUGIN_VERSION, K, MODEL_TEMPLATES, MODEL_MAX, DEFAULT_MAIN_MODEL } = require('./constants')
-const { DEV, log, logErr, LOG_FILE } = require('./log')
+const { log, logErr, LOG_FILE } = require('./log')
 const {
   clampNum, readConfig, patchConfig, readSecrets, writeSecrets, readLedger, historyKeepDays,
   resetAnchorCache, mergeLedgerHistory, clearTimer, calibrateTodayUsage,
@@ -884,9 +884,8 @@ module.exports = {
     if (!winAlive()) return false
     try { return !!getWindow().isVisible() } catch (err) { return false }
   },
-  // 诊断日志（dev 下同步落盘 %TEMP%\whale-debug.log，进程被 uTools 结束也不丢）。
+  // 诊断日志（同步落盘 %TEMP%\whale-debug.log，进程被 uTools 结束也不丢）。
   // 返回末尾部分即可，避免整份日志撑爆剪贴板/界面。
-  isDev() { return DEV },
   getDebugLog() {
     if (!LOG_FILE) return { path: '', text: '' }
     let text = ''

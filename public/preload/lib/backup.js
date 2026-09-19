@@ -57,7 +57,7 @@ function stamp() {
   return d.getFullYear() + p2(d.getMonth() + 1) + p2(d.getDate()) + '-' + p2(d.getHours()) + p2(d.getMinutes())
 }
 
-// dsh（开发者）相关配置里含机器相关的路径（Node 目录 / 版本），备份不带，
+// dsh 相关配置里含机器相关的路径（Node 目录 / 版本），备份不带，
 // 免得恢复到另一台机器后指到不存在的目录
 function stripDshKeys(cfg) {
   const out = {}

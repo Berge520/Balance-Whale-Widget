@@ -654,10 +654,12 @@ export interface DshDirPickResult {
 }
 
 // —— GitHub 加速（hosts 方案） ——
-// 实际状态：读 hosts 文件现算；on = 标记块是否存在，active = 块内解析出的生效域名
+// 实际状态：读 hosts 文件现算；on = 标记块完整（尾标记在头标记之后），active = 块内解析出的生效域名
 export interface GhAccelStatus {
   ok: boolean
   on: boolean
+  // 头标记在、尾标记不在：块被截断/改坏，内容不生效且会留下残留（提示「重新写入 hosts」）
+  broken?: boolean
   // 块被其它工具挤出文件最前（对方在本插件之后又写 hosts），first-match 被抢、加速失效
   degraded?: boolean
   active: string[]
@@ -669,6 +671,8 @@ export interface GhAccelConflict {
   domain: string
   ip: string
   line: string
+  // 按条目特征猜的「是哪类工具写的」（回环 IP = 本地反代类）；判不准时为空串
+  writer?: string
 }
 // 最近一次 IP 获取的来源追踪（内存态，重开插件清空）：回答「每个域名的 IP 通过什么方式、从哪里获取」
 export interface GhAccelTrace {
@@ -1005,8 +1009,7 @@ export interface WhaleServices {
   copyText(text: string): boolean
   redirectHotKeySetting(cmdLabel?: string): boolean
   isWidgetVisible(): boolean
-  // dev 诊断日志（落盘于 %TEMP%\whale-debug.log，进程被 uTools 结束也不丢）
-  isDev(): boolean
+  // 诊断日志（落盘于 %TEMP%\whale-debug.log，进程被 uTools 结束也不丢）
   getDebugLog(): DebugLogResult
   openLogFile(): { ok: boolean; path: string }
   // DeepSeek Harness（dsh）：状态与 启动/重启/结束/更新/打开页面
@@ -1028,12 +1031,13 @@ export interface WhaleServices {
   // 选择 Node.js 安装目录（文件夹选择器，校验目录里有 node）
   dshPickNodeDir(): DshDirPickResult
   // —— GitHub 加速（hosts 方案，纯设置页功能） ——
-  // 实际状态：读 hosts 文件现算（标记块存在 = 生效），不依赖配置里的开关意图
-  ghAccelStatus(): GhAccelStatus
+  // 实际状态：读 hosts 文件现算（标记块存在 = 生效），不依赖配置里的开关意图。
+  // 异步：宿主是同进程直调（非 IPC），读文件走异步 fs 以免阻塞渲染线程
+  ghAccelStatus(): Promise<GhAccelStatus>
   // 最近一次 IP 获取的来源追踪（内存态）：每个域名最终 IP 从哪来（DoH/社区源表/当前表/快照/兜底）
   ghAccelTrace(): GhAccelTrace
   // 块之外已存在的目标域名条目（其它工具也写 hosts 时会覆盖本插件，提示先关掉对方）
-  ghAccelScanConflicts(): GhAccelConflict[]
+  ghAccelScanConflicts(): Promise<GhAccelConflict[]>
   // 开启：refresh=true 时先静默刷新 GitHub520 并逐 IP 探测，只写当前网络可达的；
   // 全不可达时拒绝写入并返回 error。结果 ips = 实际写入的表（刷新后可能与传入不同）
   ghAccelEnable(ips?: Array<{ domain: string; ip: string }>, refresh?: boolean): Promise<GhAccelOpResult>

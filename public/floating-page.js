@@ -528,13 +528,15 @@
   groupTimerAdv.body.appendChild(rowOnly);
   groupTimerAdv.body.appendChild(rowPin); groupTimerAdv.body.appendChild(rowPersist);
   groupTimer.body.appendChild(groupTimerAdv.el);
-  // dsh 是开发者功能，普通用户用不到：非开发模式整组不建，菜单少一节
-  var groupDsh = null;
-  if (DEV) {
-    groupDsh = menuGroup('dsh', 'dsh（开发者）', false, function () { dshSend('status') });
-    groupDsh.body.appendChild(rowDsh); groupDsh.body.appendChild(rowDshPage);
-    groupDsh.body.appendChild(rowDshState); groupDsh.body.appendChild(rowDshCmd);
-  }
+  // dsh 是面向开发者的功能，但打包版同样要有 —— 早先按 window.whale.dev 建组，
+  // 结果正式安装的 .upx 里开发者模式默认关闭，这一节整个消失（连 DOM 都没有）。
+  // 现在无条件建组，再用「这台机器上有没有 dsh」决定显隐：探测到已安装（source 非空）
+  // 或正在运行（running / external）才显示，没装过 dsh 的普通用户依旧看不到这一节。
+  // 初始先藏起来，等首帧探测结果回来再决定 —— 否则没装 dsh 的用户会看到它闪一下
+  var groupDsh = menuGroup('dsh', 'dsh', false, function () { dshSend('status') });
+  groupDsh.body.appendChild(rowDsh); groupDsh.body.appendChild(rowDshPage);
+  groupDsh.body.appendChild(rowDshState); groupDsh.body.appendChild(rowDshCmd);
+  groupDsh.el.style.display = 'none';
 
   // —— 多厂商模型：点一行即把它设为挂件主显示 ——
   var groupModels = menuGroup('models', '模型', true);
@@ -576,7 +578,7 @@
   menuBox.appendChild(groupLook.el);
   menuBox.appendChild(groupUsage.el);
   menuBox.appendChild(groupTimer.el);
-  if (groupDsh) menuBox.appendChild(groupDsh.el);
+  menuBox.appendChild(groupDsh.el);
   menuBox.appendChild(row9);
 
   // 模型行的数值文案：额度型显示「已用 x%」，余额型显示原币种金额
@@ -627,6 +629,16 @@
   // dsh 状态渲染（宿主回推快照；菜单打开与启动时也会主动问一次）
   function dshRender(s) {
     if (!s) return;
+    // 这组只在「这台机器上确实有 dsh」时才露面：已安装（source 为 global/plugin）或
+    // 正在运行（本插件启的 running / 别的终端启的 external）都算。都没探测到时保持隐藏，
+    // 没装过 dsh 的普通用户菜单里就不会多出这一节。
+    // 注意 error 不算「有」：探测失败时若显示这组，用户只会看到一行报错却无从下手
+    var dshUsable = !!(s.source || s.running || (s.external && s.externalPid));
+    var shown = groupDsh.el.style.display !== 'none';
+    if (dshUsable !== shown) {
+      groupDsh.el.style.display = dshUsable ? '' : 'none';
+      positionMenu(); // 菜单高度变了，重新夹一次，别让它顶出可视区
+    }
     var err = s.error ? String(s.error) : '';
     // 3080 上的进程：running=本插件启动；external=别的终端启动的 dsh；portOther=非 dsh 占用
     var ext = !!(s.external && s.externalPid);
@@ -2524,9 +2536,8 @@
       menuDirLocked = false; // 新一轮打开：按当前几何重新决定展开方向（见 positionMenu）
       positionMenu();
       menuBox.scrollTop = 0; // 小尺寸挂件上菜单可滚动：重开时回到顶部，否则停在上次滚到的位置
-      // dsh 分组收着时状态行看不见，不必白探一次 3080；展开时才拉（见 menuGroup 的 onExpand）。
-      // 非开发模式下这组根本不存在，groupDsh 为 null
-      if (groupDsh && groupDsh.el.classList.contains('dshwv-group-open')) dshSend('status');
+      // dsh 分组收着时状态行看不见，不必白探一次 3080；展开时才拉（见 menuGroup 的 onExpand）
+      if (groupDsh.el.classList.contains('dshwv-group-open')) dshSend('status');
       // 模型列表懒加载：宿主侧有 5 分钟节流，反复开菜单不会一直打网络
       whaleApi.refreshModels(null, false);
       // 菜单里的数字不该是几分钟前的。余额侧有 25s 缓存 + 请求去重（见 preload/lib/api.js），
@@ -2988,7 +2999,8 @@
   setupHitTest();
   sendIgnoreMouse(true); // 初始全穿透，悬停鲸鱼时自动取消
   passApplyIndicator();  // 若配置里已开穿透，先把「穿透中」角标显示出来
-  // 先取一次 dsh 状态，菜单里的状态行/按钮一开始就是对的（非开发模式无此组，跳过）
-  if (groupDsh) dshSend('status');
+  // 先取一次 dsh 状态：既决定 dsh 组显不显示（装过才显示，见 dshRender），
+  // 也让菜单里的状态行/按钮一开始就是对的。无宿主桥接时问了也没人答，跳过
+  if (HAS_BRIDGE) dshSend('status');
   whaleApi.ready();
 })();
