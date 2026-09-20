@@ -301,7 +301,17 @@ npm run lint        # eslint . 静态检查
 npm run typecheck   # vue-tsc --noEmit 类型检查
 npm test            # node --test 单测（test/*.test.mjs）
 npm run build       # 构建到 dist/（prebuild 自动同步版本号 + 校验跨文件常量副本）
+npm run release     # 一键发版（见下）
 ```
+
+- **一键发版**（`npm run release`，脚本在 `scripts/release.mjs`）：
+  ```powershell
+  npm run release                    # 发 package.json 里当前 version
+  npm run release -- 1.6.3           # 先把版本号写成 1.6.3，再发
+  npm run release -- 1.6.3 --dry-run  # 只跑前置检查与四关，不提交不推送
+  ```
+  脚本按顺序做：**前置检查**（版本递增 / README 有该版本章节 / tag 未占用 / `gh` 已登录 / 在 `main` 上）→ 写版本号并同步 → 跑四关 → 用 README「### <版本>」章节当正文建 release commit → push `main` 并等 CI 绿 → 打附注 tag 并推送 → 等 Release 工作流绿 → 核对 Release 与 zip 资产（`scripts/verify-release-zip.mjs` 解压核对 `plugin.json` 顶层、版本号、preload 关键文件在位）。任一步失败即中止。
+  因为正文取自 README，**发版前先把版本记录写好**（`### <版本>` 章节），否则前置检查会拦下。
 
 - 改动 `preload/` 或 `floating-*`：不热更，需在 uTools 开发者工具里**重新加载插件**才能看到效果。
 - preload 文件为 CommonJS，**不可压缩混淆**，发布时保持原样。

@@ -1,0 +1,254 @@
+/*
+ * 一键发版脚本
+ *
+ * 用法：
+ *   npm run release                 # 发 package.json 里当前 version
+ *   npm run release -- 1.6.3        # 先把版本号写成 1.6.3，再发
+ *   npm run release -- 1.6.3 --dry-run   # 只跑前置检查与四关，不提交不推送
+ *
+ * 做的事（严格按顺序，任一步失败即中止、不留下半成品）：
+ *   1. 前置检查：版本号递增、工作区干净、README 有该版本章节、tag 未占用、gh 已登录
+ *   2. 写版本号到 package.json → sync-version 同步到 plugin.json 与 lib/constants.js
+ *   3. 跑四关：lint → typecheck → test → build（与 ci.yml / release.yml 完全同一套命令）
+ *   4. 用 README「### <版本>」章节当正文，建 release commit
+ *   5. push main → 等 CI 绿 → 打附注 tag → push tag
+ *   6. 等 Release 工作流绿 → 核对 Release 与 zip 资产（版本号 + 关键文件在位）
+ *
+ * 为什么这些步骤不交给 CI 而留在本地：版本号单一来源是 package.json 的 version，
+ * 而 tag 是「这一版确实要发」的显式动作；本地先跑同一套四关，能保证「本地能过 = CI 能过」
+ * （ci.yml 的注释也是这个口径）。README 章节进 commit body 是为了让 git log 与
+ * 对外的版本记录口径一致，不用两处各写一遍。
+ *
+ * 边界：uTools 市场的 .upx 仍需人工在开发者工具里打包上传，脚本只到 GitHub Release 为止。
+ */
+import { spawnSync } from 'node:child_process'
+import { readFileSync, writeFileSync, unlinkSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import path from 'node:path'
+import os from 'node:os'
+
+const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+const dryRun = process.argv.includes('--dry-run')
+const versionArg = process.argv.slice(2).find((a) => !a.startsWith('--'))
+
+// ── 小工具 ──
+// Windows 下 gh / git 是 .cmd 或 .exe，execFileSync 直接调用需要 shell；
+// Windows 下 gh / git / npm 是 .cmd 或 .exe，直接 spawn 不带 shell 会 ENOENT，
+// 所以命令拼成整条字符串交给系统 shell —— 注意此时不能再给 shell 传参数数组
+// （Node 24 起会报 DEP0190），参数已经在字符串里拼好了。
+function run(cmd, args, opts = {}) {
+  const line = [cmd, ...args].join(' ')
+  if (opts.echo !== false) console.log(`  $ ${line}`)
+  const r = spawnSync(line, { cwd: root, stdio: 'inherit', shell: true, ...opts })
+  if (r.status !== 0) throw new Error(`命令失败（exit ${r.status}）：${line}`)
+}
+
+// 要拿 stdout 的场景，失败即抛错，调用方自己决定要不要容忍
+function capture(cmd, args, { allowFail = false } = {}) {
+  const line = [cmd, ...args].join(' ')
+  const r = spawnSync(line, { cwd: root, encoding: 'utf8', shell: true })
+  if (r.status !== 0 && !allowFail) {
+    throw new Error(`命令失败（exit ${r.status}）：${line}\n${r.stderr || ''}`)
+  }
+  return { status: r.status, out: (r.stdout || '').trim(), err: (r.stderr || '').trim() }
+}
+
+// 单纯等一会儿。用同步 sleep 而不是 node -e 起子进程：少一次进程开销，
+// 也不受 shell 引号转义的影响。
+function sleep(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+}
+
+function fail(msg) {
+  console.error(`\n[release] ✗ ${msg}\n`)
+  process.exit(1)
+}
+
+function step(title) {
+  console.log(`\n[release] ── ${title} ──`)
+}
+
+const readJson = (rel) => JSON.parse(readFileSync(path.join(root, rel), 'utf8'))
+const pkgPath = path.join(root, 'package.json')
+
+// ── 版本号比较（只认 x.y.z，够用了） ──
+function parseVer(v) {
+  const m = /^(\d+)\.(\d+)\.(\d+)$/.exec(v)
+  return m ? [+m[1], +m[2], +m[3]] : null
+}
+function gt(a, b) {
+  for (let i = 0; i < 3; i++) {
+    if (a[i] !== b[i]) return a[i] > b[i]
+  }
+  return false
+}
+
+// ── 1. 前置检查 ──
+step('前置检查')
+
+const curVersion = readJson('package.json').version
+let nextVersion = versionArg || curVersion
+
+const vNext = parseVer(nextVersion)
+if (!vNext) fail(`版本号格式不对：${nextVersion}（要求 x.y.z）`)
+
+const vCur = parseVer(curVersion)
+if (versionArg && vCur && !gt(vNext, vCur)) {
+  fail(`新版本 ${nextVersion} 必须大于当前 ${curVersion}`)
+}
+
+// 工作区必须干净：发版 commit 只应包含版本号与文档改动，混进别的改动会让「这一版发了什么」说不清
+const dirty = capture('git', ['status', '--porcelain']).out
+if (dirty) {
+  // 允许已改好的源码 / 文档进 commit，但必须让人看见自己将要提交什么
+  console.log('  工作区有未提交改动，将一并进入本次 release commit：')
+  console.log(dirty.split('\n').map((l) => `    ${l}`).join('\n'))
+}
+
+// README 必须有对应章节：它同时是 commit body 的来源，缺了会让 commit 空正文
+const readme = readFileSync(path.join(root, 'README.md'), 'utf8')
+const sectionRe = new RegExp(`^### ${nextVersion.replace(/\./g, '\\.')}\\s*$`, 'm')
+if (!sectionRe.test(readme)) {
+  fail(`README.md 里找不到「### ${nextVersion}」章节；先补上版本记录再发（它会被当作 commit 正文）`)
+}
+
+// tag 不能已存在（本地或远端）
+if (capture('git', ['tag', '-l', `v${nextVersion}`]).out) {
+  fail(`本地已存在 tag v${nextVersion}`)
+}
+// 远端那次查询要联网：网络不通 ≠ tag 存在。区分开，否则一次网络抖动就会被
+// 报成「tag 被占用」，让人去删一个根本不存在的 tag。
+const remoteTag = capture('git', ['ls-remote', '--tags', 'origin', `refs/tags/v${nextVersion}`], { allowFail: true })
+if (remoteTag.status !== 0) {
+  if (/unable to access|Could not resolve|Connection|timed out/i.test(remoteTag.err)) {
+    fail(`查不到远端 tag（网络不通）：\n${remoteTag.err}\n请确认能访问 github.com 后重试`)
+  }
+  fail(`查询远端 tag 失败：\n${remoteTag.err}`)
+}
+if (remoteTag.out) fail(`远端已存在 tag v${nextVersion}`)
+
+// gh 未登录 / 未安装时，后面等 CI 与核对 Release 都会失败，提前问清楚
+capture('gh', ['auth', 'status'])
+
+// 当前分支必须是 main：release.yml 校验 tag 与 package.json，但 CI 只跑 main
+const branch = capture('git', ['rev-parse', '--abbrev-ref', 'HEAD']).out
+if (branch !== 'main') fail(`当前分支是 ${branch}，发版请在 main 上进行`)
+
+console.log(`  ✓ ${curVersion} → ${nextVersion}，README 章节 / tag 占用 / gh 登录 / 分支 均通过`)
+
+if (dryRun) {
+  console.log('\n[release] --dry-run：前置检查通过，继续跑四关（不提交、不推送）\n')
+}
+
+// ── 2. 写版本号 ──
+step(`写版本号 ${nextVersion}`)
+const pkgRaw = readFileSync(pkgPath, 'utf8')
+const pkgNext = pkgRaw.replace(/("version"\s*:\s*")([^"]*)(")/, `$1${nextVersion}$3`)
+if (pkgNext === pkgRaw && curVersion !== nextVersion) {
+  fail('package.json 里没找到可替换的 version 字段')
+}
+writeFileSync(pkgPath, pkgNext, 'utf8')
+run('node', ['scripts/sync-version.mjs'])
+
+// ── 3. 四关 ──
+step('静态检查 / 类型检查 / 单测 / 构建')
+for (const s of ['lint', 'typecheck', 'test', 'build']) {
+  console.log(`\n  ▶ npm run ${s}`)
+  run('npm', ['run', s])
+}
+console.log('\n  ✓ 四关全绿')
+
+if (dryRun) {
+  console.log('\n[release] --dry-run 结束：以上改动（package.json / plugin.json / constants.js）未提交，请自行决定是否保留\n')
+  process.exit(0)
+}
+
+// ── 4. 建 release commit（正文取自 README 章节） ──
+step(`建 release commit`)
+
+// 抽出「### <版本>」到下一个「##」或「###」之前的内容，剥掉「**小标题**」这类 markdown 强调
+const bodyStart = readme.search(sectionRe)
+const afterHead = readme.slice(bodyStart).indexOf('\n') + bodyStart + 1
+const rest = readme.slice(afterHead)
+const nextHead = rest.search(/^#{2,3} /m)
+const rawBody = (nextHead >= 0 ? rest.slice(0, nextHead) : rest).trim()
+const body = rawBody.replace(/\*\*/g, '').replace(/^-\s*/gm, '- ')
+
+// 标题取「### <版本>」章节里第一行「**XXX**」小标题，没有就用版本号
+const firstLabel = /\*\*(.+?)\*\*/.exec(rawBody)
+const title = `chore: 发布 v${nextVersion} - ${firstLabel ? firstLabel[1] : '版本发布'}`
+
+const msgPath = path.join(root, '.git', `COMMIT_MSG_V${nextVersion.replace(/\./g, '')}.txt`)
+writeFileSync(msgPath, `${title}\n\n${body}\n`, 'utf8')
+
+run('git', ['add', '-A'])
+run('git', ['commit', '-F', path.relative(root, msgPath)])
+unlinkSync(msgPath)
+
+// ── 5. push main → 等 CI → tag ──
+step('推送 main 并等 CI')
+run('git', ['push', 'origin', 'main'])
+
+const headSha = capture('git', ['rev-parse', 'HEAD']).out
+console.log(`\n  等待 CI（head=${headSha.slice(0, 7)}）…`)
+
+// CI 是 push 触发的异步工作流：先等它出现，再等它结束
+const ciRun = waitForRun({ headSha, workflow: 'CI', initialDelayMs: 8000 })
+console.log(`  CI run ${ciRun} 已就绪，等待结果…`)
+run('gh', ['run', 'watch', ciRun, '--exit-status', '--interval', '15'])
+console.log('  ✓ CI 全绿')
+
+step(`打附注 tag v${nextVersion}`)
+run('git', ['tag', '-a', `v${nextVersion}`, '-m', `v${nextVersion}\n\n${body}`])
+run('git', ['push', 'origin', `v${nextVersion}`])
+
+// ── 6. 等 Release 并核对资产 ──
+step('等 Release 工作流')
+const relRun = waitForRun({ headSha, workflow: 'Release', initialDelayMs: 8000 })
+console.log(`  Release run ${relRun} 已就绪，等待结果…`)
+run('gh', ['run', 'watch', relRun, '--exit-status', '--interval', '15'])
+console.log('  ✓ Release 工作流全绿')
+
+step('核对 Release 与 zip 资产')
+const rel = JSON.parse(
+  capture('gh', ['release', 'view', `v${nextVersion}`, '--json', 'tagName,isDraft,isPrerelease,assets,url']).out
+)
+if (rel.isDraft || rel.isPrerelease) fail(`Release v${nextVersion} 状态异常：draft=${rel.isDraft} prerelease=${rel.isPrerelease}`)
+
+const zipName = `balance-whale-widget-v${nextVersion}.zip`
+const asset = rel.assets.find((a) => a.name === zipName)
+if (!asset) fail(`Release 里找不到资产 ${zipName}（现有：${rel.assets.map((a) => a.name).join(', ') || '无'}）`)
+console.log(`  ✓ 资产 ${zipName}  ${(asset.size / 1024).toFixed(1)} KB`)
+
+// zip 内部结构核对：plugin.json 必须在顶层且版本号对得上，preload 必须原样在（不打包不压缩）
+const zipDir = path.join(os.tmpdir(), `whale-release-${nextVersion}`)
+const verifyScript = path.join(root, 'scripts', 'verify-release-zip.mjs')
+run('node', [verifyScript, zipDir, zipName, nextVersion], { echo: true })
+
+console.log(`
+[release] ✓ v${nextVersion} 发布完成
+  Release: ${rel.url}
+
+  仍需人工：
+   1. 在 uTools 开发者工具里把入口指向 dist/，重新加载插件验证
+   2. 要上架的话，开发者工具里打包 .upx 上传插件市场
+`)
+
+// ── 辅助：轮询等某个 head 的工作流出现 ──
+// gh run list 的 databaseId 是数字，用 --json 解析避免科学计数法；轮询是因为
+// 刚 push 时 run 还没建出来，直接 gh run watch 会报「run not found」。
+function waitForRun({ headSha, workflow, initialDelayMs = 0, timeoutMs = 120000 }) {
+  const started = Date.now()
+  if (initialDelayMs > 0) sleep(initialDelayMs)
+  for (;;) {
+    const list = JSON.parse(
+      capture('gh', ['run', 'list', '--limit', '10', '--json', 'databaseId,headSha,name,status']).out
+    )
+    const hit = list.find((r) => r.headSha === headSha && r.name.includes(workflow))
+    if (hit) return String(hit.databaseId)
+    if (Date.now() - started > timeoutMs) {
+      fail(`等 ${workflow} 工作流超时（head=${headSha.slice(0, 7)}）；去 GitHub Actions 页面手动确认`)
+    }
+    sleep(5000)
+  }
+}
