@@ -202,6 +202,18 @@ module.exports = {
       return false
     }
   },
+  // 让 uTools 底座跳到「插件应用市场」并搜索指定关键词：
+  // redirect(label) 传入非本插件指令的名称时，底座查不到已装插件会降级为「跳市场并搜索该名称」。
+  // 之所以不直接用「小鲸鱼余额挂件」：用户很可能已装本插件，为避免命中自己的指令而直接打开自身，
+  // 用「不可作为指令命中」的词去触发市场搜索分支。失败返回 false，由设置页兜底走浏览器详情页。
+  redirectToMarket(keyword) {
+    try {
+      return !!utools.redirect(String(keyword || ''))
+    } catch (err) {
+      logErr('[whale][market] 跳转插件市场失败', keyword, err && err.message)
+      return false
+    }
+  },
   // ──────────────────────────────────────────────
   // DeepSeek Harness（dsh，面向开发者用户）
   // ──────────────────────────────────────────────
@@ -270,6 +282,11 @@ module.exports = {
   ghAccelStatus() {
     return hosts.ghAccelStatus()
   },
+  // 可选的社区源表清单（含默认顺序）：设置页要按这份清单渲染「自定义源表优先级」，
+  // 不能在前端再抄一份 URL —— 源清单是 hosts 模块的领域知识，抄一份必然随版本漂移
+  ghAccelSources() {
+    return hosts.ghAccelSources()
+  },
   // 最近一次 IP 获取的来源追踪（内存态）：每个域名最终 IP 从哪来（DoH/社区源表/当前表/兜底）
   ghAccelTrace() {
     return hosts.ghAccelTrace()
@@ -288,10 +305,14 @@ module.exports = {
   },
   // 开启/关闭：写标记块要 UAC 提权，返回 Promise；refresh=true 时开启前先静默刷新 GitHub520 并探测只写可达 IP
   ghAccelEnable(ips, refresh) {
+    // 来源开关与优先级顺序随开启一起下发：用户在「获取方式」里改过设置后就该本次生效，不必重新勾选。
+    // 读的是当前配置（cfg.ghAccelSrc），而非前端传参 —— 前端只负责改配置，hosts 写块时以配置为准，
+    // 避免前端漏传导致「开关关了但没生效」
+    const src = (readConfig().ghAccelSrc) || {}
     return runGhAccelOp(
       // 标题不再写「先刷新 IP 表」：刷新现在与探测**并行**跑，源只作补测，不再是前置串行步骤
       refresh ? '开启 GitHub 加速（并行刷新 IP 表）' : '开启 GitHub 加速 / 重新写入 hosts',
-      (op) => hosts.enable(ips, refresh, op),
+      (op) => hosts.enable(ips, { refresh: refresh, src: src }, op),
       (res) => {
         if (!res.ok) return res.canceled ? ['cancel', 'UAC 弹窗被取消，hosts 未改动'] : ['fail', res.error]
         // r.ips 是回写入配置的「用户表内」IP 条数，与真正写进 hosts 的行数不同
@@ -308,12 +329,24 @@ module.exports = {
       return ['ok', res.already ? 'hosts 里本就没有本插件的块，无需改动' : '标记块已移除，hosts 还原为开启前的内容']
     })
   },
-  // 一键刷新 IP 表（GitHub520 源）；current 传当前表，源里没有的域名沿用当前值
+  // 一键刷新 IP 表（走与开启同一套候选链：DoH 实时解析 + 社区源）；current 传当前表。
+  // 候选链给的 IP 探测不通时，**当前表的旧值也要复验一遍**：旧值同样可能是失效死地址，
+  // 复验通过才沿用，不通过就**不写这个域名**（宁可让系统回落到 DNS 真实解析，也不写一条死映射）。
+  // src.sources 与 src.order 都必须从配置读后传入：不传则 hosts 内部退回内置默认顺序，
+  // 用户在「来源优先级 / 社区源表优先级」里排的序就白设了 —— 而「开启加速」走 hosts.enable
+  // 是传了的，两条路径行为不一致会让用户以为「优先级时灵时不灵」
+  // （旧版的坑更隐蔽：这里从不传 order，refreshIps 也从不解析 DoH，用户把 DoH 排第一
+  // 却看到日志只报「拉取社区源 … 成功」，设置完全没生效）
   ghAccelRefreshIps(current) {
-    return runGhAccelOp('刷新 IP 表（拉取社区源）', (op) => hosts.refreshIps(current, op), (res) => {
+    const src = (readConfig().ghAccelSrc) || {}
+    // 标题里的来源链**按用户实际设置动态生成**：原来写死「DoH 实时解析 + 社区源」，
+    // 用户关掉 DoH 或调换顺序后标题仍照旧，等于在日志里误导「这一步做了什么」
+    return runGhAccelOp('刷新 IP 表（按来源优先级取 ' + hosts.srcChainLabel(src.order, src) + '）',
+      (op) => hosts.refreshIps(current, op, src.sources, src.order, src.customSources), (res) => {
       if (!res.ok) return ['fail', res.error]
-      return ['ok', 'IP 表已更新为 ' + res.updated.length + ' 条，'
-        + (res.skipped ? res.skipped + ' 个域名源未覆盖、沿用旧值' : '全部域名来自社区源')
+      return ['ok', 'IP 表已更新为 ' + res.updated.length + ' 条'
+        + (res.unreachable ? '，其中 ' + res.unreachable + ' 个候选 IP 探测不通' : '')
+        + (res.dropped ? '、' + res.dropped + ' 个旧值复验也不通已放弃写入' : '')
         + '；需点「重新写入 hosts」才会对系统生效']
     })
   },
@@ -354,6 +387,10 @@ module.exports = {
     if (cfg.onTop !== prev.onTop) applyOnTop(cfg.onTop)
     if (cfg.usageMode !== prev.usageMode) resetBalanceCache()
     pushConfig()
+    // 反向回推给设置页：saveConfig 是设置页自己调的，但设置页的 cfg 不一定等于落库结果 ——
+    // 宿主 patchConfig 会做归一化（补齐 / 钳范围 / 清洗），不回推的话设置页手里的还是它自己拼的
+    // 那份「未归一化」的值。取消订阅后再回推会打断「配置 → 订阅 → 回推」的闭环
+    emitConfigChange()
     return cfg
   },
   getSecrets() {

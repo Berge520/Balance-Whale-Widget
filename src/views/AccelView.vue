@@ -82,7 +82,29 @@ const ghAccelConflictWriters = computed(() => {
 })
 const ghAccelProbe = ref<{ ok: boolean; ms: number; status?: number; error?: string } | null>(null)
 const ghAccelProbing = ref(false)
+// 全局「手势已发出、还在等结果」标记：键是动作名（probe / refresh / reapply / verify / dropBad），
+// 值是按钮上就地显示的文案。之前只有一个 ghAccelBusy 布尔，所有按钮一起变灰但不说明
+// **是哪一个**在跑、跑到哪一步 —— 用户点「刷新 IP 表」看到三个按钮全灰，第一反应是「卡了」。
+// 每个动作只标自己，并按需把宿主 op 日志里的实时步骤拼进来，让等待可见。
+// 开关（checkbox）与「打开/关闭」仍走 ghAccelBusy，因为那是状态变更不是一次性动作
+const ghAccelPending = ref<Record<string, string>>({})
+function ghPendingStart(key: string, text: string) {
+  ghAccelPending.value = { ...ghAccelPending.value, [key]: text }
+}
+function ghPendingText(key: string) {
+  return ghAccelPending.value[key] || ''
+}
+function ghPendingEnd(key: string) {
+  const next = { ...ghAccelPending.value }
+  delete next[key]
+  ghAccelPending.value = next
+}
 const ghAccelIpsFold = ref(false)
+// 「获取方式」高级区折叠态：默认收起，不干扰普通用户
+const ghAccelSrcFold = ref(false)
+// 卡片顶部那段原理说明的折叠态：同样默认收起 —— 普通用户只想点开关，
+// 原理（hosts 改写 / UAC / 探测校验）属于想了解再看的补充信息
+const ghAccelIntroFold = ref(false)
 // IP 表编辑框内容没保存过（用于「回到帮助 Tab 时提醒未保存」）
 const ghAccelTableDirty = ref(false)
 // 最近一次 IP 获取的来源追踪：每个域名最终 IP 从哪来（DoH / 社区源表 / 当前表 / 兜底）
@@ -257,10 +279,243 @@ function clearGhAccelLogs() {
 function setGhAccelOn(v: boolean) {
   emit('patch', { ghAccelOn: !!v })
 }
+// IP 获取来源开关（doh / community / manual）。三者默认全开 = 改动前的固定候选链行为。
+// 只覆盖传入的那一项，其余保持原值（宿主 patchConfig 也是按「显式传入才覆盖」合并的）
+function setGhAccelSrc(key: 'doh' | 'community' | 'manual', v: boolean) {
+  emit('patch', { ghAccelSrc: { [key]: !!v } })
+}
+// 来源全关：候选链必然为空，宿主侧也会拒绝（见 hosts.js enable），这里提前拦住是为了
+// 不让用户点完开关、等一轮探测才看到失败
+const ghAccelSrcAllOff = computed(() => {
+  const s = props.cfg.ghAccelSrc || {}
+  return s.doh === false && s.community === false && s.manual === false
+})
+// 「获取方式」用一个列表同时表达两件事：勾选 = 是否参与候选链，行序 = 优先级（排前先当首选）。
+// 内部顺序编码 = 来源开关 key + 该来源下的源表 URL（'community:https://…'）：
+// 主机侧 ghAccelSrc.sources 是扁平字符串数组，用 ':' 前缀区分两段顺序，解析见 hosts.normSrcOrder / normSources。
+// 前端**不维护顺序副本**：一律由 props.cfg.ghAccelSrc.order + .sources 推导，空数组 = 宿主默认顺序。
+// 这样「用户没动过」与「排成默认顺序」在数据上同一状态，不会因加载竞态写入多余配置
+const ghAccelSrcKeys = ['doh', 'community', 'manual'] as const
+type GhAccelSrcKey = (typeof ghAccelSrcKeys)[number]
+const ghAccelSrcLabel: Record<GhAccelSrcKey, string> = {
+  doh: 'DoH 实时解析（阿里 DNS + Cloudflare + Google）',
+  community: '社区源表（GitHub520 等）',
+  manual: '当前 IP 表（手填）',
+}
+const ghAccelSrcDesc: Record<GhAccelSrcKey, string> = {
+  doh: '每次实时解析当天 A 记录，最不易过时；关闭后会明显少一轮网络请求。',
+  community: '人工维护的静态快照，作 DoH 未覆盖时的回退；关闭后刷新 IP 表也不拉取。',
+  manual: '下方「编辑 IP 表」里你填写的 IP；关闭后手填值不参与候选链。',
+}
+// 宿主给的社区源表清单（含默认顺序）：源 URL 是 hosts 模块的领域知识，前端不抄一份
+const ghAccelSourceList = ref<Array<{ url: string; host: string; custom?: boolean }>>([])
+// 自定义源输入框内容 + 提交后的提示（宿主校验结果回填，见 addGhAccelSource）
+const ghAccelNewSrc = ref('')
+const ghAccelSrcMsg = ref('')
+// 自定义源增删的进行中文案：落盘要一个 IPC 往返、之后还要回拉一次来源清单，
+// 期间把「添加」/「删除」按钮置灰并改文案，否则用户会以为没点上而连点（重复添加同一个源）
+const ghAccelSrcPending = ref('')
+// 自定义源数量上限：由宿主给（hosts.CUSTOM_SRC_MAX），前端不写死，避免两处上限走岔
+const ghAccelSrcMax = ref(10)
+function ghAccelSourceHost(url: string) {
+  const hit = ghAccelSourceList.value.find((s) => s.url === url)
+  return hit ? hit.host : url
+}
+// 源表 URL → 内部编码（与宿主 sources 字段同一套写法）
+function srcCode(url: string) {
+  return 'community:' + url
+}
+// 直接由已存的 order / sources 两个字段推导出「来源 key 顺序」与「源表 URL 顺序」两段，
+// 未出现的项按默认顺序补到末尾，与宿主 normSrcOrder / normSources 同口径。
+// 来源顺序读 order（旧配置里这个键不存在 → 走默认顺序补全，与升级前一致），
+// 源表顺序读 sources 里的 'community:<url>' 子项
+function splitOrder() {
+  const cfg = props.cfg.ghAccelSrc || {}
+  const savedOrder: string[] = cfg.order || []
+  const keys = savedOrder.filter((s) => (ghAccelSrcKeys as readonly string[]).includes(s))
+  for (const k of ghAccelSrcKeys) if (!keys.includes(k)) keys.push(k)
+  const saved: string[] = cfg.sources || []
+  const known = ghAccelSourceList.value.map((s) => s.url)
+  const urls = saved
+    .filter((s) => s.startsWith('community:'))
+    .map((s) => s.slice('community:'.length))
+    .filter((u) => known.includes(u))
+  for (const u of known) if (!urls.includes(u)) urls.push(u)
+  return { keys: keys as GhAccelSrcKey[], urls: urls.length ? urls : known }
+}
+// 当前生效的候选链优先级（一行文字）：来源追踪表上方那行说明用它，
+// 不能写死「DoH > 社区源表 > 当前 IP 表 > 内部兜底」—— 那是不支持自定义优先级时的旧文案，
+// 用户调过顺序后会和实际行为不符。只列开启的来源；内部兜底恒为最后一位、不参与排序，单独缀在末尾
+const ghAccelEffectiveOrder = computed<string>(() => {
+  const { keys } = splitOrder()
+  const on = (k: GhAccelSrcKey) => (props.cfg.ghAccelSrc || {})[k] !== false
+  // 名称取 label 的短形式：完整 label 带「（阿里 DNS + Cloudflare + Google）」这类括注，串成一行太长
+  const short: Record<GhAccelSrcKey, string> = {
+    doh: 'DoH 实时解析', community: '社区源表', manual: '当前 IP 表',
+  }
+  const parts = keys.filter(on).map((k) => short[k])
+  return (parts.length ? parts.join(' > ') : '（来源全关，无法开启）') + ' > 内部兜底'
+})
+// 渲染用的一维列表：DoH → 三个勾选行（社区源表下辖自己的源表列表）→ 手填。
+// 社区源表的子行穿插在其后，视觉上就是「来源 + 该来源内部的源表优先级」一段
+type GhAccelSrcRow =
+  | { kind: 'src'; key: GhAccelSrcKey; depth: 0; code: GhAccelSrcKey; label: string; desc: string; on: boolean; up: boolean; down: boolean; custom: boolean; enabled: boolean }
+  | { kind: 'source'; key: GhAccelSrcKey; depth: 1; code: string; label: string; desc: string; on: boolean; up: boolean; down: boolean; custom: boolean; enabled: boolean }
+const ghAccelSrcRows = computed<GhAccelSrcRow[]>(() => {
+  const { keys, urls } = splitOrder()
+  const on = (k: GhAccelSrcKey) => (props.cfg.ghAccelSrc || {})[k] !== false
+  const rows: GhAccelSrcRow[] = []
+  keys.forEach((k, i) => {
+    rows.push({
+      kind: 'src',
+      key: k,
+      depth: 0,
+      code: k,
+      label: ghAccelSrcLabel[k],
+      desc: ghAccelSrcDesc[k],
+      on: on(k),
+      up: i > 0,
+      down: i < keys.length - 1,
+      custom: false,
+      enabled: true,
+    })
+    // 社区源表的内部顺序只在它开启时才有意义，收起时不给用户多看的行
+    if (k !== 'community' || !on('community')) return
+    const inChain = new Set(urls.map(srcCode))
+    urls.forEach((u, j) => {
+      const meta = ghAccelSourceList.value.find((s) => s.url === u)
+      const isCustom = !!(meta && meta.custom)
+      rows.push({
+        kind: 'source',
+        key: k,
+        depth: 1,
+        code: srcCode(u),
+        label: ghAccelSourceHost(u),
+        // 自定义源标出来源，避免用户把一个自建源误认成内置快照；未被勾选时提示它不参与
+        desc: isCustom
+          ? (inChain.has(srcCode(u)) ? '自定义源' : '自定义源 · 未启用（勾选后才参与拉取）')
+          : '人工维护的静态快照',
+        // 内置源恒参与；自定义源只在写进 sources 时才参与 —— 这正是「默认不参与」的实现
+        on: isCustom ? inChain.has(srcCode(u)) : true,
+        up: j > 0,
+        down: j < urls.length - 1,
+        custom: isCustom,
+        enabled: isCustom ? inChain.has(srcCode(u)) : true,
+      })
+    })
+  })
+  return rows
+})
+async function loadGhAccelSources() {
+  if (!api.value.ghAccelSources) return
+  const r = await api.value.ghAccelSources()
+  ghAccelSourceList.value = (r && r.all) || []
+  if (r && r.max) ghAccelSrcMax.value = r.max
+}
+// 上移 / 下移：两类行共用一个实现 —— 都在同一段（来源 key 段 / 源表 URL 段）内换位，
+// 换完把两段按固定次序拼回 sources（key 段在前、URL 段在后，顺序信息各自保留）
+function moveGhAccelRow(i: number, dir: -1 | 1) {
+  const rows = ghAccelSrcRows.value
+  const cur = rows[i]
+  const { keys, urls } = splitOrder()
+  if (!cur) return
+  if (cur.kind === 'src') {
+    // 来源行：在 keys 段内换。**不能拿 rows[i + dir] 当邻居** —— rows 里来源行之间夹着
+    // 社区源表的子行，「DoH 下移一行」的邻居其实是 community 自己的子行，按行号判相邻会
+    // 误判成「不同段」而直接 return。这里按 keys 段内的下标取真正相邻的那个来源
+    const j = keys.indexOf(cur.key)
+    const k = j + dir
+    if (j < 0 || k < 0 || k >= keys.length) return
+    const t = keys[j]
+    keys[j] = keys[k]
+    keys[k] = t
+  } else {
+    // 源表行：只在同一来源的 URL 段内换（当前只有 community 一段）
+    const j = urls.indexOf(cur.code.slice('community:'.length))
+    const k = j + dir
+    if (j < 0 || k < 0 || k >= urls.length) return
+    const t = urls[j]
+    urls[j] = urls[k]
+    urls[k] = t
+  }
+  // 两段分别落盘：**来源顺序写 order、源表顺序写 sources**。
+  // 为什么不能像原来那样把 keys 也塞进 sources：宿主读的是 cfg.ghAccelSrc.order 与
+  // cfg.ghAccelSrc.sources 两个独立字段（见 hosts.normSrcOrder / normSources），
+  // 塞进 sources 里的 'doh' / 'community' 只会被当未知 URL 过滤掉，真正生效的 order
+  // 恒为 undefined → 一律退回默认顺序，用户怎么点上移下移都不生效
+  emit('patch', { ghAccelSrc: { order: keys, sources: urls.map(srcCode) } })
+}
+// 新增自定义源：**合法性交给宿主判定**（http(s) 绝对 URL、去重、上限），前端只负责把
+// 结果如实告诉用户。落盘后重新拉一次清单，拿到宿主校验后的真实列表再渲染 ——
+// 前端不自己判 URL，避免两处规则走岔（输入被静默丢弃是最难查的一类问题）
+async function addGhAccelSource() {
+  const url = ghAccelNewSrc.value.trim()
+  if (!url) return
+  const cfg = props.cfg.ghAccelSrc || {}
+  const cur: string[] = cfg.customSources || []
+  if (cur.includes(url)) {
+    ghAccelSrcMsg.value = '这个源已经在列表里了'
+    return
+  }
+  const max = ghAccelSrcMax.value
+  if (cur.length >= max) {
+    ghAccelSrcMsg.value = '最多添加 ' + max + ' 个自定义源；每个源都是一轮网络往返，太多会让刷新变慢'
+    return
+  }
+  // 新源默认**不参与**候选链：加到列表末尾，但**不写进 sources**（sources 才是「参与哪些源」）。
+  // 用户需自行点上移/勾选才生效，避免随手加一个源就默默拖慢每次刷新
+  emit('patch', { ghAccelSrc: { customSources: cur.concat([url]) } })
+  ghAccelNewSrc.value = ''
+  ghAccelSrcMsg.value = '已添加，需在下方列表里启用（勾选）后才参与拉取'
+  ghAccelSrcPending.value = '正在添加…' // 落盘 + 回拉清单要一个来回，期间按钮置灰
+  try {
+    await loadGhAccelSources()
+  } finally {
+    ghAccelSrcPending.value = ''
+  }
+}
+// 删除自定义源：同时从 customSources 与 sources 里摘掉（后者是「参与候选链的源」，
+// 留着会指向一个已不存在的源，刷新时那一轮网络往返必然失败）
+async function removeGhAccelSource(url: string) {
+  const cfg = props.cfg.ghAccelSrc || {}
+  const cur: string[] = cfg.customSources || []
+  const inOrder: string[] = cfg.sources || []
+  emit('patch', {
+    ghAccelSrc: {
+      customSources: cur.filter((u) => u !== url),
+      sources: inOrder.filter((s) => s !== srcCode(url)),
+    },
+  })
+  ghAccelSrcMsg.value = '已删除'
+  ghAccelSrcPending.value = '正在删除…'
+  try {
+    await loadGhAccelSources()
+  } finally {
+    ghAccelSrcPending.value = ''
+  }
+}
+// 启用 / 停用某个自定义源 = 把它的编码（'community:<url>'）加进 / 移出 sources。
+// 只动 sources、不动 customSources：源还留在列表里，用户可以随时再勾回来；
+// 顺序沿用现有 urls 段（默认在末尾），用户可再点上移调优先级
+function toggleGhAccelSource(url: string, want: boolean) {
+  const { urls } = splitOrder()
+  const next = want
+    ? (urls.includes(url) ? urls : urls.concat([url]))
+    : urls.filter((u) => u !== url)
+  emit('patch', { ghAccelSrc: { sources: next.map(srcCode) } })
+}
 // 勾选后先按新意图落 config，再交给 toggleGhAccel 真正去写 / 删 hosts；
 // 失败或取消 UAC 时由它把意图回弹，因此这里不必等回推
 function onGhAccelToggleChange(e: Event) {
   const want = !!(e.target as HTMLInputElement).checked
+  // 来源全关时不允许开启：候选链为空 → 写不出任何域名。这里当场拦下并把勾选弹回，
+  // 不落配置、不弹 UAC（宿主侧还有一道同样的拒绝，双保险）
+  if (want && ghAccelSrcAllOff.value) {
+    setGhAccelOn(false)
+    ghAccelFlash.err = true
+    ghAccelFlash.msg = '三个 IP 获取来源都被关闭，没有可用候选，无法开启。请在下方「获取方式」里至少勾选一项。'
+    return
+  }
   setGhAccelOn(want)
   // 用户意图必须在这里显式传给 toggleGhAccel，**不能**让它在内部回头读 props.cfg.ghAccelOn。
   // 原因：setGhAccelOn 是同步发 IPC，宿主 patchConfig 后同步 emitConfigChange 广播新配置，
@@ -275,6 +530,10 @@ async function toggleGhAccel(want: boolean) {
   if (ghAccelBusy.value || !api.value.ghAccelEnable || !api.value.ghAccelDisable) return
   ghAccelBusy.value = true
   ghAccelFlash.msg = ''
+  // 开关也要有就地进度：checkbox 本身没有文字可改，用户勾完只看到它变灰，
+  // 不知道在干什么（开启要刷新候选 + 上百个 IP 探测 + 弹 UAC，最坏十几秒）。
+  // 文案挂在开关旁的 .gh-toggle-state 上，与按钮的 btn-busy 是同一套机制
+  ghPendingStart('toggle', want ? '正在开启…（可能弹出 UAC 授权窗口）' : '正在关闭…')
   pullGhAccelOps()
   try {
     const r = want
@@ -291,7 +550,12 @@ async function toggleGhAccel(want: boolean) {
       // 开启后立刻自动预演一次：hosts 是静态映射，写错了用户自己很难判断
       // （浏览器可能还在用连接池里的旧连接，看不出问题）。这里主动跑一次系统级
       // 连通性检测，不通就当场提示 + 给一键关闭，避免带着坏块不知情
-      if (want) await autoVerifyAfterWrite()
+      if (want) {
+        // 阶段切换：hosts 已写完，接下来是连通性预演。不改文案的话开关会一直停在
+        // 「正在开启…」，而用户其实已经可以操作，只是还在等验证结果
+        ghPendingStart('toggle', '正在验证连通性…')
+        await autoVerifyAfterWrite()
+      }
     } else {
       // 弹了 UAC 但没写入（取消/失败）：hosts 没动，意图状态不该保持，弹回原样
       setGhAccelOn(!want)
@@ -314,6 +578,7 @@ async function toggleGhAccel(want: boolean) {
     ghAccelFlash.msg = (want ? '开启失败' : '关闭失败') + '（' + String(err?.message || err) + '），'
       + 'hosts 未改动，' + (want ? '加速未开启' : '加速仍在生效') + '。可重试。'
   } finally {
+    ghPendingEnd('toggle')
     ghAccelBusy.value = false
     pullGhAccelOps()
   }
@@ -347,6 +612,9 @@ async function doReapplyGhAccel() {
   if (ghAccelBusy.value || !api.value.ghAccelEnable) return
   ghAccelBusy.value = true
   ghAccelFlash.msg = ''
+  // 重新写入会先刷新 + 过滤候选，再弹 UAC。这两段的等待体感完全不同，
+  // 用宿主 op 日志的实时步骤更新按钮文案，让用户知道现在卡在「筛选」还是「等 UAC」
+  ghPendingStart('reapply', '准备中…')
   pullGhAccelOps()
   try {
     const r = await api.value.ghAccelEnable(ips.value, false)
@@ -364,6 +632,7 @@ async function doReapplyGhAccel() {
     ghAccelFlash.msg = '写入失败：' + String(err?.message || err)
   } finally {
     ghAccelBusy.value = false
+    ghPendingEnd('reapply')
     pullGhAccelOps()
   }
 }
@@ -382,6 +651,7 @@ async function doRefreshGhAccelIps() {
   if (ghAccelBusy.value || !api.value.ghAccelRefreshIps) return
   ghAccelBusy.value = true
   ghAccelFlash.msg = ''
+  ghPendingStart('refresh', '刷新中…')
   pullGhAccelOps()
   try {
     const r = await api.value.ghAccelRefreshIps(ips.value)
@@ -394,8 +664,12 @@ async function doRefreshGhAccelIps() {
       // 已开启（hosts 里确实有标记块）时顺手重写一次，省掉用户再点一次「重新写入 hosts」
       // 和那一次多余的 UAC；只对「真的生效中」这么做，避免给还没开启的人白弹一次提权。
       // 失败不覆盖上面的成功提示 —— 表已经更新了，重写失败只写日志，用户仍可手动重试
-      if (ghAccelActual.value?.on) await doReapplyGhAccel()
-      else ghAccelFlash.msg = '已更新 ' + r.updated.length + ' 个域名' + (r.total ? '（源共 ' + r.total + ' 条）' : '') + (props.cfg.ghAccelOn ? '；已开启时请点「重新写入 hosts」生效' : '')
+      if (ghAccelActual.value?.on) {
+        ghPendingEnd('refresh')
+        await doReapplyGhAccel()
+      } else {
+        ghAccelFlash.msg = '已更新 ' + r.updated.length + ' 个域名' + (r.total ? '（源共 ' + r.total + ' 条）' : '') + (props.cfg.ghAccelOn ? '；已开启时请点「重新写入 hosts」生效' : '')
+      }
     } else {
       ghAccelFlash.err = true
       ghAccelFlash.msg = r.error || '刷新失败'
@@ -405,6 +679,7 @@ async function doRefreshGhAccelIps() {
     ghAccelFlash.msg = '刷新失败：' + String(err?.message || err)
   } finally {
     ghAccelBusy.value = false
+    ghPendingEnd('refresh')
     pullGhAccelOps()
   }
 }
@@ -412,6 +687,7 @@ async function doRefreshGhAccelIps() {
 async function doGhAccelProbe() {
   if (ghAccelProbing.value || !api.value.ghAccelProbe) return
   ghAccelProbing.value = true
+  ghPendingStart('probe', '检测中…')
   pullGhAccelOps()
   try {
     ghAccelProbe.value = await api.value.ghAccelProbe()
@@ -420,6 +696,7 @@ async function doGhAccelProbe() {
     ghAccelProbe.value = { ok: false, ms: 0, error: String(err?.message || err) }
   } finally {
     ghAccelProbing.value = false
+    ghPendingEnd('probe')
     pullGhAccelOps()
   }
 }
@@ -441,6 +718,7 @@ async function doVerifyGhAccelIps() {
   }
   ghAccelVerifying.value = true
   ghAccelFlash.msg = ''
+  ghPendingStart('verify', '校验中…')
   pullGhAccelOps()
   try {
     const r = await api.value.ghAccelVerifyIps(ips.value)
@@ -455,6 +733,7 @@ async function doVerifyGhAccelIps() {
     ghAccelFlash.msg = '校验失败：' + String(err?.message || err)
   } finally {
     ghAccelVerifying.value = false
+    ghPendingEnd('verify')
     pullGhAccelOps()
   }
 }
@@ -490,6 +769,9 @@ function removeGhAccelRow(i: number) {
 // 不会即刻参与本次挂载渲染 —— 而初值就是渲染的输入，必须同步落定）。
 // `ghAccelStatus()` 走异步读 hosts（同进程直调但 fs 是异步的），不阻塞首帧渲染
 refreshGhAccel()
+// 社区源表清单（渲染「源表优先级」用）同样在 setup 阶段拉一次：它只随版本变化，
+// 不必每次都拉，但进 Tab 时要有值，否则源表列表是空的
+loadGhAccelSources()
 // 已在帮助 Tab 内、父级再切回来时组件被重建，上面那行同样覆盖到，无需额外监听
 // 离开帮助 Tab 就丢掉校验结论：探测结果有时效，下次进来重新测，避免用旧结论标色误导
 watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = null })
@@ -502,12 +784,33 @@ watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = nu
     <!-- [帮助] GitHub 加速（hosts 方案）：走系统 hosts 直连，不装常驻进程 -->
     <section class="card">
     <h2>GitHub 加速</h2>
-    <p class="hint">改写系统 <strong>hosts</strong> 让 GitHub 相关域名直连可用 IP，浏览器 / git / 下载全生效，<strong>不占常驻进程</strong>。写入需一次 <strong>UAC 确认</strong>，关闭即删块，不动你原有的 hosts 内容。写入前会逐条做 <strong>HTTPS 探测 + 证书校验</strong>，只写真正可用、且证书确实是该域名的 IP；同一域名会有多个备用 IP 一起写入，主 IP 失效时由系统按顺序自动回退。</p>
+    <!-- 原理说明默认折叠：卡片首屏只留标题 + 开关 + 实时进度，降低普通用户的理解成本 -->
+    <div class="fold">
+      <button class="link-btn" @click="ghAccelIntroFold = !ghAccelIntroFold">
+        {{ ghAccelIntroFold ? '收起说明' : '这是什么 / 有什么影响' }}
+      </button>
+      <div v-if="ghAccelIntroFold" class="guide">
+        <p class="hint">改写系统 <strong>hosts</strong> 让 GitHub 相关域名直连可用 IP，浏览器 / git / 下载全生效，<strong>不占常驻进程</strong>。写入需一次 <strong>UAC 确认</strong>，关闭即删块，不动你原有的 hosts 内容。写入前会逐条做 <strong>HTTPS 探测 + 证书校验</strong>，只写真正可用、且证书确实是该域名的 IP；同一域名会有多个备用 IP 一起写入，主 IP 失效时由系统按顺序自动回退。</p>
+        <p class="hint">IP 失效时<strong>关一次开关再开</strong>即按新表重写（最坏回到慢速，不会更糟）。首次开启会把原 hosts 备份到<strong>插件数据目录 <code>whale-hosts-backup</code></strong>，供手动恢复；卸载不影响系统 hosts，记得先关闭。</p>
+      </div>
+    </div>
     <label class="field row check">
       <span class="label">启用 GitHub 加速</span>
       <!-- 勾选即写 config（走的仍是父级 patch），随后由 toggleGhAccel 真正落 hosts；
            失败 / 取消 UAC 时函数内部会把开关回弹，所以这里不用等回推 -->
-      <input type="checkbox" :checked="cfg.ghAccelOn" :disabled="ghAccelBusy" @change="onGhAccelToggleChange" />
+      <input
+        type="checkbox"
+        :class="{ 'gh-toggle-busy': !!ghPendingText('toggle') }"
+        :checked="cfg.ghAccelOn"
+        :disabled="ghAccelBusy"
+        @change="onGhAccelToggleChange"
+      />
+      <!-- 开关的就地进度：checkbox 没有文字可改，只变灰的话用户不知道在干什么。
+           开启这一路会连跑「刷新候选 → 写 hosts → 验证连通性」多个阶段，最坏十几秒，
+           所以这里必须把当前阶段写出来（文案由 ghPendingStart('toggle', ...) 推进） -->
+      <span v-if="ghPendingText('toggle')" class="gh-toggle-state">
+        <span class="gh-live-dot"></span>{{ ghPendingText('toggle') }}
+      </span>
     </label>
     <!-- 实时进度：开启是最耗时的操作（DoH 解析 + 上百个候选探测，最坏数秒），
          之前只在收起的日志区里看得到，用户点完勾选会觉得「卡住了」。
@@ -549,14 +852,18 @@ watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = nu
       检测到第三方条目<span v-if="ghAccelConflictWriters">（像是 {{ ghAccelConflictWriters }} 写的）</span><span v-else>（可能是其它加速工具写的）</span>：{{ ghAccelConflicts.map(c => c.domain).join('、') }}。本插件块写在文件最前会优先生效，可直接使用；若要彻底替换对方，请先在其设置里关闭对应的 GitHub 加速。
     </p>
     <div class="btn-row">
-      <button class="secondary" :disabled="ghAccelProbing" @click="doGhAccelProbe">
-        {{ ghAccelProbing ? '检测中…' : '检测连接' }}
+      <button class="secondary" :class="{ 'btn-busy': ghPendingText('probe') }" :disabled="ghAccelProbing" @click="doGhAccelProbe">
+        {{ ghPendingText('probe') || '检测连接' }}
       </button>
-      <button class="secondary" :disabled="ghAccelBusy" @click="doRefreshGhAccelIps">刷新 IP 表</button>
+      <button class="secondary" :class="{ 'btn-busy': ghPendingText('refresh') }" :disabled="ghAccelBusy" @click="doRefreshGhAccelIps">
+        {{ ghPendingText('refresh') || '刷新 IP 表' }}
+      </button>
       <!-- 「重新写入」按**实际状态**显示，不能只看意图 cfg.ghAccelOn：
            开启失败 / 取消 UAC 时意图会回弹成 false，但上一次成功的块可能仍在 hosts 里 ——
            此时实际已生效，却因为意图是 false 而看不到「重新写入」，页面上也没有别的入口重写 -->
-      <button v-if="ghAccelActual?.on || cfg.ghAccelOn" class="secondary" :disabled="ghAccelBusy" @click="doReapplyGhAccel">重新写入 hosts</button>
+      <button v-if="ghAccelActual?.on || cfg.ghAccelOn" class="secondary" :class="{ 'btn-busy': ghPendingText('reapply') }" :disabled="ghAccelBusy" @click="doReapplyGhAccel">
+        {{ ghPendingText('reapply') || '重新写入 hosts' }}
+      </button>
     </div>
     <p v-if="ghAccelProbe" class="msg" :class="ghAccelProbe.ok ? 'ok' : 'err'">
       {{ ghAccelProbe.ok ? 'github.com 可达，耗时 ' + ghAccelProbe.ms + 'ms' + (ghAccelProbe.status ? '（HTTP ' + ghAccelProbe.status + '）' : '') : '无法访问 github.com：' + (ghAccelProbe.error || '未知错误') }}<template v-if="ghAccelProbe.ok && !ghAccelActual?.on"> —— 开启前已可达（可能靠其它加速工具或代理），hosts 直连可能绕开现有代理，建议开启后再测一次对比</template>
@@ -617,7 +924,7 @@ watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = nu
         </div>
 
         <!-- IP 来源追踪：回答「每个域名的 IP 通过什么方式、从哪里获取」 -->
-        <p class="hint" style="margin-top:14px"><strong>最近一次 IP 获取来源</strong>（开启加速 / 刷新 IP 表 / 重新写入时更新）。优先级：DoH 实时解析 &gt; 社区源表 &gt; 当前 IP 表 &gt; 内部兜底。</p>
+        <p class="hint" style="margin-top:14px"><strong>最近一次 IP 获取来源</strong>（开启加速 / 刷新 IP 表 / 重新写入时更新）。优先级：<code>{{ ghAccelEffectiveOrder }}</code>。</p>
         <template v-if="ghAccelTrace && ghAccelTrace.at">
           <p class="hint">时间：<code>{{ new Date(ghAccelTrace.at).toLocaleString() }}</code></p>
           <p class="hint" v-if="ghAccelTrace.dohResolvers.length">
@@ -656,8 +963,8 @@ watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = nu
         <div class="btn-row">
           <button class="secondary" @click="addGhAccelRow">＋ 添加域名</button>
           <button class="secondary" @click="saveGhAccelIps">保存 IP 表</button>
-          <button class="secondary" :disabled="ghAccelVerifying" @click="doVerifyGhAccelIps">
-            {{ ghAccelVerifying ? '校验中…' : '校验可用性' }}
+          <button class="secondary" :class="{ 'btn-busy': ghPendingText('verify') }" :disabled="ghAccelVerifying" @click="doVerifyGhAccelIps">
+            {{ ghPendingText('verify') || '校验可用性' }}
           </button>
           <button
             v-if="ghAccelVerify && ghAccelVerify.bad.length"
@@ -672,7 +979,91 @@ watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = nu
         </p>
       </div>
     </div>
-    <p class="hint">IP 失效时<strong>关一次开关再开</strong>即按新表重写（最坏回到慢速，不会更糟）。首次开启会把原 hosts 备份到<strong>插件数据目录 <code>whale-hosts-backup</code></strong>，供手动恢复；卸载不影响系统 hosts，记得先关闭。</p>
+    <div class="fold">
+      <button class="link-btn" @click="ghAccelSrcFold = !ghAccelSrcFold">
+        {{ ghAccelSrcFold ? '收起获取方式' : '获取方式（高级）' }}
+      </button>
+      <div v-if="ghAccelSrcFold" class="guide">
+        <p class="hint">
+          勾选决定哪些来源参与候选链，<strong>行序即优先级</strong>（排在前面的先当首选，探测通过后写入 hosts 的第一行，后面的只作回退）。三者默认全开；<strong>全关则无法开启</strong>。
+        </p>
+        <ul class="gh-order">
+          <li v-for="(r, i) in ghAccelSrcRows" :key="r.code" :class="{ 'gh-order-child': r.depth === 1 }">
+            <span class="gh-order-label">
+              <input
+                v-if="r.kind === 'src'"
+                type="checkbox"
+                :checked="r.on"
+                @change="setGhAccelSrc(r.key, ($event.target as HTMLInputElement).checked)"
+              />
+              <!--
+                源表行：内置源恒参与（不给勾选框，避免用户以为关了它还能靠别处兜底）；
+                自定义源必须给勾选框 —— 「默认不参与」的语义全靠它，勾上才写进 sources
+              -->
+              <input
+                v-else-if="r.custom"
+                type="checkbox"
+                :checked="r.enabled"
+                @change="toggleGhAccelSource(r.code.slice('community:'.length), ($event.target as HTMLInputElement).checked)"
+              />
+              <span class="gh-order-idx">{{ i + 1 }}</span>
+              <span class="gh-order-name">
+                <strong>{{ r.label }}</strong>
+                <span class="hint">{{ r.kind === 'source' ? '同一域名被多个源覆盖时，取排最前那个源给的 IP' : r.desc }}</span>
+              </span>
+            </span>
+            <span class="gh-move">
+              <button
+                v-if="r.custom"
+                class="link-btn"
+                type="button"
+                title="删除这个自定义源"
+                :disabled="!!ghAccelSrcPending"
+                @click="removeGhAccelSource(r.code.slice('community:'.length))"
+              >删除</button>
+              <button
+                class="gh-move-btn"
+                type="button"
+                title="上移：提高优先级"
+                aria-label="上移"
+                :disabled="!r.up"
+                @click="moveGhAccelRow(i, -1)"
+              >▲</button>
+              <button
+                class="gh-move-btn"
+                type="button"
+                title="下移：降低优先级"
+                aria-label="下移"
+                :disabled="!r.down"
+                @click="moveGhAccelRow(i, 1)"
+              >▼</button>
+            </span>
+          </li>
+        </ul>
+        <p v-if="ghAccelSrcAllOff" class="msg err">三个来源都已关闭，没有可用候选，无法开启加速。</p>
+        <div class="gh-src-add">
+          <input
+            v-model="ghAccelNewSrc"
+            class="gh-src-input"
+            placeholder="粘贴社区源表链接，如 https://example.com/hosts.txt"
+            spellcheck="false"
+            :disabled="!!ghAccelSrcPending"
+            @keydown.enter="addGhAccelSource"
+          />
+          <button
+            class="secondary"
+            :class="{ 'btn-busy': ghAccelSrcPending }"
+            :disabled="!ghAccelNewSrc.trim() || !!ghAccelSrcPending"
+            @click="addGhAccelSource"
+          >{{ ghAccelSrcPending || '添加' }}</button>
+        </div>
+        <p class="hint">
+          可添加自建的 hosts 源表（上限 {{ ghAccelSrcMax }} 个），需为 http(s) 链接；
+          新加的源<strong>默认不参与</strong>，要在上面列表里勾选才生效。只采纳本插件关心的域名，其余条目会被忽略。
+        </p>
+        <p v-if="ghAccelSrcMsg" class="hint">{{ ghAccelSrcMsg }}</p>
+      </div>
+    </div>
     </section>
   </div>
 </template>
@@ -757,6 +1148,32 @@ watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = nu
   height: 16px;
   accent-color: var(--accent);
 }
+/* 开关就地的进行中提示：紧跟在 checkbox 右侧的一行小字 + 脉动小圆点。
+   用 accent 色而非 fg-faint —— 它要能和下方「实时进度」区分开：
+   这行说明的是「开关这个动作在跑」，下方那行是「操作内部跑到哪一步」 */
+.gh-accel .gh-toggle-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--accent);
+  /* .field.check 是 align-items:flex-start，checkbox 高 16px、这行小字行高约 16px，
+     不加这句在标签换行时会显得浮动；margin-top 让它与 checkbox 视觉居中对齐 */
+  margin-top: 1px;
+  /* 文案会换行（「正在开启…（可能弹出 UAC 授权窗口）」），窄窗里要能收缩 */
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+/* 开关本身也该有「正在动」的信号：checkbox 没有文字可改，
+   只靠右侧文字的话，视线落在勾选框上时仍会以为界面没响应。
+   checkbox 已被 disabled（ghAccelBusy），但 border/box-shadow 不受影响，
+   故用描边而非 opacity 表达 */
+.gh-accel input[type='checkbox'].gh-toggle-busy {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-radius: 2px;
+}
 .gh-accel .ver {
   font-size: 13px;
   color: var(--fg-dim);
@@ -780,6 +1197,45 @@ watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = nu
 .gh-accel .btn-row button:disabled {
   opacity: 0.45;
   cursor: default;
+}
+/* 执行中的按钮要同时满足「看得出被禁用」和「看得出在动」：
+   只靠上面的 0.45 会把亮度脉动一起压暗，脉动几乎不可见。
+   这里显式覆盖 opacity（用 :disabled 的选择器叠回来，保证特异性够高），
+   保留大致相同的灰底观感，再把动效交给 filter —— 两者互不干扰 */
+.gh-accel .btn-row button.btn-busy:disabled,
+.gh-accel .btn-row button.btn-busy {
+  opacity: 1;
+}
+/* 正在执行的那个按钮：从「一起变灰」变成「只有它自己在呼吸」，让用户一眼看出
+   是哪个动作在跑（其它按钮变灰是 ghAccelBusy 防重入，不代表它们在执行）。
+   **必须动 filter 而不是 opacity**：执行中的按钮同时带 disabled（防重入），
+   上面 `.btn-row button:disabled { opacity: .45 }` 特异性(0,3,1) 高过 `.btn-busy`(0,2,0)，
+   会把 keyframe 里的 opacity 压成固定值，呼吸完全看不出来。
+   filter 是独立属性，不与之打架；亮度脉动在灰底上也比透明度更明显 */
+.gh-accel .btn-busy {
+  animation: gh-btn-busy 1.2s ease-in-out infinite;
+  /* 除亮度脉动外再给一圈描边：脉动靠余光能看见，但用户视线不在按钮上时
+     容易漏；描边是静态高对比，扫一眼就知道是哪个在跑 */
+  border-color: var(--accent) !important;
+  box-shadow: 0 0 0 1px var(--accent);
+}
+@keyframes gh-btn-busy {
+  0%, 100% { filter: brightness(0.8); }
+  50% { filter: brightness(1.25); }
+}
+/* 尊重系统「减少动态效果」，但**不能直接 animation: none**：
+   这个动效承载的是「操作正在进行」的功能信息，直接关掉后用户分不清
+   按钮是卡住了还是在跑（且本机 Windows「动画效果」关闭时，
+   Chromium 会把 UserPreferencesMask 映射成 prefers-reduced-motion: reduce，
+   等于默认就命中这条）。
+   所以这里保留动效、只把节奏放慢、幅度收窄 —— 原来的 1.2s 脉动对
+   前庭敏感人群是负担，改成 2.4s + 更小幅度的亮度变化仍能传达「在动」。
+   注：降级 keyframes 必须定义在 @media 外、用同名覆盖 —— 嵌套在 @media 内的
+   @keyframes 在部分 Chromium 版本里不参与层叠，动画会直接失效 */
+@media (prefers-reduced-motion: reduce) {
+  .gh-accel .btn-busy {
+    animation-duration: 2.4s;
+  }
 }
 .gh-accel .msg {
   margin: 10px 0 0;
@@ -810,9 +1266,10 @@ watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = nu
   0%, 100% { opacity: 0.25; }
   50% { opacity: 1; }
 }
-/* 尊重系统「减少动态效果」设置 */
+/* 尊重系统「减少动态效果」设置：同 .btn-busy，保留脉动但放慢 ——
+   小圆点同样承载「还在动」的功能信息，关掉后界面看起来像卡死 */
 @media (prefers-reduced-motion: reduce) {
-  .gh-live-dot { animation: none; opacity: 0.7; }
+  .gh-live-dot { animation-duration: 2.4s; }
 }
 .gh-accel .hint {
   margin: 10px 0 0;
@@ -844,6 +1301,13 @@ watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = nu
 .gh-accel .link-btn:hover {
   color: var(--fg);
 }
+/* 文字链接按钮的禁用态：源列表「删除」在增删进行中要挡住连点，
+   不加这条会只靠 disabled 属性（浏览器默认只改 cursor，看起来仍像可点） */
+.gh-accel .link-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+  text-decoration: none;
+}
 .gh-accel .guide {
   margin-top: 10px;
   padding: 10px 12px;
@@ -852,6 +1316,10 @@ watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = nu
   background: var(--input-bg);
   font-size: 12px;
   line-height: 1.6;
+  /* guide 里混排表格 / 长 URL / 长来源字符串：作为 flex 子项时 min-width 默认是 auto，
+     内容宽会顶穿容器（横向溢出）。显式设 0 让容器能收缩，文字再按各元素自己的换行规则折行 */
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 /* 分组折叠（GitHub 加速日志 / 编辑 IP 表）：组间留白并用分隔线隔开 */
 .gh-accel .fold {
@@ -863,6 +1331,145 @@ watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = nu
 .gh-accel .fold + .fold {
   padding-top: 12px;
   border-top: 1px solid var(--line);
+}
+
+/* GitHub 加速：获取方式（高级）一个列表同时管「勾选」与「优先级」：
+   复选框 + 序号 + 名称说明 + 上移/下移。不做拖拽 —— 项数少，按钮更直接也更好点 */
+.gh-accel .gh-order {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+}
+.gh-accel .gh-order li {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 6px;
+}
+/* 社区源表的属于「社区源表」这一来源，缩进 + 去掉圆底序号，避免与来源行平级混淆 */
+.gh-accel .gh-order li.gh-order-child {
+  padding-left: 22px;
+}
+.gh-accel .gh-order li.gh-order-child .gh-order-idx {
+  background: none;
+  color: var(--fg2);
+}
+/* 复选框 + 序号 + 名称整行布局，占满剩余宽度把上移/下移推到右侧。
+   这里用 span 而不是 label：label 会把点击转发给内部的 input，而 input 的 change
+   已经自己 emit 过一次配置，转发会造成「一次点击两次切换」—— 净效果是 checkbox 弹回原位，
+   表现就是「点了没变化」。所以点击范围只留给 input 本体 */
+.gh-accel .gh-order-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+.gh-accel .gh-order-label input {
+  margin-top: 3px;
+  flex: none;
+  cursor: pointer;
+}
+/* 源表行没有复选框，用同宽的占位保持序号与来源行对齐 */
+.gh-accel .gh-order li.gh-order-child .gh-order-label::before {
+  content: '';
+  flex: none;
+  width: 13px;
+}
+/* 序号固定宽度，名称才能左对齐成列；名称占满剩余宽度并把说明换行显示 */
+.gh-accel .gh-order-idx {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  margin-top: 1px;
+  border-radius: 50%;
+  background: var(--bd);
+  color: var(--fg);
+  font-size: 11px;
+  line-height: 18px;
+  text-align: center;
+}
+.gh-accel .gh-order-name {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.gh-accel .gh-order-name .hint {
+  display: block;
+  margin: 2px 0 0;
+}
+/* 上移 / 下移按钮组：一对紧凑的三角图标按钮。
+   用图标而非「上移 / 下移」文字 —— 文字按钮宽度大，每行右侧会挤掉名称的可用宽度；
+   默认半透明，鼠标移到该行才完全显形，静态时列表更干净 */
+.gh-accel .gh-move {
+  flex: none;
+  display: flex;
+  gap: 2px;
+  opacity: 0.45;
+  transition: opacity 0.15s ease;
+}
+.gh-accel .gh-order li:hover .gh-move,
+.gh-accel .gh-move:focus-within {
+  opacity: 1;
+}
+.gh-accel .gh-move-btn {
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--input-bg);
+  color: var(--fg-dim);
+  font-size: 9px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.gh-accel .gh-move-btn:hover:not([disabled]) {
+  color: var(--fg);
+  border-color: var(--accent);
+  background: var(--card-bg);
+}
+.gh-accel .gh-move-btn:active:not([disabled]) {
+  transform: translateY(1px);
+}
+/* 到头的按钮置灰但仍占位，避免点击时按钮左右跳动 */
+.gh-accel .gh-move-btn[disabled] {
+  opacity: 0.3;
+  cursor: default;
+}
+/* 自定义源输入行：输入框吃掉剩余宽度，按钮固定不压缩 */
+.gh-accel .gh-src-add {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 10px;
+}
+.gh-accel .gh-src-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--input-bg);
+  color: var(--fg);
+  font-size: 12px;
+}
+.gh-accel .gh-src-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.gh-accel .gh-src-add button {
+  flex: none;
+}
+/* 「添加」在 .gh-src-add 里、不属于 .btn-row，上面那组覆盖选不中它，
+   这里补一条（含 :disabled，理由同 .btn-row 那段注释） */
+.gh-accel .gh-src-add button.btn-busy,
+.gh-accel .gh-src-add button.btn-busy:disabled {
+  opacity: 1;
+  cursor: default;
 }
 
 /* GitHub 加速：IP 表编辑行（域名 + IP 两个输入框并排） */
@@ -948,16 +1555,24 @@ watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = nu
 .gh-accel .gh-op-title {
   font-size: 12px;
   color: var(--fg);
+  /* 标题含操作名（最长「刷新 IP 表（按来源优先级取 DoH 实时解析 + 社区源并探测）」）：
+     窄窗里要能在「状态」标签与右侧时间之间换行收缩，否则把 meta 顶出卡片 */
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .gh-accel .gh-op-meta {
   margin-left: auto;
   font-size: 11px;
   color: var(--fg-faint);
+  /* 时间 + 耗时不可再压缩，但也不该把标题挤没：不参与收缩，超宽时整行靠 flex-wrap 落到下一行 */
+  flex: none;
 }
 .gh-accel .gh-op-summary {
   margin: 6px 0 0;
   font-size: 12px;
   color: var(--fg-dim);
+  overflow-wrap: anywhere;
 }
 .gh-accel .gh-op-steps {
   margin: 8px 0 0;
@@ -978,11 +1593,23 @@ watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = nu
   text-align: center;
 }
 .gh-accel .gh-step-text {
-  word-break: break-all;
+  /* 步骤文案里带域名 / 源 URL，长串（如 raw.hellogithub.com）在窄窗里必须能断行。
+     break-all 会把「刷新」这类正常词语也拆开，且不支持新版 anywhere；用 anywhere：
+     只在实在放不下时才拆长串，正常文字仍按词换行。
+     flex-shrink 也不能省 —— 默认 min-width:auto 会顶住不缩，把 detail 挤出容器 */
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .gh-accel .gh-step-detail {
   color: var(--fg-faint);
   font-size: 11px;
+  /* detail 最长的一条是「…给的 IP 探测不通，旧值 N.N.N.N 复验也不通，未写入」这类
+     整句中文 + IP：默认按词换行时中文才有断点，句中的长串仍可能顶穿，故同样允许 anywhere。
+     它是 li 里最后一个 flex 子项，不给 min-width:0 的话会按 max-content 撑宽 */
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .gh-accel .gh-step-done .gh-step-mark {
   color: var(--ok);
@@ -1028,7 +1655,12 @@ watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = nu
   margin-top: 0;
 }
 .gh-accel .gh-trace-table {
+  /* 固定布局 + 表格自身不撑宽容器：默认 auto 布局会按「最宽单元格的 max-content」算列宽，
+     而来源列现在有「社区源表 · raw.hellogithub.com「这类长串，auto 布局下整表必然横向溢出，
+     把卡片顶破。fixed 让列宽只按下面的百分比分，内容再按各自换行规则折行。
+     显式 width: 100% 之外还要 table-layout 固定，缺一不可 */
   width: 100%;
+  table-layout: fixed;
   margin-top: 8px;
   border-collapse: collapse;
   font-size: 12px;
@@ -1039,17 +1671,33 @@ watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = nu
   border-bottom: 1px solid var(--line);
   text-align: left;
   vertical-align: top;
+  /* 长域名 / 长来源一律允许断行，不允许把列撑宽（fixed 布局下超长串若不能断，会直接溢出单元格） */
+  overflow-wrap: anywhere;
 }
 .gh-accel .gh-trace-table th {
   color: var(--fg-faint);
   font-weight: 500;
 }
+/* 三列按「域名窄 / IP 定宽 / 来源占余下」分配：来源列最长（「DoH 实时解析 · Cloudflare」），
+   给它最多空间，域名与 IP 各自够用即可 */
+.gh-accel .gh-trace-table th:nth-child(1),
+.gh-accel .gh-trace-table td:nth-child(1) {
+  width: 30%;
+}
+.gh-accel .gh-trace-table th:nth-child(2),
+.gh-accel .gh-trace-table td:nth-child(2) {
+  width: 26%;
+}
 .gh-accel .gh-trace-domain {
   color: var(--fg);
   word-break: break-all;
 }
+/* 来源列原为 white-space: nowrap（一行不换），是横向溢出的主因：
+   最长的一条是「社区源表 · raw.hellogithub.com」以及未写入时的整句说明，
+   在窄卡片里 nowrap 必然顶破容器。改为正常换行 + anywhere 断长串 */
 .gh-accel .gh-trace-table td:last-child {
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 .gh-accel .gh-trace-table td.gh-src-good {
   color: var(--ok);

@@ -171,6 +171,9 @@ const cfg = reactive({
   ghAccelOn: false,
   ghAccelIps: [] as Array<{ domain: string; ip: string }>,
   ghAccelRefreshedAt: 0,
+  // IP 获取来源开关 + 两段优先级顺序：sources = 社区源表内部顺序，order = 来源层候选链顺序。
+  // 与宿主 normGhAccelSrc 同结构；默认全 true + 两段空数组 = 宿主默认候选链，与升级前行为一致
+  ghAccelSrc: { doh: true, community: true, manual: true, sources: [] as string[], order: [] as string[] },
   // 通知渠道：系统通知（默认开）+ 邮件通知（默认关，需先配 SMTP）。
   // 邮件的收发件人/显示名/主题前缀属于「配置」进这里；服务器、账号、授权码属于凭据，走 mail 表单
   notifySystemOn: true,
@@ -705,6 +708,8 @@ const appVersion = ref('')
 const updateChecking = ref(false)
 const updateResult = ref<any>(null)
 const updateMsg = ref('')
+// 手动检查出「有新版本」时把结果行变成可点入口（点了直接去插件市场更新）
+const hasUpdate = computed(() => !!(updateResult.value && updateResult.value.ok && updateResult.value.hasUpdate))
 // 反馈入口是软性内容，与版本信息不同性质，收进折叠
 const aboutFolds = reactive({ feedback: false })
 
@@ -2729,7 +2734,7 @@ function doCheckUpdate(force: boolean) {
     .then((r: any) => {
       updateResult.value = r || null
       if (!r || !r.ok) updateMsg.value = '检查失败：' + ((r && r.error) || '未知错误')
-      else if (r.hasUpdate) updateMsg.value = '发现新版本 v' + r.latest + '，可前往项目主页查看'
+      else if (r.hasUpdate) updateMsg.value = '发现新版本 v' + r.latest + '（当前 v' + r.current + '），可在插件市场更新'
       else updateMsg.value = '已是最新版本'
     })
     .catch((err: any) => {
@@ -2739,6 +2744,18 @@ function doCheckUpdate(force: boolean) {
 }
 function openHomepage() {
   services.openExternal?.('https://github.com/Berge520/Balance-Whale-Widget')
+}
+// 跳 uTools 插件应用市场并搜索本插件（走「管理中心 → 插件应用市场 → 搜一搜」那条路径）。
+// 原理：utools.redirect(label) 在已装插件里查不到该指令名时，底座会提示「未找到功能…已为您跳转
+// 插件市场搜索」并自动打开市场搜索页 —— 这是官方文档写明的降级行为，正好用来做「去市场搜索」。
+// 坑：redirect 按前缀匹配指令名，本插件 cmds 含「小鲸鱼」「小鲸鱼余额」「余额挂件」等，
+// 所以「小鲸鱼余额挂件」会被「小鲸鱼余额」吃掉、直接打开本插件。必须用不撞任何 cmd 前缀的词：
+// 这里传「鲸鱼余额挂件」（以「鲸」开头），实测能稳定落到市场搜索分支并搜到本插件。
+// 若底座版本过旧不支持（返回 false），兜底用系统浏览器打开市场搜索页。
+const MARKET_SEARCH_KEYWORD = '鲸鱼余额挂件'
+function marketSearch() {
+  const ok = services.redirectToMarket?.(MARKET_SEARCH_KEYWORD)
+  if (!ok) services.openExternal?.('https://www.u-tools.cn/plugins/?keyword=' + encodeURIComponent(MARKET_SEARCH_KEYWORD))
 }
 // 教程里的链接用系统浏览器打开，避免在插件窗口内导航
 function openDoc(url: string) {
@@ -2830,6 +2847,18 @@ function applyConfig(c: any) {
     ? c.ghAccelIps.filter((it: any) => it && typeof it === 'object').map((it: any) => ({ domain: String(it.domain || ''), ip: String(it.ip || '') }))
     : []
   cfg.ghAccelRefreshedAt = typeof c.ghAccelRefreshedAt === 'number' && c.ghAccelRefreshedAt > 0 ? c.ghAccelRefreshedAt : 0
+  // 来源开关 + 两段顺序。这里**必须整对象回填**（order 与 sources 都不能漏）：
+  // AccelView 的来源顺序取自 props.cfg.ghAccelSrc.order、源表顺序取自 .sources，
+  // 漏回填的话点「上移 / 下移」落盘后父级 cfg 不变，子组件拿到的 props 仍是旧顺序 ——
+  // 表现就是「点了没反应」，而宿主侧读的也是这份 cfg，刷新时同样按旧顺序走
+  const gs = c.ghAccelSrc && typeof c.ghAccelSrc === 'object' ? c.ghAccelSrc : {}
+  cfg.ghAccelSrc = {
+    doh: gs.doh !== false,
+    community: gs.community !== false,
+    manual: gs.manual !== false,
+    sources: Array.isArray(gs.sources) ? gs.sources.filter((s: any) => typeof s === 'string') : [],
+    order: Array.isArray(gs.order) ? gs.order.filter((s: any) => typeof s === 'string') : [],
+  }
   // 通知渠道：系统通知默认开（沿用旧行为）；邮件通知的服务器/授权码不在这里（走 secrets）
   cfg.notifySystemOn = c.notifySystemOn !== false
   cfg.notifyMailOn = c.notifyMailOn === true
@@ -4596,9 +4625,12 @@ onUnmounted(() => {
         <button class="secondary" :disabled="updateChecking" @click="doCheckUpdate(true)">
           {{ updateChecking ? '检查中…' : '立即检查更新' }}
         </button>
+        <button class="secondary" @click="marketSearch">插件市场</button>
         <button class="secondary" @click="openHomepage">项目主页</button>
       </div>
-      <p v-if="updateMsg" class="msg" :class="updateResult && updateResult.ok ? 'ok' : 'err'">{{ updateMsg }}</p>
+      <p v-if="updateMsg" class="msg" :class="[updateResult && updateResult.ok ? 'ok' : 'err', hasUpdate ? 'clickable' : '']"
+         :title="hasUpdate ? '点击前往插件市场更新' : ''"
+         @click="hasUpdate && marketSearch()">{{ updateMsg }}</p>
       <p class="hint">开启后每次呼出插件自动检查一次（12 小时内最多一次），发现新版本会弹出系统通知。</p>
 
       <div class="fold">
@@ -5049,6 +5081,11 @@ input[type='checkbox'] {
 }
 .msg.err {
   color: var(--err);
+}
+/* 有新版本时结果行可点，直接去插件市场更新 */
+.msg.clickable {
+  cursor: pointer;
+  text-decoration: underline;
 }
 .link-btn {
   margin-top: 10px;

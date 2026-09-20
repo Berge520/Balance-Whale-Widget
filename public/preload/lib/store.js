@@ -38,6 +38,44 @@ function normGhAccelRefreshedAt(v) {
   return typeof v === 'number' && isFinite(v) && v > 0 ? Math.round(v) : 0
 }
 
+// GitHub 加速「IP 获取来源」开关归一化：doh = DoH 实时解析、community = 社区源表、
+// manual = 手填/现有 IP 表。三者**默认全开**（= 改动前的固定候选链行为，老用户配置里没有
+// 这个键时按默认走，行为与升级前完全一致，不产生意外变化）。
+// 用 !== false 而非 === true：只有这样「缺省 / 非布尔」才会落到 true 一侧。
+function normGhAccelSrc(v) {
+  const o = v && typeof v === 'object' ? v : {}
+  return {
+    doh: o.doh !== false,
+    community: o.community !== false,
+    manual: o.manual !== false,
+    // 社区源表的**先后顺序**（用户自定义优先级）。空数组 = 用 hosts.js 的默认顺序
+    // （GH_IPS_SOURCES 原序）。这里只做「字符串数组 + 去重」，不去校验 URL 是否已知 ——
+    // 已知源清单是 hosts 模块的领域知识，校验在 hosts.normSources 里做
+    sources: normStrList(o.sources),
+    // 来源层的**候选链顺序**（doh / community / manual 谁在前）。
+    // 必须单独存一个键：sources 是扁平数组、混着 'community:<url>' 子项，hosts 侧要从里面
+    // 拆出「来源顺序」就得知道怎么过滤，两处约定容易走岔（旧版就是只存 sources 而没人往里
+    // 找顺序，refreshIps / filterReachable 拿到的 order 恒为 undefined，一律退回写死的默认
+    // 顺序 —— 用户怎么调「上移 / 下移」都不生效）。顺序在这里只做「字符串去重」，
+    // 合法性（只认三个 key、缺失补末尾）由 hosts.normSrcOrder 兜底
+    order: normStrList(o.order),
+    // 用户自定义源 URL 清单。同样只做「字符串数组 + 去重」，**URL 合法性由
+    // hosts.normCustomSources 校验**（是否 http(s)、是否合法绝对 URL、数量上限）：
+    // 配置可被手改 / 从备份恢复，这里放行任何字符串等于让一个随便的串被直接 fetch
+    customSources: normStrList(o.customSources),
+  }
+}
+// 字符串数组归一化：去非字符串、去空串，保序去重
+function normStrList(v) {
+  if (!Array.isArray(v)) return []
+  const out = []
+  for (const s of v) {
+    const t = typeof s === 'string' ? s.trim() : ''
+    if (t && !out.includes(t)) out.push(t)
+  }
+  return out
+}
+
 // ──────────────────────────────────────────────
 // 密钥
 // ──────────────────────────────────────────────
@@ -587,6 +625,8 @@ function readConfig() {
     ghAccelOn: p.ghAccelOn === true,
     ghAccelIps: normIps(p.ghAccelIps),
     ghAccelRefreshedAt: normGhAccelRefreshedAt(p.ghAccelRefreshedAt),
+    // IP 获取来源开关（doh / community / manual），默认全开
+    ghAccelSrc: normGhAccelSrc(p.ghAccelSrc),
     // 通知渠道：系统通知（默认开，沿用旧行为）+ 邮件通知（默认关，需先配好 SMTP）。
     // 邮件凭据（服务器/端口/账号/授权码）不在配置里，见 readSecretMail —— 只这里存「非敏感」的收发件人与信头
     notifySystemOn: p.notifySystemOn !== false,
@@ -668,6 +708,7 @@ function writeConfig(cfg) {
     ghAccelOn: cfg.ghAccelOn === true,
     ghAccelIps: normIps(cfg.ghAccelIps),
     ghAccelRefreshedAt: normGhAccelRefreshedAt(cfg.ghAccelRefreshedAt),
+    ghAccelSrc: normGhAccelSrc(cfg.ghAccelSrc),
     notifySystemOn: cfg.notifySystemOn !== false,
     notifyMailOn: cfg.notifyMailOn === true,
     mailFrom: String(cfg.mailFrom || '').trim().slice(0, 200),
@@ -783,6 +824,18 @@ function patchConfig(patch) {
   if (p.ghAccelOn !== undefined) cfg.ghAccelOn = !!p.ghAccelOn
   if (p.ghAccelIps !== undefined) cfg.ghAccelIps = normIps(p.ghAccelIps)
   if (p.ghAccelRefreshedAt !== undefined) cfg.ghAccelRefreshedAt = normGhAccelRefreshedAt(p.ghAccelRefreshedAt)
+  // 来源开关与顺序：只覆盖显式传入的键，未传入的保持原值（前端可能只改其中一项）
+  if (p.ghAccelSrc !== undefined) {
+    const s = p.ghAccelSrc && typeof p.ghAccelSrc === 'object' ? p.ghAccelSrc : {}
+    cfg.ghAccelSrc = normGhAccelSrc({
+      doh: s.doh === undefined ? cfg.ghAccelSrc.doh : s.doh,
+      community: s.community === undefined ? cfg.ghAccelSrc.community : s.community,
+      manual: s.manual === undefined ? cfg.ghAccelSrc.manual : s.manual,
+      sources: s.sources === undefined ? cfg.ghAccelSrc.sources : s.sources,
+      order: s.order === undefined ? cfg.ghAccelSrc.order : s.order,
+      customSources: s.customSources === undefined ? cfg.ghAccelSrc.customSources : s.customSources,
+    })
+  }
   // 通知渠道开关 + 邮件的非敏感字段（SMTP 服务器/授权码走 saveMailSecrets，不经这里）
   if (p.notifySystemOn !== undefined) cfg.notifySystemOn = !!p.notifySystemOn
   if (p.notifyMailOn !== undefined) cfg.notifyMailOn = !!p.notifyMailOn

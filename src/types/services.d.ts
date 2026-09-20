@@ -112,6 +112,12 @@ export interface WhaleConfig {
   ghAccelIps: Array<{ domain: string; ip: string }>
   // 上次成功刷新 IP 表的时间戳（epoch ms；0 = 从未刷新过，设置页据此提示表龄）
   ghAccelRefreshedAt: number
+  // IP 获取来源开关：doh = DoH 实时解析、community = 社区源表、manual = 手填/现有 IP 表。
+  // 三者默认全开（= 升级前的固定候选链行为）；全关时拒绝开启并提示。
+  // 来源开关 + 两段顺序：order 是来源层的候选链顺序（doh / community / manual 谁在前，
+  // 空数组 = 用内置默认顺序），sources 是社区源表内部的源顺序（'community:<url>' 前缀），
+  // 两者互不影响、各自独立落盘
+  ghAccelSrc: { doh: boolean; community: boolean; manual: boolean; sources: string[]; order: string[] }
   // 通知渠道：系统通知（默认开）+ 邮件通知（默认关，需先在「提醒与通知」卡里配好 SMTP）
   notifySystemOn: boolean
   notifyMailOn: boolean
@@ -681,11 +687,11 @@ export interface GhAccelTrace {
   dohResolvers: string[]
   // DoH 实时解析出的逐域名 IP（并集，未过探测）；只含配置了实时解析的域名（主站 + 高频入口）
   dohByDomain: Record<string, string[]>
-  // 上面每个 IP 具体由哪家 DoH 解析出（Cloudflare / Google），支撑「来源」列点名到厂商
+  // 上面每个 IP 具体由哪家 DoH 解析出（阿里 DNS / Cloudflare / Google），支撑「来源」列点名到厂商
   dohOrigin: Record<string, string>
   // 刷新用到的社区源 URL（GitHub520 主源或镜像），空 = 本次没刷新
   refreshUrl: string
-  // 每个域名最终选中的 IP + 来源（带具体出处，如「DoH 实时解析 · Cloudflare」「社区源表 · raw.hellogithub.com」）
+  // 每个域名最终选中的 IP + 来源（带具体出处，如「DoH 实时解析 · 阿里 DNS」「社区源表 · raw.hellogithub.com」）
   byDomain: Record<string, { ip: string; source: string }>
 }
 // 一次 GitHub 加速操作（开启 / 关闭 / 刷新 / 校验 / 检测）的步骤记录，供「GitHub 加速日志」回看
@@ -725,6 +731,9 @@ export interface GhAccelRefreshResult {
   updated?: Array<{ domain: string; ip: string }>
   total?: number
   skipped?: number
+  // 候选链给的 IP 探测不通的条数；unreachable 中旧值复验也不通、最终未写入的条数看 dropped
+  unreachable?: number
+  dropped?: number
   error?: string
 }
 // 连通性自检结果：ms = 往返耗时，status = HTTP 状态
@@ -928,6 +937,8 @@ export interface WhaleServices {
   getVersion(): string
   checkUpdate(force?: boolean): Promise<UpdateCheckResult>
   openExternal(url: string): boolean
+  // 让 uTools 底座跳「插件应用市场」并搜索关键词；返回 false 表示底座不支持，需调用方兜底
+  redirectToMarket(keyword: string): boolean
   // __live: 拖动滑块中的实时预览，只改窗口几何，不写存储
   saveConfig(patch: Partial<WhaleConfig> & { __live?: boolean }): WhaleConfig
   getSecrets(): WhaleSecrets
@@ -1036,6 +1047,15 @@ export interface WhaleServices {
   ghAccelStatus(): Promise<GhAccelStatus>
   // 最近一次 IP 获取的来源追踪（内存态）：每个域名最终 IP 从哪来（DoH/社区源表/当前表/快照/兜底）
   ghAccelTrace(): GhAccelTrace
+  // 可选的社区源表清单（含默认顺序 / 当前生效顺序）：设置页「自定义源表优先级」按它渲染，
+  // 前端不抄一份 URL，避免随版本漂移。
+  // custom 是宿主校验后的自定义源（设置页贴的 URL 是否被接受以这份为准）、max 是数量上限
+  ghAccelSources(): {
+    all: Array<{ url: string; host: string; custom?: boolean }>
+    order: string[]
+    custom?: string[]
+    max?: number
+  }
   // 块之外已存在的目标域名条目（其它工具也写 hosts 时会覆盖本插件，提示先关掉对方）
   ghAccelScanConflicts(): Promise<GhAccelConflict[]>
   // 开启：refresh=true 时先静默刷新 GitHub520 并逐 IP 探测，只写当前网络可达的；

@@ -105,7 +105,8 @@ try {
       if (readConfig().updateCheckOn) {
         checkUpdate(false).then((r) => {
           if (r && r.ok && r.fresh && r.hasUpdate) {
-            notify('小鲸鱼余额挂件有新版本 v' + r.latest + '（当前 v' + r.current + '）', readConfig())
+            // 文案与设置页「立即检查更新」的结果行保持一致，都指向插件市场更新
+            notify('发现新版本 v' + r.latest + '（当前 v' + r.current + '），可在插件市场更新', readConfig())
           }
         })
       }
