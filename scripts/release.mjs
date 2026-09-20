@@ -22,7 +22,7 @@
  * 边界：uTools 市场的 .upx 仍需人工在开发者工具里打包上传，脚本只到 GitHub Release 为止。
  */
 import { spawnSync } from 'node:child_process'
-import { readFileSync, writeFileSync, unlinkSync } from 'node:fs'
+import { readFileSync, writeFileSync, rmSync, mkdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import os from 'node:os'
@@ -32,14 +32,14 @@ const dryRun = process.argv.includes('--dry-run')
 const versionArg = process.argv.slice(2).find((a) => !a.startsWith('--'))
 
 // ── 小工具 ──
-// Windows 下 gh / git 是 .cmd 或 .exe，execFileSync 直接调用需要 shell；
 // Windows 下 gh / git / npm 是 .cmd 或 .exe，直接 spawn 不带 shell 会 ENOENT，
 // 所以命令拼成整条字符串交给系统 shell —— 注意此时不能再给 shell 传参数数组
 // （Node 24 起会报 DEP0190），参数已经在字符串里拼好了。
 function run(cmd, args, opts = {}) {
   const line = [cmd, ...args].join(' ')
-  if (opts.echo !== false) console.log(`  $ ${line}`)
-  const r = spawnSync(line, { cwd: root, stdio: 'inherit', shell: true, ...opts })
+  const { echo = true, ...spawnOpts } = opts
+  if (echo) console.log(`  $ ${line}`)
+  const r = spawnSync(line, { cwd: root, stdio: 'inherit', shell: true, ...spawnOpts })
   if (r.status !== 0) throw new Error(`命令失败（exit ${r.status}）：${line}`)
 }
 
@@ -60,9 +60,12 @@ function sleep(ms) {
 }
 
 function fail(msg) {
-  console.error(`\n[release] ✗ ${msg}\n`)
-  process.exit(1)
+  // 注意：这里不能直接 process.exit —— process.exit 不会执行外层的 finally，
+  // 临时消息文件就留在 .git 里了（实测确认过）。抛错让 main 的 finally 正常收尾。
+  throw new ReleaseError(msg)
 }
+
+class ReleaseError extends Error {}
 
 function step(title) {
   console.log(`\n[release] ── ${title} ──`)
@@ -70,6 +73,8 @@ function step(title) {
 
 const readJson = (rel) => JSON.parse(readFileSync(path.join(root, rel), 'utf8'))
 const pkgPath = path.join(root, 'package.json')
+// 临时消息文件统一放这里，连同 finally 清理，避免失败中断时留下垃圾
+const tmpDir = path.join(root, '.git', 'whale-release-tmp')
 
 // ── 版本号比较（只认 x.y.z，够用了） ──
 function parseVer(v) {
@@ -84,6 +89,21 @@ function gt(a, b) {
 }
 
 // ── 1. 前置检查 ──
+// 整个流程包在 try 里，只为 finally 清掉中间写出的临时消息文件：
+// 这里的每一步都可能 fail() 中断，散落的清理语句会被跳过。
+function main() {
+let cleaned = false
+const cleanup = () => {
+  if (cleaned) return
+  cleaned = true
+  try {
+    rmSync(tmpDir, { recursive: true, force: true })
+  } catch {
+    // 清理失败无所谓（.git 下不影响仓库内容），不能让收尾把真正的错误盖掉
+  }
+}
+
+try {
 step('前置检查')
 
 const curVersion = readJson('package.json').version
@@ -93,8 +113,10 @@ const vNext = parseVer(nextVersion)
 if (!vNext) fail(`版本号格式不对：${nextVersion}（要求 x.y.z）`)
 
 const vCur = parseVer(curVersion)
-if (versionArg && vCur && !gt(vNext, vCur)) {
-  fail(`新版本 ${nextVersion} 必须大于当前 ${curVersion}`)
+// 相等要放行：--dry-run 会真的把 version 写进 package.json，之后正式发同一个版本号时
+// 「next == cur」是预期状态。只有「next < cur」（想发一个更旧的版本）才是错误。
+if (versionArg && vCur && gt(vCur, vNext)) {
+  fail(`新版本 ${nextVersion} 小于当前 ${curVersion}，不能往回发`)
 }
 
 // 工作区必须干净：发版 commit 只应包含版本号与文档改动，混进别的改动会让「这一版发了什么」说不清
@@ -143,7 +165,9 @@ if (dryRun) {
 // ── 2. 写版本号 ──
 step(`写版本号 ${nextVersion}`)
 const pkgRaw = readFileSync(pkgPath, 'utf8')
-const pkgNext = pkgRaw.replace(/("version"\s*:\s*")([^"]*)(")/, `$1${nextVersion}$3`)
+// 锚定行首两个空格的顶层字段：不加锚点会改到「第一个出现的 version 键」，
+// 万一将来 package.json 里先出现别的（如某个嵌套配置的 version）就会改错地方。
+const pkgNext = pkgRaw.replace(/^( {2}"version": ")([^"]*)(")/m, `$1${nextVersion}$3`)
 if (pkgNext === pkgRaw && curVersion !== nextVersion) {
   fail('package.json 里没找到可替换的 version 字段')
 }
@@ -160,30 +184,37 @@ console.log('\n  ✓ 四关全绿')
 
 if (dryRun) {
   console.log('\n[release] --dry-run 结束：以上改动（package.json / plugin.json / constants.js）未提交，请自行决定是否保留\n')
-  process.exit(0)
+  // 用 return 而不是 process.exit：process.exit 会跳过 finally（同 fail() 那条注释）。
+  // 此刻临时目录虽然还没建，但依赖「它恰好没建」太脆，统一走正常收尾。
+  return
 }
 
 // ── 4. 建 release commit（正文取自 README 章节） ──
 step(`建 release commit`)
 
-// 抽出「### <版本>」到下一个「##」或「###」之前的内容，剥掉「**小标题**」这类 markdown 强调
+// 抽出「### <版本>」到下一个「##」或「###」之前的内容，剥掉「**小标题**」这类 markdown 强调。
+// 必须先把 CRLF 归一成 LF：README 在 Windows 上是 CRLF，每行末尾的 \r 会被原样写进
+// commit / tag 消息（git 存进对象时只保留 \n，于是回读比对永远对不上，正文里也会多出
+// 看不见的回车）。归一后正文在两种行尾的仓库里都一致。
 const bodyStart = readme.search(sectionRe)
 const afterHead = readme.slice(bodyStart).indexOf('\n') + bodyStart + 1
 const rest = readme.slice(afterHead)
 const nextHead = rest.search(/^#{2,3} /m)
-const rawBody = (nextHead >= 0 ? rest.slice(0, nextHead) : rest).trim()
+const rawBody = (nextHead >= 0 ? rest.slice(0, nextHead) : rest)
+  .replace(/\r\n?/g, '\n')
+  .trim()
 const body = rawBody.replace(/\*\*/g, '').replace(/^-\s*/gm, '- ')
 
 // 标题取「### <版本>」章节里第一行「**XXX**」小标题，没有就用版本号
 const firstLabel = /\*\*(.+?)\*\*/.exec(rawBody)
 const title = `chore: 发布 v${nextVersion} - ${firstLabel ? firstLabel[1] : '版本发布'}`
 
-const msgPath = path.join(root, '.git', `COMMIT_MSG_V${nextVersion.replace(/\./g, '')}.txt`)
+const msgPath = path.join(tmpDir, `COMMIT_MSG_V${nextVersion.replace(/\./g, '')}.txt`)
+mkdirSync(tmpDir, { recursive: true })
 writeFileSync(msgPath, `${title}\n\n${body}\n`, 'utf8')
 
 run('git', ['add', '-A'])
 run('git', ['commit', '-F', path.relative(root, msgPath)])
-unlinkSync(msgPath)
 
 // ── 5. push main → 等 CI → tag ──
 step('推送 main 并等 CI')
@@ -199,7 +230,17 @@ run('gh', ['run', 'watch', ciRun, '--exit-status', '--interval', '15'])
 console.log('  ✓ CI 全绿')
 
 step(`打附注 tag v${nextVersion}`)
-run('git', ['tag', '-a', `v${nextVersion}`, '-m', `v${nextVersion}\n\n${body}`])
+// 正文含换行，不能拼进命令行：system shell（Windows 上是 cmd）拿到含换行的
+// 整条命令时只取第一行执行，后半段会被当成新命令 —— 实测只会得到
+// 「v1.6.3」这一行的 tag 消息，多行正文静默丢失。改用 -F 从文件读。
+const tagMsgPath = path.join(tmpDir, `TAG_MSG_V${nextVersion.replace(/\./g, '')}.txt`)
+writeFileSync(tagMsgPath, `v${nextVersion}\n\n${body}\n`, 'utf8')
+run('git', ['tag', '-a', `v${nextVersion}`, '-F', path.relative(root, tagMsgPath)])
+// 回读校验：正文丢失是静默的（tag 照样建成功），只能建完再看一眼
+const tagMsg = capture('git', ['cat-file', 'tag', `v${nextVersion}`], { allowFail: true })
+if (tagMsg.status !== 0 || !tagMsg.out.includes(body.split('\n')[0])) {
+  fail('tag 消息与预期不符（正文可能没写进去）；先 git tag -d v' + nextVersion + ' 删掉再重试')
+}
 run('git', ['push', 'origin', `v${nextVersion}`])
 
 // ── 6. 等 Release 并核对资产 ──
@@ -223,7 +264,9 @@ console.log(`  ✓ 资产 ${zipName}  ${(asset.size / 1024).toFixed(1)} KB`)
 // zip 内部结构核对：plugin.json 必须在顶层且版本号对得上，preload 必须原样在（不打包不压缩）
 const zipDir = path.join(os.tmpdir(), `whale-release-${nextVersion}`)
 const verifyScript = path.join(root, 'scripts', 'verify-release-zip.mjs')
-run('node', [verifyScript, zipDir, zipName, nextVersion], { echo: true })
+// zipDir 必须加引号：run() 是把参数拼成一条命令交给 shell 的，路径含空格时
+// （用户名目录就是常见情况，如 C:\Users\Some User\...）会被拆成两个参数，位置全错位。
+run('node', [verifyScript, `"${zipDir}"`, zipName, nextVersion])
 
 console.log(`
 [release] ✓ v${nextVersion} 发布完成
@@ -233,6 +276,23 @@ console.log(`
    1. 在 uTools 开发者工具里把入口指向 dist/，重新加载插件验证
    2. 要上架的话，开发者工具里打包 .upx 上传插件市场
 `)
+} finally {
+  cleanup()
+}
+}
+
+// 收尾统一在这里：fail() 抛 ReleaseError 上来，非预期异常原样打印堆栈以便定位。
+// 放在 main 之外，保证 finally 已执行完（临时文件清干净）才退出进程。
+try {
+  main()
+} catch (e) {
+  if (e instanceof ReleaseError) {
+    console.error(`\n[release] ✗ ${e.message}\n`)
+  } else {
+    console.error(`\n[release] ✗ 未预期错误：\n`, e)
+  }
+  process.exitCode = 1
+}
 
 // ── 辅助：轮询等某个 head 的工作流出现 ──
 // gh run list 的 databaseId 是数字，用 --json 解析避免科学计数法；轮询是因为
