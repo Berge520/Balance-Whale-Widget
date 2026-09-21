@@ -298,11 +298,11 @@ function codexSummary() {
       }
     }
   }
-  // 近 7 天明细
-  const days7 = []
-  for (let i = 0; i < 7; i++) {
+  // 近 31 天明细（索引 0 是今天；设置页按 7/14/30 档位取尾部渲染，切档不重扫）
+  const days31 = []
+  for (let i = 0; i < 31; i++) {
     const d = dayAdd(today, -i)
-    days7.push({ date: d, tokens: (byDay[d] && byDay[d].tokens) || 0, turns: (byDay[d] && byDay[d].turns) || 0 })
+    days31.push({ date: d, tokens: (byDay[d] && byDay[d].tokens) || 0, turns: (byDay[d] && byDay[d].turns) || 0 })
   }
   memo = {
     ok: true, home, sessions: files.length, changed,
@@ -310,7 +310,7 @@ function codexSummary() {
     skipped, deferred,
     todayTokens, monthTokens, totalTokens,
     outTokens, reasonTokens, cachedTokens, turns,
-    days7, byModel,
+    days31, byModel,
     // 订阅窗口（5h / 周）：只有日志里带值的 rate_limits（ChatGPT 订阅 provider）才有内容，
     // API-key 计费或无订阅时为 null，设置页据此不渲染这一行
     windows: normalizeCodexRateLimits(bestRl, bestRlTs),

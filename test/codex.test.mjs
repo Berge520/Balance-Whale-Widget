@@ -220,10 +220,10 @@ test('今日 / 本月 token 按本地时区归日', () => {
   const r = codex.codexSummary()
   assert.equal(r.totalTokens, 800, '总额含跨天文件')
   assert.equal(r.todayTokens, 300, '只有今天的那个计入今日')
-  // days7 是按「今天 → 往前 6 天」push 的，首位才是今天（不是末位）
-  assert.equal(r.days7[0].date, todayKey())
-  assert.equal(r.days7[0].tokens, 300)
-  assert.equal(r.days7.length, 7)
-  // 昨天那 500 应落在 days7[1]
-  assert.equal(r.days7[1].tokens, 500)
+  // days31 是按「今天 → 往前 30 天」push 的，首位才是今天（不是末位）
+  assert.equal(r.days31[0].date, todayKey())
+  assert.equal(r.days31[0].tokens, 300)
+  assert.equal(r.days31.length, 31)
+  // 昨天那 500 应落在 days31[1]
+  assert.equal(r.days31[1].tokens, 500)
 })

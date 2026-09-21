@@ -75,8 +75,8 @@ uTools 插件：呼出后在桌面创建一个**透明、无边框、置顶**的
   | `lib/bubbles.js` | 自定义**气泡图片**（点小鲸鱼抽到「动图组」时随机显示一张）：导入（**原图不裁剪不重编码**，复制进 `userData/whale-bubbles/`）、删除、整组清除、读成 base64 data URL 数组。**没有「当前用哪张」**（有图就随机抽，删光回退内置 `rua.gif`），最多 8 张，推送总量上限 20MB |
   | `lib/assets.js` | 素材包：把导入的形象、气泡图与音效打包成 `.whaleassets` 单文件（魔数 + JSON 清单 + 平铺字节，见第六节），导入预览与按项写入 |
   | `lib/backup.js` | 备份导出（凭据可选 scrypt + AES-256-GCM 加密）、导入预览、按项同名覆盖恢复 |
-  | `lib/codex.js` | Codex 本地会话统计：扫 `$CODEX_HOME`（或 `~/.codex`）下 `sessions/` 与 `archived_sessions/` 的 `rollout-*.jsonl`，按累计量差值聚合出今日/本月/累计 token 与各模型用量，并从 `token_count` 事件的 `payload.rate_limits` 里取**订阅窗口**（5h / 周）快照；增量解析缓存落 `whale:codex`。**纯本地读取、不联网、不持有凭据** |
-  | `lib/dsh-usage.js` | dsh 本地用量统计：读 `$DSH_HOME`（或 `~/.dsh`）下的用量数据，优先 `dsh-usage/usage-ledger.json`（按天 × provider × model 的 token/cost），账本为空时回落到 `storages/session_projcache/sessions/*.json`（按会话创建日聚合），另附 `dsh-usage/provider-snapshots.json` 的余额快照；增量解析缓存落 `whale:dshUsage`。**纯本地读取、不联网、不持有凭据** |
+  | `lib/codex.js` | Codex 本地会话统计：扫 `$CODEX_HOME`（或 `~/.codex`）下 `sessions/` 与 `archived_sessions/` 的 `rollout-*.jsonl`，按累计量差值聚合出今日/本月/累计 token 与各模型用量，并从 `token_count` 事件的 `payload.rate_limits` 里取**订阅窗口**（5h / 周）快照；返回 `days31`（近 31 天逐日，索引 0 是今天）供设置页按档位切片；增量解析缓存落 `whale:codex`。**纯本地读取、不联网、不持有凭据** |
+  | `lib/dsh-usage.js` | dsh 本地用量统计：读 `$DSH_HOME`（或 `~/.dsh`）下的用量数据，优先 `dsh-usage/usage-ledger.json`（按天 × provider × model 的 token/cost），账本为空时回落到 `storages/session_projcache/sessions/*.json`（按会话创建日聚合），另附 `dsh-usage/provider-snapshots.json` 的余额快照；返回 `days31`（近 31 天逐日，索引 0 是今天）供设置页按档位切片；增量解析缓存落 `whale:dshUsage`。**纯本地读取、不联网、不持有凭据** |
   | `lib/widget.js` | 悬浮窗创建/销毁/几何/缩放/**任务栏显隐跟随**/推送 |
   | `lib/ipc.js` | 悬浮窗 ↔ 宿主 IPC 路由 |
   | `lib/settings.js` | 对外 `window.services` |
@@ -494,7 +494,18 @@ DOM：`.dshwv-root`（定位：在窗口内**居中**，四周各留 `--whale-pa
 - **「挂件窗口」v1.4.0 新增**：**窗口透明度**滑块（20–100%，`@input` 走 `saveConfig({opacity,__live:true})` 实时预览、`@change` 持久化）+ **鼠标穿透**开关（下方一行说明 + 「复制「穿透」指令名 / 新增「穿透」快捷键」两个按钮，`copyHotkeyCmd('切换鼠标穿透')` / `addHotkey('切换鼠标穿透')`）。
 - **「用量与账本」v1.4.0 新增（校准）**：`todayAdjust > 0` 时在图表下方提示「今日另有 ¥x 余额变动未计入用量（原因，时间）」；记账模式下显示「校准今日已用」输入框 + 按钮（`calibrateTodayUsage(amount)`，空值/负数拦截，成功后刷新趋势；令牌模式改为一行说明，不显示入口）。
 - **音色「自定义」v1.4.0 新增，v1.5.0 加试听与裁剪**：选「自定义」而尚未导入按压音时下方给一行提示，指向「资源」Tab（当前会回退「小黄鸭」）；**素材的导入 / 试听 / 删除统一在「资源」Tab 里**（含两段式裁剪的完整细节，见上）。**试听**用 `getSoundData()` 拉 base64 → `new Audio(dataUrl)` 播放，`volume = cfg.vol`（与挂件同音量），再点先停上一段（模块级 `previewAudio`），`play()` 被拒时提示「试听失败」。
-- **「DeepSeek Harness（dsh）」卡片**（「开发者」Tab，v1.5.0 整理后独占一组）：注册源 / 版本（默认「自动」＝安装、更新时取 latest，可固定具体版本；先「查询可用版本」再选，下拉里标出**已安装**项）/ Node.js 目录（「选择目录」或「改为自动探测」）/ 启动带 `--no-open` / 更新前重新下载 / uTools 退出后是否保留 dsh；展示插件目录 / 全局安装（只读时标注「更新会弹一次 UAC」）/ 实际使用（含 `source`）/ 最新 / 状态与最近命令 / 页面地址，支持复制地址、查看/复制日志、刷新状态，以及「删除插件目录里的 dsh」「清理 npx 旧缓存」两个维护按钮。
+- **「DeepSeek Harness（dsh）」卡片**（「开发者」Tab，v1.5.0 整理后独占一组）：注册源 / 版本（默认「自动」＝安装、更新时取 latest，可固定具体版本；先「查询可用版本」再选）/ Node.js 目录（「选择目录」或「改为自动探测」）/ 启动带 `--no-open` / 更新前重新下载 / uTools 退出后是否保留 dsh；展示插件目录 / 全局安装（只读时标注「更新会弹一次 UAC」）/ 实际使用（含 `source`）/ 状态与最近命令 / 页面地址，支持「删除插件目录里的 dsh」「清理 npx 旧缓存」两个维护按钮。
+  - **卡内分两折叠**：**「诊断信息（版本 / 命令 / 地址 / 日志）」**（`dshFolds.versions`）含「实际使用 / 全局安装 / 插件目录 / npm latest」四行、「最近命令」「页面地址」两行，以及「查询可用版本 / 复制全局路径 / 复制插件路径 / 复制地址 / 查看日志 / 清空日志 / 复制日志」按钮与日志框；**「高级选项」**含版本 / 注册源 / Node.js 目录三个设置项 + 三个行为开关。**只读诊断与可写配置分离**：卡内常显区只留状态行 + 启停按钮 + 外部进程/端口提示 + 错误与成功提示，「刷新状态」这类只读动作一律不进「高级选项」。
+  - **展开诊断折叠即自动查版本**（`dshToggleVersions()`）：尚无 `versions.latest` 时自动调 `dshQueryVersions()`，「npm latest」行的兜底文案为「查询中…」。「npm latest」**不是「版本最大值」**，而是「点『更新』会装到的版本」（npm latest tag 指向的版本）——故界面不用「最新」这类易被误读成「版本最大」的措辞。
+  - **版本错位提示**（`dshVerMismatch`）：`dsh.hasUpdate` 为假（按 semver 不算升级）但**实际使用版本 ≠ npm latest** 时（典型：手动装过 alpha，latest 指向更旧的 rc），按钮行上方显示「当前 X 与 npm latest（Y）不同，点『更新』会替换为 Y」——点更新会**替换**成 latest，可能比在用的旧，这是「没提示就是已是最新」的盲区。`hasUpdate` 为真时不显示（升级情形已由状态行的 `dshLatestTip` 覆盖，避免重复）。
+  - **版本下拉的标记（`dshVersionOptions`）**：先把「同一个版本号上的各种标记」汇总再生成选项，避免边判边 push 时 `seen` 去重让先到的标记吃掉后面的。三个标记来源——**已安装**（判据是 `dsh.resolved` = **实际在用**那份，并按 `dsh.source` 细分「全局已安装」/「插件目录已安装」；**不能判 `dsh.installed`**，那是「插件目录那份」，全局安装时恒为空、选项上一个标记都不显示）、**已选**（`cfg.dshVersion`）、**latest 标签**（`versions.latest`）；同一版本号可能同时带多个标记（拼成 `1.6.0-alpha.2（全局已安装，latest 标签）`），有标记的版本优先提到列表前面。
+  - **查询提示会自行清掉**（`dshQueryVersions`）：宿主的 `dshListVersions` 是异步的，查询期间挂「正在查询可用版本…」，并挂 2s/5s/9s/12s 四个探测点 —— 每次先 `dshStatus()` 取快照，**取到 `versions.latest` 即清提示**（`dshStatus` 是通用轮询入口、成功时不碰 `dshFlash`，不在这里清就会一直挂着到下次操作）；用令牌 `dshQueryDone` 防止上一轮的兜底定时器清掉下一轮刚设的提示；只清「还是我发的那条」（比对 `DSH_QUERY_MSG`）以免覆盖用户等待期间其它操作的消息；12s 仍无结果则报红字超时（不再静默转圈）。
+  - **「更新」按钮按安装状态换文案**：`dsh.resolved || dsh.globalVersion` 都为空时显「安装」（此时宿主走的本来就是安装流程），否则「更新」。
+  - **状态轮询只在「开发者」Tab 激活时进行**（`watch(activeTab)` → `dshPolling.start()/stop()`）：dsh 是低频开发功能，停在其它 Tab 时不空转；首次进入补一次 deep 探测（识别外部终端里跑的 dsh），轮询本身为**浅探测**（`dshStatus(false)`，不再每次触发宿主异步探端口的那次 600ms 补读）。`onWindowActive` 也只在 dev Tab 下补 deep。初次 deep 探测的时机因此从 `onMounted` 挪到「首次切到 dev Tab」（`dshDeepOnce`）。
+- **「dsh 用量统计」/「Codex 会话统计」卡片**（「开发者」Tab）：**整卡默认收起**（`devFolds`，标题即开关，`toggleDevCard`），收起态标题右侧挂一行摘要。
+  - **首次「展开」才读取**（`devStatsLoaded` 每卡只置一次）：宿主是**同步**扫文件（Codex 会话日志可能几十 MB），不看不读——不想看的用户永远不付这次扫描成本，想看的人一展开即有数，不用再点一次「读取统计」。之后靠卡片里的「刷新」按钮，收起再展开不重扫（要强制重读用「清除缓存并重扫」）。
+  - **摘要不预读**（方案 A）：只有「本会话已展开读过」后才显示「今日 X tokens · 本月 Y」，没读过则显示「点击展开查看」——保证折叠 = 零预读。
+  - **图表档位 7 / 14 / 30 天**（复用「用量与账本」的 `.range-tabs` 样式，容器 `.range-tabs-row` 右对齐）：宿主 `dshUsageSummary()` / `codexSummary()` 一次返回 **`days31`**（31 天，索引 0 是今天），设置页按 `dshUsageRange` / `codexRange` 取尾部切片渲染，**切档不重新请求**；14 天以上套 `.chart-dense`，30 天档日期标签每 5 天抽一个（`dshUsageLabelEvery` / `codexLabelEvery`）。
 - **「数据与隐私」→「备份与恢复」**：`backupExport`（默认不含凭据；勾选后必须设密码，scrypt + AES-256-GCM 加密后才写入）/ `backupPick`（只解析预览、不写盘）/ `backupApply`（按勾选项**同名覆盖**，账本走 `mergeLedgerHistory`；恢复「设置」或「窗口位置」会重建挂件立即生效）/ `backupCancel`。「清除选中数据」的二次确认会列出**将清除哪些项**，并提示先导出备份。
 
 类型声明见 `src/types/services.d.ts`（`WhaleServices` 挂到 `Window.services`），`npm run typecheck`（`vue-tsc --noEmit`）校验。

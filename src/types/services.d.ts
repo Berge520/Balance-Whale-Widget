@@ -280,7 +280,8 @@ export interface CodexSummaryResult {
   reasonTokens?: number
   cachedTokens?: number
   turns?: number
-  days7?: { date: string; tokens: number; turns: number }[]
+  // 近 31 天明细（索引 0 是今天），设置页按 7/14/30 档位取尾部
+  days31?: { date: string; tokens: number; turns: number }[]
   byModel?: Record<string, { tokens: number; out: number; reason: number; cached: number; turns: number }>
   // 订阅窗口（5h / 周）：来自日志里的 rate_limits，只有 ChatGPT 订阅 provider 才有值
   windows?: CodexWindows | null
@@ -330,7 +331,8 @@ export interface DshUsageResult {
   costMonth?: number
   costTotal?: number
   costCurrency?: string
-  days7?: { date: string; tokens: number; cost: number; turns: number }[]
+  // 近 31 天明细（索引 0 是今天），设置页按 7/14/30 档位取尾部
+  days31?: { date: string; tokens: number; cost: number; turns: number }[]
   byModel?: Record<string, { tokens: number; in: number; cached: number; out: number; reason: number; turns: number; cost: number }>
   // dsh-usage 抓到的官方余额快照（可能为空）
   balance?: { provider: string; currency: string; amount: number; at: number } | null

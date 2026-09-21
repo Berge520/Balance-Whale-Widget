@@ -278,12 +278,12 @@ function dshUsageSummary() {
     reasonTokens += v.reason; turns += v.turns
   }
 
-  // 近 7 天明细（与 Codex 卡片一致：索引 0 是今天）
-  const days7 = []
-  for (let i = 0; i < 7; i++) {
+  // 近 31 天明细（与 Codex 卡片一致：索引 0 是今天；设置页按 7/14/30 档位取尾部渲染，切档不重扫）
+  const days31 = []
+  for (let i = 0; i < 31; i++) {
     const d = dayAdd(today, -i)
     const v = byDay[d]
-    days7.push({ date: d, tokens: v ? v.tokens : 0, cost: v ? v.cost : 0, turns: v ? v.turns : 0 })
+    days31.push({ date: d, tokens: v ? v.tokens : 0, cost: v ? v.cost : 0, turns: v ? v.turns : 0 })
   }
 
   memo = {
@@ -293,7 +293,7 @@ function dshUsageSummary() {
     inTokens, cachedTokens, outTokens, reasonTokens, turns,
     // cost 只对 DeepSeek 官方有值、单位为人民币（其它 provider 未定价恒为 0，故不会混币种）
     costToday, costMonth, costTotal, costCurrency: 'CNY',
-    days7, byModel,
+    days31, byModel,
     balance: snap.balance, spendWatch: snap.spendWatch,
   }
   memoAt = now

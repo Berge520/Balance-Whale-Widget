@@ -65,7 +65,7 @@ const TABS = [
   { key: 'window', label: '窗口', desc: '显隐 · 位置 · 透明度 · 穿透' },
   { key: 'data', label: '数据', desc: '凭据设置 · 清除数据 · 备份与恢复' },
   { key: 'help', label: '帮助', desc: '使用说明 · 故障排查 · 关于与更新' },
-  { key: 'dev', label: 'dsh', desc: 'DeepSeek Harness（dsh）· dsh 用量统计 · Codex 会话统计' },
+  { key: 'dev', label: '开发者', desc: 'DeepSeek Harness（dsh）· dsh 用量统计 · Codex 会话统计' },
 ] as const
 type TabKey = (typeof TABS)[number]['key']
 const activeTab = ref<TabKey>('look')
@@ -241,8 +241,14 @@ const dsh = reactive({
 const dshFlash: Flash = useFlash()
 const dshLogOpen = ref(false)
 const dshLogEl = ref<HTMLElement | null>(null)
-// 折叠区（默认收起，卡片更短）：高级选项 / 使用说明 / 故障排查
-const dshFolds = reactive({ advanced: false, help: false, trouble: false })
+// 折叠区（默认收起，卡片更短）：诊断信息 / 高级选项 / 使用说明 / 故障排查
+const dshFolds = reactive({ advanced: false, help: false, trouble: false, versions: false })
+// 诊断折叠展开时顺手查一次「最新版本」：版本明细都是只读诊断，展开本身就是「我想核对版本」的信号，
+// 此时查一次比让用户再点一次「查询可用版本」更省事。npm view 要联网、较慢，失败也不打断（dshQueryVersions 内部已兜底）
+function dshToggleVersions() {
+  dshFolds.versions = !dshFolds.versions
+  if (dshFolds.versions && !(dsh.versions && dsh.versions.latest)) dshQueryVersions()
+}
 const dshConfirm = ref('') // '' | 'remove-plugin' | 'clean-npx'
 const dshNow = ref(Date.now()) // 未就绪时的「已等待 x 秒」
 let dshTickTimer = 0
@@ -256,6 +262,18 @@ function dshTickSync(running: boolean, ready: boolean) {
 const dshLatestTip = computed(() => {
   if (!dsh.hasUpdate) return ''
   return '有新版本 ' + ((dsh.versions && dsh.versions.latest) || '') + '，点「更新」'
+})
+// 「实际使用」与「更新会装到的版本」是否一致。
+// 注意这是**另一个维度**、不是「谁更新」：手动装过 alpha / 指定过版本时，
+// npm latest 可能比在用的旧（如 latest=1.5.0-rc.2 而实际 1.6.0-alpha.2），
+// 此时按 semver「没有更新」（状态行的 dshLatestTip 不会出现），但点「更新」仍会把你**替换**成 latest。
+// 这句提示专门补这个盲区，避免用户以为「没提示就是已是最新」。
+const dshVerMismatch = computed(() => {
+  if (dsh.hasUpdate) return '' // 升级情形已由状态行的 dshLatestTip 覆盖，不重复
+  const latest = (dsh.versions && dsh.versions.latest) || ''
+  const cur = dsh.resolved || dsh.installed || ''
+  if (!latest || !cur || latest === cur) return ''
+  return '当前 ' + cur + ' 与 npm latest（' + latest + '）不同，点「更新」会替换为 ' + latest
 })
 function dshApply(s: any) {
   if (!s || typeof s !== 'object') return
@@ -324,8 +342,34 @@ function usePolling(fn: () => void, ms: number, immediate = false) {
   }
   return { start, stop }
 }
-// 打开/回到本页时自动探测并持续刷新 dsh 状态（每 4s）
-const dshPolling = usePolling(() => dshStatus(true), 4000)
+// 打开/回到本页时自动探测并持续刷新 dsh 状态（每 4s 浅探测）
+const dshPolling = usePolling(() => dshStatus(false), 4000)
+// dsh 状态只在「开发者」Tab 激活时轮询：dsh 是低频开发功能，用户停在其它 Tab 时没必要空转
+// （首次进入补一次 deep 探测，识别外部终端里跑的 dsh；启停操作另有 deep 补读，见 dshDo/dshQueryVersions）
+let dshDeepOnce = false
+watch(activeTab, (tab) => {
+  if (tab !== 'dev') {
+    dshPolling.stop()
+    return
+  }
+  if (!dshDeepOnce) {
+    dshDeepOnce = true
+    dshStatus(true)
+  }
+  dshPolling.start()
+})
+// 两张统计卡默认收起，首次「展开」时才读取：宿主是同步扫文件（会话日志可能几十 MB），
+// 不看不读，避免每次进开发者 Tab 都无条件付一次扫描成本；展开后即读，也不用手动再点一下。
+// 收起时摘要只在「本会话已读过」之后才显示（否则露「点击展开查看」），保证折叠 = 不预读。
+const devFolds = reactive({ dshUsage: false, codex: false })
+const devStatsLoaded = reactive({ dshUsage: false, codex: false })
+function toggleDevCard(key: 'dshUsage' | 'codex') {
+  devFolds[key] = !devFolds[key]
+  if (!devFolds[key] || devStatsLoaded[key]) return
+  devStatsLoaded[key] = true
+  if (key === 'dshUsage') dshUsageRefresh()
+  else codexRefresh()
+}
 // 启动/结束是同步返回；重启要等旧进程退出、更新要下载，之后再补一次状态
 function dshDo(action: 'start' | 'stop' | 'restart' | 'update') {
   try {
@@ -468,28 +512,60 @@ const dshBusy = computed(() => dsh.busy === 'update' || dsh.busy === 'versions' 
 // 版本下拉：「自动」＝安装/更新时取 latest；也可以固定成某个具体版本
 const dshVersionOptions = computed(() => {
   const list: string[] = (dsh.versions && dsh.versions.list) || []
+  const latest = (dsh.versions && dsh.versions.latest) || ''
+  // 先把「同一个版本号上的各种标记」汇总，再统一生成选项：
+  // 早前是边判边 push，去重会让先出现的标记吃掉后面的（如已在用又恰好是 latest，
+  // 就只剩一个标记），也导致全局安装时「已安装」完全不显示——那时判的是插件目录那份（installed）。
+  const marks: Record<string, string[]> = {}
+  const addMark = (v: string, m: string) => {
+    if (!v) return
+    if (!marks[v]) marks[v] = []
+    if (!marks[v].includes(m)) marks[v].push(m)
+  }
+  // 「已安装」要标在**实际在用**的那份上（resolved 优先全局，见宿主 snapshot）
+  if (dsh.resolved) addMark(dsh.resolved, dsh.source === 'global' ? '全局已安装' : '插件目录已安装')
+  if (cfg.dshVersion) addMark(cfg.dshVersion, '已选')
+  if (latest) addMark(latest, 'latest 标签')
+
   const out: Array<{ v: string; label: string }> = [{ v: '', label: '自动（安装/更新时取 latest）' }]
   const seen: Record<string, boolean> = { '': true }
-  const push = (v: string, label: string) => {
+  const push = (v: string) => {
     if (!v || seen[v]) return
     seen[v] = true
-    out.push({ v: v, label: label })
+    const ms = marks[v]
+    out.push({ v: v, label: ms && ms.length ? v + '（' + ms.join('，') + '）' : v })
   }
-  if (dsh.installed) push(dsh.installed, dsh.installed + '（已安装）')
-  if (cfg.dshVersion) push(cfg.dshVersion, cfg.dshVersion + '（已选）')
-  for (let i = list.length - 1; i >= 0; i--) {
-    const tag = list[i] === dsh.versions.latest ? '（latest 标签）' : ''
-    push(list[i], list[i] + tag)
-  }
+  // 版本列表按宿主给的顺序倒序（新版本在前），有标记的那几个（在用 / 已选）优先提到前面
+  for (let i = list.length - 1; i >= 0; i--) push(list[i])
+  for (const v of Object.keys(marks)) push(v)
   return out
 })
 // 查询可用版本：npm view 要联网，慢一点，稍后多次刷新状态
+const DSH_QUERY_MSG = '正在查询可用版本…'
+// 轮询是异步的，等结果期间先挂个「正在查询」。查到了要主动清掉：
+// dshStatus 是通用轮询入口、成功时不碰 dshFlash，若不在这里清，提示会一直挂着到下次操作。
+let dshQueryDone = 0 // 本次查询的令牌，防止上一轮的兜底定时器清掉下一轮刚设的提示
 function dshQueryVersions() {
   try {
     services.dshListVersions?.()
     dshFlash.err = false
-    dshFlash.msg = '正在查询可用版本…'
-    for (const ms of [2000, 5000, 9000]) window.setTimeout(dshStatus, ms)
+    dshFlash.msg = DSH_QUERY_MSG
+    const token = ++dshQueryDone
+    // 宿主查到 latest 后会在后续快照里带回来，所以每次都读一遍状态、顺带把提示收掉
+    const probe = () => {
+      dshStatus()
+      if (token !== dshQueryDone) return
+      if (dsh.versions && dsh.versions.latest) { dshFlash.msg = ''; dshQueryDone++; return }
+      // 只有「还是我发的那条」才清，避免覆盖用户期间其他操作的消息
+      if (dshFlash.msg === DSH_QUERY_MSG && Date.now() - t0 > 12000) {
+        dshFlash.err = true
+        dshFlash.msg = '查询超时：未取到可用版本，请检查网络或 npm 注册源后重试。'
+        dshQueryDone++
+      }
+    }
+    const t0 = Date.now()
+    for (const ms of [2000, 5000, 9000]) window.setTimeout(probe, ms)
+    window.setTimeout(probe, 12000)
   } catch (err: any) {
     dshFlash.err = true
     dshFlash.msg = '查询失败：' + String(err?.message || err)
@@ -510,11 +586,14 @@ function fmtTokens(n?: number) {
   if (v >= 1e4) return (v / 1e4).toFixed(1) + ' 万'
   return String(v)
 }
-const codexDays7 = computed(() => (codex.value && codex.value.days7) || [])
-// 近 7 天最大值：用来算柱状条高度（全为 0 时避免除零）
+// 图表档位：宿主一次给 31 天（days31，索引 0 是今天），切档只改前端切片、不重扫
+const codexRange = ref(7)
+const codexDays = computed(() => ((codex.value && codex.value.days31) || []).slice(-codexRange.value))
+// 30 天档标签抽稀：每 5 天一个，避免糊成一片
+const codexLabelEvery = computed(() => (codexRange.value >= 30 ? 5 : 1))
 const codexDayMax = computed(() => {
   let m = 0
-  for (const d of codexDays7.value) m = Math.max(m, Number(d.tokens) || 0)
+  for (const d of codexDays.value) m = Math.max(m, Number(d.tokens) || 0)
   return m
 })
 const codexModels = computed(() => {
@@ -627,11 +706,16 @@ const dshUsage = ref<DshUsageResult | null>(null)
 const dshUsageBusy = ref(false)
 const dshUsageFlash: Flash = useFlash()
 const dshUsageFolds = reactive({ models: false, help: false })
-const dshUsageDays7 = computed(() => (dshUsage.value && dshUsage.value.days7) || [])
-// 近 7 天最大值：用来算柱状条高度（全为 0 时避免除零）
+// 图表档位：宿主一次给 31 天（days31，索引 0 是今天），切档只改前端切片、不重扫
+const DSH_USAGE_RANGES = [7, 14, 30] as const
+const dshUsageRange = ref(7)
+const dshUsageDays = computed(() => ((dshUsage.value && dshUsage.value.days31) || []).slice(-dshUsageRange.value))
+// 30 天档标签抽稀：每 5 天一个，避免糊成一片
+const dshUsageLabelEvery = computed(() => (dshUsageRange.value >= 30 ? 5 : 1))
+// 当前档内最大值：用来算柱状条高度（全为 0 时避免除零）
 const dshUsageDayMax = computed(() => {
   let m = 0
-  for (const d of dshUsageDays7.value) m = Math.max(m, Number(d.tokens) || 0)
+  for (const d of dshUsageDays.value) m = Math.max(m, Number(d.tokens) || 0)
   return m
 })
 const dshUsageModels = computed(() => {
@@ -2983,7 +3067,8 @@ function onWindowActive() {
   refreshHistory()
   refreshTodayModels() // 模型占比是联网结果，回到本页时也刷新一次
   reloadModels() // 挂件会定时刷余额，回到本页时把最新快照取回来
-  dshStatus(true) // 回到本页时同步 dsh 状态（可能在挂件菜单里启停过）
+  // 只在开发者 Tab 轮询着 dsh 状态时才需要补 deep 探测（可能在挂件菜单里启停过）
+  if (activeTab.value === 'dev') dshStatus(true)
   taskbarSync() // 顺带同步任务栏显隐状态
 }
 
@@ -3008,8 +3093,8 @@ onMounted(() => {
     refreshSounds()
     refreshSkin()
     refreshBubbles()
-    dshStatus(true) // 打开插件就先探测一次（识别外部终端里跑的 dsh）
-    dshPolling.start()
+    // dsh 状态不在挂载时轮询：等切到「开发者」Tab 再启（见 watch(activeTab)）；
+    // 任务栏状态所有 Tab 都可能看，保持常轮
     taskbarPolling.start()
     // GitHub 加速（hosts 实际状态）不在这里预读：它已抽到 AccelView，
     // 由该组件在切到帮助 Tab 时自行刷新，父级无需代劳
@@ -4414,51 +4499,60 @@ onUnmounted(() => {
         <button :disabled="dsh.running || dsh.external || !!dsh.portOther || dshBusy" @click="dshDo('start')">启动</button>
         <button class="secondary" :disabled="(!dsh.running && !dsh.external) || dshBusy" @click="dshDo('restart')">重启</button>
         <button class="secondary" :disabled="(!dsh.running && !dsh.external) || dshBusy" @click="dshDo('stop')">结束</button>
-        <button class="secondary" :disabled="dshBusy" @click="dshDo('update')">更新</button>
+        <!-- 既无全局也无插件安装时实际走的是安装流程，按钮文案别再写「更新」误导 -->
+        <button class="secondary" :disabled="dshBusy" @click="dshDo('update')">{{ dsh.resolved || dsh.globalVersion ? '更新' : '安装' }}</button>
         <button class="secondary" @click="dshOpenPage">打开 Web UI</button>
       </div>
       <p v-if="dsh.external" class="hint">3080 上检测到由<strong>别的终端</strong>启动的 dsh（pid {{ dsh.externalPid }}）：「结束」会结束它，「重启」会结束它并按当前版本重新启动。</p>
       <p v-else-if="dsh.portOther" class="hint">3080 被 {{ dsh.portOther }} 占用（不是 dsh）。为避免误杀，插件不会结束它。</p>
 
-      <label class="field row">
-        <span class="label">实际使用</span>
-        <span class="ver">{{ dsh.resolved || '未安装' }}<span v-if="dsh.source" class="tag">{{ dsh.source === 'global' ? '全局' : '插件目录' }}</span></span>
-      </label>
-      <label class="field row">
-        <span class="label">全局安装</span>
-        <span class="ver">{{ dsh.globalVersion || '无' }}<span v-if="dsh.globalVersion && !dsh.globalWritable" class="tag">只读，更新会弹一次 UAC</span></span>
-      </label>
-      <label class="field row">
-        <span class="label">插件目录</span>
-        <span class="ver">{{ dsh.installed || '未安装' }}</span>
-      </label>
-      <label class="field row">
-        <span class="label">最新</span>
-        <span class="ver">{{ (dsh.versions && dsh.versions.latest) || '未知（点「查询可用版本」）' }}</span>
-      </label>
-      <div class="btn-row">
-        <button class="secondary" :disabled="dsh.busy === 'versions'" @click="dshQueryVersions">
-          {{ dsh.busy === 'versions' ? '查询中…' : '查询可用版本' }}
+      <!-- 诊断信息（只读）：版本对照 / 最近命令 / 页面地址 / 日志，展开时自动查一次最新版本 -->
+      <div class="fold">
+        <button class="link-btn" @click="dshToggleVersions">
+          {{ dshFolds.versions ? '收起诊断信息' : '诊断信息（版本 / 命令 / 地址 / 日志）' }}
         </button>
-        <button v-if="dsh.globalDir" class="secondary" @click="dshCopyPath(dsh.globalDir, '全局路径')">复制全局路径</button>
-        <button v-if="dsh.installed" class="secondary" @click="dshCopyPath(dsh.prefix, '插件路径')">复制插件路径</button>
+        <div v-if="dshFolds.versions" class="guide">
+          <label class="field row">
+            <span class="label">实际使用</span>
+            <span class="ver">{{ dsh.resolved || '未安装' }}<span v-if="dsh.source" class="tag">{{ dsh.source === 'global' ? '全局' : '插件目录' }}</span></span>
+          </label>
+          <label class="field row">
+            <span class="label">全局安装</span>
+            <span class="ver">{{ dsh.globalVersion || '无' }}<span v-if="dsh.globalVersion && !dsh.globalWritable" class="tag">只读，更新会弹一次 UAC</span></span>
+          </label>
+          <label class="field row">
+            <span class="label">插件目录</span>
+            <span class="ver">{{ dsh.installed || '未安装' }}</span>
+          </label>
+          <label class="field row">
+            <span class="label">npm latest</span>
+            <span class="ver">{{ (dsh.versions && dsh.versions.latest) || '查询中…' }}<span v-if="dsh.versions && dsh.versions.latest" class="tag">点「更新」会装到这个版本</span></span>
+          </label>
+          <label class="field row">
+            <span class="label">最近命令</span>
+            <span class="cmdline">{{ dsh.lastCmd || '（还没执行过）' }}</span>
+          </label>
+          <label class="field row">
+            <span class="label">页面地址</span>
+            <span class="cmdline">{{ dsh.webUrl || (dsh.url + '（未捕获 token，dsh 启动完成后会自动获取）') }}</span>
+          </label>
+          <p v-if="dshVerMismatch" class="hint">{{ dshVerMismatch }}</p>
+          <div class="btn-row">
+            <button class="secondary" :disabled="dsh.busy === 'versions'" @click="dshQueryVersions">
+              {{ dsh.busy === 'versions' ? '查询中…' : '查询可用版本' }}
+            </button>
+            <button class="secondary" @click="dshStatus(true)">刷新状态</button>
+            <button v-if="dsh.globalDir" class="secondary" @click="dshCopyPath(dsh.globalDir, '全局路径')">复制全局路径</button>
+            <button v-if="dsh.installed" class="secondary" @click="dshCopyPath(dsh.prefix, '插件路径')">复制插件路径</button>
+            <button class="secondary" @click="dshCopyUrl">复制地址</button>
+            <button class="secondary" @click="dshLogOpen = !dshLogOpen">{{ dshLogOpen ? '收起日志' : '查看日志' }}</button>
+            <button v-if="dshLogOpen" class="secondary" @click="dshClearLog">清空日志</button>
+            <button v-if="dshLogOpen" class="secondary" @click="dshCopyLog">复制日志</button>
+          </div>
+          <pre v-if="dshLogOpen" ref="dshLogEl" class="log-box">{{ dsh.log || '（暂无日志：启动或更新 dsh 后再看）' }}</pre>
+        </div>
       </div>
 
-      <label class="field row">
-        <span class="label">最近命令</span>
-        <span class="cmdline">{{ dsh.lastCmd || '（还没执行过）' }}</span>
-      </label>
-      <label class="field row">
-        <span class="label">页面地址</span>
-        <span class="cmdline">{{ dsh.webUrl || (dsh.url + '（未捕获 token，dsh 启动完成后会自动获取）') }}</span>
-      </label>
-      <div class="btn-row">
-        <button class="secondary" @click="dshCopyUrl">复制地址</button>
-        <button class="secondary" @click="dshLogOpen = !dshLogOpen">{{ dshLogOpen ? '收起日志' : '查看日志' }}</button>
-        <button v-if="dshLogOpen" class="secondary" @click="dshClearLog">清空日志</button>
-        <button v-if="dshLogOpen" class="secondary" @click="dshCopyLog">复制日志</button>
-      </div>
-      <pre v-if="dshLogOpen" ref="dshLogEl" class="log-box">{{ dsh.log || '（暂无日志：启动或更新 dsh 后再看）' }}</pre>
       <p v-if="dsh.error && !dshLogOpen" class="msg err">{{ dsh.error }}</p>
       <p v-if="dshFlash.msg" class="msg" :class="msgCls(dshFlash)">{{ dshFlash.msg }}</p>
 
@@ -4485,7 +4579,6 @@ onUnmounted(() => {
           <div class="btn-row">
             <button class="secondary" @click="dshPickDir">选择目录</button>
             <button v-if="cfg.dshNodeDir" class="secondary" @click="dshAutoDir">改为自动探测</button>
-            <button class="secondary" @click="dshStatus()">刷新状态</button>
           </div>
           <label class="field row check">
             <span class="label">启动时不自动打开浏览器 <em>（勾选：命令追加 --no-open，启动后点「打开 Web UI」查看）</em></span>
@@ -4531,13 +4624,24 @@ onUnmounted(() => {
 
     <!-- [dsh] dsh 本地用量统计：读 ~/.dsh 下 dsh-usage 的账本与会话投影缓存，纯本地、不联网 -->
     <section v-if="activeTab === 'dev'" class="card">
-      <h2>dsh 用量统计</h2>
+      <div class="card-head">
+        <h2 class="card-toggle" @click="toggleDevCard('dshUsage')">
+          <span class="caret">{{ devFolds.dshUsage ? '▾' : '▸' }}</span>dsh 用量统计
+          <!-- 收起态摘要：只在「本会话已展开读过」后才显示，否则不预读、直接提示点开 -->
+          <span v-if="!devFolds.dshUsage" class="card-sum">
+            <template v-if="devStatsLoaded.dshUsage && dshUsage && dshUsage.ok">今日 {{ fmtTokens(dshUsage.todayTokens) }} tokens · 本月 {{ fmtTokens(dshUsage.monthTokens) }}</template>
+            <template v-else>点击展开查看</template>
+          </span>
+        </h2>
+      </div>
+      <template v-if="devFolds.dshUsage">
       <p class="hint">
         读 dsh 自己写在 <code>~/.dsh</code>（或 <code>$DSH_HOME</code>）下的用量数据做统计，
         <strong>纯本地读取、不需要 API Key、不发任何网络请求</strong>。优先用 dsh-usage 的按天账本，
         账本还没落盘时回落到会话投影缓存。
       </p>
       <div class="btn-row">
+        <!-- 首次展开已自动读过一次，按钮主要当「刷新」用 -->
         <button :disabled="dshUsageBusy" @click="dshUsageRefresh">{{ dshUsageBusy ? '读取中…' : (dshUsage ? '刷新' : '读取统计') }}</button>
         <button v-if="dshUsage" class="secondary" :disabled="dshUsageBusy" @click="dshUsageClearCache">清除缓存并重扫</button>
       </div>
@@ -4577,16 +4681,22 @@ onUnmounted(() => {
         </label>
         <p v-if="dshUsage.note" class="hint">{{ dshUsage.note }}</p>
 
-        <div v-if="dshUsageDayMax > 0" class="chart">
-          <div v-for="d in dshUsageDays7" :key="d.date" class="bar-col">
-            <div class="bar-val">{{ d.tokens > 0 ? fmtTokens(d.tokens) : '' }}</div>
+        <div class="range-tabs-row">
+          <div class="range-tabs">
+            <button v-for="r in DSH_USAGE_RANGES" :key="r" class="range-tab"
+                    :class="{ 'range-tab-on': dshUsageRange === r }" @click="dshUsageRange = r">{{ r }} 天</button>
+          </div>
+        </div>
+        <div v-if="dshUsageDayMax > 0" class="chart" :class="{ 'chart-dense': dshUsageRange >= 14 }">
+          <div v-for="(d, i) in dshUsageDays" :key="d.date" class="bar-col">
+            <div class="bar-val">{{ d.tokens > 0 && (dshUsageLabelEvery === 1 || i % dshUsageLabelEvery === 0) ? fmtTokens(d.tokens) : '' }}</div>
             <div class="bar-track">
               <div class="bar" :style="{ height: dshUsageBarHeight(d.tokens) }"></div>
             </div>
-            <div class="bar-day">{{ codexDayLabel(d.date) }}</div>
+            <div class="bar-day">{{ i % dshUsageLabelEvery === 0 ? codexDayLabel(d.date) : '' }}</div>
           </div>
         </div>
-        <p v-else class="hint">近 7 天没有用量记录。</p>
+        <p v-else class="hint">近 {{ dshUsageRange }} 天没有用量记录。</p>
 
         <div class="fold">
           <button class="link-btn" @click="dshUsageFolds.models = !dshUsageFolds.models">{{ dshUsageFolds.models ? '收起各模型用量' : '各模型用量' }}</button>
@@ -4608,16 +4718,28 @@ onUnmounted(() => {
           </div>
         </div>
       </template>
+      </template>
     </section>
 
     <!-- [dsh] Codex 本地会话统计：读 ~/.codex/sessions 的 rollout JSONL，纯本地、不联网 -->
     <section v-if="activeTab === 'dev'" class="card">
-      <h2>Codex 会话统计</h2>
+      <div class="card-head">
+        <h2 class="card-toggle" @click="toggleDevCard('codex')">
+          <span class="caret">{{ devFolds.codex ? '▾' : '▸' }}</span>Codex 会话统计
+          <!-- 收起态摘要：只在「本会话已展开读过」后才显示，否则不预读、直接提示点开 -->
+          <span v-if="!devFolds.codex" class="card-sum">
+            <template v-if="devStatsLoaded.codex && codex && codex.ok">今日 {{ fmtTokens(codex.todayTokens) }} tokens · 本月 {{ fmtTokens(codex.monthTokens) }}</template>
+            <template v-else>点击展开查看</template>
+          </span>
+        </h2>
+      </div>
+      <template v-if="devFolds.codex">
       <p class="hint">
         直接读 Codex CLI 写在 <code>~/.codex/sessions</code> 的会话日志（<code>rollout-*.jsonl</code>）做统计，
         <strong>纯本地读取、不需要 API Key、不发任何网络请求</strong>。用量取累计量的差值，天然免疫重复计数。
       </p>
       <div class="btn-row">
+        <!-- 首次展开已自动读过一次，按钮主要当「刷新」用 -->
         <button :disabled="codexBusy" @click="codexRefresh">{{ codexBusy ? '读取中…' : (codex ? '刷新' : '读取统计') }}</button>
         <button v-if="codex" class="secondary" :disabled="codexBusy" @click="codexClearCache">清除缓存并重扫</button>
       </div>
@@ -4650,16 +4772,22 @@ onUnmounted(() => {
           <span class="ver">{{ codexWindowsText }}</span>
         </label>
 
-        <div v-if="codexDayMax > 0" class="chart">
-          <div v-for="d in codexDays7" :key="d.date" class="bar-col">
-            <div class="bar-val">{{ d.tokens > 0 ? fmtTokens(d.tokens) : '' }}</div>
+        <div class="range-tabs-row">
+          <div class="range-tabs">
+            <button v-for="r in DSH_USAGE_RANGES" :key="r" class="range-tab"
+                    :class="{ 'range-tab-on': codexRange === r }" @click="codexRange = r">{{ r }} 天</button>
+          </div>
+        </div>
+        <div v-if="codexDayMax > 0" class="chart" :class="{ 'chart-dense': codexRange >= 14 }">
+          <div v-for="(d, i) in codexDays" :key="d.date" class="bar-col">
+            <div class="bar-val">{{ d.tokens > 0 && (codexLabelEvery === 1 || i % codexLabelEvery === 0) ? fmtTokens(d.tokens) : '' }}</div>
             <div class="bar-track">
               <div class="bar" :style="{ height: codexBarHeight(d.tokens) }"></div>
             </div>
-            <div class="bar-day">{{ codexDayLabel(d.date) }}</div>
+            <div class="bar-day">{{ i % codexLabelEvery === 0 ? codexDayLabel(d.date) : '' }}</div>
           </div>
         </div>
-        <p v-else class="hint">近 7 天没有用量记录。</p>
+        <p v-else class="hint">近 {{ codexRange }} 天没有用量记录。</p>
 
         <div class="fold">
           <button class="link-btn" @click="codexFolds.models = !codexFolds.models">{{ codexFolds.models ? '收起各模型用量' : '各模型用量' }}</button>
@@ -4680,6 +4808,7 @@ onUnmounted(() => {
             <p class="guide-use"><strong>读不到数据：</strong>确认 Codex CLI 至少跑过一次、且 <code>~/.codex/sessions</code>（或 <code>$CODEX_HOME</code> 指向的目录）里有 <code>rollout-*.jsonl</code>。</p>
           </div>
         </div>
+      </template>
       </template>
     </section>
 
@@ -4911,6 +5040,32 @@ h1 {
   display: flex;
   gap: 8px;
 }
+/* 开发者 Tab 两张统计卡的整卡折叠：标题即按钮，收起态在标题右侧挂一行摘要。
+   摘要用次级色、可换行，保证窄窗口下不把标题挤走 */
+.card-toggle {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  /* 窄窗口下摘要换到第二行，不挤压标题 */
+  flex-wrap: wrap;
+  cursor: pointer;
+  user-select: none;
+}
+/* 对齐既有 .fold-caret：三角字符在标题字号下会继承 600 字重，
+   小字号加粗后 ▸/▾ 会糊成一道短横，所以固定宽度并显式 400 字重 */
+.card-toggle .caret {
+  width: 1em;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--fg-dim);
+}
+.card-sum {
+  margin-left: auto;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--fg-dim);
+  text-align: right;
+}
 /* 卡头里的危险操作（如「确认恢复默认？」）：与 .btn-row button.danger 同一套配色 */
 .head-actions button.danger {
   background: rgba(224, 67, 63, 0.16);
@@ -4928,7 +5083,13 @@ h1 {
   color: var(--err);
   white-space: nowrap;
 }
-/* 用量趋势区间切换（7 / 14 / 30 / 90 / 180 天） */
+/* 用量趋势区间切换（7 / 14 / 30 / 90 / 180 天）；.range-tabs-row 是开发者 Tab 的档位容器 */
+/* 开发者 Tab 里的图表档位：右对齐贴住图表上沿，与卡片内的按钮行区分开 */
+.range-tabs-row {
+  display: flex;
+  justify-content: flex-end;
+  margin: 4px 0 8px;
+}
 .range-tabs {
   display: flex;
   gap: 2px;
