@@ -344,7 +344,7 @@ function normMenuGroupsRev(v) {
   return n
 }
 function defaultConfig() {
-  return { scale: 1.5, vol: 0.9, soundOn: true, soundSet: 'duck', usageMode: 'ledger', peakMode: 'default', peakRemindOn: true, bubbleOn: true, menuBtn: true, onTop: true, lowAlertOn: true, lowAlertAmount: LOW_ALERT_BY_CURRENCY.CNY, budgetOn: false, budgetAmount: 0, dropAlertOn: false, dropAlertAmount: 5, clickQueueOn: false, remindSec: 8, quietOn: false, quietFrom: '23:00', quietTo: '07:00', timeBubbleOn: true, updateCheckOn: false, dragLock: false, enterMode: 'both', timerNotifyOn: true, timerMailOn: true, timerPersistOn: true, timerMode: 'off', timerSec: 1500, timerAt: '07:30', timerNote: '', timerBreakMin: 5, timerRemindSec: 8, timerBubblePin: true, timerBubbleOnly: true, dshNodeDir: '', dshKeepAlive: false, dshRegistry: '', dshVersion: '', dshReinstall: false, dshNoOpen: true, avoidTaskbar: true, edgeTop: 0, edgeRight: 0, edgeBottom: 0, edgeLeft: 0, scrollGapOn: false, scrollGapPx: SCROLL_GAP_DEFAULT, snapMode: 'ratio', snapRatio: SNAP_RATIO_DEFAULT, opacity: 100, passThrough: false, skin: 'DSniang1', theme: 'default', quotes: normQuotes(null), alerts: normAlerts(null), quotaTotal: 0, quotaReset: 'monthly', tokenPrice: normTokenPrice(null), historyKeepDays: HISTORY_KEEP_DEFAULT, models: [], mainModelId: DEFAULT_MAIN_MODEL, menuGroups: normMenuGroups(null), menuGroupsRev: 0, ghAccelOn: false, ghAccelIps: normIps(null), ghAccelRefreshedAt: 0, notifySystemOn: true, notifyMailOn: false, mailFrom: '', mailTo: '', mailFromName: '小鲸鱼余额挂件', mailSubjectPrefix: '[小鲸鱼余额挂件]' }
+  return { scale: 1.3, vol: 0.9, soundOn: true, soundSet: 'duck', usageMode: 'ledger', peakMode: 'default', peakRemindOn: true, bubbleOn: true, menuBtn: true, onTop: true, lowAlertOn: true, lowAlertAmount: LOW_ALERT_BY_CURRENCY.CNY, budgetOn: false, budgetAmount: 0, dropAlertOn: false, dropAlertAmount: 5, clickQueueOn: false, remindSec: 8, quietOn: false, quietFrom: '23:00', quietTo: '07:00', timeBubbleOn: true, updateCheckOn: false, dragLock: false, enterMode: 'both', timerNotifyOn: true, timerMailOn: true, timerPersistOn: true, timerMode: 'off', timerSec: 1500, timerAt: '07:30', timerNote: '', timerBreakMin: 5, timerRemindSec: 8, timerBubblePin: true, timerBubbleOnly: true, guideDone: false, dshNodeDir: '', dshKeepAlive: false, dshRegistry: '', dshVersion: '', dshReinstall: false, dshNoOpen: true, avoidTaskbar: true, edgeTop: 0, edgeRight: 0, edgeBottom: 0, edgeLeft: 0, scrollGapOn: false, scrollGapPx: SCROLL_GAP_DEFAULT, snapMode: 'ratio', snapRatio: SNAP_RATIO_DEFAULT, opacity: 100, passThrough: false, skin: 'DSniang1', theme: 'default', quotes: normQuotes(null), alerts: normAlerts(null), quotaTotal: 0, quotaReset: 'monthly', tokenPrice: normTokenPrice(null), historyKeepDays: HISTORY_KEEP_DEFAULT, models: [], mainModelId: DEFAULT_MAIN_MODEL, menuGroups: normMenuGroups(null), menuGroupsRev: 0, ghAccelOn: false, ghAccelIps: normIps(null), ghAccelRefreshedAt: 0, notifySystemOn: true, notifyMailOn: false, mailFrom: '', mailTo: '', mailFromName: '小鲸鱼余额挂件', mailSubjectPrefix: '[小鲸鱼余额挂件]' }
 }
 // dsh 注册源：只接受 http(s) 或空（默认官方源）
 function normRegistry(v) {
@@ -586,6 +586,9 @@ function readConfig() {
     timerRemindSec: p.timerRemindSec === 0 || p.timerRemindSec === 5 || p.timerRemindSec === 8 || p.timerRemindSec === 15 ? p.timerRemindSec : dft.timerRemindSec,
     timerBubblePin: p.timerBubblePin !== false,
     timerBubbleOnly: p.timerBubbleOnly !== false,
+    // 首次运行引导是否已结束（点「开始使用」或「跳过」）——默认 false 表示还没走过引导。
+    // 只认 true：老配置里没有这个键，若不这样归一，升级上来的老用户会被当成新装用户弹一次引导
+    guideDone: p.guideDone === true,
     dshNodeDir: typeof p.dshNodeDir === 'string' ? p.dshNodeDir.slice(0, 260) : dft.dshNodeDir,
     dshKeepAlive: p.dshKeepAlive === true,
     dshRegistry: normRegistry(p.dshRegistry),
@@ -677,6 +680,7 @@ function writeConfig(cfg) {
       timerRemindSec: cfg.timerRemindSec === 0 || cfg.timerRemindSec === 5 || cfg.timerRemindSec === 8 || cfg.timerRemindSec === 15 ? cfg.timerRemindSec : 8,
       timerBubblePin: cfg.timerBubblePin !== false,
       timerBubbleOnly: cfg.timerBubbleOnly !== false,
+      guideDone: cfg.guideDone === true,
       dshNodeDir: typeof cfg.dshNodeDir === 'string' ? cfg.dshNodeDir.slice(0, 260) : '',
       dshKeepAlive: cfg.dshKeepAlive === true,
       dshRegistry: normRegistry(cfg.dshRegistry),
@@ -777,6 +781,9 @@ function patchConfig(patch) {
   }
   if (p.timerBubblePin !== undefined) cfg.timerBubblePin = !!p.timerBubblePin
   if (p.timerBubbleOnly !== undefined) cfg.timerBubbleOnly = !!p.timerBubbleOnly
+  // 首次运行引导只允许单向置为「已完成」：写回 undefined 之外的任何值都按 bool 处理，
+  // 但不提供「重新弹出引导」的入口，免得误触让老用户再走一遍
+  if (p.guideDone !== undefined) cfg.guideDone = p.guideDone === true
   if (p.dshNodeDir !== undefined) cfg.dshNodeDir = String(p.dshNodeDir || '').trim().slice(0, 260)
   if (p.dshKeepAlive !== undefined) cfg.dshKeepAlive = !!p.dshKeepAlive
   if (p.dshRegistry !== undefined) cfg.dshRegistry = normRegistry(p.dshRegistry)

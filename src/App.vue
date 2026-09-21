@@ -3,6 +3,7 @@ import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from
 import type { AssetsApplyResult, AssetsExportResult, AssetsPreviewResult, BackupPreviewResult, BubbleMeta, CodexSummaryResult, CodexWindow, CodexWindows, DshUsageResult, LedgerDetailDay, LedgerDetailEntry, ModelUsageRow, SkinGallery, SkinMeta, SoundMeta, SoundRole, WhaleMailSecrets, WhaleModel, WhaleModelRow, WhaleModelTemplate, WhalePriceModel, WhaleServices, WhaleTokenPrice } from './types/services'
 import SkinCropper from './components/SkinCropper.vue'
 import SoundTrimmer from './components/SoundTrimmer.vue'
+import FirstRunGuide from './components/FirstRunGuide.vue'
 import AccelView from './views/AccelView.vue'
 
 // 主窗 preload（services.js）注入的宿主 API
@@ -74,6 +75,10 @@ type Flash = { msg: string; err: boolean }
 function useFlash(): Flash { return reactive({ msg: '', err: false }) }
 function msgCls(f: Flash) { return { ok: !f.err, err: f.err } }
 const secretsFlash: Flash = useFlash()
+// 首次运行引导弹层的独立回执（不能与 secretsFlash 共用：两个入口同时开着时消息会串）
+const guideFlash: Flash = useFlash()
+const guideSaving = ref(false)
+const showGuide = ref(false)
 const testing = ref(false)
 const testResults = ref<Array<{ label: string; ok: boolean; msg: string }>>([])
 const lastTestAt = ref(0)
@@ -86,8 +91,8 @@ const lastTestText = computed(() => {
 
 // —— 挂件配置 ——
 const cfg = reactive({
-  scale: 1.5,
-  scaleNum: 10,
+  scale: 1.3,
+  scaleNum: 6,
   vol: 0.9,
   soundOn: true,
   soundSet: 'duck',
@@ -2453,6 +2458,49 @@ async function testKey() {
   }
 }
 
+// —— 首次运行引导 ——
+// 保存并结束引导：复用 saveSecrets 那条宿主通道（内部会 Object.assign 合并，不会清掉 models / notifyMail），
+// 同时把「进入方式」一并落库。凭据为空也允许提交 —— 用户可能只想调进入方式，
+// 这时给一句提示而不是拦着（拦着会让他以为必须填密钥才能用）
+function onGuideSave(p: { apiKey: string; platformToken: string; enterMode: string }) {
+  guideSaving.value = true
+  try {
+    secrets.apiKey = p.apiKey
+    secrets.platformToken = p.platformToken
+    const r = services.saveSecrets?.({ apiKey: p.apiKey, platformToken: p.platformToken })
+    cfg.enterMode = p.enterMode as typeof cfg.enterMode
+    patchCfg({ enterMode: p.enterMode })
+    services.finishFirstRunGuide?.()
+    showGuide.value = false
+    if (r && !r.hasApiKey) {
+      // 没填 API Key：引导仍算走完（否则每次打开都弹），但要明确告诉用户挂件还显示不出余额
+      activeTab.value = 'data'
+      toolOpen.credentials = true
+      secretsFlash.msg = '已保存（未填写 API Key，挂件将提示未配置）'
+      setTimeout(() => { secretsFlash.msg = '' }, 4000)
+    }
+  } catch (err: any) {
+    guideFlash.msg = String(err?.message || err)
+    guideFlash.err = true
+  } finally {
+    guideSaving.value = false
+  }
+}
+// 引导里的「测试连接」：直接借 testKey()，它读的正是已同步好的 secrets
+async function onGuideTest(p: { apiKey: string; platformToken: string }) {
+  secrets.apiKey = p.apiKey
+  secrets.platformToken = p.platformToken
+  guideFlash.msg = ''
+  await testKey()
+}
+// 跳过：只置位 guideDone，不动凭据也不动进入方式 —— 用户明说现在不想配，就别顺手改他的配置
+function onGuideSkip() {
+  try {
+    services.finishFirstRunGuide?.()
+  } catch (err) {}
+  showGuide.value = false
+}
+
 function showWidget() {
   const r = services.showWidget?.() || { ok: true }
   widgetVisible.value = true
@@ -2955,6 +3003,11 @@ onMounted(() => {
   window.addEventListener('focus', onWindowActive)
   document.addEventListener('visibilitychange', onWindowActive)
   if (cfg.updateCheckOn) doCheckUpdate(false)
+  // 首次运行引导：放在最后弹，避免与前面的初始化抢渲染。
+  // 判据在宿主侧（guideDone 未置位 + 没填 API Key），老用户升级上来不会被打扰
+  try {
+    if (services.needFirstRunGuide?.()) showGuide.value = true
+  } catch (err) {}
 })
 
 onUnmounted(() => {
@@ -4668,6 +4721,23 @@ onUnmounted(() => {
       :vol="cfg.vol"
       @confirm="onSoundTrimConfirm"
       @cancel="soundTrim = null"
+    />
+
+    <!-- 首次运行引导：新装用户进设置页时弹一次，保存凭据或跳过都置位 guideDone，之后不再弹 -->
+    <FirstRunGuide
+      v-if="showGuide"
+      :api-key="secrets.apiKey"
+      :platform-token="secrets.platformToken"
+      :enter-mode="cfg.enterMode"
+      :saving="guideSaving"
+      :testing="testing"
+      :test-results="testResults"
+      :flash-msg="guideFlash.msg"
+      :flash-err="guideFlash.err"
+      @save="onGuideSave"
+      @test="onGuideTest"
+      @skip="onGuideSkip"
+      @doc="openDoc"
     />
   </div>
 </template>

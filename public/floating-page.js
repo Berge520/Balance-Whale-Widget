@@ -157,11 +157,11 @@
   var scaleInput = document.createElement('input');
   scaleInput.type = 'range';
   scaleInput.min = String(MIN_SCALE); scaleInput.max = String(MAX_SCALE); scaleInput.step = '0.1';
-  scaleInput.className = 'dshwv-range'; scaleInput.value = '1.5';
+  scaleInput.className = 'dshwv-range'; scaleInput.value = '1.3';
   var scaleNumber = document.createElement('input');
   scaleNumber.type = 'number';
   scaleNumber.min = '1'; scaleNumber.max = String(SCALE_STEPS); scaleNumber.step = '1';
-  scaleNumber.className = 'dshwv-number'; scaleNumber.value = '10';
+  scaleNumber.className = 'dshwv-number'; scaleNumber.value = '6';
   scaleInput.addEventListener('input', function () { setScale(scaleInput.value, false); });
   scaleInput.addEventListener('change', function () { setScale(scaleInput.value, true); });
   function numberToScale() {
@@ -772,7 +772,7 @@
   var mainModelId = 'deepseek';
   // 币种前缀与宿主 constants.js 的 MODEL_MONEY_PREFIX 保持一致（浮动页没有 require，读不到宿主常量）
   var MODEL_MONEY_PREFIX = { CNY: '¥ ', USD: '$' };
-  var curScale = 1.5;
+  var curScale = 1.3;
   var flipped = false;
   var animDelayTimer = null, drag = null, shown = null, animId = null;
   var bubbleShown = false, bubbleTimer = null, bubbleRandomActive = false, bubbleRandomLines = null;

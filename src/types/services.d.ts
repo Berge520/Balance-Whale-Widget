@@ -92,6 +92,8 @@ export interface WhaleConfig {
   timerBubbleOnly: boolean
   // 进入插件时显示哪些窗口：both=设置窗+挂件；widget=只显示挂件；settings=只显示设置窗
   enterMode: 'both' | 'widget' | 'settings'
+  // 首次运行引导是否已结束（保存凭据或点「跳过」都置 true），之后不再弹
+  guideDone: boolean
   // DeepSeek Harness（dsh，开发者）：自定义 Node.js 目录（''=自动探测）/ 退出后是否保留进程
   dshNodeDir: string
   dshKeepAlive: boolean
@@ -943,6 +945,10 @@ export interface WhaleServices {
   saveConfig(patch: Partial<WhaleConfig> & { __live?: boolean }): WhaleConfig
   getSecrets(): WhaleSecrets
   saveSecrets(secrets: Partial<WhaleSecrets>): { hasApiKey: boolean; hasPlatformToken: boolean }
+  // 是否需要弹「首次运行引导」：guideDone 未置位且尚未填 API Key（老用户升级上来不会为 true）
+  needFirstRunGuide(): boolean
+  // 结束首次运行引导（保存凭据或跳过都调它），置位 guideDone
+  finishFirstRunGuide(): boolean
   // 邮件通知的 SMTP 凭据：走加密存储（不进备份）。mailPass 留空 = 沿用已保存的授权码
   saveMailSecrets(mail: Partial<WhaleMailSecrets>): WhaleMailSecrets
   // 用给定（或已保存的）SMTP 配置发一封测试邮件，不落库

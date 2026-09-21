@@ -265,7 +265,7 @@ function syncTaskbarWatch() {
 
 // 挂件基准尺寸：clamp(122, min(250, min(workW,workH)*0.28) * scale, 625)
 function baseSize(wa, scale) {
-  const s = clampNum(scale, MIN_SCALE, MAX_SCALE, 1.5)
+  const s = clampNum(scale, MIN_SCALE, MAX_SCALE, 1.3)
   let base = Math.min(BASE_CAP, Math.min(wa.width, wa.height) * 0.28) * s
   base = Math.min(BASE_MAX, Math.max(BASE_MIN, base))
   // 挂件本体不能超出屏幕工作区（窗口留白可越界，透明且点击穿透，不影响）

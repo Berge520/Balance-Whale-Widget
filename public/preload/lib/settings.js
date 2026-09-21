@@ -396,6 +396,17 @@ module.exports = {
   getSecrets() {
     return readSecrets()
   },
+  // 是否需要弹「首次运行引导」：配置里的 guideDone 没置位，且凭据里还没填 API Key。
+  // 之所以两个条件都要判：老用户升级上来 guideDone 虽为 false（配置里本就没这个键），
+  // 但 API Key 早已填好，不该被再引导一次；而新装用户两者都满足。
+  needFirstRunGuide() {
+    return readConfig().guideDone !== true && !readSecrets().apiKey
+  },
+  // 结束首次运行引导：无论用户是「保存凭据」还是「跳过」，都置位 guideDone，之后不再弹
+  finishFirstRunGuide() {
+    patchConfig({ guideDone: true })
+    return readConfig().guideDone
+  },
   saveSecrets(secrets) {
     const next = Object.assign(readSecrets(), secrets || {})
     writeSecrets(next)
