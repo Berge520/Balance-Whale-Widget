@@ -79,6 +79,9 @@ const secretsFlash: Flash = useFlash()
 const guideFlash: Flash = useFlash()
 const guideSaving = ref(false)
 const showGuide = ref(false)
+// 弹层是「首次自动弹出」还是「用户手动重开」：决定标题口径（欢迎使用 / 配置凭据），
+// 也决定关闭时要不要写 guideDone —— 手动重开时它本来就是 true，不必再写
+const guideReopen = ref(false)
 const testing = ref(false)
 const testResults = ref<Array<{ label: string; ok: boolean; msg: string }>>([])
 const lastTestAt = ref(0)
@@ -2472,6 +2475,7 @@ function onGuideSave(p: { apiKey: string; platformToken: string; enterMode: stri
     patchCfg({ enterMode: p.enterMode })
     services.finishFirstRunGuide?.()
     showGuide.value = false
+    guideReopen.value = false
     if (r && !r.hasApiKey) {
       // 没填 API Key：引导仍算走完（否则每次打开都弹），但要明确告诉用户挂件还显示不出余额
       activeTab.value = 'data'
@@ -2493,12 +2497,22 @@ async function onGuideTest(p: { apiKey: string; platformToken: string }) {
   guideFlash.msg = ''
   await testKey()
 }
-// 跳过：只置位 guideDone，不动凭据也不动进入方式 —— 用户明说现在不想配，就别顺手改他的配置
+// 跳过 / 关闭：只置位 guideDone，不动凭据也不动进入方式 —— 用户明说现在不想配，就别顺手改他的配置。
+// 手动重开（guideReopen）时 guideDone 早已是 true，但仍调一次：语义一致，且宿主侧是幂等写
 function onGuideSkip() {
   try {
     services.finishFirstRunGuide?.()
   } catch (err) {}
   showGuide.value = false
+  guideReopen.value = false
+}
+// 手动重开引导（数据 Tab 凭据卡里的入口）：不改 guideDone，纯粹再展示一次 ——
+// 用户回来多半是想换个 Key 或忘了进入方式在哪调
+function onGuideReopen() {
+  guideFlash.msg = ''
+  guideFlash.err = false
+  guideReopen.value = true
+  showGuide.value = true
 }
 
 function showWidget() {
@@ -3006,7 +3020,10 @@ onMounted(() => {
   // 首次运行引导：放在最后弹，避免与前面的初始化抢渲染。
   // 判据在宿主侧（guideDone 未置位 + 没填 API Key），老用户升级上来不会被打扰
   try {
-    if (services.needFirstRunGuide?.()) showGuide.value = true
+    if (services.needFirstRunGuide?.()) {
+      guideReopen.value = false
+      showGuide.value = true
+    }
   } catch (err) {}
 })
 
@@ -4272,6 +4289,11 @@ onUnmounted(() => {
         <button class="secondary" @click="copyHotkeyCmd()">复制指令名</button>
         <button class="secondary" @click="addHotkey()">新增快捷键</button>
       </div>
+      <!-- 新手引导入口：首次引导只弹一次（guideDone），之后从帮助 Tab 重开。
+           与「使用说明」「故障排查」同为折叠块、同一视觉语言，不额外占版面 -->
+      <div class="fold">
+        <button class="link-btn" @click="onGuideReopen()">新手引导（填 DeepSeek 凭据）</button>
+      </div>
       <div class="fold">
         <button class="link-btn" @click="widgetFolds.help = !widgetFolds.help">{{ widgetFolds.help ? '收起使用说明' : '使用说明' }}</button>
         <div v-if="widgetFolds.help" class="guide">
@@ -4734,6 +4756,7 @@ onUnmounted(() => {
       :test-results="testResults"
       :flash-msg="guideFlash.msg"
       :flash-err="guideFlash.err"
+      :reopen="guideReopen"
       @save="onGuideSave"
       @test="onGuideTest"
       @skip="onGuideSkip"
