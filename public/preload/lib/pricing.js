@@ -1,13 +1,24 @@
 /*
  * 峰谷时段判定与模型定价（CommonJS）。
  */
-const { PEAK_HOURS, PRICING, WEEKEND_VALLEY_FROM_SEC } = require('./constants')
+const { PEAK_HOURS, PRICING, WEEKEND_VALLEY_FROM_SEC, CN_HOLIDAYS } = require('./constants')
 const { logErr } = require('./log')
+
+// 北京时间 YYYY-MM-DD（isPeakTime 与节假日表都用这一格式）
+function bjDayKey(timeSec) {
+  const bj = new Date(Number(timeSec) * 1000 + 8 * 3600 * 1000)
+  const p2 = (n) => String(n).padStart(2, '0')
+  return bj.getUTCFullYear() + '-' + p2(bj.getUTCMonth() + 1) + '-' + p2(bj.getUTCDate())
+}
 
 function isPeakTime(timeSec) {
   if (!isFinite(Number(timeSec))) return false
   const n = Number(timeSec)
   const bj = new Date(n * 1000 + 8 * 3600 * 1000)
+  // 法定节假日全天谷价：放假日常落在工作日，只看星期几会把它们当峰时按双倍价记账。
+  // 不受 WEEKEND_VALLEY_FROM_SEC 约束 —— 那张表是「周末谷价」规则的生效点，而节假日全天谷价是
+  // 官方一直以来的口径，二者生效时间不同（同受周末门槛会让上半年所有节假日漏判成峰时）。
+  if (CN_HOLIDAYS.has(bjDayKey(n))) return false
   if (n >= WEEKEND_VALLEY_FROM_SEC) {
     const dow = bj.getUTCDay() // 0=周日 6=周六
     if (dow === 0 || dow === 6) return false

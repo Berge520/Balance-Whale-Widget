@@ -95,6 +95,7 @@ uTools 插件：呼出后在桌面创建一个**透明、无边框、置顶**的
   - **`refreshIps` 旧值复验（v1.6.2）**：探测不通的域名**不直接沿用旧值**，而是把当前表旧值也过同一套 `probeIp` 复验 —— 旧值同样可能是早已失效的死地址（上次刷新留下的，或手填后网络环境变了），直接写回会让 hosts 里留一条解析不通的映射，比不写更糟（不写至少还能回落到 DNS 的真实解析）；复验通过才沿用（来源追踪标「当前 IP 表（手填，旧值复验可用）」），复验也不通就**不写这个域名**（来源追踪注明，`dropped` 计数进摘要）。
   - **操作日志标题动态生成（v1.6.2）**：`settings.ghAccelRefreshIps` 用 `hosts.srcChainLabel(src.order, src)` 生成标题，而不是写死「DoH 实时解析 + 社区源」—— 标题由 preload 侧 `runGhAccelOp` 开篇生成，用户没打开设置页时也要正确，故由宿主按同一份 `normSrcOrder` + 开关算、只列实际参与的来源（写死的话用户关掉 DoH 或调换顺序后标题仍照旧，日志等于在骗人，`test/hosts.test.mjs` 已钉住）。
   - **`saveConfig` 反向回推（v1.6.2）**：`saveConfig` 末尾 `emitConfigChange()` —— 宿主 `patchConfig` 会归一化（如 `ghAccelSrc` 补全 / 去重），不回推设置页手里还是自己拼的未归一化值，表现为「点『上移』没反应」。
+  - **`writeConfig` 写失败留痕（v1.6.2）**：`store.writeConfig` 把 `utools.dbStorage.setItem` 包进 `try/catch`，失败 `logErr('[whale][config] 写配置失败', err.message)` 并返回 `false`（成功返回 `true`）。dbStorage 写满 / 配额超限时 `setItem` 会抛，原先裸抛到 IPC 层会让设置页停在「保存中」、用户以为改了其实没落盘（旧配置继续生效）；与账本侧（`writeLedger` 等）统一为「失败留痕 + 返回值可判」。`patchConfig` 目前不透传该返回值（配置项都是幂等的，失败了下次改任意一项会整体重写）。
   - **CSS 变量必须自带**：`<style scoped>` 的变量解析发生在**子组件自身**，父级 `.page` 上定义的 `--fg` / `--accent` 等**不会传进去**（子组件里会退化成空值，`color: var(--fg)` 直接失效）。因此每个抽出的 view 都要在自己的根类上重抄一份令牌（含暗色媒体查询）。**改配色时父子两处都要改。**
   - **通用控件类也要自带**：`.card` / `.field` / `.label` / `.btn-row` / `.msg` / `.hint` / `.link-btn` / `.guide` / `.fold` / `.ver` 这些原来是父级 scoped 样式里的公共类，子组件用不到，需按用到的部分在子组件里复制一份。
   - **根节点必须是稳定元素**：`vue-tsc` 会把 `<template>` 根当 props 校验目标，多根 / 条件根都会出问题；且 scoped 样式需要一个固定宿主节点挂 CSS 变量。故 view 的模板统一是 `<div class="xxx">` 外壳，**显隐的 `v-if` 留在父级的组件标签上**，不要把「当前 Tab 判断」塞进子组件根节点。
@@ -193,7 +194,7 @@ uTools 插件：呼出后在桌面创建一个**透明、无边框、置顶**的
 - `grantedBalance/toppedUpBalance` 取自 `balance_infos[]` 的 `granted_balance`/`topped_up_balance`（接口未返回时为 `null`），用于赠送额度到期判定；
 - `todayAdjust` 为今日「未计入用量」的余额下降合计；
 - `adjust` **仅在该次新采样判定出非消费下降时非空**（`{amount,why}`），供挂件气泡解释；写入 `balanceCache` 前会剥掉该字段，避免 TTL 内复用或挂件重建时重复弹气泡。
-- `peakNextAt` 为**下次峰谷切换的 epoch 秒**（`pricing.nextPeakChangeAt` 按 `constants.PEAK_HOURS` + 周末谷价规则从下一个整点起逐小时探测得出，取不到为 `0`）。挂件只按它换算「距峰时/谷时 1h20m」，页面内不再实现第二套时段规则。
+- `peakNextAt` 为**下次峰谷切换的 epoch 秒**（`pricing.nextPeakChangeAt` 按 `constants.PEAK_HOURS` + 周末谷价 + 法定节假日规则从下一个整点起逐小时探测得出，取不到为 `0`）。挂件只按它换算「距峰时/谷时 1h20m」，页面内不再实现第二套时段规则。
 - 每次成功采样后 `getBalancePayload` 调 `maybeNotifyAlerts` 统一判定**三类**自动通知（预算、低余额、大幅波动）：
   - **预算 / 低余额**经 `notifyDaily(text, cfg, kind)` 出口：**免打扰时段内直接跳过且不占用当天名额**（`inQuietHours`，出时段后仍会补发一次），否则按 `kind` 认领当天名额（`claimDailyNotice(kind)` → 账本 `budgetNotifiedOn` / `lowNotifiedOn`）后 `utools.showNotification` 弹一次。
   - **大幅波动**走 `notifyNow(text, cfg)`：只受免打扰约束、**不认领当天名额**。判定用 `recordLedgerUsage` 返回的 `drop`（本轮余额下降总额，计不计入用量都算；跨天/换币种/换 Key 三个分支恒为 0，天然不会误报），`drop ≥ dropAlertAmount` 才通知。不做每天一次去重 —— 下降后基准随即更新，同一次下降只会被采样到一次，不会重复刷屏。文案区分：正常消费报「今日已用」，被防误判拦下的下降附 `adjust.why` 并注明「未计入今日用量」。
@@ -289,7 +290,7 @@ uTools 插件：呼出后在桌面创建一个**透明、无边框、置顶**的
 - 解析 `data.biz_data.series[]`（兼容 `data.series`），每 series `{model,buckets:[{time,usage:{RESPONSE_TOKEN,PROMPT_CACHE_HIT_TOKEN,PROMPT_CACHE_MISS_TOKEN}}]}`；接口只给 token 不给金额。
 - `computeTodayUsage` **同时按 `model` 聚合金额**（`byModel`：`{model,amount,tokens}`，按金额降序），金额与总额用同一份 `priceFor(model)` + `isPeakTime(b.time)` 计算（`sum(byModel.amount) === amount`）；`model` 缺失归到空名一组，由设置页显示为「未知模型」。`fetchPlatformUsage` 把 `{amount,tokens,byModel}` 一起透传。
 - **今日模型占比**（设置页「用量与账本」卡片）：模型明细只有本接口会给，**记账模式拿不到**，故只在 `usageMode==='token'` 时渲染。宿主 `settings.getTodayModels()` 复用 `fetchPlatformUsage`（不新增请求通道与 IPC），返回 `{ok,models,amount,tokens}`；无平台 Token 时返回 `{ok:false,error:'未配置平台 Token'}` 由页面提示。页面在 `onMounted` / 切用量模式 / 窗口重新可见时各拉一次，不在轮询里发请求。
-- 峰谷：北京时间工作日 9–12、14–18 为峰；`WEEKEND_VALLEY_FROM_SEC`（=北京 2026-08-23 00:00）起周末全天谷价。
+- 峰谷：北京时间工作日 9–12、14–18 为峰；`WEEKEND_VALLEY_FROM_SEC`（=北京 2026-08-23 00:00）起周末全天谷价；`CN_HOLIDAYS`（`constants.js` 内置的北京时间 `YYYY-MM-DD` 表，**不设生效点、一直生效**）里的中国法定节假日全天谷价。放假日常落在工作日，只看星期几会漏判成峰时、按双倍价记账；表只列「实际放假」的日子（调休补班的周末本就在周末分支被判谷价）。`CN_HOLIDAYS` 与 `WEEKEND_VALLEY_FROM_SEC` 是**两条独立规则**，别把节假日查表塞进 `n >= WEEKEND_VALLEY_FROM_SEC` 分支（上半年节假日会全部漏判）。
 - 成功后 `setTodayUsage(amount)` 把平台今日总量写入账本 `todayUsage`：趋势图 / 导出 / 今日已用都取账本，不写会导致设置页与挂件显示不一致（记账累计值 ≠ 平台今日总量）。
 
 **定价表**（每百万 token，CNY，谷/峰）：

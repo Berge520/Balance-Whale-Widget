@@ -48,6 +48,39 @@ test('无效入参一律按谷时处理，不抛异常', () => {
   }
 })
 
+// 法定节假日全天谷价：这些日子多为工作日，只按星期几判会把它们算成峰时、按双倍价记账。
+test('法定节假日全天谷价（均为工作日）', () => {
+  assert.equal(isPeakTime(bj(2026, 1, 1, 10)), false)  // 元旦（周四）
+  assert.equal(isPeakTime(bj(2026, 5, 1, 10)), false)  // 劳动（周五）
+  assert.equal(isPeakTime(bj(2026, 5, 4, 10)), false)  // 劳动调休（周一）
+  assert.equal(isPeakTime(bj(2026, 10, 1, 10)), false) // 国庆（周四）
+  assert.equal(isPeakTime(bj(2026, 10, 8, 15)), false) // 国庆末日（周四）
+  assert.equal(isPeakTime(bj(2026, 2, 16, 9)), false)  // 春节除夕（周一）
+  assert.equal(isPeakTime(bj(2026, 4, 6, 10)), false)  // 清明调休（周一）
+  assert.equal(isPeakTime(bj(2026, 6, 19, 10)), false) // 端午（周五）
+  assert.equal(isPeakTime(bj(2026, 9, 25, 10)), false) // 中秋（周五）
+})
+
+test('节假日表不误伤相邻工作日（边界前后仍是正常峰谷）', () => {
+  // 元旦表末 01-03 周六（本就谷价）→ 之后 01-05 周一 10 点恢复正常峰时
+  assert.equal(isPeakTime(bj(2026, 1, 5, 10)), true)
+  // 劳动结束后的 05-06 周三 10 点 → 恢复峰时
+  assert.equal(isPeakTime(bj(2026, 5, 6, 10)), true)
+  // 国庆结束后的 10-09 周五 10 点 → 恢复峰时
+  assert.equal(isPeakTime(bj(2026, 10, 9, 10)), true)
+  // 节前一天仍是普通工作日：04-30 周四 10 点 → 峰时
+  assert.equal(isPeakTime(bj(2026, 4, 30, 10)), true)
+  // 节假日表的谷价是「全天」，非峰段时刻本来就是谷价
+  assert.equal(isPeakTime(bj(2026, 5, 1, 3)), false)
+})
+
+test('节假日顺带把「下一个切换点」也算对（21:00 起跨完整个假期）', () => {
+  // 劳动 05-05 周二 20 点 → 假期全天谷价，次日 05-06 周三 9:00 才转峰
+  assert.equal(nextPeakChangeAt(bj(2026, 5, 5, 20)), bj(2026, 5, 6, 9))
+  // 国庆 10-08 周四 20 点 → 次日 10-09 周五 9:00
+  assert.equal(nextPeakChangeAt(bj(2026, 10, 8, 20)), bj(2026, 10, 9, 9))
+})
+
 test('nextPeakChangeAt 给出下一个整点边界', () => {
   // 峰时中 → 本段结束
   assert.equal(nextPeakChangeAt(bj(2026, 9, 15, 9, 30)), bj(2026, 9, 15, 12))
