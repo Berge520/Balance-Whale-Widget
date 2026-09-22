@@ -186,6 +186,106 @@ test('parseDump 忽略 config 下缩进不足的噪声行（不误收为 configK
   assert.deepEqual(dump.entriesOf(p)[0].configKeys, ['realKey'])
 })
 
+// ⚠️ 嵌套条目必须与顶层条目一视同仁 —— 这是本机实测踩过的坑：
+// `mnemon-bundle` 的 config 列表里嵌着 8 个 depth=4 的子条目，只认行首 `- id:` 的旧实现
+// 把它们整组漏掉（用户层显示 3 条而非 11 条）。下面这三条钉住它，别让谁「简化」回行首正则
+test('parseDump 收进 config 列表里嵌套的子条目（不只看行首 `- id:`）', () => {
+  const p = dump.parseDump(
+    [
+      '# == pkg',
+      '- id: mnemon-bundle',
+      '  name: dsh-mnemon',
+      '  config:',
+      '    - id: mnemon',
+      '      name: dsh-mnemon-core',
+      '    - id: mnemon-source-documents',
+      '      name: dsh-mnemon-docs',
+    ].join('\n')
+  )
+  assert.deepEqual(p.sections[0].ids, ['mnemon-bundle', 'mnemon', 'mnemon-source-documents'])
+  const byId = {}
+  for (const e of dump.entriesOf(p)) byId[e.id] = e
+  assert.equal(byId['mnemon'].name, 'dsh-mnemon-core')
+  assert.equal(byId['mnemon-source-documents'].name, 'dsh-mnemon-docs')
+  // depth 是解析期的内部字段（entriesOf 刻意不回传前端，见 DshDumpEntry），
+  // 用「分节序号:id」直接读内部表。子条目 4 格、父条目 0 格
+  assert.equal(p.entries['0:mnemon-bundle'].depth, 0)
+  assert.equal(p.entries['0:mnemon'].depth, 4)
+})
+
+// 字段归属由缩进决定，不是「最近出现过谁」：子条目出现后父条目自己的字段
+// 不能被算到子条目头上（反之亦然），否则 disabled / configKeys 会串味
+test('parseDump 按缩进把 name / disabled / config 归给正确的层级', () => {
+  const p = dump.parseDump(
+    [
+      '# == pkg',
+      '- id: parent',
+      '  name: parent-name',
+      '  config:',
+      '    - id: child',
+      '      name: child-name',
+      '      disabled: true',
+      '      config:',
+      '        childKey: 1',
+      '  disabled: false',
+    ].join('\n')
+  )
+  const byId = {}
+  for (const e of dump.entriesOf(p)) byId[e.id] = e
+  assert.equal(byId['parent'].name, 'parent-name')
+  assert.equal(byId['child'].name, 'child-name')
+  // 父条目在子条目之后才写自己的 disabled: false，不能被 child 的 true 覆盖
+  assert.equal(byId['parent'].disabled, false)
+  assert.equal(byId['child'].disabled, true)
+  // 子条目字段门槛 = 自身缩进 4 + 4 = 8
+  assert.deepEqual(byId['child'].configKeys, ['childKey'])
+})
+
+// configKeys 的缩进门槛随条目深浅浮动：条目 `- id:` 比同级兄弟字段少 2 格，
+// 它的 config: 在 +2、config 的字段在 +4。写死 4 格只对顶层条目有效，写 +2 则一个都收不到
+test('parseDump 的 configKeys 门槛随条目深度浮动（顶层与嵌套都收，且不含更深层内部字段）', () => {
+  const p = dump.parseDump(
+    [
+      '# == pkg',
+      '- id: top',
+      '  config:',
+      '    topKey: 1',
+      '    embedding:',
+      '      enabled: true',
+      '    - id: nested',
+      '      config:',
+      '        nestedKey: 2',
+    ].join('\n')
+  )
+  const byId = {}
+  for (const e of dump.entriesOf(p)) byId[e.id] = e
+  assert.deepEqual(byId['top'].configKeys, ['topKey', 'embedding'])
+  // embedding 是顶层字段（收），它内部的 enabled 不是（不收）
+  assert.equal(byId['top'].configKeys.includes('enabled'), false)
+  assert.deepEqual(byId['nested'].configKeys, ['nestedKey'])
+})
+
+// 反向钉子：`providers:` 之类的列表用 `- use:` / `instanceId:` 而非 `- id:`，
+// 它们不是 cordis 组装节点，混进 entries 会让 id 清单与条目数一起虚高
+test('parseDump 不把 `- use:` / `instanceId:` 列表项当成条目', () => {
+  const p = dump.parseDump(
+    [
+      '# == pkg',
+      '- id: mnemon-source-memory-spaces',
+      '  config:',
+      '    providers:',
+      '      - use: dsh-mnemon-provider-local',
+      '        instanceId: local-1',
+      '      - use: dsh-mnemon-provider-remote',
+      '        instanceId: remote-1',
+    ].join('\n')
+  )
+  assert.deepEqual(p.sections[0].ids, ['mnemon-source-memory-spaces'])
+  // `- use:` 行没有 `- id:`，所以压根没进 entries；`providers` 作为 config 顶层字段被收
+  assert.deepEqual(Object.keys(p.entries), ['0:mnemon-source-memory-spaces'])
+  assert.deepEqual(dump.entriesOf(p)[0].configKeys, ['providers'])
+})
+
 // ── parseDshWarnings ──
 // 这是 C2 的唯一权威判据来源：dsh 解析 patch 时自己打的 not found 行。
 // 实测它在 dump 正文**之前**（走 stderr），格式如：

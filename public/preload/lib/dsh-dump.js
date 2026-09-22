@@ -99,15 +99,20 @@ function shortSource(p) {
 // 解析 dump 全文 → { sections: [...], entries: {...} }
 //
 // 每个 section：{ head, bundle, patchedBy, isUserLayer, source, ids: [...] }
-// 每个 entry：{ id, name, disabled, hasConfig, configKeys }
+// 每个 entry：{ id, name, disabled, hasConfig, configKeys, depth }
+//   depth 是解析期的内部字段（`- id:` 的缩进），只用于判定字段归属与 configKeys 门槛，
+//   **不随 entriesOf 回传前端**（DshDumpEntry 里没有它，前端不需要、也看不懂这个数）
 // 条目级解析的好处：一个 30KB 的 dump 出来后只有几百字节，前端够用（§4.3）
 function parseDump(text) {
   const lines = stripAnsi(text).split('\n')
   const sections = []
   const entries = {}
   let cur = null
-  let curEntry = null
-  // 条目语法：顶层 `- id: X` / `  name: Y` / `  disabled: ...` / `  config:`
+  // 条目栈：按 `- id:` 的缩进深度排。栈顶是当前缩进最深的条目，
+  // 于是「这一行 name/disabled/config 属于谁」由**缩进**决定，而不是「最近出现过谁」——
+  // 后者会把 `providers:` 列表里兄弟元素的字段错记到上一个子条目头上。
+  let stack = []
+  // 条目语法：`- id: X` / `<更深缩进> name: Y` / `disabled: ...` / `config:`
   for (const line of lines) {
     const head = parseSectionHead(line)
     if (head) {
@@ -119,42 +124,72 @@ function parseDump(text) {
         ids: [],
       }
       sections.push(cur)
-      curEntry = null
+      stack = []
       continue
     }
     if (!cur) continue
-    const idm = /^-\s+id:\s*(.+?)\s*$/.exec(line)
+    // 条目开头的 `- id: X`，**任意缩进深度都收**。
+    // 早先只认行首 `^- id:`，于是 `mnemon-bundle` 的 `config:` 列表里嵌套的 8 个子条目
+    // （缩进 4 空格，本机实测：mnemon / mnemon-source-* / mnemon-strategy-*）一个都没进 entries ——
+    // 转储卡把它们整组漏掉（用户层显示 3 条而非 11 条），拿 entries 当「已知 id 清单」的旧 C2
+    // 还因此把这 8 个**合法**条目全判成对不上（8 假阳性 + 1 真阳性，纯属巧合才没漏掉真的那个）。
+    // 嵌套条目同样是 cordis 组装树里的真实节点，必须与顶层条目一视同仁地收进来。
+    const idm = /^(\s*)-\s+id:\s*(.+?)\s*$/.exec(line)
     if (idm) {
-      const id = idm[1]
-      curEntry = { id: id, name: '', disabled: false, hasConfig: false, configKeys: [] }
+      const id = idm[2]
+      const depth = idm[1].length
+      // 弹出比本行缩进更浅/等深的条目，剩下的栈顶就是父条目
+      while (stack.length && stack[stack.length - 1].depth >= depth) stack.pop()
+      const en = { id: id, name: '', disabled: false, hasConfig: false, configKeys: [], depth: depth }
+      stack.push(en)
       cur.ids.push(id)
       // 同 id 出现在多个分节是正常的（分层），用「分节序号:id」做键避免互相覆盖
-      entries[sections.length - 1 + ':' + id] = curEntry
+      entries[sections.length - 1 + ':' + id] = en
       continue
     }
-    if (!curEntry) continue
+    const en0 = stack.length ? stack[stack.length - 1] : null
+    if (!en0) continue
+    // ⚠️ 归属必须**按本行缩进**再收一次栈，不能只靠「下一个 `- id:` 到来时 pop」：
+    // 条目自身的字段比 `- id:` 深 2 格（`- id: child`(4) → `disabled:`(6)），而父条目的
+    // 字段又比子条目浅（`- id: parent`(0) → `disabled:`(2)）。于是父条目的收尾字段会以
+    // 「比子条目浅」的缩进出现在子条目之后 —— 只看栈顶就会把它错记到子条目头上。
+    // 实测踩坑：`  disabled: false`(2) 覆盖掉子条目的 `disabled: true`(6)，且子条目
+    // 后续的 `config:` 字段也再没机会被收（栈顶永远停在子条目上）。
+    // 规则：本行缩进 < 条目字段缩进（depth+2）时，说明已退出该条目的字段区，逐层弹栈。
+    // 用「严格小于」而不是「小于等于」：条目自己的字段就在 depth+2，等于时必须保留栈顶
+    const lineInd = /^(\s*)/.exec(line)[1].length
+    while (stack.length && lineInd < stack[stack.length - 1].depth + 2) stack.pop()
+    const en = stack.length ? stack[stack.length - 1] : null
+    if (!en) continue
     const nm = /^\s+name:\s*(.+?)\s*$/.exec(line)
     if (nm) {
       const v = nm[1].replace(/^['"]|['"]$/g, '')
-      curEntry.name = v
+      en.name = v
       // 已出现的 id/name 登记到全局表，供 diff 用「id → name」兜底显示
-      if (!entries['@name:' + curEntry.id]) entries['@name:' + curEntry.id] = { id: curEntry.id, name: v }
+      if (!entries['@name:' + en.id]) entries['@name:' + en.id] = { id: en.id, name: v }
       continue
     }
     // disabled 有四种写法（实测）：`disabled: true` / `!!js '...'` / `!!js >-` 多行 / 省略
     if (/^\s+disabled:/.test(line)) {
-      curEntry.disabled = !/^\s+disabled:\s*false\s*$/.test(line)
+      en.disabled = !/^\s+disabled:\s*false\s*$/.test(line)
       continue
     }
     if (/^\s+config:\s*$/.test(line)) {
-      curEntry.hasConfig = true
+      en.hasConfig = true
       continue
     }
-    // config 下的顶层字段：缩进 4 空格且形如 `key: value`，只留 key 名不留值
-    if (curEntry.hasConfig) {
-      const km = /^ {4}([A-Za-z_][\w.-]*):(?:\s|$)/.exec(line)
-      if (km && curEntry.configKeys.length < CONFIG_KEY_MAX && curEntry.configKeys.indexOf(km[1]) < 0) {
-        curEntry.configKeys.push(km[1])
+    // config 下的顶层字段：形如 `key: value`，只留 key 名不留值。
+    // ⚠️ 缩进门槛随条目深浅浮动，且**不能**写成「条目缩进 + 2」：条目自身是 `- id:`（比同级
+    // 兄弟字段少 2 格），它的 `config:` 在 +2、config 的字段在 +4。本机实测：
+    //   `- id: web-ui-settings`(0) → `config:`(2) → `plugin:`(4)
+    //   `- id: mnemon`(4)         → `config:`(6) → `routingGuidance:`(8)
+    // 更深的是嵌套对象里的字段（如 `embedding.enabled`），不进 configKeys ——
+    // 否则 diff 会把内部对象的字段当成顶层配置项比对
+    if (en.hasConfig) {
+      const ind = /^(\s*)/.exec(line)[1].length
+      const km = ind === en.depth + 4 ? /^([A-Za-z_][\w.-]*):(?:\s|$)/.exec(line.trim()) : null
+      if (km && en.configKeys.length < CONFIG_KEY_MAX && en.configKeys.indexOf(km[1]) < 0) {
+        en.configKeys.push(km[1])
       }
     }
   }
