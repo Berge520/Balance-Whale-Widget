@@ -520,23 +520,29 @@ README 明示：0.1.5 启动器只路由 `web` / `plugin`；历史上的 `dsh do
 
 ### 6.1 验证清单（**编码前的硬 gate**）
 
-| # | 要验证什么 | 方法 | 通过后才做 |
-|---|---|---|---|
-| V1 | `disabled: true` 对 **profile `cordis.patch.yml` 里的 bundle 条目**是否生效 | 手动改一个 bundle 条目 → 启动 dsh → 看目标插件是否真被禁用 | E2 精确禁用 |
-| V2 | 整份禁用后 dsh 是否真能起来（是否会触发 `patch: entry not found`） | 手动全禁 → 启动 | E3 一键隔离 |
-| V3 | 现有 `profiles/web/cordis.patch.yml` 里 11 条 `disabled` 的实际语义 | 读现有文件，确认它是"用户自己禁的"还是"某工具写的" | 写入格式设计 |
-| V4 | 写入后 dsh 是否热加载（`patchReload: "live"` **[实测]** 的含义） | 改文件 → 观察不重启是否生效 | 是否需提示重启 |
+> **状态：V1–V4 已于 v1.6.2 全部真机核验完毕（2026-09-22）**，逐条结论见 `docs/whale-widget-spec.md` §10.3 第 ⑤ 段。**验证结论已敲定阶段三的四条硬约束**；**E1（备份 + 可撤销机制）、E2（单个插件禁用 / 启用）与 E3（我的一键隔离）已于 v1.6.3 落地**（见 §6.2 与 spec §10.3 第 ⑥ / ⑦ / ⑧ 段），E4 待排期。
+> 核验全程用 `dsh --patch <overlay.yml>` 叠加临时层，**未改用户文件**；备份在 `~/.dsh/whale-v-gate-backup/`，验完三个关键文件 SHA256 与基线逐字一致。
 
-**验证方式**：手动操作 + 记录结论到 `docs/whale-widget-spec.md`，**不写代码**。
+| # | 要验证什么 | 方法 | 通过后才做 | **实测结论（v1.6.2）** |
+|---|---|---|---|---|
+| V1 | `disabled: true` 对 **profile `cordis.patch.yml` 里的 bundle 条目**是否生效 | 手动改一个 bundle 条目 → 启动 dsh → 看目标插件是否真被禁用 | E2 精确禁用 | **分情况**：纯服务端 bundle（`cost-meter`/`modlens`/`mnemon`）**可靠生效**；带 client 入口的插件（`dsh-better-sidebar`）**禁用组装树条目无效** —— 其加载入口在 `package.json` 的 `dependencies`。E2 不能承诺「禁用必生效」 |
+| V2 | 整份禁用后 dsh 是否真能起来（是否会触发 `patch: entry not found`） | 手动全禁 → 启动 | E3 一键隔离 | **能起来**（16 条全禁，监听 3080，无报错）。但**写不存在的 id 只打一行 stderr `patch: entry "X" not found`**，退出码 0、启动照常 —— **静默失效**，E2/E3 必须主动捕获这句 |
+| V3 | 现有 `profiles/web/cordis.patch.yml` 里 11 条 `disabled` 的实际语义 | 读现有文件，确认它是"用户自己禁的"还是"某工具写的" | 写入格式设计 | **12 条目 / 11 条 `disabled`，全部是第三方插件**（`modlens`/`mnemon`×9/`cost-meter`），无一条打在官方 bundle；第 25–34 行是 `remote-web-ui` 托管块。格式：`- id: X` + `disabled: true` **行级追加**，不改其他字段 |
+| V4 | 写入后 dsh 是否热加载（`patchReload: "live"` **[实测]** 的含义） | 改文件 → 观察不重启是否生效 | 是否需提示重启 | **单向生效**：加 `disabled` **即时生效**（pid 不变）；**删掉该行不恢复**（等 23s 仍无效）→ **「恢复/撤销」不能只删行**，必须重启或显式 toggle |
+
+**验证方式**：手动操作 + 记录结论到 `docs/whale-widget-spec.md`，**不写代码**。（已完成）
+
+**零风险验证通道（后续 E1/E2 可复用）**：`dsh --profile web --patch <overlay.yml> --dump-config` 叠加临时层，不改用户文件；运行态看 web 首页 `/plugins/??<清单>`（`/?token=<启动打印的 token>` 是唯一免额外鉴权的端点，`/api/*` 一律 401）。注意 `--patch` 是 launcher 层参数，与 `web` 位置参数不可混用。
+
 
 ### 6.2 候选功能（验证通过后再排期）
 
-| # | 功能 | 前置 |
-|---|---|---|
-| E1 | 备份 + 可撤销机制（`whale-dsh-backup/<时间戳>/`） | 无（是所有写入的前置） |
-| E2 | 单个插件禁用 / 启用 | V1、V3 |
-| E3 | 「我的一键隔离」（**不是**原方案的"安全模式"） | V2 |
-| E4 | known-good 快照 + 回滚（留 N 份） | E1。**快照绝不包含 `.credentials.yaml`** |
+| # | 功能 | 前置 | 状态 |
+|---|---|---|---|
+| E1 | 备份 + 可撤销机制（`whale-dsh-backup/<时间戳>/`） | 无（是所有写入的前置） | ✅ **模块与单测已完成（v1.6.3）**：`lib/dsh-backup.js` + `test/dsh-backup.test.mjs`（20 项）。**IPC 接入与设置页卡片未做**，留给 E2 —— 详见 spec §10.3 第 ⑥ 段 |
+| E2 | 单个插件禁用 / 启用 | V1、V3、E1 | ✅ **已完成（v1.6.3）**：`lib/dsh-patch.js` + `test/dsh-patch.test.mjs`（15 项）+ `settings.js` 宿主层 + `services.d.ts` 类型 + 设置页「dsh 插件开关」卡片（含快照列表与两步确认还原）。**写前强制建快照，快照失败即中止写入**；「启用」需重启 dsh（V4 单向热重载）。**未新增 IPC 通道**（D14）。详见 spec §10.3 第 ⑦ 段 |
+| E3 | 「我的一键隔离」（**不是**原方案的"安全模式"） | V2、E1 | ✅ **已完成（v1.6.3）**：`lib/dsh-isolate.js`（候选清单纯函数层）+ `dsh-patch.js#applyBatchDisable`（**两趟法**批量落笔）+ `test/dsh-isolate.test.mjs`（25 项）+ `settings.js` 宿主层 + `services.d.ts` 类型 + 设置页「dsh 一键隔离」卡片。**只禁勾选的候选**（§5.2 红线，不做全禁）；候选数上限 `MAX_BATCH = 100`；组装树读不到时**降级**（`treeError` + 只列 patch 条目，不算整体失败）；**写入前 `dryRun` 把将改动的行列给用户过目 → 两步确认 → 建 `before-isolate` 快照（失败即中止）→ 回读逐条校验**。**未新增 IPC 通道**（D14）。详见 spec §10.3 第 ⑧ 段 |
+| E4 | known-good 快照 + 回滚（留 N 份） | E1。**快照绝不包含 `.credentials.yaml`** | 待排期（E1 已备好 `pruneSnapshots` / `MAX_SNAPSHOTS = 20`） |
 | E5 | 自动换端口启动（官方支持 `--port 0` 让 OS 选空闲端口）**[实测]** | **D7：单独排期，不进本期** |
 | E6 | Profile 快速切换 + 健康指示 | 需改 `restart()` 参数链 |
 | E7 | `dsh plugin` 转发（pnpm） | 只读列举先做；pnpm 缺失需降级只读；**禁走 `.cmd`/`.ps1`** |
@@ -552,7 +558,7 @@ README 明示：0.1.5 启动器只路由 `web` / `plugin`；历史上的 `dsh do
 | 阶段一 · 第三梯队 | §3.3 **C5**（降级「尽力而为」，D26） | 探测失败报 `warning` 并写明原因，**不得**让整轮 `ok:false` | **已落地**：`lib/diagnostics.js` C5 六条 `warning` 出口 |
 | 阶段一 · 收尾 | §3.1 全量交付物 + §3.4 宿主 API + §3.6 第 4 张卡 | 按 §11.3 手动制造 5 种场景，诊断能准确报出；dsh 未安装 / 未运行时诊断不报错 | **已落地**：spec §10.3 四段核验记录（含 C5 三态真机证据） |
 | 阶段二 | §4 一次性 CLI 读取（D1–D2） | 先补 §4.1 登录 shell 兜底；三平台均能取到 dump 并正确分节；超时/失败有降级文案 | **已落地**：`lib/dsh-dump.js`（§4.3 六条约束全遵守）+ 设置页第 5 张卡（开发者 Tab）+ 28 项单测 |
-| 阶段三 | §6 写入与恢复 | **先过 §6.1 的 V1–V4 硬 gate** | **延后（D2）** |
+| 阶段三 | §6 写入与恢复 | **先过 §6.1 的 V1–V4 硬 gate** | **进行中（v1.6.3）**：gate 已全过；**E1 备份机制 / E2 单插件禁用启用 / E3 一键隔离已落地**，E4 known-good 回滚待排期 |
 | 单独排期 | E5 自动换端口（`--port 0`） | 不改现有 `dsh.js` 启动路径的前提下另立任务 | **延后（D7）** |
 
 > **梯队划分的意义（D27）**：按「平台语义依赖从零到有」排序，**稳的先落地**。第一梯队不碰任何平台差异，可行即完成；C1 曾是本期最不稳的一环（`realpath` 语义），改用身份指纹后降到第二梯队；C5 是唯一真正依赖 `tasklist`/`ps` 双套逻辑 + 进程名反推的项，**允许它探测不出来**（D26）。

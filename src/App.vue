@@ -1,6 +1,6 @@
 <script lang="ts" setup>
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
-import type { AssetsApplyResult, AssetsExportResult, AssetsPreviewResult, BackupPreviewResult, BubbleMeta, CodexSummaryResult, CodexWindow, CodexWindows, DshDiagnoseFinding, DshDiagnoseItem, DshDiagnoseResult, DshDumpResult, DshUsageResult, LedgerDetailDay, LedgerDetailEntry, ModelUsageRow, SkinGallery, SkinMeta, SoundMeta, SoundRole, WhaleMailSecrets, WhaleModel, WhaleModelRow, WhaleModelTemplate, WhalePriceModel, WhaleServices, WhaleTokenPrice } from './types/services'
+import type { AssetsApplyResult, AssetsExportResult, AssetsPreviewResult, BackupPreviewResult, BubbleMeta, CodexSummaryResult, CodexWindow, CodexWindows, DshBackupListResult, DshBackupSnapshot, DshDiagnoseFinding, DshDiagnoseItem, DshDiagnoseResult, DshDumpResult, DshIsolateCandidatesResult, DshIsolatePlan, DshPatchItem, DshPatchListResult, DshUsageResult, LedgerDetailDay, LedgerDetailEntry, ModelUsageRow, SkinGallery, SkinMeta, SoundMeta, SoundRole, WhaleMailSecrets, WhaleModel, WhaleModelRow, WhaleModelTemplate, WhalePriceModel, WhaleServices, WhaleTokenPrice } from './types/services'
 import SkinCropper from './components/SkinCropper.vue'
 import SoundTrimmer from './components/SoundTrimmer.vue'
 import FirstRunGuide from './components/FirstRunGuide.vue'
@@ -361,15 +361,17 @@ watch(activeTab, (tab) => {
 // 两张统计卡默认收起，首次「展开」时才读取：宿主是同步扫文件（会话日志可能几十 MB），
 // 不看不读，避免每次进开发者 Tab 都无条件付一次扫描成本；展开后即读，也不用手动再点一下。
 // 收起时摘要只在「本会话已读过」之后才显示（否则露「点击展开查看」），保证折叠 = 不预读。
-const devFolds = reactive({ dshUsage: false, codex: false, diagnose: false, dshDump: false })
-const devStatsLoaded = reactive({ dshUsage: false, codex: false, diagnose: false, dshDump: false })
-function toggleDevCard(key: 'dshUsage' | 'codex' | 'diagnose' | 'dshDump') {
+const devFolds = reactive({ dshUsage: false, codex: false, diagnose: false, dshDump: false, dshPatch: false, dshIsolate: false })
+const devStatsLoaded = reactive({ dshUsage: false, codex: false, diagnose: false, dshDump: false, dshPatch: false, dshIsolate: false })
+function toggleDevCard(key: 'dshUsage' | 'codex' | 'diagnose' | 'dshDump' | 'dshPatch' | 'dshIsolate') {
   devFolds[key] = !devFolds[key]
   if (!devFolds[key] || devStatsLoaded[key]) return
   devStatsLoaded[key] = true
   if (key === 'dshUsage') dshUsageRefresh()
   else if (key === 'codex') codexRefresh()
   else if (key === 'dshDump') dshDumpRefresh()
+  else if (key === 'dshPatch') dshPatchRefresh()
+  else if (key === 'dshIsolate') dshIsolateRefresh()
   else diagnoseRefresh()
 }
 // 启动/结束是同步返回；重启要等旧进程退出、更新要下载，之后再补一次状态
@@ -1047,6 +1049,292 @@ function dshDumpCopy() {
   const ok = services.copyText?.(lines.join('\n'))
   dshDumpFlash.err = !ok
   dshDumpFlash.msg = ok ? '已复制完整转储信息' : '复制失败，请手动选中复制。'
+}
+
+// ── dsh 插件开关（计划书 §6.2 E2）──
+// 改的是用户层 patch（$DSH_HOME/profiles/web/cordis.patch.yml）：**逐条禁用/启用** + 快照还原。
+// 与上面两张卡的本质区别：这是**唯一会写 dsh 文件的卡**，所以每次写入前强制建快照。
+const dshPatch = ref<DshPatchListResult | null>(null)
+const dshPatchBusy = ref(false)
+const dshPatchFlash: Flash = useFlash()
+// 逐条的操作中状态：key = id，避免一条在写时其他条也能点
+const dshPatchPending = ref<string>('')
+const dshPatchFolds = reactive({ help: false })
+const dshPatchProfile = 'web'
+const dshBackups = ref<DshBackupListResult | null>(null)
+const dshBackupFolds = reactive({ list: false })
+// 还原是破坏性操作且不可再撤销（会把文件整体覆盖回旧内容），做两步确认
+const dshRestoreConfirm = ref('')
+function dshPatchRefresh() {
+  if (dshPatchBusy.value) return
+  dshPatchBusy.value = true
+  dshPatchFlash.msg = ''
+  dshPatchFlash.err = false
+  try {
+    const r = services.dshPatchList?.({ profile: dshPatchProfile })
+    if (!r) {
+      dshPatchFlash.err = true
+      dshPatchFlash.msg = '宿主 API 不可用'
+      return
+    }
+    dshPatch.value = r
+    if (!r.ok) {
+      dshPatchFlash.err = true
+      dshPatchFlash.msg = r.error || '读取失败'
+      return
+    }
+    dshPatchFlash.msg = r.exists
+      ? `${r.items?.length || 0} 个条目 · ${(r.items || []).filter((i) => i.disabled).length} 条已禁用`
+      : '这个 profile 还没有 patch 文件，禁用任意插件时会自动创建'
+  } catch (err: any) {
+    dshPatchFlash.err = true
+    dshPatchFlash.msg = '读取失败：' + String(err?.message || err)
+  } finally {
+    dshPatchBusy.value = false
+    dshBackupRefresh()
+  }
+}
+function dshBackupRefresh() {
+  try {
+    const r = services.dshBackupList?.()
+    if (r) dshBackups.value = r
+  } catch (err: any) {
+    // 快照列表读不到不该让整卡失败（禁用/启用仍可用，只是看不到历史）
+    dshBackups.value = { ok: false, snapshots: [], error: String(err?.message || err) }
+  }
+}
+// 切换一条的 disabled。**宿主侧会先建快照再写**，所以这里不做「先备份」的分步交互
+function dshPatchToggle(item: DshPatchItem) {
+  if (dshPatchPending.value) return
+  dshPatchPending.value = item.id
+  dshPatchFlash.msg = ''
+  dshPatchFlash.err = false
+  const want = !item.disabled
+  window.setTimeout(() => {
+    try {
+      const r = services.dshPatchToggle?.({ profile: dshPatchProfile, id: item.id, disabled: want })
+      if (!r) {
+        dshPatchFlash.err = true
+        dshPatchFlash.msg = '宿主 API 不可用'
+        return
+      }
+      if (!r.ok) {
+        dshPatchFlash.err = true
+        dshPatchFlash.msg = r.error || '写入失败'
+        return
+      }
+      if (!r.changed) {
+        dshPatchFlash.msg = `「${item.id}」已经是该状态，未改动。`
+      } else {
+        // V4：取消禁用（启用）不是即时生效的，必须重启 —— 这里不能笼统说「已生效」
+        const tail = r.needsRestart ? '；dsh 的 patch 热重载是单向的，**启用需重启 dsh 才生效**' : ''
+        dshPatchFlash.err = false
+        dshPatchFlash.msg = `已${want ? '禁用' : '启用'}「${item.id}」` +
+          (r.backedUp ? `（改动前已备份 ${r.snapshot}）` : '') + tail
+      }
+    } catch (err: any) {
+      dshPatchFlash.err = true
+      dshPatchFlash.msg = '写入失败：' + String(err?.message || err)
+    } finally {
+      dshPatchPending.value = ''
+      dshPatchRefresh()
+    }
+  }, 30)
+}
+// 还原：第一次点变成「确认还原」，第二次才真还原
+function dshBackupRestore(dirName: string) {
+  if (dshRestoreConfirm.value !== dirName) {
+    dshRestoreConfirm.value = dirName
+    dshPatchFlash.err = false
+    dshPatchFlash.msg = `再点一次「确认还原」会用 ${dirName} 覆盖当前配置（整文件覆盖，会一并回退这份文件上的其他改动）。`
+    return
+  }
+  dshRestoreConfirm.value = ''
+  dshPatchFlash.msg = ''
+  try {
+    const r = services.dshBackupRestore?.({ dirName })
+    if (!r || !r.ok) {
+      dshPatchFlash.err = true
+      dshPatchFlash.msg = (r && r.error) || '还原失败'
+      return
+    }
+    dshPatchFlash.err = false
+    dshPatchFlash.msg = `已还原 ${r.written?.length || 0} 个文件` +
+      (r.skipped?.length ? `（跳过 ${r.skipped.length} 个建快照时就不存在的文件）` : '') +
+      '；dsh 侧需重启才完全生效。'
+  } catch (err: any) {
+    dshPatchFlash.err = true
+    dshPatchFlash.msg = '还原失败：' + String(err?.message || err)
+  } finally {
+    dshPatchRefresh()
+  }
+}
+function dshBackupCreate() {
+  dshPatchFlash.msg = ''
+  try {
+    const r = services.dshBackupCreate?.({ profile: dshPatchProfile })
+    if (!r || !r.ok) {
+      dshPatchFlash.err = true
+      dshPatchFlash.msg = (r && r.error) || '备份失败'
+      return
+    }
+    dshPatchFlash.err = false
+    dshPatchFlash.msg = `已建快照 ${r.dirName}` + (r.missing ? `（${r.missing} 个文件当时不存在，未备）` : '')
+  } catch (err: any) {
+    dshPatchFlash.err = true
+    dshPatchFlash.msg = '备份失败：' + String(err?.message || err)
+  } finally {
+    dshBackupRefresh()
+  }
+}
+// 快照时间戳目录名 → 本地可读时间（YYYYMMDD-HHMMSS → 2026-09-22 21:42:43）
+function dshBackupTime(s: DshBackupSnapshot) {
+  if (s.at) {
+    const d = new Date(s.at)
+    if (!Number.isNaN(d.getTime())) return d.toLocaleString('zh-CN', { hour12: false })
+  }
+  const m = /^(\d{4})(\d{2})(\d{2})-(\d{2})(\d{2})(\d{2})/.exec(s.dirName || '')
+  return m ? `${m[1]}-${m[2]}-${m[3]} ${m[4]}:${m[5]}:${m[6]}` : (s.dirName || '')
+}
+function dshBackupReasonText(r: string) {
+  return r === 'before-disable' ? '禁用前' : r === 'before-enable' ? '启用前' : r === 'manual' ? '手动备份' : (r || '—')
+}
+
+// —— E3 一键隔离 ——
+// 与 E2 的区别：E2 是「一条一条改」，E3 是「一次把勾选的都禁掉」。
+// 计划书 §5.2 的红线在这里落地：**只动用户勾选的条目**，写前必须把「会改哪几行」摆出来过目。
+const dshIsolate = ref<DshIsolateCandidatesResult | null>(null)
+const dshIsolateBusy = ref(false)
+const dshIsolateFolds = reactive({ help: false, list: false })
+// 勾选名单（用 Set 因为要频繁增删；渲染时再转数组）
+const dshIsolatePicked = ref<Set<string>>(new Set())
+// dryRun 探出来的改动计划：非空即处于「待确认」态（两步确认的第一步）
+const dshIsolatePlan = ref<{ plans: DshIsolatePlan[]; changedCount: number; ids: string[] } | null>(null)
+
+function dshIsolateRefresh() {
+  if (dshIsolateBusy.value) return
+  dshIsolateBusy.value = true
+  dshPatchFlash.msg = ''
+  dshPatchFlash.err = false
+  // 重新读清单意味着候选可能变了，之前的勾选与待确认计划一律作废
+  dshIsolatePlan.value = null
+  Promise.resolve(services.dshIsolateCandidates?.({ profile: dshPatchProfile }))
+    .then((r) => {
+      if (!r) {
+        dshPatchFlash.err = true
+        dshPatchFlash.msg = '宿主 API 不可用'
+        return
+      }
+      dshIsolate.value = r
+      if (!r.ok) {
+        dshPatchFlash.err = true
+        dshPatchFlash.msg = r.error || '读取候选失败'
+        return
+      }
+      dshIsolatePicked.value = new Set((r.items || []).map((it) => it.id))
+      dshPatchFlash.msg = r.treeError
+        ? '组装树没读到（' + r.treeError + '），候选只含 patch 里已有的条目。'
+        : `共 ${r.items?.length || 0} 个候选` + (r.truncated ? '（已截断，只列出前 100 个）' : '')
+    })
+    .catch((err) => {
+      dshPatchFlash.err = true
+      dshPatchFlash.msg = '读取候选失败：' + String(err?.message || err)
+    })
+    .then(() => {
+      dshIsolateBusy.value = false
+    })
+}
+
+function dshIsolateTogglePick(id: string) {
+  const next = new Set(dshIsolatePicked.value)
+  if (next.has(id)) next.delete(id)
+  else next.add(id)
+  dshIsolatePicked.value = next
+  // 勾选一变，上一轮的「待确认计划」就过期了 —— 留着会让用户按着旧计划点确认
+  dshIsolatePlan.value = null
+}
+
+function dshIsolateAll() {
+  dshIsolatePicked.value = new Set((dshIsolate.value?.items || []).map((it) => it.id))
+  dshIsolatePlan.value = null
+}
+// 只勾「启用中」的：候选里那些已经是 disabled 的条目勾了也是 noop（一键隔离的意图是「只留我要的」）
+function dshIsolateNoneDisabled() {
+  const items = dshIsolate.value?.items || []
+  dshIsolatePicked.value = new Set(items.filter((it) => !it.disabled).map((it) => it.id))
+  dshIsolatePlan.value = null
+}
+
+// 第一步：只算不写（dryRun），把「会动哪几行」摆给用户；第二步 dshIsolateConfirm 才真写
+function dshIsolatePreview() {
+  if (dshIsolateBusy.value) return
+  const ids = Array.from(dshIsolatePicked.value)
+  if (!ids.length) {
+    dshPatchFlash.err = true
+    dshPatchFlash.msg = '先勾选要保留隔离的插件。'
+    return
+  }
+  dshIsolateBusy.value = true
+  dshPatchFlash.msg = ''
+  dshPatchFlash.err = false
+  try {
+    const r = services.dshIsolateApply?.({ profile: dshPatchProfile, ids, dryRun: true })
+    if (!r) {
+      dshPatchFlash.err = true
+      dshPatchFlash.msg = '宿主 API 不可用'
+    } else if (!r.ok) {
+      dshPatchFlash.err = true
+      dshPatchFlash.msg = r.error || '无法生成改动计划'
+    } else if (!r.changed) {
+      dshIsolatePlan.value = null
+      dshPatchFlash.msg = `勾选的 ${ids.length} 条全都已经是禁用状态，无需改动。`
+    } else {
+      dshIsolatePlan.value = { plans: r.plans || [], changedCount: r.changedCount || 0, ids }
+      dshPatchFlash.msg = ''
+    }
+  } catch (err: any) {
+    dshPatchFlash.err = true
+    dshPatchFlash.msg = '生成改动计划失败：' + String(err?.message || err)
+  } finally {
+    dshIsolateBusy.value = false
+  }
+}
+
+function dshIsolateConfirm() {
+  const pending = dshIsolatePlan.value
+  if (dshIsolateBusy.value || !pending) return
+  dshIsolateBusy.value = true
+  dshPatchFlash.msg = ''
+  dshPatchFlash.err = false
+  try {
+    const r = services.dshIsolateApply?.({ profile: dshPatchProfile, ids: pending.ids })
+    if (!r) {
+      dshPatchFlash.err = true
+      dshPatchFlash.msg = '宿主 API 不可用'
+    } else if (!r.ok) {
+      dshPatchFlash.err = true
+      dshPatchFlash.msg = r.error || '写入失败'
+    } else {
+      dshPatchFlash.err = false
+      dshPatchFlash.msg = `已隔离：改了 ${r.changedCount ?? 0} 条` +
+        (r.backedUp ? `（快照 ${r.snapshot}）` : '') +
+        '。dsh 的 patch 热重载是单向的，加 disabled 即时生效；若界面没变化请重启 dsh。'
+    }
+  } catch (err: any) {
+    dshPatchFlash.err = true
+    dshPatchFlash.msg = '写入失败：' + String(err?.message || err)
+  } finally {
+    dshIsolateBusy.value = false
+    dshIsolatePlan.value = null
+    dshIsolateRefresh()
+  }
+}
+
+function dshIsolateActionText(action: string) {
+  return action === 'update' ? '改 disabled 行'
+    : action === 'insert' ? '补一行 disabled'
+      : action === 'append' ? '新加条目'
+        : '已是禁用（不动）'
 }
 
 // —— 检查更新 ——
@@ -5139,6 +5427,198 @@ onUnmounted(() => {
       </template>
     </section>
 
+    <!-- [dsh] 插件开关（E2）：**本页唯一会写 dsh 文件的卡**。逐条禁用/启用 + 写前强制快照 + 一键还原 -->
+    <section v-if="activeTab === 'dev'" class="card">
+      <div class="card-head">
+        <h2 class="card-toggle" @click="toggleDevCard('dshPatch')">
+          <span class="caret">{{ devFolds.dshPatch ? '▾' : '▸' }}</span>dsh 插件开关
+          <span v-if="!devFolds.dshPatch" class="card-sum">
+            <template v-if="devStatsLoaded.dshPatch">{{ dshPatchFlash.msg || '点击展开' }}</template>
+            <template v-else>点击展开读取</template>
+          </span>
+        </h2>
+      </div>
+      <template v-if="devFolds.dshPatch">
+      <p class="hint">
+        逐条<strong>禁用 / 启用</strong> dsh 插件。改的是<strong>用户层 patch</strong>
+        <code>profiles/{{ dshPatchProfile }}/cordis.patch.yml</code>（行级追加 <code>- id: X</code> + <code>disabled: true</code>），
+        <strong>每次写入前自动建一份快照</strong>，可随时整文件还原。
+      </p>
+      <p class="hint">
+        ⚠️ <strong>对带前端界面的插件可能无效</strong>：实测只有<strong>纯服务端</strong>插件
+        （cost-meter / modlens / mnemon 这类）能被 patch 可靠禁用；带 client 入口的插件（如 dsh-better-sidebar）
+        加载入口在 <code>package.json</code> 的 <code>dependencies</code> 里，禁用 patch 条目不生效。
+        <br>⚠️ <strong>启用需重启</strong>：dsh 的 patch 热重载是<strong>单向</strong>的 —— 加 <code>disabled</code> 即时生效，
+        但<strong>删掉不恢复</strong>，所以「启用」后要重启 dsh 才看得到。
+      </p>
+      <div class="btn-row">
+        <button :disabled="dshPatchBusy" @click="dshPatchRefresh()">{{ dshPatchBusy ? '读取中…' : '刷新清单' }}</button>
+        <button class="secondary" @click="dshBackupCreate()">立即备份</button>
+        <button class="link-btn" @click="dshPatchFolds.help = !dshPatchFolds.help">{{ dshPatchFolds.help ? '收起说明' : '说明' }}</button>
+      </div>
+      <p v-if="dshPatchFlash.msg" class="msg" :class="msgCls(dshPatchFlash)">{{ dshPatchFlash.msg }}</p>
+
+      <template v-if="dshPatch && !dshPatch.ok">
+        <p class="hint">{{ dshPatch.error || '读取失败，请稍后重试。' }}</p>
+      </template>
+
+      <template v-else-if="dshPatch">
+        <label class="field row">
+          <span class="label">写入位置</span>
+          <span class="ver" :title="dshPatch.file">{{ dshPatch.file }}</span>
+        </label>
+
+        <p v-if="!dshPatch.exists" class="hint">
+          这个 profile 还没有 <code>cordis.patch.yml</code> —— 点任意插件的「禁用」会自动创建它。
+        </p>
+        <p v-else-if="!dshPatch.items?.length" class="hint">这个 patch 文件里还没有条目。</p>
+
+        <div v-else class="patch-list">
+          <div v-for="it in dshPatch.items" :key="it.id" class="patch-item" :class="{ 'patch-off': it.disabled }">
+            <span class="patch-id" :title="`第 ${it.line} 行`">{{ it.id }}</span>
+            <span v-if="it.hasConfig" class="patch-tag">带 config</span>
+            <span class="patch-state">{{ it.disabled ? '已禁用' : '启用中' }}</span>
+            <button
+              class="secondary patch-btn"
+              :disabled="!!dshPatchPending"
+              @click="dshPatchToggle(it)"
+            >{{ dshPatchPending === it.id ? '写入中…' : (it.disabled ? '启用' : '禁用') }}</button>
+          </div>
+        </div>
+
+        <!-- 快照：写前自动建的那些 + 手动备份的，都在这里回滚 -->
+        <div class="fold">
+          <button class="link-btn" @click="dshBackupFolds.list = !dshBackupFolds.list">
+            {{ dshBackupFolds.list ? '收起快照' : '展开快照' }}（{{ dshBackups?.snapshots?.length || 0 }} 份，保留最近 {{ dshBackups?.max ?? 20 }} 份）
+          </button>
+          <div v-if="dshBackupFolds.list">
+            <p v-if="dshBackups && !dshBackups.ok" class="hint">{{ dshBackups.error || '快照列表读取失败。' }}</p>
+            <p v-else-if="!dshBackups?.snapshots?.length" class="hint">还没有快照。</p>
+            <template v-else>
+              <p class="hint" :title="dshBackups.root">存放在 <code>whale-dsh-backup/</code>（与 dsh 配置同目录，可自行删除）</p>
+              <div v-for="s in dshBackups.snapshots" :key="s.dirName" class="bak-item">
+                <span class="bak-time">{{ dshBackupTime(s) }}</span>
+                <span class="bak-tag">{{ dshBackupReasonText(s.reason) }}</span>
+                <span class="bak-meta">{{ s.present }}/{{ s.total }} 个文件</span>
+                <button
+                  class="secondary patch-btn"
+                  :class="{ 'bak-confirm': dshRestoreConfirm === s.dirName }"
+                  @click="dshBackupRestore(s.dirName)"
+                >{{ dshRestoreConfirm === s.dirName ? '确认还原' : '还原' }}</button>
+              </div>
+            </template>
+          </div>
+        </div>
+
+        <div v-if="dshPatchFolds.help" class="guide">
+          <p class="guide-use"><strong>为什么清单只有这几条：</strong>这一页列出的是<strong>这个 patch 文件里写了什么</strong>，不是 dump 出来的完整组装树。后者包含官方 bundle 与各层 patch，而这里能改的只有用户层这一个文件 —— 拿一份「能看不能改」的清单来当操作对象，只会让人对着开关点半天没反应。</p>
+          <p class="guide-use"><strong>禁用是怎么写的：</strong>沿用 dsh 自己的行级写法 —— 已有条目就只改它那一行的 <code>disabled</code> 值；没有该条目就在文件末尾追加 <code>- id: X</code> + <code>disabled: true</code>（patch 是后者覆盖前者，追加在末尾等于优先级最高）。整份文件<strong>不会重新序列化</strong>，你的注释、引号风格、键顺序都原样保留。</p>
+          <p class="guide-use"><strong>为什么每次都要备份：</strong>实测 dsh 对写坏的 patch <strong>不报错</strong> —— 写一个不存在的 id，它只在 stderr 打一行 <code>patch: entry "X" not found</code>、退出码 0、启动照常。所以这里写完会<strong>回读磁盘校验</strong>，并且改动前一定先建快照：宁可不让改，也不能让改动不可撤销。</p>
+          <p class="guide-use"><strong>还原是整文件覆盖：</strong>因为热重载单向（删行不恢复），只有让文件真正回到改动前的完整内容才有效。代价是<strong>会一并回退这份文件上的其他改动</strong> —— 备份的价值就是拿到一个已知良好的状态。快照<strong>绝不包含</strong> <code>.credentials.yaml</code> 等凭据文件。</p>
+        </div>
+      </template>
+      </template>
+    </section>
+
+    <!-- [dsh] 一键隔离（E3）：与上一卡的区别是「只动勾选的条目」，并把将改动的行先摆出来过目 -->
+    <section v-if="activeTab === 'dev'" class="card">
+      <div class="card-head">
+        <h2 class="card-toggle" @click="toggleDevCard('dshIsolate')">
+          <span class="caret">{{ devFolds.dshIsolate ? '▾' : '▸' }}</span>dsh 一键隔离
+          <span v-if="!devFolds.dshIsolate" class="card-sum">
+            <template v-if="devStatsLoaded.dshIsolate">{{ dshPatchFlash.msg || '点击展开' }}</template>
+            <template v-else>点击展开读取</template>
+          </span>
+        </h2>
+      </div>
+      <template v-if="devFolds.dshIsolate">
+        <p class="hint">
+          上面那张卡是<strong>一条一条</strong>改；这张是<strong>一次改一批</strong>：
+          勾出你要<strong>禁掉</strong>的插件，点「预览改动」看清会动哪几行，再点「确认隔离」。
+          <strong>没勾的条目一个字节都不会碰</strong> —— 这里的「隔离」不是「把所有插件全禁」。
+        </p>
+        <p class="hint">
+          ⚠️ 候选 = <strong>用户层 patch 里已有的条目</strong> ∪ <strong>组装树里读到的插件</strong>。
+          后者写进去等于<strong>新加</strong>一条 patch，而实测带前端界面的插件这样就禁不掉
+          （加载入口在 <code>package.json</code> 的 <code>dependencies</code> 里）；
+          纯服务端插件（cost-meter / modlens / mnemon 这类）才可靠生效。
+          <br>⚠️ <strong>写前必先建快照</strong>（记作「隔离前」），快照建不出来就中止写入，不会出现改完没法回滚的情况。
+        </p>
+        <div class="btn-row">
+          <button :disabled="dshIsolateBusy" @click="dshIsolateRefresh()">{{ dshIsolateBusy ? '读取中…' : '刷新候选' }}</button>
+          <button class="secondary" :disabled="dshIsolateBusy" @click="dshIsolatePreview()">预览改动</button>
+          <button class="link-btn" @click="dshIsolateFolds.help = !dshIsolateFolds.help">{{ dshIsolateFolds.help ? '收起说明' : '说明' }}</button>
+        </div>
+        <p v-if="dshPatchFlash.msg" class="msg" :class="msgCls(dshPatchFlash)">{{ dshPatchFlash.msg }}</p>
+
+        <template v-if="dshIsolate && !dshIsolate.ok">
+          <p class="hint">{{ dshIsolate.error || '读取候选失败，请稍后重试。' }}</p>
+        </template>
+
+        <template v-else-if="dshIsolate">
+          <label class="field row">
+            <span class="label">写入位置</span>
+            <span class="ver" :title="dshIsolate.file">{{ dshIsolate.file }}</span>
+          </label>
+
+          <p v-if="!dshIsolate.items?.length" class="hint">
+            没有可隔离的候选 —— patch 文件里还没有条目，也没能从组装树里读到插件。
+          </p>
+
+          <template v-else>
+            <div class="fold">
+              <button class="link-btn" @click="dshIsolateFolds.list = !dshIsolateFolds.list">
+                {{ dshIsolateFolds.list ? '收起候选' : '展开候选' }}（已勾 {{ dshIsolatePicked.size }} / 共 {{ dshIsolate.items.length }} 条）
+              </button>
+              <div class="btn-row">
+                <button class="secondary" @click="dshIsolateAll()">全选</button>
+                <button class="secondary" @click="dshIsolateNoneDisabled()">只选启用中的</button>
+              </div>
+            </div>
+            <div v-if="dshIsolateFolds.list" class="patch-list">
+              <label
+                v-for="it in dshIsolate.items"
+                :key="it.id"
+                class="patch-item iso-item"
+                :class="{ 'patch-off': it.disabled }"
+              >
+                <input type="checkbox" :checked="dshIsolatePicked.has(it.id)" @change="dshIsolateTogglePick(it.id)">
+                <span class="patch-id" :title="it.source === 'patch' ? `patch 第 ${it.line} 行` : '不在 patch 里，隔离会新加一条'">{{ it.id }}</span>
+                <span v-if="it.source === 'plugin'" class="patch-tag">新加</span>
+                <span v-if="it.hasConfig" class="patch-tag">带 config</span>
+                <span class="patch-state">{{ it.disabled ? '已禁用' : '启用中' }}</span>
+              </label>
+            </div>
+          </template>
+
+          <!-- 待确认的改动计划：写之前把「会动哪几行」逐条摆出来，这是 §5.2 的硬要求 -->
+          <template v-if="dshIsolatePlan">
+            <p class="hint">
+              将改动 <strong>{{ dshIsolatePlan.changedCount }}</strong> 条（行号按<strong>改动前</strong>的文件算）：
+            </p>
+            <div class="patch-list">
+              <div v-for="p in dshIsolatePlan.plans" :key="p.id" class="patch-item" :class="{ 'patch-off': p.action === 'noop' }">
+                <span class="patch-id">{{ p.id }}</span>
+                <span class="patch-tag">{{ dshIsolateActionText(p.action) }}</span>
+                <span class="patch-state">{{ p.line ? `第 ${p.line} 行` : '追加到末尾' }}</span>
+              </div>
+            </div>
+            <div class="btn-row">
+              <button class="danger" :disabled="dshIsolateBusy" @click="dshIsolateConfirm()">{{ dshIsolateBusy ? '写入中…' : '确认隔离（先建快照）' }}</button>
+              <button class="secondary" @click="dshIsolatePlan = null">取消</button>
+            </div>
+          </template>
+
+          <div v-if="dshIsolateFolds.help" class="guide">
+            <p class="guide-use"><strong>「隔离」为什么不是「全禁」：</strong>原方案是往 profile 里补十几条 <code>disabled: true</code> 把用户整个 profile 干掉。这里改成只操作用户<strong>显式勾选</strong>的条目 —— 界面上点不出「我没选的东西」，改动范围永远能追溯到一份真实读到的清单。</p>
+            <p class="guide-use"><strong>候选为什么要读组装树：</strong>实测写一个<strong>不存在的 id</strong>，dsh 只在 stderr 打一行 <code>patch: entry "X" not found</code>、退出码 0、启动照常 —— 也就是「写坏了不报错」。所以候选先用 <code>--dump-config</code> 拿一份真实存在的条目，与 patch 里的取并集，让你<strong>勾不到拼错的 id</strong>。读不到组装树时降级为「只有 patch 里的条目」，不把整件事判死。</p>
+            <p class="guide-use"><strong>为什么分两步：</strong>「预览改动」是 <strong>dryRun</strong>，只计算不写盘，返回本次会改哪些行；你过目后点「确认隔离」才真正落笔。一次改多条与单条不同 —— 往中间插行会让后面的行号整体顺延，所以实现里是<strong>从后往前</strong>改、并且<strong>一次写盘</strong>，不会半截写入。</p>
+            <p class="guide-use"><strong>已是禁用的条目：</strong>勾了也不会重复写，计划里会标成「已是禁用（不动）」，界面上说「改了 N 条」而不是「N 条已隔离」，免得把没动过的算进战果。</p>
+          </div>
+        </template>
+      </template>
+    </section>
+
     <!-- [dsh] Codex 本地会话统计：读 ~/.codex/sessions 的 rollout JSONL，纯本地、不联网 -->
     <section v-if="activeTab === 'dev'" class="card">
       <div class="card-head">
@@ -5846,6 +6326,93 @@ select:focus,
 }
 .layer-user {
   border-left-color: #e08a2e;
+}
+/* 插件开关（E2）的条目列表：一行一个，左侧色条标出「已禁用」 */
+.patch-list {
+  margin-top: 6px;
+}
+.patch-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  padding: 5px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--card-border);
+  border-left: 3px solid #4a90d9;
+  background: rgba(127, 127, 127, 0.05);
+}
+/* 已禁用：灰掉色条，一眼能扫出「哪些被我关了」 */
+.patch-off {
+  border-left-color: rgba(127, 127, 127, 0.45);
+}
+.patch-id {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12px;
+  color: var(--fg);
+  word-break: break-all;
+  min-width: 0;
+}
+.patch-tag {
+  flex: none;
+  padding: 0 5px;
+  border-radius: 4px;
+  font-size: 11px;
+  color: var(--fg-dim);
+  background: rgba(127, 127, 127, 0.15);
+}
+.patch-state {
+  margin-left: auto;
+  flex: none;
+  font-size: 12px;
+  color: var(--fg-dim);
+}
+.patch-btn {
+  flex: none;
+  padding: 2px 10px;
+  font-size: 12px;
+}
+/* 还原前的二次确认：把按钮染成警示色，避免连点误操作 */
+.bak-confirm {
+  border-color: #d9534f;
+  color: #d9534f;
+}
+/* E3 候选行是 <label>，整行可点即勾选；补上手型与复选框对齐 */
+.iso-item {
+  cursor: pointer;
+}
+.iso-item input[type='checkbox'] {
+  flex: none;
+  margin: 0;
+  accent-color: var(--accent);
+}
+.bak-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  padding: 5px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--card-border);
+  background: rgba(127, 127, 127, 0.05);
+}
+.bak-time {
+  font-size: 12px;
+  color: var(--fg);
+}
+.bak-tag {
+  flex: none;
+  padding: 0 5px;
+  border-radius: 4px;
+  font-size: 11px;
+  color: var(--fg-dim);
+  background: rgba(127, 127, 127, 0.15);
+}
+.bak-meta {
+  margin-left: auto;
+  flex: none;
+  font-size: 12px;
+  color: var(--fg-dim);
 }
 input[type='checkbox'] {
   width: 16px;

@@ -2,6 +2,7 @@
  * 对外 API（CommonJS）：注入到主窗 window.services，供设置页调用。
  */
 const fs = require('fs')
+const path = require('path')
 const { PLUGIN_VERSION, K, MODEL_TEMPLATES, MODEL_MAX, DEFAULT_MAIN_MODEL } = require('./constants')
 const { log, logErr, LOG_FILE } = require('./log')
 const {
@@ -30,6 +31,291 @@ const codex = require('./codex')
 const dshUsage = require('./dsh-usage')
 const diagnostics = require('./diagnostics')
 const dshDump = require('./dsh-dump')
+const dshBackup = require('./dsh-backup')
+const { parsePatch, applyToggle, applyBatchDisable } = require('./dsh-patch')
+const dshIsolate = require('./dsh-isolate')
+const { readTextSafe } = require('./util')
+
+// ── dsh 插件开关（计划书 §6.2 E2）──
+// 目标文件固定是**用户层** profile patch（$DSH_HOME/profiles/<p>/cordis.patch.yml）。
+//
+// ⚠️ 为什么不解析 dump 树来列条目：dump 树是「组装后的结果」，里面既有官方 bundle 也有
+// 各层 patch，而这里能改的**只有用户层这一个文件**。拿一份「能看不能改」的清单去当操作对象，
+// 会让用户对着一个开关点半天没反应（V1：带 client 入口的插件禁不掉）。
+// 所以清单 = 这个文件里已经写了什么，界面再明确说清「写入位置」。
+function dshPatchPath(profile) {
+  const home = dshBackup.dshHome()
+  if (!home) return ''
+  return path.join(home, 'profiles', String(profile || 'web'), 'cordis.patch.yml')
+}
+
+// 列出用户层 patch 里的条目（含「文件不存在」这一正常空态）
+function listDshPatchItems(opts) {
+  const o = opts && typeof opts === 'object' ? opts : {}
+  const profile = String(o.profile || 'web')
+  const file = dshPatchPath(profile)
+  if (!file) return { ok: false, error: '找不到 dsh 配置目录（$DSH_HOME 与 ~/.dsh 都不存在）', profile: profile }
+  const r = readTextSafe(file, '')
+  // ENOENT 是预期分支（这份 profile 还没写过 patch），不是错误 —— 界面给「还没有条目」的空态
+  if (!r.ok && r.reason) {
+    logErr('[whale][dsh-patch] 读 patch 文件失败', r.reason)
+    return { ok: false, error: '读不到 patch 文件：' + r.reason, file: file, profile: profile }
+  }
+  const parsed = parsePatch(r.ok ? r.text : '')
+  return {
+    ok: true,
+    file: file,
+    profile: profile,
+    exists: r.ok,
+    items: parsed.items.map((it) => ({
+      id: it.id,
+      disabled: it.disabled,
+      line: it.lineIndex + 1,
+      hasConfig: it.hasConfig,
+    })),
+  }
+}
+
+// 切换单个条目的 disabled（E2 的核心动作）。
+// opts = { profile?, id, disabled?, dryRun? }
+//
+// ⚠️ 写前必须先建快照 —— 本函数**不做**这件事，由调用方（设置页 → 宿主）编排：
+// 备份是 E1 的职责，本模块与 dsh-patch.js 都只碰文件内容，不碰快照目录。
+// 这里只保证**写入可核验**（V2：dsh 对写坏的 patch 不报错，只能自己回读确认）。
+function toggleDshPatchItem(opts) {
+  const o = opts && typeof opts === 'object' ? opts : {}
+  const profile = String(o.profile || 'web')
+  const id = String(o.id || '').trim()
+  const disabled = o.disabled !== false
+  if (!id) return { ok: false, error: '未指定插件 id' }
+  const file = dshPatchPath(profile)
+  if (!file) return { ok: false, error: '找不到 dsh 配置目录（$DSH_HOME 与 ~/.dsh 都不存在）' }
+
+  const cur = readTextSafe(file, '')
+  const text = cur.ok ? cur.text : ''
+  const res = applyToggle(text, id, disabled)
+  if (!res.ok) return { ok: false, error: res.error || '无法生成新的 patch 内容' }
+
+  // dryRun：只算不写，界面可以先让用户看清「会写出什么」
+  if (o.dryRun === true) {
+    return { ok: true, dryRun: true, action: res.action, changed: res.changed, file: file, profile: profile, id: id, disabled: disabled }
+  }
+  if (!res.changed) {
+    return { ok: true, action: res.action, changed: false, file: file, profile: profile, id: id, disabled: disabled }
+  }
+
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    fs.writeFileSync(file, res.text, 'utf8')
+  } catch (err) {
+    logErr('[whale][dsh-patch] 写 patch 文件失败', id + ': ' + ((err && err.message) || err))
+    return { ok: false, error: '写入失败：' + ((err && err.message) || err) }
+  }
+
+  // V2 的教训落地：写完**回读磁盘**确认那条 id 真的以期望形态出现了。
+  // 不信任「writeFileSync 没抛错 = 写对了」—— 这里挡的是「内容确实写进文件、但形态不是 patch 能识别的」
+  const back = readTextSafe(file, '')
+  const check = back.ok ? parsePatch(back.text).items.find((it) => it.id === id) : null
+  if (!check || check.disabled !== disabled) {
+    logErr('[whale][dsh-patch] 写入后回读校验不符', id + ' 期望 disabled=' + disabled)
+    return { ok: false, error: '写入后校验未通过，配置可能未生效（已保留快照，可回滚）', file: file }
+  }
+
+  log('[whale][dsh-patch] 已切换条目', { id: id, disabled: disabled, action: res.action })
+  return {
+    ok: true,
+    action: res.action,
+    changed: true,
+    file: file,
+    profile: profile,
+    id: id,
+    disabled: disabled,
+    // V4：patchReload 是单向的 —— 加 disabled 即时生效，**取消禁用不恢复**。
+    // 所以界面必须提示「启用后需要重启 dsh」，不能谎称已即时生效
+    needsRestart: !disabled,
+  }
+}
+
+// ── dsh 一键隔离（计划书 §6.2 E3）──
+// 与 E2 的关系：E2 一次改一条，E3 一次改一批 —— 但**仍然只动用户勾选的条目**。
+// 计划书 §5.2 明确否掉了原方案的「安全模式」（给所有用户插件条目追加 disabled: true）：
+// 本机 profiles/web 有 13 个 bundle + 9 个依赖，全禁等于把用户整个 profile 干掉。
+//
+// 隔离 = 「只留我想要的那几个，其余全禁」。所以候选必须来自**真实存在的条目**，
+// 否则用户勾了一个拼错的 id，V2 的静默失效会让界面报「已隔离」而实际什么都没发生。
+// 候选清单 = 用户层 patch 里的条目 ∪ dump 组装树里的插件条目：
+// 前者是「已经被改过的」，后者是「能被改的」。
+function listDshIsolateCandidates(opts) {
+  const o = opts && typeof opts === 'object' ? opts : {}
+  const profile = String(o.profile || 'web')
+  const file = dshPatchPath(profile)
+  if (!file) return { ok: false, error: '找不到 dsh 配置目录（$DSH_HOME 与 ~/.dsh 都不存在）', profile: profile }
+
+  const r = readTextSafe(file, '')
+  if (!r.ok && r.reason) {
+    logErr('[whale][dsh-isolate] 读 patch 文件失败', r.reason)
+    return { ok: false, error: '读不到 patch 文件：' + r.reason, file: file, profile: profile }
+  }
+  const parsed = parsePatch(r.ok ? r.text : '')
+  const patchItems = parsed.items.map((it) => ({
+    id: it.id,
+    disabled: it.disabled,
+    line: it.lineIndex + 1,
+    hasConfig: it.hasConfig,
+  }))
+
+  // dump 树里的条目 id；与 patch 里已有的取并集，作为候选项。
+  // ⚠️ 这里**只做并集，不做「可改性」判断**：判据（有没有 client 入口）要看包元数据，
+  // 属另一个模块的事，猜错的代价（列出改不动的条目）由界面文案承担（V1 明示「可能无效」）。
+  function pluginIdsFromDump(payload) {
+    if (!payload || !payload.ok) return []
+    const entries = Array.isArray(payload.entries) ? payload.entries : []
+    const ids = []
+    for (let i = 0; i < entries.length; i++) {
+      const e = entries[i] && typeof entries[i] === 'object' ? entries[i] : {}
+      const id = String(e.id || '').trim()
+      if (id) ids.push(id)
+    }
+    // 已存在 patch 里的条目由 patchItems 覆盖，这里只补「dump 有、patch 没有」的
+    const out = []
+    const known = {}
+    for (let i = 0; i < patchItems.length; i++) known[patchItems[i].id] = true
+    for (let i = 0; i < ids.length; i++) {
+      if (!known[ids[i]]) {
+        known[ids[i]] = true
+        out.push(ids[i])
+      }
+    }
+    return out
+  }
+
+  return new Promise((resolve) => {
+    let settled = false
+    const done = (payload) => {
+      if (settled) return
+      settled = true
+      clearTimeout(guard)
+      resolve(payload)
+    }
+    // 与 dumpDshConfig 同一道兜底闸门（内部两次 spawn 最坏 8s + 8s，这里再多给 4s）
+    const guard = setTimeout(() => {
+      logErr('[whale][dsh-isolate] 候选清单超时兜底（子进程回调未回来）', '')
+      done({
+        ok: true,
+        file: file,
+        profile: profile,
+        exists: r.ok,
+        truncated: false,
+        treeError: '读取组装树超时，候选只包含 patch 文件里已有的条目',
+        items: dshIsolate.candidatesOf({ patchItems: patchItems, pluginIds: [] }),
+      })
+    }, 20000)
+    dshDump.collectDshDump({ profile: profile }, (err, payload) => {
+      // dump 失败**不算整体失败**：patch 里的条目照样能隔离，只是候选少一截。
+      // 这与 D26 的降级思路一致 —— 探测不出来就如实说，不把整件事判死
+      const treeError = err ? ((err && err.message) || String(err)) : ''
+      if (treeError) logErr('[whale][dsh-isolate] 组装树读取失败（候选降级）', treeError)
+      const pluginIds = treeError ? [] : pluginIdsFromDump(payload)
+      const items = dshIsolate.candidatesOf({ patchItems: patchItems, pluginIds: pluginIds })
+      done({
+        ok: true,
+        file: file,
+        profile: profile,
+        exists: r.ok,
+        truncated: items.length >= dshIsolate.MAX_BATCH,
+        treeError: treeError,
+        items: items,
+      })
+    })
+  })
+}
+
+// 批量禁用（E3 的执行动作）。
+// opts = { profile?, ids: string[], dryRun? }
+//
+// 与 E2 一样：**只算不写**（dryRun）时先把「会动哪几行」交出去，界面据此让用户过目再确认。
+// 返回 plans 里的 line 是**改动前**的行号（1 基），append 的 line 为 0（表示是新加的行）。
+function isolateDshPlugins(opts) {
+  const o = opts && typeof opts === 'object' ? opts : {}
+  const profile = String(o.profile || 'web')
+  const ids = Array.isArray(o.ids) ? o.ids.map((v) => String(v == null ? '' : v).trim()).filter(Boolean) : []
+  if (!ids.length) return { ok: false, error: '没有勾选任何插件' }
+  if (ids.length > dshIsolate.MAX_BATCH) {
+    return { ok: false, error: '一次最多隔离 ' + dshIsolate.MAX_BATCH + ' 条（当前 ' + ids.length + ' 条）' }
+  }
+  const file = dshPatchPath(profile)
+  if (!file) return { ok: false, error: '找不到 dsh 配置目录（$DSH_HOME 与 ~/.dsh 都不存在）' }
+
+  const cur = readTextSafe(file, '')
+  const res = applyBatchDisable(cur.ok ? cur.text : '', ids)
+  if (!res.ok) return { ok: false, error: res.error || '无法生成新的 patch 内容' }
+
+  // 明确报出「一条都没动」：全选成已禁用时 plans 全是 noop，界面要说清而不是假装写成功了
+  const changed = res.plans.filter((p) => p.action !== 'noop')
+  if (o.dryRun === true) {
+    return {
+      ok: true,
+      dryRun: true,
+      changed: res.changed,
+      file: file,
+      profile: profile,
+      plans: res.plans,
+      changedCount: changed.length,
+    }
+  }
+  if (!res.changed) {
+    return { ok: true, changed: false, file: file, profile: profile, plans: res.plans, changedCount: 0 }
+  }
+
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    fs.writeFileSync(file, res.text, 'utf8')
+  } catch (err) {
+    logErr('[whale][dsh-isolate] 写 patch 文件失败', (err && err.message) || '')
+    return { ok: false, error: '写入失败：' + ((err && err.message) || err) }
+  }
+
+  // V2 的教训：写完回读磁盘，逐条确认真的成了 disabled —— 批量写更不能只信「没抛错」
+  const back = readTextSafe(file, '')
+  const after = back.ok ? parsePatch(back.text).items : []
+  const mismatch = []
+  for (let i = 0; i < ids.length; i++) {
+    const hit = after.find((it) => it.id === ids[i])
+    if (!hit || !hit.disabled) mismatch.push(ids[i])
+  }
+  if (mismatch.length) {
+    logErr('[whale][dsh-isolate] 写入后回读校验不符', mismatch.join(', '))
+    return {
+      ok: false,
+      error: '写入后校验未通过（' + mismatch.length + ' 条未生效），已保留快照可回滚',
+      file: file,
+      mismatch: mismatch,
+    }
+  }
+
+  log('[whale][dsh-isolate] 已批量禁用', { count: ids.length, changed: changed.length })
+  return {
+    ok: true,
+    changed: true,
+    file: file,
+    profile: profile,
+    plans: res.plans,
+    changedCount: changed.length,
+    // V2：批量禁用**即时生效**（加 disabled 是单向热重载中会生效的那一半）。
+    // 所以隔离完之后 dsh 会立刻少掉这些插件，界面必须提示「隔离后 dsh 可能重启/重连」
+    needsRestart: false,
+  }
+}
+
+// 快照列表（E1 的 dsh-backup 透传到设置页）
+function listDshBackups() {
+  try {
+    return { ok: true, root: dshBackup.backupRoot(), max: dshBackup.MAX_SNAPSHOTS, snapshots: dshBackup.listSnapshots() }
+  } catch (err) {
+    logErr('[whale][dsh-backup] 列快照失败', (err && err.message) || '')
+    return { ok: false, error: '读取快照列表失败：' + ((err && err.message) || err), snapshots: [] }
+  }
+}
 
 // 近 N 天用量（含今日，缺失日期补 0），按日期升序。
 // 上限 = 配置的账本保留天数（默认 365，最低 35）：设置页要算「本月汇总」，31 号那天窗口必须能回溯到 1 号。
@@ -378,6 +664,85 @@ module.exports = {
   // 清理 npx 缓存里含 dsh 的历史副本（旧版本留下的）
   dshCleanNpxCache() {
     return dsh.cleanNpxCaches()
+  },
+  // ── dsh 插件开关（E2）：改的是用户层 profile patch（$DSH_HOME/profiles/<p>/cordis.patch.yml）──
+  dshPatchList(opts) {
+    return listDshPatchItems(opts)
+  },
+  // 切换单个条目的 disabled。**写前自动建快照**（E1），建失败就不写 ——
+  // 「宁可不让用户改，也不能让改动不可撤销」：V2 已证明 dsh 对写坏的 patch 不报错
+  dshPatchToggle(opts) {
+    const o = opts && typeof opts === 'object' ? opts : {}
+    const profile = String(o.profile || 'web')
+    const id = String(o.id || '').trim()
+    const disabled = o.disabled !== false
+    if (!id) return { ok: false, error: '未指定插件 id' }
+    // 已是目标状态时不必浪费一份快照：先 dryRun 探一下会不会真的改
+    const probe = toggleDshPatchItem({ profile: profile, id: id, disabled: disabled, dryRun: true })
+    if (!probe.ok) return probe
+    if (!probe.changed) {
+      return { ok: true, changed: false, action: probe.action, id: id, disabled: disabled, backedUp: false }
+    }
+    const snap = dshBackup.createSnapshot({ profile: profile, reason: disabled ? 'before-disable' : 'before-enable' })
+    if (!snap.ok) {
+      logErr('[whale][dsh-patch] 快照失败，已中止写入', snap.error || '')
+      return { ok: false, error: '建快照失败，已中止改动：' + (snap.error || '未知错误') }
+    }
+    const res = toggleDshPatchItem({ profile: profile, id: id, disabled: disabled })
+    return Object.assign({ backedUp: true, snapshot: snap.dirName }, res)
+  },
+  // ── dsh 一键隔离（E3）：列候选 + 批量禁用，**写前自动建一份快照** ──
+  // 候选清单是 Promise：要 spawn 一次 dump 才知道组装树里有哪些真实存在的插件条目
+  dshIsolateCandidates(opts) {
+    return listDshIsolateCandidates(opts)
+  },
+  // 批量禁用。opts.dryRun=true 时**只算不写**：界面据此把「会动哪几行」交给用户过目再确认
+  dshIsolateApply(opts) {
+    const o = opts && typeof opts === 'object' ? opts : {}
+    const profile = String(o.profile || 'web')
+    const dryRun = o.dryRun === true
+    const probe = isolateDshPlugins({ profile: profile, ids: o.ids, dryRun: true })
+    if (!probe.ok) return probe
+    // 一条都不会变时不必浪费一份快照（与 dshPatchToggle 同一取舍）
+    if (dryRun || !probe.changed) return probe
+    const snap = dshBackup.createSnapshot({ profile: profile, reason: 'before-isolate' })
+    if (!snap.ok) {
+      logErr('[whale][dsh-isolate] 快照失败，已中止写入', snap.error || '')
+      return { ok: false, error: '建快照失败，已中止隔离：' + (snap.error || '未知错误') }
+    }
+    const res = isolateDshPlugins({ profile: profile, ids: o.ids })
+    return Object.assign({ backedUp: true, snapshot: snap.dirName }, res)
+  },
+  // 快照列表 / 还原（E1 的 dsh-backup 透传）
+  dshBackupList() {
+    return listDshBackups()
+  },
+  dshBackupRestore(opts) {
+    const o = opts && typeof opts === 'object' ? opts : {}
+    try {
+      return dshBackup.restoreSnapshot(o)
+    } catch (err) {
+      logErr('[whale][dsh-backup] 还原失败', (err && err.message) || '')
+      return { ok: false, error: '还原失败：' + ((err && err.message) || err) }
+    }
+  },
+  dshBackupRemove(dirName) {
+    try {
+      return dshBackup.removeSnapshot(dirName)
+    } catch (err) {
+      logErr('[whale][dsh-backup] 删除快照失败', (err && err.message) || '')
+      return { ok: false, error: '删除失败：' + ((err && err.message) || err) }
+    }
+  },
+  // 手动建快照（界面上的「立即备份」）
+  dshBackupCreate(opts) {
+    const o = opts && typeof opts === 'object' ? opts : {}
+    try {
+      return dshBackup.createSnapshot({ profile: String(o.profile || 'web'), reason: 'manual' })
+    } catch (err) {
+      logErr('[whale][dsh-backup] 建快照失败', (err && err.message) || '')
+      return { ok: false, error: '备份失败：' + ((err && err.message) || err) }
+    }
   },
   // 选择 Node.js 安装目录并校验（目录里必须有 node 可执行文件）
   dshPickNodeDir() {

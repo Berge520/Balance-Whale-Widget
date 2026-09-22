@@ -456,6 +456,151 @@ export interface DshDumpResult {
   diffError?: string
 }
 
+// 用户层 patch（$DSH_HOME/profiles/<p>/cordis.patch.yml）里的一个条目。
+// ⚠️ 清单只来自**这一个文件**，不是 dump 出来的组装树 —— 后者里绝大多数条目这份文件改不动
+export interface DshPatchItem {
+  id: string
+  disabled: boolean
+  // 条目在文件里的行号（1 基），方便用户对照着打开文件看
+  line: number
+  // 条目下除 disabled 外还有内容（config 等）
+  hasConfig: boolean
+}
+
+export interface DshPatchListResult {
+  ok: boolean
+  error?: string
+  // patch 文件绝对路径与 profile：界面必须把「改的是哪个文件」说清楚
+  file?: string
+  profile?: string
+  // 文件当前是否存在。false 是正常空态（这份 profile 还没写过 patch），不是错误
+  exists?: boolean
+  items?: DshPatchItem[]
+}
+
+// 切换一个条目的结果。
+// ⚠️ needsRestart：V4 实测 patchReload 是**单向**的 —— 加 disabled 即时生效，
+// **取消禁用不恢复**。所以「启用」后界面必须提示重启，不能谎称已生效
+export interface DshPatchToggleResult {
+  ok: boolean
+  error?: string
+  changed?: boolean
+  // 'append' 新增条目 | 'update' 改已有条目的 disabled 行 | 'insert' 给已有条目补 disabled 行 | 'noop'
+  action?: string
+  id?: string
+  disabled?: boolean
+  // 本次改动前是否成功建了快照（建失败会中止写入，故写成功时必为 true）
+  backedUp?: boolean
+  snapshot?: string
+  needsRestart?: boolean
+}
+
+// dsh 配置快照（E1 的 whale-dsh-backup/<时间戳>/）
+export interface DshBackupSnapshot {
+  dirName: string
+  // ISO 时间串
+  at: string
+  profile: string
+  // 'manual' / 'before-disable' / 'before-enable' …
+  reason: string
+  total: number
+  // 建快照时真的存在、被备走的文件数（< total 说明有文件当时就不存在，属正常）
+  present: number
+}
+
+export interface DshBackupListResult {
+  ok: boolean
+  error?: string
+  // 快照根目录（$DSH_HOME/whale-dsh-backup）
+  root?: string
+  // 保留份数上限
+  max?: number
+  snapshots: DshBackupSnapshot[]
+}
+
+export interface DshBackupRestoreResult {
+  ok: boolean
+  error?: string
+  dirName?: string
+  // 被覆盖回去的文件（相对 $DSH_HOME）
+  written?: string[]
+  // 建快照时就不存在、故未还原的文件
+  skipped?: string[]
+}
+
+export interface DshBackupCreateResult {
+  ok: boolean
+  error?: string
+  dirName?: string
+  at?: string
+  profile?: string
+  // 建快照时不存在、只记了 missing 的文件数
+  missing?: number
+}
+
+// ── E3「我的一键隔离」 ──
+// 候选项 = 用户层 patch 里的条目 ∪ dump 出来的组装树条目。
+// source 决定免责文案：'patch' 是改自己那一行（最稳），'plugin' 是**新增**一条 patch
+// —— V1 实测带 client 入口的插件（如 dsh-better-sidebar）这样禁用**无效**，界面须提示
+export interface DshIsolateCandidate {
+  id: string
+  // 'patch' | 'plugin'
+  source: string
+  // 已在用户层 patch 里（source === 'patch'）
+  inPatch: boolean
+  // 冻结的当前状态：界面据此默认不勾「已禁用」的条目
+  disabled: boolean
+  // 条目在 patch 文件里的行号（1 基）；不在 patch 里时为 0
+  line: number
+  // 条目下除 disabled 外还有 config 等子块
+  hasConfig: boolean
+}
+
+export interface DshIsolateCandidatesResult {
+  ok: boolean
+  error?: string
+  // patch 文件绝对路径与 profile：界面必须说清「改的是哪个文件」
+  file?: string
+  profile?: string
+  // patch 文件当前是否存在。false 是正常空态（还没写过 patch），不是错误
+  exists?: boolean
+  // 候选数触顶 MAX_BATCH（界面提示「列表被截断」）
+  truncated?: boolean
+  // 组装树读不到时的降级原因。**非空不代表整体失败** ——
+  // 此时 items 只含 patch 里的条目，隔离照样能做（与 D26 同一取舍）
+  treeError?: string
+  items?: DshIsolateCandidate[]
+}
+
+// 一条将改动的行。⚠️ line 是**改动前**的行号（1 基），append 的为 0
+export interface DshIsolatePlan {
+  id: string
+  // 'update' 改已有 disabled 行 | 'insert' 给已有条目补 disabled 行 | 'append' 新增条目 | 'noop' 已是禁用
+  action: string
+  line: number
+  // 改动前该条目的 disabled 状态
+  was: boolean
+}
+
+export interface DshIsolateApplyResult {
+  ok: boolean
+  error?: string
+  dryRun?: boolean
+  changed?: boolean
+  file?: string
+  profile?: string
+  plans?: DshIsolatePlan[]
+  // plans 里 action !== 'noop' 的条数：界面据此说「改了 N 条」而不是「N 条已隔离」
+  changedCount?: number
+  // 写前是否成功建了快照（建失败会中止写入，故写成功时必为 true）
+  backedUp?: boolean
+  snapshot?: string
+  // 写入后回读校验未通过的 id（V2 的静默失效靠这一步暴露）
+  mismatch?: string[]
+  // V4：加 disabled 是单向热重载中会生效的那一半，故为 false
+  needsRestart?: boolean
+}
+
 export interface ClearDataResult {
   ok: boolean
   // 各项是否被清除（按项清除的结果回显）
@@ -1145,6 +1290,25 @@ export interface WhaleServices {
   // 同步等结果会冻住整个渲染进程。宿主侧另有 20s 兜底闸门保证一定 settle。
   dumpDshConfig(opts?: { force?: boolean; profile?: string }): Promise<DshDumpResult>
   clearDshDumpCache(): void
+  // ── dsh 插件开关（E2）：只读写用户层 profile patch（$DSH_HOME/profiles/<p>/cordis.patch.yml）──
+  // 列出该文件里的条目（**不是** dump 出来的组装树：那份清单里绝大多数条目这个文件改不动）
+  dshPatchList(opts?: { profile?: string }): DshPatchListResult
+  // 切换单个条目的 disabled。**写前自动建快照**，建失败则中止写入（宁可不让改，也不能让改动不可撤销）。
+  // 返回的 needsRestart=true 表示「启用」场景：patchReload 单向，取消禁用必须重启 dsh 才看得到
+  dshPatchToggle(opts: { profile?: string; id: string; disabled: boolean }): DshPatchToggleResult
+  // 快照（E1 的 whale-dsh-backup）：列表 / 立即备份 / 还原 / 删除
+  dshBackupList(): DshBackupListResult
+  dshBackupCreate(opts?: { profile?: string }): DshBackupCreateResult
+  dshBackupRestore(opts: { dirName: string; dryRun?: boolean }): DshBackupRestoreResult
+  dshBackupRemove(dirName: string): { ok: boolean; error?: string }
+  // ── E3「我的一键隔离」：一次把勾选的条目全禁掉 ──
+  // 候选清单必须 spawn `dsh --dump-config`，故返回 Promise（宿主侧有 20s 兜底闸门）。
+  // 组装树读不到时**降级**：treeError 说明原因、items 只含 patch 里的条目，不算整体失败
+  dshIsolateCandidates(opts?: { profile?: string }): Promise<DshIsolateCandidatesResult>
+  // 执行隔离。**只动 ids 里的条目**，其余一个字节不碰（计划书 §5.2 的红线）。
+  // dryRun=true 只算不写，返回 plans 让界面把「会动哪几行」先摆给用户过目；
+  // 真正写入时写前自动建快照（reason='before-isolate'），建失败即中止
+  dshIsolateApply(opts: { profile?: string; ids: string[]; dryRun?: boolean }): DshIsolateApplyResult
   exportUsageCsv(days?: number): UsageCsvResult
   importUsageCsv(): UsageCsvImportResult
   // 按项清除本地数据：true 的项才会被清除
