@@ -167,14 +167,28 @@ function listDshIsolateCandidates(opts) {
   // dump 树里的条目 id；与 patch 里已有的取并集，作为候选项。
   // ⚠️ 这里**只做并集，不做「可改性」判断**：判据（有没有 client 入口）要看包元数据，
   // 属另一个模块的事，猜错的代价（列出改不动的条目）由界面文案承担（V1 明示「可能无效」）。
-  function pluginIdsFromDump(payload) {
-    if (!payload || !payload.ok) return []
+  //
+  // 回传 id 的同时带上**归属 bundle / 当前 disabled / 有无 config**：
+  //   · bundle  —— 供 dsh-isolate 分档（官方框架 vs 第三方插件），实测 204 个条目里 199 个是官方节点
+  //   · disabled —— 早先候选层对 plugin 条目硬编码 `disabled: false`，于是「已禁用」标记只对
+  //     patch 里的条目准；dump 的条目本来就带这个字段，白丢可惜
+  // ⚠️ 同一 id 可能在多个分节重复出现（分层是正常的），按「最后见到的为准」——
+  // 与 parseDump 的 entries 覆盖口径一致（后写的分节更靠近生效层）
+  function fromDump(payload) {
+    if (!payload || !payload.ok) return { ids: [], bundleOf: {}, disabledOf: {}, configOf: {} }
     const entries = Array.isArray(payload.entries) ? payload.entries : []
     const ids = []
+    const bundleOf = {}
+    const disabledOf = {}
+    const configOf = {}
     for (let i = 0; i < entries.length; i++) {
       const e = entries[i] && typeof entries[i] === 'object' ? entries[i] : {}
       const id = String(e.id || '').trim()
-      if (id) ids.push(id)
+      if (!id) continue
+      ids.push(id)
+      if (e.bundle) bundleOf[id] = String(e.bundle)
+      disabledOf[id] = !!e.disabled
+      configOf[id] = !!e.hasConfig
     }
     // 已存在 patch 里的条目由 patchItems 覆盖，这里只补「dump 有、patch 没有」的
     const out = []
@@ -186,7 +200,7 @@ function listDshIsolateCandidates(opts) {
         out.push(ids[i])
       }
     }
-    return out
+    return { ids: out, bundleOf: bundleOf, disabledOf: disabledOf, configOf: configOf }
   }
 
   return new Promise((resolve) => {
@@ -205,7 +219,6 @@ function listDshIsolateCandidates(opts) {
         file: file,
         profile: profile,
         exists: r.ok,
-        truncated: false,
         treeError: '读取组装树超时，候选只包含 patch 文件里已有的条目',
         items: dshIsolate.candidatesOf({ patchItems: patchItems, pluginIds: [] }),
       })
@@ -215,14 +228,19 @@ function listDshIsolateCandidates(opts) {
       // 这与 D26 的降级思路一致 —— 探测不出来就如实说，不把整件事判死
       const treeError = err ? ((err && err.message) || String(err)) : ''
       if (treeError) logErr('[whale][dsh-isolate] 组装树读取失败（候选降级）', treeError)
-      const pluginIds = treeError ? [] : pluginIdsFromDump(payload)
-      const items = dshIsolate.candidatesOf({ patchItems: patchItems, pluginIds: pluginIds })
+      const tree = treeError ? { ids: [], bundleOf: {}, disabledOf: {}, configOf: {} } : fromDump(payload)
+      const items = dshIsolate.candidatesOf({
+        patchItems: patchItems,
+        pluginIds: tree.ids,
+        bundleOf: tree.bundleOf,
+        disabledOf: tree.disabledOf,
+        configOf: tree.configOf,
+      })
       done({
         ok: true,
         file: file,
         profile: profile,
         exists: r.ok,
-        truncated: items.length >= dshIsolate.MAX_BATCH,
         treeError: treeError,
         items: items,
       })
@@ -310,7 +328,15 @@ function isolateDshPlugins(opts) {
 // 快照列表（E1 的 dsh-backup 透传到设置页）
 function listDshBackups() {
   try {
-    return { ok: true, root: dshBackup.backupRoot(), max: dshBackup.MAX_SNAPSHOTS, snapshots: dshBackup.listSnapshots() }
+    return {
+      ok: true,
+      root: dshBackup.backupRoot(),
+      // max = **当前生效**的保留份数（读用户配置，E4 起可调），不是常量上限
+      max: dshBackup.retentionKeep(),
+      keepMin: dshBackup.KEEP_MIN,
+      keepMax: dshBackup.KEEP_MAX,
+      snapshots: dshBackup.listSnapshots(),
+    }
   } catch (err) {
     logErr('[whale][dsh-backup] 列快照失败', (err && err.message) || '')
     return { ok: false, error: '读取快照列表失败：' + ((err && err.message) || err), snapshots: [] }
@@ -734,14 +760,49 @@ module.exports = {
       return { ok: false, error: '删除失败：' + ((err && err.message) || err) }
     }
   },
-  // 手动建快照（界面上的「立即备份」）
+  // 手动建快照（界面上的「立即备份」）。o.name 可给个名字（E4），给了就是「手动命名的备份」→ 不受轮转
   dshBackupCreate(opts) {
     const o = opts && typeof opts === 'object' ? opts : {}
     try {
-      return dshBackup.createSnapshot({ profile: String(o.profile || 'web'), reason: 'manual' })
+      return dshBackup.createSnapshot({ profile: String(o.profile || 'web'), reason: 'manual', name: o.name })
     } catch (err) {
       logErr('[whale][dsh-backup] 建快照失败', (err && err.message) || '')
       return { ok: false, error: '备份失败：' + ((err && err.message) || err) }
+    }
+  },
+  // 标记 / 命名（E4）：只改 meta.json，不碰快照内容
+  dshBackupSetMeta(opts) {
+    const o = opts && typeof opts === 'object' ? opts : {}
+    try {
+      return dshBackup.setMeta(o)
+    } catch (err) {
+      logErr('[whale][dsh-backup] 更新快照标记失败', (err && err.message) || '')
+      return { ok: false, error: '更新标记失败：' + ((err && err.message) || err) }
+    }
+  },
+  // 按当前保留份数清理一次（E4：调小保留份数后手动触发，不必等下次建快照）
+  dshBackupPrune() {
+    try {
+      const keep = dshBackup.retentionKeep()
+      return { ok: true, keep: keep, removed: dshBackup.pruneSnapshots({ keep: keep }) }
+    } catch (err) {
+      logErr('[whale][dsh-backup] 清理快照失败', (err && err.message) || '')
+      return { ok: false, error: '清理失败：' + ((err && err.message) || err) }
+    }
+  },
+  // 改保留份数（E4）：写进配置，**不立即删**（删除等用户点「清理」或下次建快照）。
+  // why 不顺手 prune：用户可能只是想把数字调小看看，立刻删掉快照太粗暴；
+  // 而且「调小 → 确认要清」之间给一次后悔的机会。
+  dshBackupSetKeep(n) {
+    const v = Math.round(clampNum(n, dshBackup.KEEP_MIN, dshBackup.KEEP_MAX, dshBackup.MAX_SNAPSHOTS))
+    try {
+      const cfg = patchConfig({ dshBackupKeep: v })
+      if (!cfg) return { ok: false, error: '保存设置失败' }
+      // 配置返回体里没有 dshBackupKeep 字段时以我们算出的 v 为准（前后端同一套 clamp）
+      return { ok: true, keep: typeof cfg.dshBackupKeep === 'number' ? cfg.dshBackupKeep : v }
+    } catch (err) {
+      logErr('[whale][dsh-backup] 保存保留份数失败', (err && err.message) || '')
+      return { ok: false, error: '保存失败：' + ((err && err.message) || err) }
     }
   },
   // 选择 Node.js 安装目录并校验（目录里必须有 node 可执行文件）

@@ -325,11 +325,11 @@ const SCROLL_GAP_DEFAULT = 17
 // 保持用户上次的展开组合，而不是每次都回到默认那两组。
 // 默认只展开 models（切模型最高频）；look 组有 7 行控件，展开会把菜单塞满，故默认收起。
 //
-// menuGroupsRev 是「默认展开态」的版本号：改了上面任一组的默认值就 +1。
+// menuGroupsRev 是「默认展开态」的版本号：改了上面任一组的默认值 / 删掉某组就 +1。
 // 页面侧（floating-page.js）在配置里读到旧版本号时，会把受影响的组强制回到新默认，
 // 否则老配置里存过的旧默认值会一直盖着新默认值，看起来像改动没生效。
-// timerAdv 是「计时」组内的子折叠（只显计时 / 气泡常驻 / 计时保存）
-const MENU_GROUPS_DEFAULT = { look: false, models: true, usage: false, timer: false, timerAdv: false, dsh: false }
+// （v3 起 timer 组内不再有 timerAdv 子折叠，该键已从表里删掉）
+const MENU_GROUPS_DEFAULT = { look: false, models: true, usage: false, timer: false, dsh: false }
 function normMenuGroups(v) {
   const p = v && typeof v === 'object' ? v : {}
   const out = {}
@@ -344,7 +344,7 @@ function normMenuGroupsRev(v) {
   return n
 }
 function defaultConfig() {
-  return { scale: 1.3, vol: 0.9, soundOn: true, soundSet: 'duck', usageMode: 'ledger', peakMode: 'default', peakRemindOn: true, bubbleOn: true, menuBtn: true, onTop: true, lowAlertOn: true, lowAlertAmount: LOW_ALERT_BY_CURRENCY.CNY, budgetOn: false, budgetAmount: 0, dropAlertOn: false, dropAlertAmount: 5, clickQueueOn: false, remindSec: 8, quietOn: false, quietFrom: '23:00', quietTo: '07:00', timeBubbleOn: true, updateCheckOn: false, dragLock: false, enterMode: 'both', timerNotifyOn: true, timerMailOn: true, timerPersistOn: true, timerMode: 'off', timerSec: 1500, timerAt: '07:30', timerNote: '', timerBreakMin: 5, timerRemindSec: 8, timerBubblePin: true, timerBubbleOnly: true, guideDone: false, dshNodeDir: '', dshKeepAlive: false, dshRegistry: '', dshVersion: '', dshReinstall: false, dshNoOpen: true, avoidTaskbar: true, edgeTop: 0, edgeRight: 0, edgeBottom: 0, edgeLeft: 0, scrollGapOn: false, scrollGapPx: SCROLL_GAP_DEFAULT, snapMode: 'ratio', snapRatio: SNAP_RATIO_DEFAULT, opacity: 100, passThrough: false, skin: 'DSniang1', theme: 'default', quotes: normQuotes(null), alerts: normAlerts(null), quotaTotal: 0, quotaReset: 'monthly', tokenPrice: normTokenPrice(null), historyKeepDays: HISTORY_KEEP_DEFAULT, models: [], mainModelId: DEFAULT_MAIN_MODEL, menuGroups: normMenuGroups(null), menuGroupsRev: 0, ghAccelOn: false, ghAccelIps: normIps(null), ghAccelRefreshedAt: 0, notifySystemOn: true, notifyMailOn: false, mailFrom: '', mailTo: '', mailFromName: '小鲸鱼余额挂件', mailSubjectPrefix: '[小鲸鱼余额挂件]' }
+  return { scale: 1.3, vol: 0.9, soundOn: true, soundSet: 'duck', usageMode: 'ledger', peakMode: 'default', peakRemindOn: true, bubbleOn: true, menuBtn: true, onTop: true, lowAlertOn: true, lowAlertAmount: LOW_ALERT_BY_CURRENCY.CNY, budgetOn: false, budgetAmount: 0, dropAlertOn: false, dropAlertAmount: 5, clickQueueOn: false, remindSec: 8, quietOn: false, quietFrom: '23:00', quietTo: '07:00', timeBubbleOn: true, updateCheckOn: false, dragLock: false, enterMode: 'both', timerNotifyOn: true, timerMailOn: true, timerPersistOn: true, timerMode: 'off', timerSec: 1500, timerAt: '07:30', timerNote: '', timerBreakMin: 5, timerRemindSec: 8, timerBubblePin: true, timerBubbleOnly: true, guideDone: false, dshNodeDir: '', dshKeepAlive: false, dshRegistry: '', dshVersion: '', dshReinstall: false, dshNoOpen: true, avoidTaskbar: true, edgeTop: 0, edgeRight: 0, edgeBottom: 0, edgeLeft: 0, scrollGapOn: false, scrollGapPx: SCROLL_GAP_DEFAULT, snapMode: 'ratio', snapRatio: SNAP_RATIO_DEFAULT, opacity: 100, passThrough: false, skin: 'DSniang1', theme: 'default', quotes: normQuotes(null), alerts: normAlerts(null), quotaTotal: 0, quotaReset: 'monthly', tokenPrice: normTokenPrice(null), historyKeepDays: HISTORY_KEEP_DEFAULT, models: [], mainModelId: DEFAULT_MAIN_MODEL, dshBackupKeep: DSB_KEEP_DEFAULT, menuGroups: normMenuGroups(null), menuGroupsRev: 0, ghAccelOn: false, ghAccelIps: normIps(null), ghAccelRefreshedAt: 0, notifySystemOn: true, notifyMailOn: false, mailFrom: '', mailTo: '', mailFromName: '小鲸鱼余额挂件', mailSubjectPrefix: '[小鲸鱼余额挂件]' }
 }
 // dsh 注册源：只接受 http(s) 或空（默认官方源）
 function normRegistry(v) {
@@ -618,6 +618,8 @@ function readConfig() {
     tokenPrice: normTokenPrice(p.tokenPrice),
     // 账本历史保留天数：趋势图 / 明细 / 导出与明细日志裁剪都按它算窗口
     historyKeepDays: Math.round(clampNum(p.historyKeepDays, HISTORY_KEEP_MIN, HISTORY_KEEP_MAX, dft.historyKeepDays)),
+    // dsh 快照保留份数（known-good / 手动命名的快照不计入，见 dsh-backup.js#pruneSnapshots）
+    dshBackupKeep: Math.round(clampNum(p.dshBackupKeep, DSB_KEEP_MIN, DSB_KEEP_MAX, dft.dshBackupKeep)),
     // 多厂商模型：models 是用户填的注册表（自动进备份），运行时结果另存 K.models
     models: models,
     mainModelId: normMainModelId(p.mainModelId, models),
@@ -706,6 +708,7 @@ function writeConfig(cfg) {
       quotaReset: normQuotaReset(cfg.quotaReset),
       tokenPrice: normTokenPrice(cfg.tokenPrice),
       historyKeepDays: Math.round(clampNum(cfg.historyKeepDays, HISTORY_KEEP_MIN, HISTORY_KEEP_MAX, HISTORY_KEEP_DEFAULT)),
+      dshBackupKeep: Math.round(clampNum(cfg.dshBackupKeep, DSB_KEEP_MIN, DSB_KEEP_MAX, DSB_KEEP_DEFAULT)),
       models: models,
       mainModelId: normMainModelId(cfg.mainModelId, models),
       menuGroups: normMenuGroups(cfg.menuGroups),
@@ -820,6 +823,10 @@ function patchConfig(patch) {
   if (p.historyKeepDays !== undefined) {
     cfg.historyKeepDays = Math.round(clampNum(p.historyKeepDays, HISTORY_KEEP_MIN, HISTORY_KEEP_MAX, cfg.historyKeepDays))
   }
+  // dsh 快照保留份数（1–200）：调小不会立刻删，下一次建快照时才按新上限轮转
+  if (p.dshBackupKeep !== undefined) {
+    cfg.dshBackupKeep = Math.round(clampNum(p.dshBackupKeep, DSB_KEEP_MIN, DSB_KEEP_MAX, cfg.dshBackupKeep))
+  }
   // 多厂商模型：models 先于 mainModelId 处理，否则「同时传两者」时新加的 id 还没进列表，主显示会被判为失效
   if (p.models !== undefined) cfg.models = normModels(p.models)
   if (p.mainModelId !== undefined) cfg.mainModelId = normMainModelId(p.mainModelId, cfg.models)
@@ -858,7 +865,11 @@ function patchConfig(patch) {
   if (p.mailTo !== undefined) cfg.mailTo = String(p.mailTo || '').trim().slice(0, 200)
   if (p.mailFromName !== undefined) cfg.mailFromName = String(p.mailFromName || '').trim().slice(0, 60)
   if (p.mailSubjectPrefix !== undefined) cfg.mailSubjectPrefix = String(p.mailSubjectPrefix || '').trim().slice(0, 60)
-  writeConfig(cfg)
+  // 写失败必须让调用方知道：writeConfig 是**返回 false 而不抛错**（见上面的注释），
+  // 早先这里直接忽略返回值，于是全项目 13 个 patchConfig 调用点（设置页保存、hosts 表龄、
+  // 保留份数…）都拿不到「没落盘」这件事 —— writeConfig 里辛苦加的 logErr 只落到了日志里，
+  // 用户侧依然看到「保存成功」、重启后又变回去。这里抛出去，交给各调用点的 try/catch 统一处理。
+  if (!writeConfig(cfg)) throw new Error('写配置失败（存储可能已满或被拒绝）')
   return cfg
 }
 
@@ -881,6 +892,12 @@ const DETAIL_LOG_KEEP = 100
 const HISTORY_KEEP_DEFAULT = 365
 const HISTORY_KEEP_MIN = 35
 const HISTORY_KEEP_MAX = 730
+// dsh 快照保留份数（设置页可调，默认 20）。上限 200 是「不至于让快照目录无限长」的兜底；
+// 下限 1 是因为 0 等于「每次写入前建的快照立刻被自己删掉」，回滚就没了。known-good
+// 与手动命名的快照不计入轮转，所以实际留在盘上的可能多于这个数（见 dsh-backup.js#isPinned）。
+const DSB_KEEP_DEFAULT = 20
+const DSB_KEEP_MIN = 1
+const DSB_KEEP_MAX = 200
 // 直接读原始配置而不走 readConfig()：readLedger() 每次刷新都会调 pruneDetailLog()，
 // 而 readConfig() 要把 models / quotes / alerts 全套归一化一遍，这里只需要一个数字。
 function historyKeepDays() {
@@ -1246,4 +1263,8 @@ module.exports = {
   normTokenPrice,
   // GitHub 加速 IP 表归一化：hosts.js 写块 / 刷新结果与 store 配置共用
   normIps,
+  // dsh 快照保留份数的边界（设置页输入框与 dsh-backup.js 的兜底共用同一组数字）
+  DSB_KEEP_DEFAULT,
+  DSB_KEEP_MIN,
+  DSB_KEEP_MAX,
 }

@@ -337,6 +337,16 @@ const CHECKS = [
       { file: APP_VUE, pick: whaleMp3Paths('const BUILTIN_SOUND_SETS') },
     ],
   },
+  // 一键隔离的单次写入上限：宿主 dsh-isolate.js 拿它做准入判断（超限直接拒绝），
+  // 设置页拿它做勾选量的提前拦截。两边不一致会出现「界面放行、宿主拒绝」的割裂，
+  // 或更糟的「界面拦下了宿主其实能写的条数」。
+  {
+    name: '一键隔离写入上限 MAX_BATCH',
+    parts: [
+      { file: 'public/preload/lib/dsh-isolate.js', pick: jsNumber('const MAX_BATCH') },
+      { file: APP_VUE, pick: jsNumber('const DSH_ISOLATE_MAX_BATCH') },
+    ],
+  },
 ]
 
 let bad = 0

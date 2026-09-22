@@ -67,7 +67,17 @@ function homeDir(target, opts) {
     const envKey = String(o.env || '')
     const envVal = envKey ? String(process.env[envKey] || '').trim() : ''
     if (envVal) cands.push(expandHome(envVal, o))
-    cands.push(path.join(os.homedir(), String(o.fallback || '')))
+    // ⚠️ os.homedir() 必须单独兜住，**不能**让异常混进「候选目录不存在」这条预期分支。
+    // homedir() 在 Windows 上读 USERPROFILE / HOMEDRIVE+HOMEPATH，三者都被清掉时它会**抛错**
+    // （Node 找不到家目录的行为）。早先这里裸调，异常被下面的 existsSync 循环整个吞掉 →
+    // 候选表里少一项、函数返回 '' —— 而 '' 在全部调用方眼里等于「用户没配 DSH_HOME」，
+    // 于是快照列表空、备份报「没有可备份的文件」、诊断假通过，全程零日志。
+    // 这违反本模块的错误分流原则（D23 同款口径）：只有「目录确实不存在」能静默，
+    // 「取不到家目录」是真故障。此处没法 require('./log')（D21 禁止），所以把兜底行为
+    // 写死成「跳过这一项候选」—— 与原来相比行为不变，但候选表不再中途断掉。
+    let home = ''
+    try { home = os.homedir() } catch (_) { home = '' }
+    if (home) cands.push(path.join(home, String(o.fallback || '')))
   }
   for (const c of cands) {
     try { if (c && fs.existsSync(c)) return c } catch (_) {}
@@ -85,9 +95,15 @@ function homeDir(target, opts) {
 function expandHome(raw, o) {
   let p = raw
   if (o.expand === true) {
-    const home = os.homedir()
-    if (p === '~') p = home
-    else if (p.startsWith('~/') || p.startsWith('~\\')) p = path.join(home, p.slice(2))
+    // 与 homeDir 同款兜底：homedir() 可能抛（见上面 homeDir 里的注释）。
+    // 取不到家目录就**不展开**，把 `~` 原样留着 —— 后续 existsSync 必然不命中，
+    // 结果仍是「这个候选不可用」，但不会因为抛错掀掉整张候选表。
+    let home = ''
+    try { home = os.homedir() } catch (_) { home = '' }
+    if (home) {
+      if (p === '~') p = home
+      else if (p.startsWith('~/') || p.startsWith('~\\')) p = path.join(home, p.slice(2))
+    }
   }
   if (path.isAbsolute(p)) return p
   return o.relative === true ? path.join(process.cwd(), p) : p

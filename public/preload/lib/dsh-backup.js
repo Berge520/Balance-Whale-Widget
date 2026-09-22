@@ -28,14 +28,22 @@ const path = require('path')
 const crypto = require('crypto')
 const { log, logErr } = require('./log')
 const { homeDir, readTextSafe } = require('./util')
+// 只读配置（取保留份数）。store 不 require 本模块，无循环引用
+const { readConfig } = require('./store')
 
 // 快照根目录名（放在 $DSH_HOME 下，用户能自己找到；也让「一起删掉」变简单）
 const BACKUP_DIR_NAME = 'whale-dsh-backup'
+
+// 用户给快照加的「标记」单独存一个文件，**不写进 manifest**。
+// why：manifest 是建快照那一刻的事实记录（谁建的、备了什么、校验值多少），必须保持只读语义；
+// 命名和 known-good 是用户事后追加的意见，混进去会让「这份快照到底是不是完整的」变得可疑。
+const META_NAME = 'meta.json'
 // manifest 文件名（每份快照目录里）
 const MANIFEST_NAME = 'manifest.json'
-// 快照保留份数上限：超过了从最旧的开始删。
-// E4 会带「留 N 份」的配置，E1 先用一个保守默认值把「无限增长」这件事堵住
+// 快照保留份数上限（E4 起可由用户配置，这里是回落默认值）。
 const MAX_SNAPSHOTS = 20
+const KEEP_MIN = 1
+const KEEP_MAX = 200
 // manifest schema：将来字段变了，旧快照仍能被识别出来（不至于当成损坏）
 const SCHEMA = 1
 
@@ -88,10 +96,78 @@ function sha256(text) {
   return crypto.createHash('sha256').update(String(text), 'utf8').digest('hex')
 }
 
+// ── 元信息（命名 / known-good 标记）──
+// meta.json 是**用户意见**，读不出来（没写过 / 手删了 / JSON 坏了）一律当「没标记」，
+// 不算错误也不留痕 —— 它不影响快照本身能不能还原，为它报错只会制造噪音。
+const NAME_MAX = 40
+
+function normName(v) {
+  return String(v == null ? '' : v).replace(/\s+/g, ' ').trim().slice(0, NAME_MAX)
+}
+
+function metaPath(dirName) {
+  return path.join(backupRoot(), dirName, META_NAME)
+}
+
+function readMeta(dirName) {
+  const empty = { name: '', knownGood: false, at: '' }
+  const r = readTextSafe(metaPath(dirName))
+  if (!r.ok) return empty
+  let m = null
+  try { m = JSON.parse(r.text) } catch (_) { return empty }
+  if (!m || typeof m !== 'object') return empty
+  return {
+    name: normName(m.name),
+    knownGood: m.knownGood === true,
+    at: String(m.at || ''),
+  }
+}
+
+// dirName 必须已经过合法化校验（调用处负责）；这里只写文件
+function writeMeta(dirName, meta) {
+  const m = { name: normName(meta && meta.name), knownGood: !!(meta && meta.knownGood), at: new Date().toISOString() }
+  // 两项都空 = 等价于「没有标记」，直接删掉 meta.json，别留一个 {} 让列表以为有东西
+  if (!m.name && !m.knownGood) {
+    try { fs.rmSync(metaPath(dirName), { force: true }) } catch (_) { /* 删不掉也没关系，读回来仍是「无标记」 */ }
+    return m
+  }
+  try {
+    fs.writeFileSync(metaPath(dirName), JSON.stringify(m, null, 2), 'utf8')
+  } catch (err) {
+    logErr('[whale][dsh-backup] 写快照标记失败', dirName + ': ' + errMsg(err))
+    return null
+  }
+  return m
+}
+
+// 纯目录名校验（防目录穿越：用户可手改任何东西，不能让它读写到快照根之外）
+function safeDirName(dirName) {
+  const name = String(dirName || '')
+  if (!name) return ''
+  if (name !== path.basename(name) || name === '.' || name === '..') return ''
+  return name
+}
+
+// 决定一份快照对外用哪个目录名（列表 / 还原 / 删除 / 清理都走它的结果）。
+// 正常情况就是磁盘上的目录名 n。仅当 manifest 记的 m.dirName 与 n 不同、**且那个目录真的
+// 存在于快照根下、且里面真的放着 manifest** 时才采用它 —— 这覆盖「快照目录被手工重命名、
+// 但 manifest 里的旧名字还指向一个仍然存在的目录」这一种历史情形，让改名后的快照仍能被删除。
+// ⚠️ m.dirName 绝不能无条件采信：它会进 path.join 与 rmSync，等于把「manifest 里一个字段」
+// 变成「删除任意路径」。这三个条件（纯目录名 / 存在 / 有 manifest）是它能被采信的全部理由。
+function resolveDirName(diskName, manifestName) {
+  const m = safeDirName(manifestName)
+  if (!m || m === diskName) return diskName
+  try {
+    if (fs.existsSync(path.join(backupRoot(), m, MANIFEST_NAME))) return m
+  } catch (_) { /* 探测失败就退回磁盘目录名，宁可删不掉也不删错 */ }
+  return diskName
+}
+
 // ── 快照 ──
-// opts = { profile?: string, reason?: string }
+// opts = { profile?: string, reason?: string, name?: string, knownGood?: boolean }
 //   reason：为什么建这份快照（'manual' / 'before-disable' / ...），只写进 manifest 供界面展示，
 //           本模块不解读它的值 —— 加新 reason 不需要改这里
+//   name / knownGood：用户标记，写进 meta.json（不进 manifest，见 META_NAME 的说明）
 //
 // 返回 { ok, dir, at, profile, files: [{rel, ok, sha256?, bytes?, reason?}], missing: n, error? }
 //   files[].ok=false 表示该文件**当时就不存在**（如本机 home 层 cordis.patch.yml 不存在），
@@ -161,9 +237,15 @@ function createSnapshot(opts) {
   }
 
   log('[whale][dsh-backup] 已建快照', { dirName: dirName, files: files.length, missing: missing })
+  // 用户标记（命名 / known-good）：只在真的给了才写，否则不落 meta.json
+  const meta = writeMeta(dirName, { name: o.name, knownGood: o.knownGood === true })
   // 建完就轮转，避免无限增长（失败不影响本次快照 —— 它已经写好了）
-  try { pruneSnapshots() } catch (err) { logErr('[whale][dsh-backup] 轮转旧快照失败', errMsg(err)) }
-  return { ok: true, dir: dir, dirName: dirName, at: manifest.at, profile: profile, files: files, missing: missing }
+  try { pruneSnapshots({ keep: retentionKeep() }) } catch (err) { logErr('[whale][dsh-backup] 轮转旧快照失败', errMsg(err)) }
+  return {
+    ok: true, dir: dir, dirName: dirName, at: manifest.at, profile: profile,
+    files: files, missing: missing,
+    name: meta ? meta.name : '', knownGood: meta ? meta.knownGood : false,
+  }
 }
 
 // ── 列表 ──
@@ -193,18 +275,29 @@ function listSnapshots() {
     }
     if (!m || m.kind !== 'whale-dsh-backup') continue
     const files = Array.isArray(m.files) ? m.files : []
+    const meta = readMeta(n)
+    // dirName 一律取**目录名**而不是 manifest 里的 m.dirName：manifest 是用户可手改的，
+    // 而 dirName 到了 pruner 会被拼成路径去 rmSync —— 信 manifest 就等于让「手改一个
+    // 字段」变成「删掉快照根之外的任意目录」（E4 复查实测：填 '../evil' 能越过根；
+    // 填一个真实同级目录名会把那份**完好的快照**连带删掉）。磁盘上的目录名才是事实。
     out.push({
-      dirName: String(m.dirName || n),
+      dirName: resolveDirName(n, m.dirName),
       at: String(m.at || ''),
       profile: String(m.profile || ''),
       reason: String(m.reason || ''),
       total: files.length,
       present: files.filter((f) => f && f.ok).length,
+      name: meta.name,
+      knownGood: meta.knownGood,
       // 空集合也算「完好」—— 没文件可备不叫损坏，叫这份快照没内容
       intact: true,
     })
   }
-  out.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0))
+  // 已知良好的排最前（回滚时第一眼要看到的就是它），其余按时间倒序
+  out.sort((a, b) => {
+    if (a.knownGood !== b.knownGood) return a.knownGood ? -1 : 1
+    return a.at < b.at ? 1 : a.at > b.at ? -1 : 0
+  })
   return out
 }
 
@@ -221,14 +314,10 @@ function listSnapshots() {
 //        （防「备份自己就坏了」—— V2 的教训：dsh 不会告诉你写坏了，只能自己校验）
 function restoreSnapshot(opts) {
   const o = opts && typeof opts === 'object' ? opts : {}
-  const dirName = String(o.dirName || '')
+  const dirName = safeDirName(o.dirName)
   if (!dirName) return { ok: false, error: '未指定要还原的快照' }
   const root = backupRoot()
   if (!root) return { ok: false, error: '找不到 dsh 配置目录' }
-  // 防目录穿越：dirName 必须是一个**纯目录名**（用户可手改 manifest，不能让它写到外面去）
-  if (dirName !== path.basename(dirName) || dirName === '.' || dirName === '..') {
-    return { ok: false, error: '快照名不合法' }
-  }
   const dir = path.join(root, dirName)
   const r = readTextSafe(path.join(dir, MANIFEST_NAME))
   if (!r.ok) return { ok: false, error: '读不到该快照的清单（' + (r.reason || 'ENOENT') + '）' }
@@ -279,21 +368,44 @@ function restoreSnapshot(opts) {
 }
 
 // ── 清理 ──
-// opts = { keep?: number }  默认 MAX_SNAPSHOTS
+// opts = { keep?: number, protectPinned?: boolean }   keep 默认 MAX_SNAPSHOTS（调用方可传用户配置值）
 // 返回被删掉的快照目录名数组（按删除顺序）
+//
+// 两条保护规则（E4）：
+//   ① **known-good 永不轮转**：它是用户明确指认的「已知良好」，被自动清理掉等于把回滚目标弄丢；
+//   ② 带名字且不是 before-* 的**手动备份也不轮转**：手动备份是用户主动存的，与写入前自动建的不是一回事。
+//      why 排除 before-*：那些是写入的副产物、量最大，如果手动改名就能免死，改两下就绕过了上限。
+// 两者都只是「免于自动清理」，手动删除仍可以删（用户点删除是明确意图）。
+function isPinned(s) {
+  return s.knownGood === true || (!!s.name && !/^before-/.test(String(s.reason || '')))
+}
+
 function pruneSnapshots(opts) {
   const o = opts && typeof opts === 'object' ? opts : {}
   const keep = Number.isFinite(o.keep) && o.keep >= 0 ? Math.floor(o.keep) : MAX_SNAPSHOTS
-  const list = listSnapshots() // 已按时间倒序
-  const doomed = list.slice(keep)
+  const protect = o.protectPinned !== false
+  const list = listSnapshots() // 已按 known-good 优先 + 时间倒序
   const root = backupRoot()
   const removed = []
-  for (const s of doomed) {
+  // ⚠️ keep 只统计**未固定**的快照：固定的那几份不占配额。
+  // why：known-good 是用户指认的回滚目标，如果它把 keep 的名额吃掉，
+  // 「保留 1 份」就会变成「只留 known-good、普通快照全删」—— 与用户设的份数含义不符。
+  let keptNormal = 0
+  for (const s of list) {
+    // dirName 正常来自 readdir（磁盘事实），这里再校验一次是**纵深防御**：
+    // 本函数会 rmSync 拼出来的路径，多一道纯目录名校验，代价为零、出事时却是唯一那道闸
+    const name = safeDirName(s.dirName)
+    if (!name) {
+      logErr('[whale][dsh-backup] 跳过目录名不合法的快照', String(s.dirName))
+      continue
+    }
+    if (protect && isPinned(s)) continue
+    if (keptNormal < keep) { keptNormal++; continue }
     try {
-      fs.rmSync(path.join(root, s.dirName), { recursive: true, force: true })
-      removed.push(s.dirName)
+      fs.rmSync(path.join(root, name), { recursive: true, force: true })
+      removed.push(name)
     } catch (err) {
-      logErr('[whale][dsh-backup] 删除旧快照失败', s.dirName + ': ' + errMsg(err))
+      logErr('[whale][dsh-backup] 删除旧快照失败', name + ': ' + errMsg(err))
     }
   }
   if (removed.length) log('[whale][dsh-backup] 已清理旧快照', { removed: removed.join(',') })
@@ -302,9 +414,8 @@ function pruneSnapshots(opts) {
 
 // 删单个快照（界面上的「删除这一份」）
 function removeSnapshot(dirName) {
-  const name = String(dirName || '')
+  const name = safeDirName(dirName)
   if (!name) return { ok: false, error: '未指定快照' }
-  if (name !== path.basename(name) || name === '.' || name === '..') return { ok: false, error: '快照名不合法' }
   const root = backupRoot()
   if (!root) return { ok: false, error: '找不到 dsh 配置目录' }
   const dir = path.join(root, name)
@@ -319,9 +430,52 @@ function removeSnapshot(dirName) {
   return { ok: true, dirName: name }
 }
 
+// 给快照命名 / 打（取消）known-good 标记。
+// opts = { dirName: string, name?: string, knownGood?: boolean }
+//   name 传空串 = 清掉名字；knownGood 传 false = 取消标记；两者都空 = 删掉 meta.json
+// 只改 meta.json，**不碰快照内容** —— 标记错了重标即可，不会影响可还原性
+function setMeta(opts) {
+  const o = opts && typeof opts === 'object' ? opts : {}
+  const dirName = safeDirName(o.dirName)
+  if (!dirName) return { ok: false, error: '未指定快照' }
+  const root = backupRoot()
+  if (!root) return { ok: false, error: '找不到 dsh 配置目录' }
+  if (!fs.existsSync(path.join(root, dirName, MANIFEST_NAME))) {
+    return { ok: false, error: '该快照不存在' }
+  }
+  // 上面的 existsSync 走的是「按 dirName 拼出来的路径」，meta 写入跟着同一个路径走，
+  // 两者必须是同一个来源（都是校验过的纯目录名），否则会出现
+  // 「查的是 A 却写了 B」这种看似成功实则写错目录的情况
+  const cur = readMeta(dirName)
+  const next = {
+    name: o.name === undefined ? cur.name : normName(o.name),
+    knownGood: o.knownGood === undefined ? cur.knownGood : o.knownGood === true,
+  }
+  const meta = writeMeta(dirName, next)
+  if (!meta) return { ok: false, error: '写快照标记失败（目录不可写？）' }
+  log('[whale][dsh-backup] 已更新快照标记', { dirName: dirName, name: meta.name, knownGood: meta.knownGood })
+  return { ok: true, dirName: dirName, name: meta.name, knownGood: meta.knownGood }
+}
+
+// 当前生效的保留份数：读用户配置，读不出来回落默认值（配置读写由 store 负责，这里只管兜底）
+function retentionKeep() {
+  let n = MAX_SNAPSHOTS
+  try {
+    const cfg = readConfig()
+    if (cfg && cfg.dshBackupKeep !== undefined) n = cfg.dshBackupKeep
+  } catch (err) {
+    logErr('[whale][dsh-backup] 读保留份数配置失败，用默认值', errMsg(err))
+  }
+  if (!Number.isFinite(Number(n))) return MAX_SNAPSHOTS
+  return Math.min(KEEP_MAX, Math.max(KEEP_MIN, Math.floor(Number(n))))
+}
+
 module.exports = {
   BACKUP_DIR_NAME,
+  META_NAME,
   MAX_SNAPSHOTS,
+  KEEP_MIN,
+  KEEP_MAX,
   dshHome,
   backupRoot,
   targetFiles,
@@ -330,7 +484,10 @@ module.exports = {
   restoreSnapshot,
   pruneSnapshots,
   removeSnapshot,
+  setMeta,
+  retentionKeep,
   // 供测试/排查用
   _stampOf: stampOf,
   _sha256: sha256,
+  _isPinned: isPinned,
 }

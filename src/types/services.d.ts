@@ -420,6 +420,9 @@ export interface DshDumpEntry {
   hasConfig: boolean
   // config 下的顶层字段名（最多 12 个），只留名字不留值
   configKeys: string[]
+  // 归属包名（dump 分节头的第一个字段，如 `@deepseek-ai/dsh-base` / `dsh-mnemon`）。
+  // dsh 一键隔离拿它分档（官方框架 vs 第三方插件）—— id 本身看不出归属
+  bundle?: string
 }
 
 // 生效树 vs 默认树 diff（D2）。三个数组都截断到 200 条，总数在 *Total 里。
@@ -506,6 +509,10 @@ export interface DshBackupSnapshot {
   total: number
   // 建快照时真的存在、被备走的文件数（< total 说明有文件当时就不存在，属正常）
   present: number
+  // 用户给的名字（E4）。空串 = 没名字
+  name: string
+  // 用户指认的「已知良好」回滚目标（E4）。列表里这类排最前，且**不会被自动轮转删掉**
+  knownGood: boolean
 }
 
 export interface DshBackupListResult {
@@ -513,8 +520,11 @@ export interface DshBackupListResult {
   error?: string
   // 快照根目录（$DSH_HOME/whale-dsh-backup）
   root?: string
-  // 保留份数上限
+  // **当前生效**的保留份数（读用户配置，E4 起可调），不是常量上限
   max?: number
+  // 保留份数的可调范围（设置页输入框用）
+  keepMin?: number
+  keepMax?: number
   snapshots: DshBackupSnapshot[]
 }
 
@@ -536,6 +546,27 @@ export interface DshBackupCreateResult {
   profile?: string
   // 建快照时不存在、只记了 missing 的文件数
   missing?: number
+  // 建快照时一并打上的名字 / 标记（E4）
+  name?: string
+  knownGood?: boolean
+}
+
+// E4：命名 / 打 known-good 标记（只改 meta.json，不碰快照内容）
+export interface DshBackupMetaResult {
+  ok: boolean
+  error?: string
+  dirName?: string
+  name?: string
+  knownGood?: boolean
+}
+
+// E4：按当前保留份数清理一次
+export interface DshBackupPruneResult {
+  ok: boolean
+  error?: string
+  keep?: number
+  // 被删掉的快照目录名
+  removed?: string[]
 }
 
 // ── E3「我的一键隔离」 ──
@@ -548,12 +579,20 @@ export interface DshIsolateCandidate {
   source: string
   // 已在用户层 patch 里（source === 'patch'）
   inPatch: boolean
-  // 冻结的当前状态：界面据此默认不勾「已禁用」的条目
-  disabled: boolean
+  // 当前状态，**三态**：true 已禁用 / false 启用中 / undefined 状态未知。
+  // ⚠️ undefined 不是「启用」—— 它表示宿主没拿到该条目的 dump 状态（调用方漏传 disabledOf）。
+  // 界面必须把 undefined 显示成「状态未知」，当成 false 会把已禁用的插件谎报成启用中
+  disabled?: boolean
   // 条目在 patch 文件里的行号（1 基）；不在 patch 里时为 0
   line: number
   // 条目下除 disabled 外还有 config 等子块
   hasConfig: boolean
+  // 'patched' | 'third' | 'core' —— 分组用的档位（见 dsh-isolate.tierOfBundle）。
+  // 'patched' = 已在用户 patch 里 / 'third' = 第三方插件 / 'core' = dsh 官方框架节点。
+  // ⚠️ 只用于界面分组与默认折叠，**不是**权限或安全边界
+  tier: string
+  // 归属包名（来自 dump 分节头）。core/third 的实际判据，界面可显示出来
+  bundle?: string
 }
 
 export interface DshIsolateCandidatesResult {
@@ -564,11 +603,11 @@ export interface DshIsolateCandidatesResult {
   profile?: string
   // patch 文件当前是否存在。false 是正常空态（还没写过 patch），不是错误
   exists?: boolean
-  // 候选数触顶 MAX_BATCH（界面提示「列表被截断」）
-  truncated?: boolean
   // 组装树读不到时的降级原因。**非空不代表整体失败** ——
   // 此时 items 只含 patch 里的条目，隔离照样能做（与 D26 同一取舍）
   treeError?: string
+  // 候选**不再截断**（早先截到 MAX_BATCH=100，导致第 101 条起勾都勾不到）。
+  // MAX_BATCH 现在只约束「一次写入多少条」，见 dshIsolateApply
   items?: DshIsolateCandidate[]
 }
 
@@ -1298,9 +1337,18 @@ export interface WhaleServices {
   dshPatchToggle(opts: { profile?: string; id: string; disabled: boolean }): DshPatchToggleResult
   // 快照（E1 的 whale-dsh-backup）：列表 / 立即备份 / 还原 / 删除
   dshBackupList(): DshBackupListResult
-  dshBackupCreate(opts?: { profile?: string }): DshBackupCreateResult
+  // 立即备份。给了 name 就是「手动命名的备份」→ 不受轮转清理（E4）
+  dshBackupCreate(opts?: { profile?: string; name?: string }): DshBackupCreateResult
   dshBackupRestore(opts: { dirName: string; dryRun?: boolean }): DshBackupRestoreResult
   dshBackupRemove(dirName: string): { ok: boolean; error?: string }
+  // ── E4：known-good 标记 / 命名 / 可配保留份数 ──
+  // 命名与打标记只改快照目录里的 meta.json，**不碰快照内容**（标记错了重标即可）。
+  // name 传空串清名字、knownGood 传 false 取消标记；只传一项时另一项保持不变
+  dshBackupSetMeta(opts: { dirName: string; name?: string; knownGood?: boolean }): DshBackupMetaResult
+  // 按当前保留份数清理一次（known-good 与手动命名的快照不参与轮转）
+  dshBackupPrune(): DshBackupPruneResult
+  // 改保留份数（1–200）。**只写配置、不立即删**，删除由 dshBackupPrune 或下次建快照触发
+  dshBackupSetKeep(n: number): { ok: boolean; error?: string; keep?: number }
   // ── E3「我的一键隔离」：一次把勾选的条目全禁掉 ──
   // 候选清单必须 spawn `dsh --dump-config`，故返回 Promise（宿主侧有 20s 兜底闸门）。
   // 组装树读不到时**降级**：treeError 说明原因、items 只含 patch 里的条目，不算整体失败

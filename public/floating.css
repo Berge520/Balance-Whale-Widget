@@ -163,12 +163,17 @@
     /* border-box：max-height（CSS 兜底 + JS 内联夹取）必须包含内边距与边框。
        否则实测高度会多出 8px*2 内边距 + 1px*2 边框，顶边越出窗口被裁掉，左上/右上圆角变直角 */
     box-sizing: border-box;
-    /* 宽度跟着内容自适应：275px 是原先「收缩到适应」的自然宽度（由「大小」行的 range 129px 定）。
-       改成 min/max 夹取后，标签变长（自适应标签列）或出现双滑块时面板能自己变宽，
-       短内容时也不会留着大片空白。max-width 仍防 dsh 状态/命令这类 nowrap 长文本把面板撑爆 */
-    width: max-content;
-    min-width: 260px;
-    max-width: 320px;
+    /* 宽度：**固定基准 + 只在真需要时放宽**（原先 width:max-content 让「越展开越宽」成了必然）。
+       max-content 的含义是「不许换行时内容要多宽给多宽」，而本面板是 overflow-y:auto ——
+       展开的组越多、内容越高，越容易出垂直滚动条，滚动条又吃掉内容宽，max-content 再加宽补偿，
+       于是每展开一组面板就宽一点，直到撞上 max-width。加上所有行都是 nowrap，根本没有换行折中。
+       改成固定 275px（= 原先「收缩到适应」的自然宽度，由「大小」行的 range 定）后，
+       展开多少组宽度都不变；只有 dsh 状态/命令这类 nowrap 长文本会顶到 max-width。
+       min(320px, 92vw) 防窗口很窄时（小尺寸挂件）面板越过窗口边缘 */
+    width: 275px;
+    max-width: min(320px, 92vw);
+    /* 常驻滚动条槽位：否则「出现滚动条 → 内容宽被占 → 排版重算」会在展开/收起时抖一下 */
+    scrollbar-gutter: stable;
     background: rgba(252,253,255,.96);
     -webkit-backdrop-filter: blur(14px) saturate(1.6);
     backdrop-filter: blur(14px) saturate(1.6);
@@ -251,11 +256,19 @@
   }
   .dshwv-group-head:hover { background: rgba(47,87,214,.08); color: #1b2a5e; }
   .dshwv-group-arrow { width: 11px; font-size: 9px; opacity: .6; }
-  .dshwv-group-body { padding: 0 0 4px; }
-  /* 组内嵌组（计时的「更多」）：去掉分隔线与缩进强调层级，缩进用左侧留白表示，
-     否则里外两层标题同字号同色，看起来像两个平级分组 */
-  .dshwv-group .dshwv-group { border-top: none; margin-left: 6px; }
-  .dshwv-group .dshwv-group > .dshwv-group-head { padding-left: 0; font-size: 10px; opacity: .85; }
+  /* 组体高度过渡：grid-template-rows 0fr↔1fr 可以直接对 auto 内容做动画，
+     不必先测量像素高度；外层 overflow:hidden 才能让内层被压扁时真的裁掉。
+     grid 里只放一个子项（.dshwv-group-inner）是这招的前提 —— 见 floating-page.js 的 menuGroup()。
+     展开态由 .dshwv-group-open 控制 */
+  .dshwv-group-body {
+    display: grid;
+    grid-template-rows: 0fr;
+    overflow: hidden;
+    padding: 0;
+    transition: grid-template-rows .2s ease, padding .2s ease;
+  }
+  .dshwv-group-inner { min-height: 0; }
+  .dshwv-group-open > .dshwv-group-body { grid-template-rows: 1fr; padding: 0 0 4px; }
   .dshwv-menu-foot { margin-top: 8px; padding: 8px 6px 2px; border-top: 1px solid rgba(32,49,112,.1); }
 
   /* —— 控件 —— */
@@ -347,23 +360,15 @@
   .dshwv-menu-foot .dshwv-menu-link.dshwv-menu-link-warn:hover { background: #c9362f; border-color: #c9362f; box-shadow: none; }
 
   .dshwv-volpct { width: 40px; text-align: right; color: #5b6ba1; font-size: 12px; font-variant-numeric: tabular-nums; }
-  /* 计时行：模式下拉 + 开始/暂停/继续按钮；「目标」行的时/分/秒 / 时刻输入按模式二选一显示 */
+  /* 计时行：模式下拉 + 开始/暂停/继续按钮。「目标」拆成两个互斥子行
+     （倒计时三段 / 定时刻），每行只放自己那套控件，不再让另一套隐形占位 */
   .dshwv-timer-btn { flex: 0 0 auto; width: 52px; padding: 4px 0; }
-  .dshwv-timer-time { flex: 0 0 auto; width: 78px; }
-  /* 时/分/秒三段：比通用 .dshwv-number 窄（一行要放下 三段 + 三个单位 + 留言），
+  .dshwv-timer-time { flex: 1; min-width: 0; box-sizing: border-box; }
+  /* 时/分/秒三段：比通用 .dshwv-number 窄（一行要放下 三段 + 三个单位 + 重置），
      并显示 spinner —— 分钟档常用 25 → 5，手输不如点一下快 */
   .dshwv-timer-seg { width: 38px; flex: 0 0 auto; padding: 3px 2px 3px 5px; text-align: center; }
   .dshwv-timer-unit { flex: 0 0 auto; color: #8b9ac9; font-size: 11px; }
-  /* 到点留言：占满「留言」行剩余宽度 */
-  .dshwv-timer-note {
-    flex: 1; min-width: 0; box-sizing: border-box;
-    border: 1px solid rgba(32,49,112,.2); border-radius: 8px;
-    padding: 3px 6px; font-size: 12px; color: #2b3a6b; background: #fff;
-    transition: border-color .15s ease, box-shadow .15s ease;
-  }
-  .dshwv-timer-note:focus { outline: none; border-color: #2f57d6; box-shadow: 0 0 0 2px rgba(47,87,214,.18); }
-  .dshwv-timer-break { width: 46px; flex: 0 0 auto; }
-  /* 重置：只在计时中/暂停时出现，占满「目标」行；用次要按钮配色与「开始」区分 */
+  /* 重置：只在计时中/暂停时出现，占满「目标」行剩余宽度；用次要按钮配色与「开始」区分 */
   .dshwv-timer-reset { flex: 1; padding: 4px 0; border-color: rgba(32,49,112,.22); background: rgba(32,49,112,.06); color: #4a5a92; }
   .dshwv-timer-reset:hover { background: rgba(32,49,112,.12); border-color: rgba(32,49,112,.34); }
 

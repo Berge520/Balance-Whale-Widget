@@ -301,6 +301,193 @@ test('removeSnapshot：删指定的一份；名字不合法或不存在时明确
   assert.equal(bak.removeSnapshot('').ok, false)
 })
 
+// ── ④·E4 标记 / 命名 / 轮转保护 ──
+test('setMeta：命名与 known-good 能存能读，且不写进 manifest（快照内容不受影响）', () => {
+  makeHome(fullHome())
+  const s = bak.createSnapshot({ profile: 'web', reason: 'manual' })
+  // 建快照时可以直接带名字与标记
+  assert.equal(s.name, '')
+  assert.equal(s.knownGood, false)
+
+  const r = bak.setMeta({ dirName: s.dirName, name: '装插件前', knownGood: true })
+  assert.equal(r.ok, true, r.error)
+  assert.equal(r.name, '装插件前')
+  assert.equal(r.knownGood, true)
+
+  const one = bak.listSnapshots()[0]
+  assert.equal(one.name, '装插件前')
+  assert.equal(one.knownGood, true)
+
+  // manifest 一个字节都没动（标记只进 meta.json）
+  const m = JSON.parse(fs.readFileSync(path.join(s.dir, 'manifest.json'), 'utf8'))
+  assert.equal(m.name, undefined)
+  assert.equal(m.knownGood, undefined)
+  // meta 单独一个文件
+  assert.equal(fs.existsSync(path.join(s.dir, 'meta.json')), true)
+})
+
+test('setMeta：只改一项时另一项保持不变（部分更新语义）', () => {
+  makeHome(fullHome())
+  const s = bak.createSnapshot({ profile: 'web', name: '原始名字', knownGood: true })
+  assert.equal(s.name, '原始名字')
+  assert.equal(s.knownGood, true)
+
+  // 只改名字
+  const r1 = bak.setMeta({ dirName: s.dirName, name: '换个名字' })
+  assert.equal(r1.name, '换个名字')
+  assert.equal(r1.knownGood, true, '没传 knownGood 不能把它抹掉')
+
+  // 只取消标记
+  const r2 = bak.setMeta({ dirName: s.dirName, knownGood: false })
+  assert.equal(r2.name, '换个名字')
+  assert.equal(r2.knownGood, false)
+})
+
+test('setMeta：名字与标记都清空时删掉 meta.json；名字超长截断、空白折叠', () => {
+  makeHome(fullHome())
+  const s = bak.createSnapshot({ profile: 'web', name: '  一段   带空白的名字  ' })
+  assert.equal(bak.listSnapshots()[0].name, '一段 带空白的名字', '空白要折叠成单个空格并去首尾')
+
+  const long = bak.setMeta({ dirName: s.dirName, name: 'x'.repeat(100) })
+  assert.equal(long.name.length, 40, '名字上限 40 字符')
+
+  const cleared = bak.setMeta({ dirName: s.dirName, name: '', knownGood: false })
+  assert.equal(cleared.ok, true)
+  assert.equal(cleared.name, '')
+  assert.equal(cleared.knownGood, false)
+  assert.equal(fs.existsSync(path.join(s.dir, 'meta.json')), false, '两项都空时不该留一个空 meta.json')
+})
+
+test('setMeta：快照不存在 / dirName 穿越时明确失败', () => {
+  makeHome(fullHome())
+  bak.createSnapshot({ profile: 'web' })
+  assert.equal(bak.setMeta({ dirName: 'nope-20260101-000000', name: 'x' }).ok, false)
+  assert.equal(bak.setMeta({ dirName: '../evil', name: 'x' }).ok, false)
+  assert.equal(bak.setMeta({}).ok, false)
+})
+
+test('pruneSnapshots：known-good 一份都不删（即使它在最旧那一头）', () => {
+  makeHome(fullHome())
+  const made = []
+  for (let i = 0; i < 4; i++) made.push(bak.createSnapshot({ profile: 'web', reason: 'r' + i }))
+  // 让 at 递增：r0 最旧、r3 最新
+  made.forEach((s, i) => {
+    const mp = path.join(s.dir, 'manifest.json')
+    const m = JSON.parse(fs.readFileSync(mp, 'utf8'))
+    m.at = new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString()
+    fs.writeFileSync(mp, JSON.stringify(m))
+  })
+  // 最旧那份打成 known-good
+  assert.equal(bak.setMeta({ dirName: made[0].dirName, knownGood: true }).ok, true)
+
+  const removed = bak.pruneSnapshots({ keep: 1 })
+  // r0 被保护、r3 占掉唯一的 keep 名额 → 只有 r1、r2 该被删
+  assert.deepEqual(removed.sort(), [made[1].dirName, made[2].dirName].sort())
+  const left = bak.listSnapshots()
+  assert.equal(left.length, 2)
+  assert.equal(left[0].dirName, made[0].dirName, 'known-good 必须排在最前')
+  assert.equal(left.find((s) => s.dirName === made[3].dirName).reason, 'r3')
+})
+
+test('pruneSnapshots：手动命名（reason 非 before-*）的快照受保护，before-* 的改名不免死', () => {
+  makeHome(fullHome())
+  const a = bak.createSnapshot({ profile: 'web', reason: 'r0' })
+  const b = bak.createSnapshot({ profile: 'web', reason: 'r1' })
+  const c = bak.createSnapshot({ profile: 'web', reason: 'before-disable' })
+  const d = bak.createSnapshot({ profile: 'web', reason: 'before-isolate' })
+  const all = [a, b, c, d]
+  all.forEach((s, i) => {
+    const mp = path.join(s.dir, 'manifest.json')
+    const m = JSON.parse(fs.readFileSync(mp, 'utf8'))
+    m.at = new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString()
+    fs.writeFileSync(mp, JSON.stringify(m))
+  })
+  // a 是最旧的普通快照，b 手动命名，c/d 是写入前自动建的（改名也不该免死）
+  bak.setMeta({ dirName: b.dirName, name: '我的备份' })
+  bak.setMeta({ dirName: c.dirName, name: '硬起个名字' })
+
+  // keep 设 0：除受保护的以外全删
+  const removed = bak.pruneSnapshots({ keep: 0 })
+  assert.deepEqual(removed.sort(), [a.dirName, c.dirName, d.dirName].sort(),
+    '只有手动命名的那份（reason=r1）该活下来')
+  const left = bak.listSnapshots()
+  assert.equal(left.length, 1)
+  assert.equal(left[0].dirName, b.dirName)
+})
+
+test('pruneSnapshots：protectPinned=false 时退回纯计数语义（内部调用可用）', () => {
+  makeHome(fullHome())
+  const a = bak.createSnapshot({ profile: 'web', reason: 'r0' })
+  const b = bak.createSnapshot({ profile: 'web', reason: 'r1' })
+  const all = [a, b]
+  all.forEach((s, i) => {
+    const mp = path.join(s.dir, 'manifest.json')
+    const m = JSON.parse(fs.readFileSync(mp, 'utf8'))
+    m.at = new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString()
+    fs.writeFileSync(mp, JSON.stringify(m))
+  })
+  bak.setMeta({ dirName: a.dirName, knownGood: true })
+  // ⚠️ 注意 listSnapshots 会把 known-good 排到最前，所以「最新的」是 b，但「排第一的」是 a。
+  // 关闭保护后 keep=1 保留的是列表第一项（a，known-good），被删的是 b —— 这里刻意用这个
+  // 反直觉的结果钉住「protectPinned=false 退回的是纯列表顺序计数，与标记无关」。
+  assert.deepEqual(bak.pruneSnapshots({ keep: 1, protectPinned: false }), [b.dirName])
+})
+
+test('listSnapshots：dirName 以磁盘目录名为准，不信任 manifest 里的记录（防手改字段删错目录）', () => {
+  makeHome(fullHome())
+  const s = bak.createSnapshot({ profile: 'web', reason: 'manual' })
+  const root = bak.backupRoot()
+  // 手改 manifest 的 dirName，指向一个同级的「无关目录」—— 它没 manifest，本不该被碰
+  const bystander = path.join(root, '20200101-000000')
+  fs.mkdirSync(bystander)
+  fs.writeFileSync(path.join(bystander, 'marker.txt'), 'must survive', 'utf8')
+  const mp = path.join(s.dir, 'manifest.json')
+  const m = JSON.parse(fs.readFileSync(mp, 'utf8'))
+  m.dirName = '20200101-000000'
+  fs.writeFileSync(mp, JSON.stringify(m))
+
+  // 列表必须以目录名为准（否则界面上的「还原 / 删除」会指向另一个目录）
+  assert.equal(bak.listSnapshots()[0].dirName, s.dirName)
+
+  // 清理时也不能信 manifest：bystander 没 manifest，绝不能被碰；
+  // 真实快照按 keep=0 被正常删掉（这里用 keep:0 + protectPinned:false 让它成为待删项）
+  bak.pruneSnapshots({ keep: 0, protectPinned: false })
+  assert.equal(fs.existsSync(path.join(bystander, 'marker.txt')), true, '无关目录被误删了')
+  assert.equal(fs.existsSync(s.dir), false, '待删的真实快照该被删掉')
+})
+
+test('listSnapshots：目录被手工改名后仍认 manifest 指向的旧目录（改名的那份删得掉）', () => {
+  makeHome(fullHome())
+  const s = bak.createSnapshot({ profile: 'web', reason: 'manual' })
+  const root = bak.backupRoot()
+  // 模拟「快照目录被手工改名、manifest 里的旧名字还指向一个确实存在的目录」：
+  // 整份快照搬到新目录名，manifest 里仍留着旧名字，且按旧名字放一份同内容目录
+  const renamed = '20200101-000000'
+  fs.cpSync(s.dir, path.join(root, renamed), { recursive: true })
+  // 列表：两份都能列出来；搬到 renamed 的那份，manifest 里记的是 s.dirName，
+  // 而 s.dirName 那个目录也真实存在，故它对外仍报 s.dirName（界面据此定位磁盘）
+  const names = bak.listSnapshots().map((x) => x.dirName)
+  assert.equal(names.filter((x) => x === s.dirName).length, 2)
+  // 按 manifest 里的旧名字删，必须命中 —— 这条正是 fallback 存在的理由：
+  // 不做 fallback 的话 removeSnapshot(旧名) 会「成功删掉另一个目录」或直接失败
+  assert.equal(bak.removeSnapshot(s.dirName).ok, true)
+  assert.equal(fs.existsSync(s.dir), false, '按旧名删的应当是 manifest 指向的那个目录')
+  assert.equal(fs.existsSync(path.join(root, renamed)), true, '被改名的那份不该被误删')
+})
+
+test('_isPinned：known-good 与「有名字且非 before-*」为真，其余为假', () => {
+  assert.equal(bak._isPinned({ knownGood: true, name: '', reason: 'before-disable' }), true)
+  assert.equal(bak._isPinned({ knownGood: false, name: '手动存的', reason: 'manual' }), true)
+  assert.equal(bak._isPinned({ knownGood: false, name: '硬起的名', reason: 'before-isolate' }), false)
+  assert.equal(bak._isPinned({ knownGood: false, name: '', reason: 'manual' }), false)
+})
+
+test('retentionKeep：读不到配置时回落默认值 20（配置读写由 store 负责）', () => {
+  makeHome(fullHome())
+  // 本文件里的 utools 桩 dbStorage.getItem 恒返回 null → 配置为空 → 用默认值
+  assert.equal(bak.retentionKeep(), bak.MAX_SNAPSHOTS)
+})
+
 // ── ⑤ 路径与纯函数 ──
 test('targetFiles：三个受管文件的相对路径固定，与 profile 名联动', () => {
   makeHome(fullHome())

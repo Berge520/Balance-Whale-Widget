@@ -294,6 +294,11 @@ function pick(en) {
 
 // 「最终生效的定义」：同 id 被多层 patch 时，**后出现的分节覆盖先出现的**
 // （patch 按 id 整体替换，不是深度合并 —— plan §4.2 D1）
+//
+// ⚠️ 同时记下该条目**最终归属哪个 bundle**（分节头的第一个字段）。
+// 这一条不能从 entry 自己身上拿：entry 是解析期按「分节序号:id」建的，
+// 换了分节就是另一个对象，而「覆盖」恰恰意味着前面分节的 bundle 名会丢。
+// 用途是 dsh-isolate 的分档（官方框架 vs 第三方插件）——见那里的注释。
 function indexEntries(parsed) {
   const p = parsed && typeof parsed === 'object' ? parsed : { sections: [], entries: {} }
   const out = {}
@@ -301,7 +306,10 @@ function indexEntries(parsed) {
     const ids = p.sections[i].ids
     for (const id of ids) {
       const en = p.entries[i + ':' + id]
-      if (en) out[id] = en
+      if (en) {
+        // 浅拷贝后再挂 bundle，避免污染 parseDump 的原对象（diff 那边还在用它）
+        out[id] = { id: en.id, name: en.name, disabled: en.disabled, hasConfig: en.hasConfig, configKeys: en.configKeys, bundle: p.sections[i].bundle }
+      }
     }
   }
   return out
@@ -312,12 +320,14 @@ function hashEntry(en) {
 }
 
 // dump 输出 → 精简条目数组（前端只拿这个，不拿全文）
+// `bundle` 一并回传：它是「这个条目属于哪个包」的唯一权威来源，
+// 界面拿它做分档（dsh-isolate），前端自己从 id 猜不出来。
 function entriesOf(parsed) {
   const idx = indexEntries(parsed)
   const out = []
   for (const id of Object.keys(idx)) {
     const en = idx[id]
-    out.push({ id: id, name: en.name, disabled: en.disabled, hasConfig: en.hasConfig, configKeys: en.configKeys })
+    out.push({ id: id, name: en.name, disabled: en.disabled, hasConfig: en.hasConfig, configKeys: en.configKeys, bundle: en.bundle || '' })
   }
   return out
 }

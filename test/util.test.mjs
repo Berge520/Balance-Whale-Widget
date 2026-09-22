@@ -130,6 +130,33 @@ test('homeDir relative 只在 expand 之后仍非绝对路径时按 cwd 解析�
   }
 })
 
+test('homeDir / expandHome：os.homedir() 抛错时不掀掉整张候选表（E1 静默失效回归）', () => {
+  // 背景：homedir() 在 Windows 上依赖 USERPROFILE / HOMEDRIVE+HOMEPATH，三者都被清掉时它会**抛错**。
+  // 早先 `path.join(os.homedir(), fallback)` 裸调，异常被候选探测的 catch 整个吞掉 →
+  // 候选表中途断掉、函数返回 ''，而 '' 在调用方等于「用户没配 DSH_HOME」→ 快照列表空、
+  // 备份报「没有可备份的文件」、诊断假通过，全程零日志。这里把 homedir 打成必抛，钉住：
+  //   1) 不往外抛异常
+  //   2) env 命中的候选照常返回（候选表不因 homedir 失败而整张报废）
+  //   3) expand:true 且取不到家目录时退回「不展开」而不是抛错
+  mkTmp()
+  const real = os.homedir
+  os.homedir = () => { throw new Error('simulated: no home dir') }
+  process.env.WHALE_TEST_HDBOMB = tmpRoot
+  process.env.WHALE_TEST_HDBOMB_TILDE = '~/whale-homedir-bomb'
+  try {
+    // env 命中：与 homedir 无关，必须照常返回
+    assert.equal(util.homeDir({ env: 'WHALE_TEST_HDBOMB', fallback: '.no-such-dir-xyz' }), tmpRoot)
+    // env 未命中：homedir 抛错 → 跳过该候选 → 返回空串（不抛）
+    assert.equal(util.homeDir({ env: 'WHALE_TEST_NOPE', fallback: '.no-such-dir-xyz' }), '')
+    // expand:true 且需要 homedir：退回不展开，不抛
+    assert.equal(util.homeDir({ env: 'WHALE_TEST_HDBOMB_TILDE', fallback: '.no-such-dir-xyz', expand: true }), '')
+  } finally {
+    os.homedir = real
+    delete process.env.WHALE_TEST_HDBOMB
+    delete process.env.WHALE_TEST_HDBOMB_TILDE
+  }
+})
+
 // ── readTextSafe ──
 test('readTextSafe 读成功返回文本与 ok:true', () => {
   const root = mkTmp()

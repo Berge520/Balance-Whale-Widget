@@ -13,7 +13,7 @@
   var TIMER_MIN_DEFAULT = 25; // 三段全填 0 时的兜底分钟数（避免「填了 0 就开不了」）
   var TIMER_AT_DEFAULT = '07:30'; // 定时刻默认值（与宿主 store.js 的 defaultConfig 同值）
   var TIMER_BREAK_DEFAULT = 5;    // 到点后「休息 N 分钟」的默认档位
-  var TIMER_NOTE_MAX = 60;        // 到点留言长度上限（与菜单输入框 maxLength、宿主清洗同值）
+  var TIMER_NOTE_MAX = 60;        // 到点留言长度上限（留言只在设置页编辑，与那里输入框的 maxLength、宿主清洗同值）
   // 内置挂件形象（相对插件根目录；用哪张由设置页的 skin 值决定）。
   // 键 = public/whale/ 下的图片文件名，加形象时这里加一行、设置页「形象」下拉加一个 option；
   // 宿主 store.js 的 normSkin 另有一份同值的合法值清单，三处要一起改。
@@ -93,17 +93,21 @@
 
   var menuBox = document.createElement('div');
   menuBox.className = 'dshwv-menu';
-  // 面板是「对话框」而不是 menu/menuitem：里面是开关、下拉、滑块，套 menuitem 语义反而读不出来
+  // 面板是「对话框」而不是 menu/menuitem：里面是开关、下拉、滑块，套 menuitem 语义反而读不出来。
+  // aria-modal：面板一开就借走焦点（见 toggleMenu 的 setInputFocus），菜单外的挂件本体此刻不可交互，
+  // 声明成模态能让辅助技术在面板内循环读，而不是顺着 DOM 读到后面的挂件
   menuBox.setAttribute('role', 'dialog');
+  menuBox.setAttribute('aria-modal', 'true');
   menuBox.setAttribute('aria-label', '挂件菜单');
   function menuLabel(text) { var s = document.createElement('span'); s.className = 'dshwv-menu-label'; s.textContent = text; return s; }
   function menuRow() { var r = document.createElement('div'); r.className = 'dshwv-menu-row'; return r; }
 
   // 菜单分组的展开状态（key → 布尔）：随 config.menuGroups 落盘，重开挂件后保持上次的组合。
   // 默认只展开 models（切模型最高频）；其余组收起，菜单一打开就是一屏以内
-  var menuGroups = { look: false, models: true, usage: false, timer: false, timerAdv: false, dsh: false };
-  // 展开组合的「版本」：改了某组默认展开态就 +1，用来把老配置里存过的旧默认值迁移掉（见 onInit）
-  var MENU_GROUPS_REV = 2;
+  var menuGroups = { look: false, models: true, usage: false, timer: false, dsh: false };
+  // 展开组合的「版本」：改了某组默认展开态 / 删掉某组就 +1，用来把老配置里存过的旧值迁移掉（见 onInit）。
+  // v3：删掉 timer 组内的子折叠 timerAdv，老配置里残留的该键不再被读取
+  var MENU_GROUPS_REV = 3;
   var menuGroupEls = {};
 
   // 菜单分组：点标题折叠/展开。只默认展开常用组，避免菜单过长
@@ -114,6 +118,7 @@
     var head = document.createElement('button');
     head.type = 'button';
     head.className = 'dshwv-group-head';
+    head.title = title;
     var arrow = document.createElement('span');
     arrow.className = 'dshwv-group-arrow';
     var name = document.createElement('span');
@@ -121,13 +126,25 @@
     head.appendChild(arrow); head.appendChild(name);
     var bodyEl = document.createElement('div');
     bodyEl.className = 'dshwv-group-body';
+    // 多包一层 inner：组体用 grid-template-rows 0fr↔1fr 做高度过渡，
+    // 这个技巧要求 grid 只有「一个」子项 —— 各组的行数不同、且是逐个 append 进来的，
+    // 直接放进 grid 会让每行各占一条轨道，0fr 只压得住第一行，收起时下面的行还露在外面。
+    // 故 bodyEl（grid + overflow:hidden）里只放 inner，行统统 append 到 inner 里。
+    var inner = document.createElement('div');
+    inner.className = 'dshwv-group-inner';
+    bodyEl.appendChild(inner);
     box.appendChild(head); box.appendChild(bodyEl);
     var open = typeof menuGroups[key] === 'boolean' ? menuGroups[key] : !!defaultOpen;
     function apply() {
       box.classList.toggle('dshwv-group-open', open);
-      bodyEl.style.display = open ? '' : 'none';
+      // 展开/收起在 CSS 里用 grid-template-rows 0fr↔1fr 过渡（见 floating.css）。
+      // 不再直接切 display：那样高度是瞬变的，positionMenu 重夹 maxHeight 时肉眼能看到跳一下
       arrow.textContent = open ? '▾' : '▸';
       head.setAttribute('aria-expanded', open ? 'true' : 'false');
+      // 收起只是把 grid 压成 0fr + overflow:hidden，里面的控件仍在 DOM 里、仍能被 Tab 聚焦 ——
+      // 按 Tab 会把焦点送进「看不见的」输入框（在 uTools 窗口里尤其明显）。
+      // inert 一次性把整棵子树的聚焦与点击都停掉，比逐个 tabindex="-1" 稳妥
+      try { inner.inert = !open; } catch (err) {}
     }
     head.addEventListener('click', function (e) {
       e.stopPropagation();
@@ -141,7 +158,8 @@
     apply();
     var api = {
       el: box,
-      body: bodyEl,
+      // 暴露 inner：各组的行都 append 到这里（bodyEl 只是高度动画用的 grid 外壳）
+      body: inner,
       // 配置回推（设置页 / 别的窗口改过）时同步展开态；不走 saveCfg，否则自己回写自己
       setOpen: function (v) { open = !!v; apply(); },
     };
@@ -149,31 +167,20 @@
     return api;
   }
 
-  // 大小档位 1–15 线性映射到 MIN_SCALE–MAX_SCALE（原为 1–20，档位 20 即 2.5 倍太大，
-  // 收到 15 后最大约 2.1 倍）。档位数改动必须同步三处：scaleNumber.max、
-  // numberToScale 的钳制值、scaleToDisplay 的分母，以及设置页 App.vue 的同名三处。
-  var SCALE_STEPS = 15;
-
+  // 大小：菜单里只留滑块（原先滑块旁还挂一个 1–15 档位数字框，同一行两个控件冗余，
+  // 精确输入去设置页「外观」用连续滑块/数字框）。滑块值就是 scale，不再有档位换算。
   var scaleInput = document.createElement('input');
   scaleInput.type = 'range';
   scaleInput.min = String(MIN_SCALE); scaleInput.max = String(MAX_SCALE); scaleInput.step = '0.1';
   scaleInput.className = 'dshwv-range'; scaleInput.value = '1.3';
-  var scaleNumber = document.createElement('input');
-  scaleNumber.type = 'number';
-  scaleNumber.min = '1'; scaleNumber.max = String(SCALE_STEPS); scaleNumber.step = '1';
-  scaleNumber.className = 'dshwv-number'; scaleNumber.value = '6';
+  scaleInput.title = '挂件大小（' + MIN_SCALE + '–' + MAX_SCALE + ' 倍，精确调整见设置页「外观」）';
   scaleInput.addEventListener('input', function () { setScale(scaleInput.value, false); });
   scaleInput.addEventListener('change', function () { setScale(scaleInput.value, true); });
-  function numberToScale() {
-    var v = Math.round(Number(scaleNumber.value));
-    return MIN_SCALE + Math.max(0, Math.min(SCALE_STEPS, v) - 1) * (MAX_SCALE - MIN_SCALE) / (SCALE_STEPS - 1);
-  }
-  scaleNumber.addEventListener('input', function () { setScale(numberToScale(), false); });
-  scaleNumber.addEventListener('change', function () { setScale(numberToScale(), true); });
 
   function soundOpt(value, label) { var o = document.createElement('option'); o.value = value; o.textContent = label; return o; }
   var soundSelect = document.createElement('select');
   soundSelect.className = 'dshwv-sound';
+  soundSelect.title = '提示音音色（自定义需先在设置页导入）';
   soundSelect.appendChild(soundOpt('duck', '小黄鸭'));
   soundSelect.appendChild(soundOpt('fx1', '音效1'));
   soundSelect.appendChild(soundOpt('custom', '自定义'));
@@ -182,6 +189,7 @@
   var OPACITY_PRESETS = [100, 80, 60, 40, 20];
   var opacitySelect = document.createElement('select');
   opacitySelect.className = 'dshwv-sound';
+  opacitySelect.title = '挂件整体透明度';
   OPACITY_PRESETS.forEach(function (p) {
     var o = document.createElement('option');
     o.value = String(p);
@@ -199,12 +207,14 @@
 
   var usageSelect = document.createElement('select');
   usageSelect.className = 'dshwv-sound';
+  usageSelect.title = '余额按哪种口径统计（实时令牌需在设置页配平台 Token）';
   usageSelect.appendChild(soundOpt('ledger', '小鲸鱼记账 (推荐)'));
   usageSelect.appendChild(soundOpt('token', '实时·令牌 (需平台Token)'));
   usageSelect.addEventListener('change', function () { setUsageMode(usageSelect.value); });
 
   var peakSelect = document.createElement('select');
   peakSelect.className = 'dshwv-sound';
+  peakSelect.title = '峰谷时段方案（决定何时算低谷价）';
   peakSelect.appendChild(soundOpt('default', '默认'));
   peakSelect.appendChild(soundOpt('liangwen', '梁文峰谷'));
   peakSelect.appendChild(soundOpt('qiangqiang', '!?强强?!'));
@@ -241,6 +251,7 @@
   // 计时 / 定时 / 倒计时：结果显示在思考气泡里（见 timerLines）
   var timerSelect = document.createElement('select');
   timerSelect.className = 'dshwv-sound';
+  timerSelect.title = '计时模式：正计时 / 倒计时 / 定时';
   timerSelect.appendChild(soundOpt('off', '关闭'));
   timerSelect.appendChild(soundOpt('up', '正计时'));
   timerSelect.appendChild(soundOpt('down', '倒计时'));
@@ -251,15 +262,21 @@
   timerBtn.type = 'button';
   timerBtn.className = 'dshwv-menu-link dshwv-timer-btn';
   timerBtn.textContent = '开始';
+  timerBtn.title = '开始 / 暂停 / 继续当前计时';
   timerBtn.addEventListener('click', function (e) { e.stopPropagation(); timerBtnClick(); });
 
-  // 重置：仅在计时中/暂停时出现（占满「目标」行），清掉进度回到未开始
-  var timerResetBtn = document.createElement('button');
-  timerResetBtn.type = 'button';
-  timerResetBtn.className = 'dshwv-menu-link dshwv-timer-reset';
-  timerResetBtn.textContent = '重置';
-  timerResetBtn.title = '清掉本次计时进度（模式保留）';
-  timerResetBtn.addEventListener('click', function (e) { e.stopPropagation(); resetTimer(); });
+  // 重置：仅在计时中/暂停时出现（占满「目标」行），清掉进度回到未开始。
+  // 倒计时 / 定时各一个：下面把「目标」拆成了两个互斥子行，同一个 button 不能同时挂在两行里
+  function makeResetBtn() {
+    var b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'dshwv-menu-link dshwv-timer-reset';
+    b.textContent = '重置';
+    b.title = '清掉本次计时进度（模式保留）';
+    b.addEventListener('click', function (e) { e.stopPropagation(); resetTimer(); });
+    return b;
+  }
+  var timerResetBtn = makeResetBtn();
 
   // 倒计时目标：时 / 分 / 秒 三段（上限 23:59:59）。
   // 三段互不钳制 —— 50 分、80 秒都允许输入，startTimer 里统一折算成秒数，避免「填 90 分要自己换成 1 时 30 分」
@@ -306,24 +323,8 @@
   timerTime.title = '定时刻（HH:MM，已过点则顺延到明天，回车生效）';
   commitOnEnter(timerTime, function () { saveCfg(); });
 
-  // 计时留言：开始前写一句话，到点后在气泡与系统通知里显示（「接下来要做什么」）
-  var timerNoteEl = document.createElement('input');
-  timerNoteEl.type = 'text';
-  timerNoteEl.className = 'dshwv-timer-note';
-  timerNoteEl.maxLength = TIMER_NOTE_MAX;
-  timerNoteEl.placeholder = '到点提醒我…（回车生效，可留空）';
-  timerNoteEl.title = '计时到点后要做什么：这里写的一句会显示在到点气泡与系统通知里（最多 ' + TIMER_NOTE_MAX + ' 字，回车生效）';
-  // 留言框是 textarea 式自由输入，回车提交而不是换行，故要拦默认行为（见 commitOnEnter）
-  commitOnEnter(timerNoteEl, function () { setTimerNote(timerNoteEl.value); });
-
-  // 到点后的动作档：休息 N 分钟（0 = 不提供「休息」按钮）
-  var timerBreak = document.createElement('input');
-  timerBreak.type = 'number';
-  timerBreak.min = '0'; timerBreak.max = '120'; timerBreak.step = '5';
-  timerBreak.className = 'dshwv-number dshwv-timer-break';
-  timerBreak.value = String(TIMER_BREAK_DEFAULT);
-  timerBreak.title = '到点后「休息」按钮的分钟数（0 = 不显示该按钮，回车生效）';
-  commitOnEnter(timerBreak, function () { setTimerBreakMin(timerBreak.value); });
+  // 计时留言 / 休息档：都要打字或填数字，悬浮窗没有好的输入环境，只在设置页改。
+  // 页面保留本地副本（到点气泡与「休息 N 分钟」按钮要用），由 applyConfig 回推。
 
   var notifyToggle = document.createElement('input');
   notifyToggle.type = 'checkbox';
@@ -331,13 +332,6 @@
   notifyToggle.checked = true;
   notifyToggle.title = '计时到点时弹系统通知';
   notifyToggle.addEventListener('change', function () { setTimerNotifyOn(notifyToggle.checked); });
-
-  var persistToggle = document.createElement('input');
-  persistToggle.type = 'checkbox';
-  persistToggle.className = 'dshwv-check';
-  persistToggle.checked = true;
-  persistToggle.title = '记住计时状态：重载插件/重建挂件后继续计时';
-  persistToggle.addEventListener('change', function () { setTimerPersistOn(persistToggle.checked); });
 
   // 到点提醒气泡停留时长：0 = 常驻（手动点气泡关闭）
   var remindSelect = document.createElement('select');
@@ -349,26 +343,14 @@
   remindSelect.title = '到点提醒气泡的停留时长（常驻 = 需手动点气泡关闭）';
   remindSelect.addEventListener('change', function () { setTimerRemindSec(remindSelect.value); });
 
-  // 计时气泡是否常驻：关闭后计时中气泡只短暂显示，点小鲸鱼可随时再看
-  var pinToggle = document.createElement('input');
-  pinToggle.type = 'checkbox';
-  pinToggle.className = 'dshwv-check';
-  pinToggle.checked = true;
-  pinToggle.title = '计时气泡常驻显示（关闭后只在开始时短暂显示，点小鲸鱼可随时查看）';
-  pinToggle.addEventListener('change', function () { setTimerBubblePin(pinToggle.checked); });
-
-  // 气泡内容：开 → 计时中气泡只显示计时；关 → 气泡照常显示余额/用量等全部内容
-  var onlyToggle = document.createElement('input');
-  onlyToggle.type = 'checkbox';
-  onlyToggle.className = 'dshwv-check';
-  onlyToggle.checked = true;
-  onlyToggle.title = '开启：计时中气泡只显示计时；关闭：气泡照常显示余额、今日用量等全部内容';
-  onlyToggle.addEventListener('change', function () { setTimerBubbleOnly(onlyToggle.checked); });
+  // 计时气泡是否常驻 / 是否只显示计时：两个开关都只在设置页改，页面保留本地副本
+  // 与 setter（showTimerBubble / 气泡切换要用），但不再往菜单里放控件
 
   var volInput = document.createElement('input');
   volInput.type = 'range';
   volInput.min = '0'; volInput.max = '1'; volInput.step = '0.05';
   volInput.className = 'dshwv-range'; volInput.value = '0.9';
+  volInput.title = '提示音音量';
   var volPct = document.createElement('span');
   volPct.className = 'dshwv-volpct';
   volPct.textContent = '90%';
@@ -378,21 +360,20 @@
   // 菜单里的控件都没有可见 <label>（同行那个只是 span），补可访问名：
   // title 只在悬停时可见，辅助技术读的是 aria-label
   [
-    [scaleInput, '大小（滑块）'], [scaleNumber, '大小（1–20）'],
+    [scaleInput, '大小'],
     [soundToggle, '音效开关'], [soundSelect, '音色'], [volInput, '音量'],
     [opacitySelect, '透明度'], [usageSelect, '用量口径'], [peakSelect, '峰谷方案'],
     [bubbleToggle, '思考气泡'], [remindToggle, '峰谷提醒'], [remindSelect, '到点提醒停留时长'],
     [timeToggle, '气泡报时'], [lockToggle, '锁定位置'],
     [timerSelect, '计时模式'], [timerHour, '倒计时小时'], [timerMin, '倒计时分钟'], [timerSec, '倒计时秒'],
-    [timerTime, '定时时刻'], [timerNoteEl, '到点提醒我'], [timerBreak, '到点后休息分钟'],
-    [notifyToggle, '到点通知'], [persistToggle, '记住计时状态'],
-    [pinToggle, '计时气泡常驻'], [onlyToggle, '计时中只显示计时'],
+    [timerTime, '定时时刻'],
+    [notifyToggle, '到点通知'],
   ].forEach(function (pair) {
     pair[0].setAttribute('aria-label', pair[1]);
   });
 
   var row1 = menuRow();
-  row1.appendChild(menuLabel('大小')); row1.appendChild(scaleInput); row1.appendChild(scaleNumber);
+  row1.appendChild(menuLabel('大小')); row1.appendChild(scaleInput);
   var row2 = menuRow();
   row2.appendChild(menuLabel('音效')); row2.appendChild(soundToggle); row2.appendChild(soundSelect);
   var row3 = menuRow();
@@ -411,27 +392,26 @@
   row7.appendChild(menuLabel('报时')); row7.appendChild(timeToggle);
   var rowTimer = menuRow();
   rowTimer.appendChild(menuLabel('计时')); rowTimer.appendChild(timerSelect); rowTimer.appendChild(timerBtn);
-  var rowTimerArg = menuRow();
-  rowTimerArg.appendChild(menuLabel('目标'));
-  rowTimerArg.appendChild(timerHour); rowTimerArg.appendChild(timerSegUnits[0]);
-  rowTimerArg.appendChild(timerMin); rowTimerArg.appendChild(timerSegUnits[1]);
-  rowTimerArg.appendChild(timerSec); rowTimerArg.appendChild(timerSegUnits[2]);
-  rowTimerArg.appendChild(timerTime);
-  rowTimerArg.appendChild(timerResetBtn);
-  // 到点要做什么：留言一句（可留空）+ 「休息」按钮的分钟档，两者到点后都作用在提醒气泡与通知上
-  var rowTimerNote = menuRow();
-  rowTimerNote.appendChild(menuLabel('留言')); rowTimerNote.appendChild(timerNoteEl);
-  var rowTimerBreak = menuRow();
-  rowTimerBreak.appendChild(menuLabel('休息档')); rowTimerBreak.appendChild(timerBreak);
-  rowTimerBreak.appendChild(timerUnit('分钟'));
+  // 「目标」拆成两个互斥子行（倒计时 / 定时各一行）：
+  // 原先两种输入挤在同一行、靠 display 二选一，但另一样虽看不见仍占着 flex 位置，
+  // 切模式时行宽不变、白白吃掉一块；拆开后每行都只放自己那套控件。
+  // 计时中/暂停时两行都让位给「重置」（见 syncTimerMenu）
+  var rowTimerDown = menuRow();
+  rowTimerDown.appendChild(menuLabel('目标'));
+  rowTimerDown.appendChild(timerHour); rowTimerDown.appendChild(timerSegUnits[0]);
+  rowTimerDown.appendChild(timerMin); rowTimerDown.appendChild(timerSegUnits[1]);
+  rowTimerDown.appendChild(timerSec); rowTimerDown.appendChild(timerSegUnits[2]);
+  rowTimerDown.appendChild(timerResetBtn);
+  var timerResetBtnAt = makeResetBtn();
+  var rowTimerAt = menuRow();
+  rowTimerAt.appendChild(menuLabel('目标'));
+  rowTimerAt.appendChild(timerTime);
+  rowTimerAt.appendChild(timerResetBtnAt);
+  // 到点要做什么（留言一句 + 「休息」按钮的分钟档）：都要打字或填数字，悬浮窗里没有好的
+  // 输入环境，只在设置页「提醒与通知」改。页面保留本地副本（到点气泡与「休息 N 分钟」按钮要用），
+  // 由 applyConfig 回推 —— 所以这里不再建行。
   var rowNotify = menuRow();
   rowNotify.appendChild(menuLabel('到点通知')); rowNotify.appendChild(notifyToggle); rowNotify.appendChild(remindSelect);
-  var rowOnly = menuRow();
-  rowOnly.appendChild(menuLabel('只显计时')); rowOnly.appendChild(onlyToggle);
-  var rowPin = menuRow();
-  rowPin.appendChild(menuLabel('气泡常驻')); rowPin.appendChild(pinToggle);
-  var rowPersist = menuRow();
-  rowPersist.appendChild(menuLabel('计时保存')); rowPersist.appendChild(persistToggle);
   var row8 = menuRow();
   row8.appendChild(menuLabel('锁定')); row8.appendChild(lockToggle);
   var row9 = menuRow();
@@ -439,6 +419,7 @@
   settingsBtn.type = 'button';
   settingsBtn.className = 'dshwv-menu-link';
   settingsBtn.textContent = '打开设置';
+  settingsBtn.title = '打开设置页（外观 / 通知 / 数据等都在那里）';
   settingsBtn.addEventListener('click', function (e) {
     e.stopPropagation();
     closeMenu();
@@ -475,7 +456,7 @@
   row9.appendChild(hideBtn);
   row9.classList.add('dshwv-menu-foot');
 
-  // —— dsh（DeepSeek Harness，开发者）：启动 / 重启 / 结束 / 更新 + 打开页面 + 状态 ——
+  // —— dsh（DeepSeek Harness，开发者）：启动 / 重启 / 结束 + 打开页面 + 状态 ——
   var dshStateEl = document.createElement('span');
   dshStateEl.className = 'dshwv-dsh-state';
   dshStateEl.textContent = '未获取';
@@ -491,12 +472,11 @@
   var dshStartBtn = dshBtn('启动', 'start', '启动 dsh Web UI（插件目录里还没有时会先自动下载安装）');
   var dshRestartBtn = dshBtn('重启', 'restart', '先结束再启动 dsh');
   var dshStopBtn = dshBtn('结束', 'stop', '结束 dsh 进程');
-  var dshUpdateBtn = dshBtn('更新', 'update', '结束并按「dsh 版本」重新安装（自动＝latest），装完用新版启动');
   var dshOpenBtn = dshBtn('打开页面', 'open', '在系统浏览器打开 dsh 页面（自动使用 dsh 打印的带 token 地址，避免提示需要认证）');
   var rowDsh = menuRow();
   rowDsh.appendChild(menuLabel('dsh'));
   rowDsh.appendChild(dshStartBtn); rowDsh.appendChild(dshRestartBtn);
-  rowDsh.appendChild(dshStopBtn); rowDsh.appendChild(dshUpdateBtn);
+  rowDsh.appendChild(dshStopBtn);
   var rowDshPage = menuRow();
   rowDshPage.appendChild(menuLabel('页面')); rowDshPage.appendChild(dshOpenBtn);
   var rowDshState = menuRow();
@@ -519,15 +499,9 @@
   groupUsage.body.appendChild(row4); groupUsage.body.appendChild(row5);
   groupUsage.body.appendChild(rowRemind);
   var groupTimer = menuGroup('timer', '计时', false);
-  groupTimer.body.appendChild(rowTimer); groupTimer.body.appendChild(rowTimerArg);
-  groupTimer.body.appendChild(rowTimerNote); groupTimer.body.appendChild(rowTimerBreak);
+  groupTimer.body.appendChild(rowTimer); groupTimer.body.appendChild(rowTimerDown);
+  groupTimer.body.appendChild(rowTimerAt);
   groupTimer.body.appendChild(rowNotify);
-  // 三个次要行为开关（只显计时 / 气泡常驻 / 计时保存）再套一层折叠：
-  // 计时组本身已有 8 行，展开后一屏装不下；这三个都是「设一次就不再动」的开关
-  var groupTimerAdv = menuGroup('timerAdv', '更多（显隐与保存）', false);
-  groupTimerAdv.body.appendChild(rowOnly);
-  groupTimerAdv.body.appendChild(rowPin); groupTimerAdv.body.appendChild(rowPersist);
-  groupTimer.body.appendChild(groupTimerAdv.el);
   // dsh 是面向开发者的功能，但打包版同样要有 —— 早先按 window.whale.dev 建组，
   // 结果正式安装的 .upx 里开发者模式默认关闭，这一节整个消失（连 DOM 都没有）。
   // 现在无条件建组，再用「这台机器上有没有 dsh」决定显隐：探测到已安装（source 非空）
@@ -673,7 +647,6 @@
     dshStartBtn.disabled = !!s.running || ext || !!other || busy;
     dshRestartBtn.disabled = (!s.running && !ext) || busy;
     dshStopBtn.disabled = (!s.running && !ext) || !!s.stopping;
-    dshUpdateBtn.disabled = busy;
   }
   function dshSend(action) {
     if (!HAS_BRIDGE) { dshRender({ error: '未连接宿主，无法控制 dsh' }); return; }
@@ -1601,53 +1574,18 @@
     notifyToggle.checked = timerNotifyOn;
     saveCfg();
   }
-  function setTimerPersistOn(v) {
-    timerPersistOn = !!v;
-    persistToggle.checked = timerPersistOn;
-    saveCfg();
-    // 关闭：宿主收到配置后会清掉已落库的计时；开启：立即把当前状态存一次
-    saveTimerState();
-  }
-  // 到点留言：只影响「下次到点」（本次计时用的就是开始时那句），所以改完不必重绘气泡
-  function setTimerNote(v) {
-    timerNote = String(v || '').slice(0, TIMER_NOTE_MAX);
-    timerNoteEl.value = timerNote;
-    saveCfg();
-  }
-  function setTimerBreakMin(v) {
-    var n = Math.round(Number(v));
-    if (!isFinite(n)) n = TIMER_BREAK_DEFAULT;
-    timerBreakMin = Math.min(120, Math.max(0, n));
-    timerBreak.value = String(timerBreakMin);
-    saveCfg();
-    updateTimerActions();
-  }
+  // 到点留言 / 休息档：菜单里已无输入框（只在设置页改），本地副本由 applyConfig 回推，
+  // 故这里不再保留 setter
   function setTimerRemindSec(v) {
     var n = Math.round(Number(v));
     timerRemindSec = (n === 0 || n === 5 || n === 8 || n === 15) ? n : 8;
     remindSelect.value = String(timerRemindSec);
     saveCfg();
   }
-  function setTimerBubblePin(v) {
-    timerBubblePin = !!v;
-    pinToggle.checked = timerBubblePin;
-    saveCfg();
-    // 立即套用：开启 → 一直显示；关闭 → 重新按「短暂停留」计时收起
+  // 计时气泡常驻 / 只显计时：两个开关只在设置页改，页面按 applyConfig 回推的配置生效。
+  // 计时中切回「常驻」时立刻重新展开气泡，否则要等下一次刷新才看得到
+  function applyTimerBubblePrefs() {
     if (timerActive() && timerTakesBubble()) showTimerBubble(timerBubbleAutoMs());
-  }
-  // 「只显计时」开关：开 → 计时中气泡只显示计时；关 → 气泡照常显示余额/用量等全部内容
-  function setTimerBubbleOnly(v) {
-    timerBubbleOnly = !!v;
-    onlyToggle.checked = timerBubbleOnly;
-    saveCfg();
-    if (!timerActive()) return;
-    if (timerBubbleOnly) {
-      showTimerBubble(timerBubbleAutoMs());
-    } else if (bubbleTimerActive && !timerFinished) {
-      // 关掉后立刻把气泡切回余额/用量，方便直接看到效果
-      hideBubble();
-      showBubble(true);
-    }
   }
   // 主按钮：开始 → 暂停 → 继续 →（到点后）开始
   function timerBtnClick() {
@@ -1663,21 +1601,23 @@
     // 「刚结束」不算忙：到点后气泡可能还挂着（常驻或还没到 timerRemindSec），
     // 但这只是展示态 —— 菜单必须能直接改时长/留言开下一轮，否则要等气泡消失才解锁，用起来像卡死
     var idle = !busy;
-    // 「目标」行：计时中/暂停时让位给「重置」；未开始时才显示时/分/秒或时刻输入
-    rowTimerArg.style.display = (busy || (idle && (timerMode === 'down' || timerMode === 'at'))) ? '' : 'none';
-    timerResetBtn.style.display = busy ? '' : 'none';
+    // 「目标」两个互斥子行：倒计时行 / 定时刻行各显示自己那套；计时中/暂停时两行都让位给「重置」
     var down = idle && timerMode === 'down';
+    var at = idle && timerMode === 'at';
+    rowTimerDown.style.display = (down || busy) ? '' : 'none';
+    rowTimerAt.style.display = (at || busy) ? '' : 'none';
+    // 重置按钮每行一个，按当前模式决定哪一行里的那个露出来（倒计时行为兜底，未开始时不显示）
+    timerResetBtn.style.display = (busy && (down || !at)) ? '' : 'none';
+    timerResetBtnAt.style.display = (busy && at) ? '' : 'none';
     timerHour.style.display = down ? '' : 'none';
     timerMin.style.display = down ? '' : 'none';
     timerSec.style.display = down ? '' : 'none';
-    timerTime.style.display = (idle && timerMode === 'at') ? '' : 'none';
+    timerTime.style.display = at ? '' : 'none';
     // 单位提示跟着自己的输入框一起显隐（各自成对，避免「时」标签孤零零留在行里）
     timerSegUnits[0].style.display = down ? '' : 'none';
     timerSegUnits[1].style.display = down ? '' : 'none';
     timerSegUnits[2].style.display = down ? '' : 'none';
-    // 留言与休息档：只在还没开始时显示 —— 计时中改它们没有意义（这次到点用的就是开始时那句）
-    rowTimerNote.style.display = idle ? '' : 'none';
-    rowTimerBreak.style.display = idle ? '' : 'none';
+    // 留言与休息档已移到设置页：菜单里不再有对应行，这里也不用显隐
     updateTimerActions();
   }
 
@@ -2102,9 +2042,10 @@
       timerMode: timerMode,
       timerSec: timerSegTotalSec(),
       timerAt: String(timerTime.value || ''),
-      // 到点要做什么：留言 + 「休息」档（都只在开始前可改，见 syncTimerMenu）
-      timerNote: String(timerNoteEl.value || '').slice(0, TIMER_NOTE_MAX),
-      timerBreakMin: Math.min(120, Math.max(0, Math.round(Number(timerBreak.value) || 0))),
+      // 到点要做什么：留言 + 「休息」档。菜单里已无对应输入框，原样提交本地副本
+      // （和上面的「邮件」开关同理，漏带就会被 undefined 抹掉）
+      timerNote: timerNote,
+      timerBreakMin: timerBreakMin,
       timerRemindSec: timerRemindSec,
       timerBubblePin: timerBubblePin,
       timerBubbleOnly: timerBubbleOnly,
@@ -2113,9 +2054,6 @@
       // 带上版本号，下次启动才不会再触发一次 look 迁移（见 onInit）
       menuGroupsRev: MENU_GROUPS_REV,
     });
-  }
-  function scaleToDisplay(s) {
-    return Math.round((s - MIN_SCALE) / ((MAX_SCALE - MIN_SCALE) / (SCALE_STEPS - 1))) + 1;
   }
   // 拖动中的实时预览：rAF 合并，只通知宿主改窗口几何，不写存储、不回推
   var liveRaf = 0;
@@ -2130,7 +2068,6 @@
     // 窗口尺寸由宿主调整（以鲸鱼角为不动点）；拖动中仅实时预览，松手(change)才持久化
     curScale = Math.round(Math.min(MAX_SCALE, Math.max(MIN_SCALE, Number(v))) * 10) / 10;
     scaleInput.value = String(curScale);
-    scaleNumber.value = String(scaleToDisplay(curScale));
     if (commit) { if (liveRaf) { cancelAnimationFrame(liveRaf); liveRaf = 0; } saveCfg(); }
     else sendLiveScale();
   }
@@ -2204,7 +2141,6 @@
     if (typeof cfg.scale === 'number' && isFinite(cfg.scale)) {
       curScale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, cfg.scale));
       scaleInput.value = String(curScale);
-      scaleNumber.value = String(scaleToDisplay(curScale));
     }
     if (typeof cfg.vol === 'number' && isFinite(cfg.vol)) {
       soundVol = Math.min(1, Math.max(0, cfg.vol));
@@ -2328,10 +2264,7 @@
     }
     if (typeof cfg.timerMailOn === 'boolean') timerMailOn = cfg.timerMailOn;
     if (typeof cfg.notifyMailOn === 'boolean') mailOn = cfg.notifyMailOn;
-    if (typeof cfg.timerPersistOn === 'boolean') {
-      timerPersistOn = cfg.timerPersistOn;
-      persistToggle.checked = timerPersistOn;
-    }
+    if (typeof cfg.timerPersistOn === 'boolean') timerPersistOn = cfg.timerPersistOn;
     // 计时偏好：运行中的状态以 timer 状态为准，这里只在空闲时套用。
     // 注意：宿主每次广播配置都会走到这里，若不加判断就会把「正在编辑中」的输入框
     // 强行回填 —— 用户打字打到一半被覆盖，看起来就像「输入实时生效」。
@@ -2346,27 +2279,29 @@
     if (typeof cfg.timerAt === 'string' && /^\d{1,2}:\d{2}$/.test(cfg.timerAt) && !editing(timerTime)) {
       timerTime.value = cfg.timerAt;
     }
+    // 留言 / 休息档：菜单里已无输入框，只回填本地副本（到点气泡与「休息 N 分钟」按钮用）
     if (typeof cfg.timerNote === 'string') {
       timerNote = cfg.timerNote.slice(0, TIMER_NOTE_MAX);
-      if (!editing(timerNoteEl)) timerNoteEl.value = timerNote;
     }
     if (typeof cfg.timerBreakMin === 'number' && isFinite(cfg.timerBreakMin)) {
       timerBreakMin = Math.min(120, Math.max(0, Math.round(cfg.timerBreakMin)));
-      if (!editing(timerBreak)) timerBreak.value = String(timerBreakMin);
     }
     if (typeof cfg.timerRemindSec === 'number' && isFinite(cfg.timerRemindSec)) {
       var sec = Math.round(cfg.timerRemindSec);
       timerRemindSec = (sec === 0 || sec === 5 || sec === 8 || sec === 15) ? sec : 8;
       remindSelect.value = String(timerRemindSec);
     }
-    if (typeof cfg.timerBubblePin === 'boolean') {
+    var bubblePrefsChanged = false;
+    if (typeof cfg.timerBubblePin === 'boolean' && cfg.timerBubblePin !== timerBubblePin) {
       timerBubblePin = cfg.timerBubblePin;
-      pinToggle.checked = timerBubblePin;
+      bubblePrefsChanged = true;
     }
-    if (typeof cfg.timerBubbleOnly === 'boolean') {
+    if (typeof cfg.timerBubbleOnly === 'boolean' && cfg.timerBubbleOnly !== timerBubbleOnly) {
       timerBubbleOnly = cfg.timerBubbleOnly;
-      onlyToggle.checked = timerBubbleOnly;
+      bubblePrefsChanged = true;
     }
+    // 设置页改了这两个开关：计时中立刻让气泡按新口径重显，不必等下一次刷新
+    if (bubblePrefsChanged) applyTimerBubblePrefs();
     if (!timerActive() && (cfg.timerMode === 'off' || cfg.timerMode === 'up' || cfg.timerMode === 'down' || cfg.timerMode === 'at')) {
       timerMode = cfg.timerMode;
     }
@@ -2543,7 +2478,7 @@
       // 菜单里的数字不该是几分钟前的。余额侧有 25s 缓存 + 请求去重（见 preload/lib/api.js），
       // 这个补充很便宜；走的是与轮询同一条路径，所以不会切到 loading 态
       refresh(false);
-      // 菜单里有输入框（留言/时长/定时），窗口默认 focusable:false 收不到键盘 → 借一次焦点
+      // 菜单里还有输入框（倒计时时长 / 定时刻），窗口默认 focusable:false 收不到键盘 → 借一次焦点
       try { whaleApi.setInputFocus(true); } catch (err) {}
       // 打开菜单这一刻指针往往停在按钮上，而「穿透恢复」定时器（PASS_RELEASE_MS）可能在
       // 菜单展开后才开火，把整窗切成点击穿透 —— 菜单明明画着，点输入框却点到了下层应用。
@@ -2560,6 +2495,10 @@
     menuBox.classList.remove('dshwv-menu-open');
     menuBtn.setAttribute('aria-expanded', 'false');
     resetHideBtn(); // 关菜单即退出「隐藏挂件」确认态，免得下次打开时按钮还停在「再点一次隐藏」
+    // 焦点归位：面板是 aria-modal，焦点原本在面板内的某个控件上（或已被借到本窗）。
+    // 不还回去的话，纯键盘操作关掉菜单后焦点会掉到 body —— 下一次按 Tab 得从整页头开始找。
+    // 只在按钮可见时还：菜单按钮被设置页关掉（dshwv-menu-btn-off）时它不可聚焦，focus() 是空操作
+    if (menuBtnEnabled) { try { menuBtn.focus({ preventScroll: true }); } catch (err) {} }
     // 交还焦点：否则挂件一直占着焦点，设置窗（uTools 主窗）会失焦并自动隐藏
     try { whaleApi.setInputFocus(false); } catch (err) {}
   }
@@ -2583,7 +2522,6 @@
     if (!menuOpen) return;
     try {
       var b = menuBtn.getBoundingClientRect();
-      var vw = window.innerWidth || document.documentElement.clientWidth || 300;
       var vh = window.innerHeight || document.documentElement.clientHeight || 300;
       // 菜单按钮被隐藏（display:none）时，rect 全 0；改用鲸鱼图片位置定位
       if (!menuBtnEnabled || b.width <= 0) {
@@ -2611,18 +2549,25 @@
         menuDirLocked = true;
       }
       var openDown = menuDown;
-      // 用按钮的「视觉」中心判断左右（根元素左吸附时整体 scaleX(-1) 镜像，
-      // getBoundingClientRect 已反映镜像后的实际位置，不能再用根布局中心判断）
-      var btnCx = b.left + b.width / 2;
-      var onLeft = btnCx < vw / 2;
-      if (onLeft) {
-        menuBox.style.left = Math.max(4, b.left) + 'px';
-        menuBox.style.right = 'auto';
-        menuBox.style.transformOrigin = openDown ? 'top left' : 'bottom left';
-      } else {
-        menuBox.style.right = Math.max(4, (vw - b.right)) + 'px';
+      // 横向锚点：**靠向挂件在屏幕上的内侧**，与垂直方向「只能往屏幕内有空间的那侧摆」同一道理。
+      // 挂件四周的窗口留白是 --whale-pad（200px），但菜单固定宽 275px 放不进纯留白区；
+      // 若贴按钮边展开，275px 会整个铺在挂件本体上把小鲸鱼盖住。改成贴窗口边缘后菜单落在留白区一侧，
+      // 只压到本体靠外的窄条，居中的鲸鱼主体露出来。
+      // 关键是选**哪**条窗口边缘，必须按「挂件贴工作区哪一侧」判断，不能用按钮在窗口内的坐标 ——
+      // 那是窗口内部几何，跟屏幕位置无关，挂件被拖到屏幕另一侧时方向就反了。
+      // flipped = 宿主按 anchor.hAnchor 推出的「挂件贴工作区左侧」（见 preload/lib/widget.js 的 flippedOf，
+      // 随 whale:init / whale:snapped 下发）。挂件贴左时左边的留白已在屏幕外、摆过去也看不见，
+      // 故菜单该贴窗口**右**边缘（屏幕内侧），反之贴左边缘 —— 取反即得。
+      var MENU_EDGE_GAP = 4; // 菜单与窗口边缘的间距，与垂直方向的 max(4, …) 同一口径
+      var menuOnRight = flipped;
+      if (menuOnRight) {
+        menuBox.style.right = MENU_EDGE_GAP + 'px';
         menuBox.style.left = 'auto';
         menuBox.style.transformOrigin = openDown ? 'top right' : 'bottom right';
+      } else {
+        menuBox.style.left = MENU_EDGE_GAP + 'px';
+        menuBox.style.right = 'auto';
+        menuBox.style.transformOrigin = openDown ? 'top left' : 'bottom left';
       }
       menuBox.classList.toggle('dshwv-menu-down', openDown);
       // 高度不足时压缩并在菜单内滚动（不把菜单压到屏幕外）

@@ -81,7 +81,16 @@ function registerIpc() {
       return
     }
     const prev = readConfig()
-    const cfg = patchConfig(patch)
+    // patchConfig 写失败会抛（见 store.js）—— 这个 handler 里除了赋值还有一串副作用
+    // （改窗口尺寸 / 置顶 / 清计时 / 广播），全在 catch 外，所以必须自己兜住：
+    // 抛出去会变成 Electron 事件回调里的未捕获异常，挂件侧看不到任何反馈
+    let cfg
+    try {
+      cfg = patchConfig(patch)
+    } catch (err) {
+      logErr('[whale][ipc] 保存配置失败', err && err.message)
+      return
+    }
     // 关掉「计时保存」时顺手清掉已落库的计时状态
     if (cfg.timerPersistOn === false && prev.timerPersistOn !== false) clearTimer()
     if (cfg.scale !== prev.scale) applyScaleToWindow(cfg.scale, true)

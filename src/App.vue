@@ -1,9 +1,10 @@
 <script lang="ts" setup>
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
-import type { AssetsApplyResult, AssetsExportResult, AssetsPreviewResult, BackupPreviewResult, BubbleMeta, CodexSummaryResult, CodexWindow, CodexWindows, DshBackupListResult, DshBackupSnapshot, DshDiagnoseFinding, DshDiagnoseItem, DshDiagnoseResult, DshDumpResult, DshIsolateCandidatesResult, DshIsolatePlan, DshPatchItem, DshPatchListResult, DshUsageResult, LedgerDetailDay, LedgerDetailEntry, ModelUsageRow, SkinGallery, SkinMeta, SoundMeta, SoundRole, WhaleMailSecrets, WhaleModel, WhaleModelRow, WhaleModelTemplate, WhalePriceModel, WhaleServices, WhaleTokenPrice } from './types/services'
+import type { AssetsApplyResult, AssetsExportResult, AssetsPreviewResult, BackupPreviewResult, BubbleMeta, CodexSummaryResult, CodexWindow, CodexWindows, DshBackupListResult, DshBackupSnapshot, DshDiagnoseFinding, DshDiagnoseItem, DshDiagnoseResult, DshDumpResult, DshIsolateCandidate, DshIsolateCandidatesResult, DshIsolatePlan, DshPatchItem, DshPatchListResult, DshUsageResult, LedgerDetailDay, LedgerDetailEntry, ModelUsageRow, SkinGallery, SkinMeta, SoundMeta, SoundRole, WhaleMailSecrets, WhaleModel, WhaleModelRow, WhaleModelTemplate, WhalePriceModel, WhaleServices, WhaleTokenPrice } from './types/services'
 import SkinCropper from './components/SkinCropper.vue'
 import SoundTrimmer from './components/SoundTrimmer.vue'
 import FirstRunGuide from './components/FirstRunGuide.vue'
+import UsageChart from './components/UsageChart.vue'
 import AccelView from './views/AccelView.vue'
 
 // 主窗 preload（services.js）注入的宿主 API
@@ -151,6 +152,9 @@ const cfg = reactive({
   // 计时到点的邮件通知（邮件总开关 notifyMailOn 未开时不生效）
   timerMailOn: true,
   timerPersistOn: true,
+  // 计时气泡常驻 / 计时中气泡只显示计时（原先只在挂件菜单里改，已挪到本页）
+  timerBubblePin: true,
+  timerBubbleOnly: true,
   // 计时时长（秒）与到点要做什么：留言 + 休息档。与挂件菜单「计时」组同一份配置
   timerSec: 1500,
   timerNote: '',
@@ -241,8 +245,13 @@ const dsh = reactive({
 const dshFlash: Flash = useFlash()
 const dshLogOpen = ref(false)
 const dshLogEl = ref<HTMLElement | null>(null)
-// 折叠区（默认收起，卡片更短）：诊断信息 / 高级选项 / 使用说明 / 故障排查
+// 折叠区（默认收起，卡片更短）。
+// 主控卡里的实际顺序：诊断信息 / dsh 故障排查 / 高级选项 / 使用说明 —— 诊断与排查提到最前，
+// 它们是「出问题时才看」的，排在卡尾等于出事时滚不到；高级选项与使用说明是配置与说明，靠后无妨。
 const dshFolds = reactive({ advanced: false, help: false, trouble: false, versions: false })
+// 主控卡整体折叠：与其他 5 张卡保持一致（都带 caret + 收起态摘要）。默认展开 ——
+// 启动/重启/结束是本 tab 最高频的动作，默认收起等于每次进来都要多点一下。
+const dshMainFold = ref(true)
 // 诊断折叠展开时顺手查一次「最新版本」：版本明细都是只读诊断，展开本身就是「我想核对版本」的信号，
 // 此时查一次比让用户再点一次「查询可用版本」更省事。npm view 要联网、较慢，失败也不打断（dshQueryVersions 内部已兜底）
 function dshToggleVersions() {
@@ -361,16 +370,15 @@ watch(activeTab, (tab) => {
 // 两张统计卡默认收起，首次「展开」时才读取：宿主是同步扫文件（会话日志可能几十 MB），
 // 不看不读，避免每次进开发者 Tab 都无条件付一次扫描成本；展开后即读，也不用手动再点一下。
 // 收起时摘要只在「本会话已读过」之后才显示（否则露「点击展开查看」），保证折叠 = 不预读。
-const devFolds = reactive({ dshUsage: false, codex: false, diagnose: false, dshDump: false, dshPatch: false, dshIsolate: false })
-const devStatsLoaded = reactive({ dshUsage: false, codex: false, diagnose: false, dshDump: false, dshPatch: false, dshIsolate: false })
-function toggleDevCard(key: 'dshUsage' | 'codex' | 'diagnose' | 'dshDump' | 'dshPatch' | 'dshIsolate') {
+const devFolds = reactive({ dshUsage: false, codex: false, diagnose: false, dshDump: false, dshIsolate: false })
+const devStatsLoaded = reactive({ dshUsage: false, codex: false, diagnose: false, dshDump: false, dshIsolate: false })
+function toggleDevCard(key: 'dshUsage' | 'codex' | 'diagnose' | 'dshDump' | 'dshIsolate') {
   devFolds[key] = !devFolds[key]
   if (!devFolds[key] || devStatsLoaded[key]) return
   devStatsLoaded[key] = true
   if (key === 'dshUsage') dshUsageRefresh()
   else if (key === 'codex') codexRefresh()
   else if (key === 'dshDump') dshDumpRefresh()
-  else if (key === 'dshPatch') dshPatchRefresh()
   else if (key === 'dshIsolate') dshIsolateRefresh()
   else diagnoseRefresh()
 }
@@ -582,7 +590,7 @@ function dshQueryVersions() {
 const codex = ref<CodexSummaryResult | null>(null)
 const codexBusy = ref(false)
 const codexFlash: Flash = useFlash()
-const codexFolds = reactive({ models: false, help: false })
+const codexFolds = reactive({ help: false })
 // token 数按万/亿缩写，避免长串数字撑破布局
 function fmtTokens(n?: number) {
   const v = Number(n) || 0
@@ -595,20 +603,18 @@ const codexRange = ref(7)
 const codexDays = computed(() => ((codex.value && codex.value.days31) || []).slice(-codexRange.value))
 // 30 天档标签抽稀：每 5 天一个，避免糊成一片
 const codexLabelEvery = computed(() => (codexRange.value >= 30 ? 5 : 1))
-const codexDayMax = computed(() => {
-  let m = 0
-  for (const d of codexDays.value) m = Math.max(m, Number(d.tokens) || 0)
-  return m
-})
 const codexModels = computed(() => {
   const bm = (codex.value && codex.value.byModel) || {}
   return Object.keys(bm)
     .map((k) => ({ name: k, ...bm[k] }))
     .sort((a, b) => (Number(b.tokens) || 0) - (Number(a.tokens) || 0))
 })
-// 柱高百分比：最大值为满格（100%），最小留 2% 让「有量但极少」也看得见
+// 柱高百分比：最大值为满格（100%），最小留 2% 让「有量但极少」也看得见。
+// 最大值就地算：这份 days 已按档位切好、最多 31 个元素，不值得单开 computed，
+// 且共用组件拿不到这里的 computed，只能靠这个函数（见 UsageChart.vue 的 hasBars）。
 function codexBarHeight(tokens?: number) {
-  const max = codexDayMax.value
+  let max = 0
+  for (const d of codexDays.value) max = Math.max(max, Number(d.tokens) || 0)
   if (!max) return '0%'
   return Math.max(2, Math.round(((Number(tokens) || 0) / max) * 100)) + '%'
 }
@@ -709,19 +715,13 @@ function codexClearCache() {
 const dshUsage = ref<DshUsageResult | null>(null)
 const dshUsageBusy = ref(false)
 const dshUsageFlash: Flash = useFlash()
-const dshUsageFolds = reactive({ models: false, help: false })
+const dshUsageFolds = reactive({ help: false })
 // 图表档位：宿主一次给 31 天（days31，索引 0 是今天），切档只改前端切片、不重扫
 const DSH_USAGE_RANGES = [7, 14, 30] as const
 const dshUsageRange = ref(7)
 const dshUsageDays = computed(() => ((dshUsage.value && dshUsage.value.days31) || []).slice(-dshUsageRange.value))
 // 30 天档标签抽稀：每 5 天一个，避免糊成一片
 const dshUsageLabelEvery = computed(() => (dshUsageRange.value >= 30 ? 5 : 1))
-// 当前档内最大值：用来算柱状条高度（全为 0 时避免除零）
-const dshUsageDayMax = computed(() => {
-  let m = 0
-  for (const d of dshUsageDays.value) m = Math.max(m, Number(d.tokens) || 0)
-  return m
-})
 const dshUsageModels = computed(() => {
   const bm = (dshUsage.value && dshUsage.value.byModel) || {}
   return Object.keys(bm)
@@ -734,9 +734,12 @@ const dshUsageSourceText = computed(() => {
   if (s === 'sessions') return '会话缓存聚合'
   return '无用量记录'
 })
-// 柱高百分比：最大值为满格（100%），最小留 2% 让「有量但极少」也看得见
+// 柱高百分比：最大值为满格（100%），最小留 2% 让「有量但极少」也看得见。
+// 最大值就地算：这份 days 已经按档位切好，元素最多 31 个，不值得为它单开一个 computed，
+// 而且共用组件拿不到这里的 computed，只能靠这个函数（见 UsageChart.vue 的 hasBars）。
 function dshUsageBarHeight(tokens?: number) {
-  const max = dshUsageDayMax.value
+  let max = 0
+  for (const d of dshUsageDays.value) max = Math.max(max, Number(d.tokens) || 0)
   if (!max) return '0%'
   return Math.max(2, Math.round(((Number(tokens) || 0) / max) * 100)) + '%'
 }
@@ -1051,20 +1054,28 @@ function dshDumpCopy() {
   dshDumpFlash.msg = ok ? '已复制完整转储信息' : '复制失败，请手动选中复制。'
 }
 
-// ── dsh 插件开关（计划书 §6.2 E2）──
+// ── dsh 插件开关（计划书 §6.2 E2 / E3 合并卡）──
 // 改的是用户层 patch（$DSH_HOME/profiles/web/cordis.patch.yml）：**逐条禁用/启用** + 快照还原。
 // 与上面两张卡的本质区别：这是**唯一会写 dsh 文件的卡**，所以每次写入前强制建快照。
+// E2 与 E3 合并成一张卡后：清单与候选统一用 dshIsolate 那份（含组装树，能看到未在 patch 里的插件），
+// dshPatch 只保留「宿主返回的 patch 文件状态」（exists / file），供标题摘要与写入位置显示。
 const dshPatch = ref<DshPatchListResult | null>(null)
 const dshPatchBusy = ref(false)
 const dshPatchFlash: Flash = useFlash()
 // 逐条的操作中状态：key = id，避免一条在写时其他条也能点
 const dshPatchPending = ref<string>('')
-const dshPatchFolds = reactive({ help: false })
 const dshPatchProfile = 'web'
 const dshBackups = ref<DshBackupListResult | null>(null)
 const dshBackupFolds = reactive({ list: false })
 // 还原是破坏性操作且不可再撤销（会把文件整体覆盖回旧内容），做两步确认
 const dshRestoreConfirm = ref('')
+// ── E4：命名 / known-good 标记 / 保留份数 ──
+// 改名与删除都是「就地输入 / 两步确认」，同一时刻只允许一行处于编辑或待确认态
+const dshRenameFor = ref('')
+const dshRenameText = ref('')
+const dshDeleteConfirm = ref('')
+const dshKeepDraft = ref<number | null>(null)
+const dshKeepBusy = ref(false)
 function dshPatchRefresh() {
   if (dshPatchBusy.value) return
   dshPatchBusy.value = true
@@ -1084,7 +1095,7 @@ function dshPatchRefresh() {
       return
     }
     dshPatchFlash.msg = r.exists
-      ? `${r.items?.length || 0} 个条目 · ${(r.items || []).filter((i) => i.disabled).length} 条已禁用`
+      ? `这个 profile 的 patch 里已有 ${r.items?.length || 0} 条，其中 ${(r.items || []).filter((i) => i.disabled).length} 条已禁用 —— 下面的清单已按最新状态刷新。`
       : '这个 profile 还没有 patch 文件，禁用任意插件时会自动创建'
   } catch (err: any) {
     dshPatchFlash.err = true
@@ -1137,7 +1148,8 @@ function dshPatchToggle(item: DshPatchItem) {
       dshPatchFlash.msg = '写入失败：' + String(err?.message || err)
     } finally {
       dshPatchPending.value = ''
-      dshPatchRefresh()
+      // 刷新合并清单：状态徽章与行尾按钮都要按新的 disabled 重画
+      dshIsolateRefresh()
     }
   }, 30)
 }
@@ -1199,10 +1211,165 @@ function dshBackupTime(s: DshBackupSnapshot) {
 function dshBackupReasonText(r: string) {
   return r === 'before-disable' ? '禁用前' : r === 'before-enable' ? '启用前' : r === 'manual' ? '手动备份' : (r || '—')
 }
+// ── E4：命名 / known-good 标记 / 保留份数 ──
+// 改名：就地开编辑框，内容预填当前名字
+function dshRenameStart(s: DshBackupSnapshot) {
+  dshRenameFor.value = s.dirName
+  dshRenameText.value = s.name || ''
+  dshDeleteConfirm.value = ''
+  dshRestoreConfirm.value = ''
+}
+function dshRenameCancel() {
+  dshRenameFor.value = ''
+  dshRenameText.value = ''
+}
+function dshRenameSave() {
+  const dirName = dshRenameFor.value
+  if (!dirName) return
+  applyBackupMeta({ dirName: dirName, name: dshRenameText.value }, `已命名为「${dshRenameText.value.trim() || '（无名字）'}」`)
+  dshRenameFor.value = ''
+  dshRenameText.value = ''
+}
+// 切换 known-good：只有一份能是（宿主不强制，这里在前端把其他份取消掉，语义更清楚）
+function dshToggleKnownGood(s: DshBackupSnapshot) {
+  const want = !s.knownGood
+  dshPatchFlash.msg = ''
+  dshPatchFlash.err = false
+  try {
+    const r = services.dshBackupSetMeta?.({ dirName: s.dirName, knownGood: want })
+    if (!r || !r.ok) {
+      dshPatchFlash.err = true
+      dshPatchFlash.msg = (r && r.error) || '更新标记失败'
+      return
+    }
+    // 打上时把其他份的标记摘掉 —— 回滚目标只该有一个，否则「一键回滚」指向哪份就不明确了
+    if (want) {
+      const others = (dshBackups.value?.snapshots || []).filter((x) => x.knownGood && x.dirName !== s.dirName)
+      for (const o of others) {
+        const rr = services.dshBackupSetMeta?.({ dirName: o.dirName, knownGood: false })
+        if (!rr || !rr.ok) {
+          dshPatchFlash.err = true
+          dshPatchFlash.msg = `已标记本份，但取消 ${o.dirName} 的旧标记失败`
+        }
+      }
+    }
+    dshPatchFlash.err = false
+    dshPatchFlash.msg = want
+      ? `已标记 ${s.dirName} 为「已知良好」—— 它不会被自动清理`
+      : `已取消 ${s.dirName} 的「已知良好」标记`
+  } catch (err: any) {
+    dshPatchFlash.err = true
+    dshPatchFlash.msg = '更新标记失败：' + String(err?.message || err)
+  } finally {
+    dshBackupRefresh()
+  }
+}
+function applyBackupMeta(opts: { dirName: string; name?: string; knownGood?: boolean }, okMsg: string) {
+  dshPatchFlash.msg = ''
+  dshPatchFlash.err = false
+  try {
+    const r = services.dshBackupSetMeta?.(opts)
+    if (!r || !r.ok) {
+      dshPatchFlash.err = true
+      dshPatchFlash.msg = (r && r.error) || '更新标记失败'
+      return
+    }
+    dshPatchFlash.msg = okMsg
+  } catch (err: any) {
+    dshPatchFlash.err = true
+    dshPatchFlash.msg = '更新标记失败：' + String(err?.message || err)
+  } finally {
+    dshBackupRefresh()
+  }
+}
+// 删除：两步确认（快照删了就真没了，不经过回收站）
+function dshDeleteSnapshot(dirName: string) {
+  if (dshDeleteConfirm.value !== dirName) {
+    dshDeleteConfirm.value = dirName
+    dshRestoreConfirm.value = ''
+    dshRenameFor.value = ''
+    dshPatchFlash.err = false
+    dshPatchFlash.msg = `再点一次「确认删除」会永久删掉 ${dirName}（不经过回收站）。`
+    return
+  }
+  dshDeleteConfirm.value = ''
+  dshPatchFlash.msg = ''
+  try {
+    const r = services.dshBackupRemove?.(dirName)
+    if (!r || !r.ok) {
+      dshPatchFlash.err = true
+      dshPatchFlash.msg = (r && r.error) || '删除失败'
+      return
+    }
+    dshPatchFlash.err = false
+    dshPatchFlash.msg = `已删除 ${dirName}`
+  } catch (err: any) {
+    dshPatchFlash.err = true
+    dshPatchFlash.msg = '删除失败：' + String(err?.message || err)
+  } finally {
+    dshBackupRefresh()
+  }
+}
+// 保留份数：只写配置，不立刻删（删除由「立即清理」或下次建快照触发）
+function dshSaveKeep() {
+  if (dshKeepBusy.value) return
+  const n = Number(dshKeepDraft.value)
+  if (!Number.isFinite(n)) return
+  dshKeepBusy.value = true
+  dshPatchFlash.msg = ''
+  dshPatchFlash.err = false
+  try {
+    const r = services.dshBackupSetKeep?.(Math.round(n))
+    if (!r || !r.ok) {
+      dshPatchFlash.err = true
+      dshPatchFlash.msg = (r && r.error) || '保存失败'
+      return
+    }
+    dshPatchFlash.err = false
+    dshPatchFlash.msg = `保留份数已设为 ${r.keep}（调小不会立刻删，点「立即清理」或下次备份时生效）`
+    dshKeepDraft.value = null
+  } catch (err: any) {
+    dshPatchFlash.err = true
+    dshPatchFlash.msg = '保存失败：' + String(err?.message || err)
+  } finally {
+    dshKeepBusy.value = false
+    dshBackupRefresh()
+  }
+}
+function dshPruneNow() {
+  dshPatchFlash.msg = ''
+  dshPatchFlash.err = false
+  try {
+    const r = services.dshBackupPrune?.()
+    if (!r || !r.ok) {
+      dshPatchFlash.err = true
+      dshPatchFlash.msg = (r && r.error) || '清理失败'
+      return
+    }
+    const n = r.removed?.length || 0
+    dshPatchFlash.err = false
+    dshPatchFlash.msg = n
+      ? `已按保留 ${r.keep} 份清理，删掉 ${n} 份：${r.removed?.join('、')}`
+      : `当前没有超出保留份数（${r.keep} 份）的快照，未删任何东西`
+  } catch (err: any) {
+    dshPatchFlash.err = true
+    dshPatchFlash.msg = '清理失败：' + String(err?.message || err)
+  } finally {
+    dshBackupRefresh()
+  }
+}
 
 // —— E3 一键隔离 ——
 // 与 E2 的区别：E2 是「一条一条改」，E3 是「一次把勾选的都禁掉」。
 // 计划书 §5.2 的红线在这里落地：**只动用户勾选的条目**，写前必须把「会改哪几行」摆出来过目。
+// 一次写入的条数上限。**必须与宿主 dsh-isolate.js 的 MAX_BATCH 一致** ——
+// 界面拿它做勾选量的提前拦截，宿主拿它做真正的准入判断；两边不一致就会出现
+// 「界面放行、宿主拒绝」的割裂。改动时两处一起改（scripts/check-shared.mjs 会校验跨文件副本）。
+const DSH_ISOLATE_MAX_BATCH = 100
+// 独立回执，**不与 dshPatchFlash 共用**：两张卡操作同一份文件但是两件事，
+// 共用一个 flash 会让「插件开关」卡的标题显示「已隔离：改了 N 条」（那张卡从不做隔离）——
+// 界面在陈述一件不成立的事。同 secretsFlash / guideFlash 的分法（见 L78）。
+const dshIsolateFlash: Flash = useFlash()
 const dshIsolate = ref<DshIsolateCandidatesResult | null>(null)
 const dshIsolateBusy = ref(false)
 const dshIsolateFolds = reactive({ help: false, list: false })
@@ -1214,31 +1381,31 @@ const dshIsolatePlan = ref<{ plans: DshIsolatePlan[]; changedCount: number; ids:
 function dshIsolateRefresh() {
   if (dshIsolateBusy.value) return
   dshIsolateBusy.value = true
-  dshPatchFlash.msg = ''
-  dshPatchFlash.err = false
+  dshIsolateFlash.msg = ''
+  dshIsolateFlash.err = false
   // 重新读清单意味着候选可能变了，之前的勾选与待确认计划一律作废
   dshIsolatePlan.value = null
   Promise.resolve(services.dshIsolateCandidates?.({ profile: dshPatchProfile }))
     .then((r) => {
       if (!r) {
-        dshPatchFlash.err = true
-        dshPatchFlash.msg = '宿主 API 不可用'
+        dshIsolateFlash.err = true
+        dshIsolateFlash.msg = '宿主 API 不可用'
         return
       }
       dshIsolate.value = r
       if (!r.ok) {
-        dshPatchFlash.err = true
-        dshPatchFlash.msg = r.error || '读取候选失败'
+        dshIsolateFlash.err = true
+        dshIsolateFlash.msg = r.error || '读取候选失败'
         return
       }
       dshIsolatePicked.value = new Set((r.items || []).map((it) => it.id))
-      dshPatchFlash.msg = r.treeError
+      dshIsolateFlash.msg = r.treeError
         ? '组装树没读到（' + r.treeError + '），候选只含 patch 里已有的条目。'
-        : `共 ${r.items?.length || 0} 个候选` + (r.truncated ? '（已截断，只列出前 100 个）' : '')
+        : `共 ${r.items?.length || 0} 个候选`
     })
     .catch((err) => {
-      dshPatchFlash.err = true
-      dshPatchFlash.msg = '读取候选失败：' + String(err?.message || err)
+      dshIsolateFlash.err = true
+      dshIsolateFlash.msg = '读取候选失败：' + String(err?.message || err)
     })
     .then(() => {
       dshIsolateBusy.value = false
@@ -1258,43 +1425,166 @@ function dshIsolateAll() {
   dshIsolatePicked.value = new Set((dshIsolate.value?.items || []).map((it) => it.id))
   dshIsolatePlan.value = null
 }
-// 只勾「启用中」的：候选里那些已经是 disabled 的条目勾了也是 noop（一键隔离的意图是「只留我要的」）
+// 只勾「确定启用中」的：已经是 disabled 的条目勾了也是 noop（一键隔离的意图是「只留我要的」）。
+// 状态未知（disabled === undefined）也一并排除 —— 不知道它现在开没开，就不该替用户决定
 function dshIsolateNoneDisabled() {
   const items = dshIsolate.value?.items || []
-  dshIsolatePicked.value = new Set(items.filter((it) => !it.disabled).map((it) => it.id))
+  dshIsolatePicked.value = new Set(items.filter((it) => it.disabled === false).map((it) => it.id))
   dshIsolatePlan.value = null
 }
 
+// 按档位分组的候选。实测本机 204 个候选里 199 个是 dsh 自己的框架节点
+// （tool-bash / session / llm / subagent…），第三方插件只有 5 个 —— 平铺展示等于让用户
+// 在 204 条里找那 5 条。分组后官方框架默认折叠，用户先看到的就是「我改过的 + 第三方插件」。
+// 档位由宿主按 dump 的 bundle 归属算好（前端从 id 猜不出来），这里只负责分组与折叠。
+const DSH_ISOLATE_TIERS: { key: string; label: string; hint: string; foldByDefault: boolean }[] = [
+  { key: 'patched', label: '已在你 patch 里', hint: '改动就是改它自己那一行，最稳', foldByDefault: false },
+  { key: 'third', label: '第三方插件', hint: '写入等于新加一条 patch；带前端界面的可能禁不掉', foldByDefault: false },
+  { key: 'core', label: 'dsh 官方框架', hint: '禁掉可能让 dsh 本身不正常，确认不需要再动', foldByDefault: true },
+]
+// 第二种分组轴：按「启用中 / 已禁用」分。找同一批插件的当前状态时用得上 ——
+// 来源分档回答「这条是谁的」，状态分档回答「这条现在开没开」，两个问题不重叠，所以做成可切换而不是二选一。
+const DSH_ISOLATE_STATES: { key: string; label: string; hint: string; foldByDefault: boolean }[] = [
+  { key: 'on', label: '启用中', hint: '当前没被禁用；勾选隔离会把它写进 patch', foldByDefault: false },
+  { key: 'off', label: '已禁用', hint: '已经在 patch 里被禁掉了', foldByDefault: false },
+  { key: 'unknown', label: '状态未知', hint: '没读到 dump 状态；可能是 dsh 组装树没读出来，重新刷新候选再看', foldByDefault: false },
+]
+const dshIsolateGroupBy = ref<'tier' | 'state' | 'both'>('tier')
+// 状态分组：三态各自成组（undefined 归 unknown，绝不能并进 'on'）
+function dshIsolateStateOf(it: { disabled?: boolean }) {
+  if (it.disabled === true) return 'off'
+  if (it.disabled === false) return 'on'
+  return 'unknown'
+}
+function dshIsolateTierOf(it: { tier?: string }) {
+  // 判不出来算 third，与宿主 tierOfBundle 的口径一致：宁可不折叠，也不把插件藏起来
+  return it.tier || 'third'
+}
+const dshIsolateGroups = computed(() => {
+  const items = dshIsolate.value?.items || []
+  const by = dshIsolateGroupBy.value
+  if (by === 'both') {
+    // 第三轴「来源+状态」：来源在外、状态在内，空组整组不渲染（9 个组合全展开会有大半是空的）。
+    // 组 key 用 'tier:state' 而不是裸 key —— 折叠状态是一张扁平表，'core' 这种 key 会和前两轴撞车。
+    // 嵌套组沿用折叠表同理：内层 key 前面带上来源前缀，才不会和别的来源下同名状态互相干扰。
+    return DSH_ISOLATE_TIERS.map((t) => ({
+      ...t,
+      items: [],
+      children: DSH_ISOLATE_STATES.map((s) => ({
+        ...s,
+        key: `${t.key}:${s.key}`,
+        items: items.filter((it) => dshIsolateTierOf(it) === t.key && dshIsolateStateOf(it) === s.key),
+      })).filter((s) => s.items.length > 0),
+    })).filter((t) => t.children.length > 0)
+  }
+  const specs = by === 'state' ? DSH_ISOLATE_STATES : DSH_ISOLATE_TIERS
+  return specs
+    .map((t) => ({
+      ...t,
+      children: [],
+      items: items.filter((it) => (by === 'state' ? dshIsolateStateOf(it) === t.key : dshIsolateTierOf(it) === t.key)),
+    }))
+    .filter((g) => g.items.length > 0)
+})
+// 组名计数与折叠默认值按轴分别给：
+// - 按来源时用 DSH_ISOLATE_TIERS / 按状态时用 DSH_ISOLATE_STATES，两者都带 foldByDefault；
+// - 「来源+状态」下的内层组名取自 DSH_ISOLATE_STATES，但 key 是 'tier:state'，故从 key 里还原档位。
+const dshIsolateGroupSpecs = computed(() => {
+  const specs = DSH_ISOLATE_TIERS.concat(DSH_ISOLATE_STATES)
+  if (dshIsolateGroupBy.value === 'both') {
+    return DSH_ISOLATE_TIERS.flatMap((t) =>
+      DSH_ISOLATE_STATES.map((s) => ({ ...s, key: `${t.key}:${s.key}`, foldByDefault: s.foldByDefault })),
+    )
+  }
+  return specs.map((t) => ({ ...t, foldByDefault: t.foldByDefault }))
+})
+// 组头上的条数：「来源+状态」那一轴的外层组自己没有条目（items 恒空），
+// 直接读 g.items.length 会显示 0 条 —— 它的条数在各子组里，要加起来报。
+function dshIsolateGroupCount(g: { items: unknown[]; children?: { items: unknown[] }[] }) {
+  return g.items.length + (g.children || []).reduce((n, c) => n + c.items.length, 0)
+}
+// 把「外层组之下要渲染的东西」统一成一层带/不带组头的行层，供模板一层 v-for 渲染完。
+// 单轴：外层组自己就有条目 → 回一个 head:false 的无头层（不画组头、也不进折叠表）；
+// 双轴：外层组只有子组 → 每个子组回一个 head:true 的层，折叠 key 沿用子组的 'tier:state' 复合键。
+// 这样模板不必再为两种轴各写一份行渲染（原先两份逐字重复，改一处漏一处）。
+function dshIsolateSubLevels(g: {
+  key: string
+  label: string
+  hint: string
+  items: DshIsolateCandidate[]
+  children?: { key: string; label: string; hint: string; items: DshIsolateCandidate[] }[]
+}) {
+  if (g.children && g.children.length) {
+    return g.children.map((c) => ({ key: c.key, label: c.label, hint: c.hint, items: c.items, head: true }))
+  }
+  return [{ key: g.key, label: g.label, hint: g.hint, items: g.items, head: false }]
+}
+// 收起态摘要：**陈述本卡的状态**，不借任何 flash 的消息。
+// 早先这里读的是 dshPatchFlash.msg，于是「插件开关」卡禁用一个插件后，
+// 本卡标题会显示那条消息 —— 一张从没做过隔离的卡在报告隔离结果。
+const dshIsolateSummary = computed(() => {
+  const r = dshIsolate.value
+  if (!r) return '点击展开'
+  if (!r.ok) return '读取失败'
+  const n = r.items?.length || 0
+  return `${n} 个插件 · 已勾 ${dshIsolatePicked.value.size} 个`
+})
+// 官方框架那组默认折叠，但只在本次数据首次到达时设一次 —— 用户手动展开后不能被覆盖回去
+const dshIsolateTierFolds = reactive<Record<string, boolean>>({})
+watch(dshIsolate, (r) => {
+  if (!r?.items) return
+  for (const t of dshIsolateGroupSpecs.value) {
+    // 只在还没初始化过时套默认值；之后一律尊重用户的展开/折叠
+    if (dshIsolateTierFolds[t.key] === undefined) dshIsolateTierFolds[t.key] = t.foldByDefault
+  }
+})
+function dshIsolateToggleTier(key: string) {
+  dshIsolateTierFolds[key] = !dshIsolateTierFolds[key]
+}
+function dshIsolateSetGroupBy(mode: 'tier' | 'state' | 'both') {
+  dshIsolateGroupBy.value = mode
+}
 // 第一步：只算不写（dryRun），把「会动哪几行」摆给用户；第二步 dshIsolateConfirm 才真写
 function dshIsolatePreview() {
   if (dshIsolateBusy.value) return
   const ids = Array.from(dshIsolatePicked.value)
   if (!ids.length) {
-    dshPatchFlash.err = true
-    dshPatchFlash.msg = '先勾选要保留隔离的插件。'
+    dshIsolateFlash.err = true
+    dshIsolateFlash.msg = '先勾选要保留隔离的插件。'
+    return
+  }
+  // 超上限就拦在这里，并把话说全（勾了多少、上限多少、下一步怎么办）。
+  // ⚠️ 宿主 isolateDshPlugins 对 ids.length > MAX_BATCH 是**直接拒绝**（返回 ok:false），
+  // 不是截断 —— 而刷新默认全选、实测候选常有 200 条以上，于是「刷新后什么都不改直接点预览」
+  // 必然弹一句「一次最多隔离 100 条」。那句错误既没说现在勾了几条、也没说该怎么办。
+  if (ids.length > DSH_ISOLATE_MAX_BATCH) {
+    dshIsolateFlash.err = true
+    dshIsolateFlash.msg =
+      `一次最多隔离 ${DSH_ISOLATE_MAX_BATCH} 条，当前勾了 ${ids.length} 条 —— ` +
+      '请先点「只选启用中的」缩小范围，或在下面取消一部分勾选。'
     return
   }
   dshIsolateBusy.value = true
-  dshPatchFlash.msg = ''
-  dshPatchFlash.err = false
+  dshIsolateFlash.msg = ''
+  dshIsolateFlash.err = false
   try {
     const r = services.dshIsolateApply?.({ profile: dshPatchProfile, ids, dryRun: true })
     if (!r) {
-      dshPatchFlash.err = true
-      dshPatchFlash.msg = '宿主 API 不可用'
+      dshIsolateFlash.err = true
+      dshIsolateFlash.msg = '宿主 API 不可用'
     } else if (!r.ok) {
-      dshPatchFlash.err = true
-      dshPatchFlash.msg = r.error || '无法生成改动计划'
+      dshIsolateFlash.err = true
+      dshIsolateFlash.msg = r.error || '无法生成改动计划'
     } else if (!r.changed) {
       dshIsolatePlan.value = null
-      dshPatchFlash.msg = `勾选的 ${ids.length} 条全都已经是禁用状态，无需改动。`
+      dshIsolateFlash.msg = `勾选的 ${ids.length} 条全都已经是禁用状态，无需改动。`
     } else {
       dshIsolatePlan.value = { plans: r.plans || [], changedCount: r.changedCount || 0, ids }
-      dshPatchFlash.msg = ''
+      dshIsolateFlash.msg = ''
     }
   } catch (err: any) {
-    dshPatchFlash.err = true
-    dshPatchFlash.msg = '生成改动计划失败：' + String(err?.message || err)
+    dshIsolateFlash.err = true
+    dshIsolateFlash.msg = '生成改动计划失败：' + String(err?.message || err)
   } finally {
     dshIsolateBusy.value = false
   }
@@ -1304,25 +1594,25 @@ function dshIsolateConfirm() {
   const pending = dshIsolatePlan.value
   if (dshIsolateBusy.value || !pending) return
   dshIsolateBusy.value = true
-  dshPatchFlash.msg = ''
-  dshPatchFlash.err = false
+  dshIsolateFlash.msg = ''
+  dshIsolateFlash.err = false
   try {
     const r = services.dshIsolateApply?.({ profile: dshPatchProfile, ids: pending.ids })
     if (!r) {
-      dshPatchFlash.err = true
-      dshPatchFlash.msg = '宿主 API 不可用'
+      dshIsolateFlash.err = true
+      dshIsolateFlash.msg = '宿主 API 不可用'
     } else if (!r.ok) {
-      dshPatchFlash.err = true
-      dshPatchFlash.msg = r.error || '写入失败'
+      dshIsolateFlash.err = true
+      dshIsolateFlash.msg = r.error || '写入失败'
     } else {
-      dshPatchFlash.err = false
-      dshPatchFlash.msg = `已隔离：改了 ${r.changedCount ?? 0} 条` +
+      dshIsolateFlash.err = false
+      dshIsolateFlash.msg = `已隔离：改了 ${r.changedCount ?? 0} 条` +
         (r.backedUp ? `（快照 ${r.snapshot}）` : '') +
         '。dsh 的 patch 热重载是单向的，加 disabled 即时生效；若界面没变化请重启 dsh。'
     }
   } catch (err: any) {
-    dshPatchFlash.err = true
-    dshPatchFlash.msg = '写入失败：' + String(err?.message || err)
+    dshIsolateFlash.err = true
+    dshIsolateFlash.msg = '写入失败：' + String(err?.message || err)
   } finally {
     dshIsolateBusy.value = false
     dshIsolatePlan.value = null
@@ -3484,6 +3774,8 @@ function applyConfig(c: any) {
   cfg.timerNotifyOn = c.timerNotifyOn !== false
   cfg.timerMailOn = c.timerMailOn !== false
   cfg.timerPersistOn = c.timerPersistOn !== false
+  cfg.timerBubblePin = c.timerBubblePin !== false
+  cfg.timerBubbleOnly = c.timerBubbleOnly !== false
   cfg.timerSec = typeof c.timerSec === 'number' && c.timerSec > 0 ? Math.round(c.timerSec) : 1500
   cfg.timerNote = typeof c.timerNote === 'string' ? c.timerNote : ''
   cfg.timerBreakMin = typeof c.timerBreakMin === 'number' ? c.timerBreakMin : 5
@@ -4414,6 +4706,16 @@ onUnmounted(() => {
         <input type="checkbox" v-model="cfg.timerPersistOn" @change="patchCfg({ timerPersistOn: cfg.timerPersistOn })" />
       </label>
 
+      <!-- 计时气泡口径：原先只在挂件菜单「计时 → 更多」里，那层嵌套折叠已去掉，挪到本页 -->
+      <label class="field row check">
+        <span class="label">计时气泡常驻 <em>（开启：计时中气泡一直显示；关闭：只在开始时短暂显示，点小鲸鱼可随时查看）</em></span>
+        <input type="checkbox" v-model="cfg.timerBubblePin" @change="patchCfg({ timerBubblePin: cfg.timerBubblePin })" />
+      </label>
+      <label class="field row check">
+        <span class="label">计时中只显示计时 <em>（开启：气泡只显示计时；关闭：气泡照常显示余额、今日用量等全部内容）</em></span>
+        <input type="checkbox" v-model="cfg.timerBubbleOnly" @change="patchCfg({ timerBubbleOnly: cfg.timerBubbleOnly })" />
+      </label>
+
       <!-- 计时时长：与挂件菜单「倒计时」三段输入同一份配置（cfg.timerSec 存秒），
            这里用三个数字框拆开展示，任一段改动都折算回秒提交 -->
       <div class="field row">
@@ -4907,8 +5209,9 @@ onUnmounted(() => {
       <p v-if="widgetFlash.msg" class="msg" :class="msgCls(widgetFlash)">{{ widgetFlash.msg }}</p>
     </section>
 
-    <!-- [帮助] 使用帮助：使用说明 / 快捷键绑定 / 故障排查。
-         这些原先都堆在「挂件窗口」卡尾（一次性配置 + 排查 + 说明），日常要调的窗口项被埋在一堆说明下面 -->
+    <!-- [帮助] 使用帮助：使用说明 / 快捷键绑定 / 挂件故障排查。
+         这些原先都堆在「挂件窗口」卡尾（一次性配置 + 排查 + 说明），日常要调的窗口项被埋在一堆说明下面。
+         这里叫「挂件故障排查」以区别 dsh 卡里的「dsh 故障排查」—— 前者是插件自身日志，后者是 dsh 子进程日志 -->
     <section v-if="activeTab === 'help'" class="card">
       <h2>使用帮助</h2>
       <p class="hint">给「显示/隐藏挂件」绑定一个全局快捷键（想给「鼠标穿透」也绑一个，见「窗口」组）。</p>
@@ -4931,12 +5234,14 @@ onUnmounted(() => {
         </div>
       </div>
       <div v-if="diagReady" class="fold">
-        <button class="link-btn" @click="widgetFolds.trouble = !widgetFolds.trouble">{{ widgetFolds.trouble ? '收起故障排查' : '故障排查' }}</button>
+        <button class="link-btn" @click="widgetFolds.trouble = !widgetFolds.trouble">{{ widgetFolds.trouble ? '收起挂件故障排查' : '挂件故障排查' }}</button>
         <div v-if="widgetFolds.trouble" class="guide">
-          <p class="guide-use">挂件消失或显示异常时，可复制诊断日志（%TEMP%\whale-debug.log）或用系统程序打开日志文件。</p>
+          <!-- 标题与日志按钮都带「挂件」前缀：dsh 卡里另有一块「dsh 故障排查」讲 dsh 子进程日志，
+               两块都叫「故障排查」时用户会把两处的日志当成同一份 -->
+          <p class="guide-use">挂件消失或显示异常时，可复制插件自身的诊断日志（%TEMP%\whale-debug.log）或用系统程序打开日志文件。<strong>这只含挂件与插件自身的日志</strong>；dsh 的日志见「开发者 → dsh」卡里的「查看 dsh 日志」。</p>
           <div class="btn-row">
-            <button class="secondary" @click="copyDebugLog">复制诊断日志</button>
-            <button class="secondary" @click="openLogFile">打开日志文件</button>
+            <button class="secondary" @click="copyDebugLog">复制挂件日志</button>
+            <button class="secondary" @click="openLogFile">打开挂件日志文件</button>
           </div>
           <p v-if="diagFlash.msg" class="msg" :class="msgCls(diagFlash)">{{ diagFlash.msg }}</p>
         </div>
@@ -5030,7 +5335,14 @@ onUnmounted(() => {
 
     <!-- [开发者] DeepSeek Harness（dsh） -->
     <section v-if="activeTab === 'dev'" class="card">
-      <h2>DeepSeek Harness（dsh）</h2>
+      <div class="card-head">
+        <h2 class="card-toggle" @click="dshMainFold = !dshMainFold">
+          <span class="caret">{{ dshMainFold ? '▾' : '▸' }}</span>DeepSeek Harness（dsh）
+          <!-- 收起态摘要：状态本来就是启动后自动查的（不额外读盘），所以这里直接报，不像其他卡要等首次展开 -->
+          <span v-if="!dshMainFold" class="card-sum">{{ dshStateText }}</span>
+        </h2>
+      </div>
+      <template v-if="dshMainFold">
       <p class="hint">在挂件菜单「dsh」分组或本卡片里 启动 / 重启 / 结束 / 更新 dsh 并打开它的 Web UI（默认 <code>http://127.0.0.1:3080</code>）。<strong>优先用你已全局安装的那份</strong>（零重复占用、终端与插件同一版本），没有才装到插件数据目录。</p>
 
       <label class="field row">
@@ -5087,11 +5399,35 @@ onUnmounted(() => {
             <button v-if="dsh.globalDir" class="secondary" @click="dshCopyPath(dsh.globalDir, '全局路径')">复制全局路径</button>
             <button v-if="dsh.installed" class="secondary" @click="dshCopyPath(dsh.prefix, '插件路径')">复制插件路径</button>
             <button class="secondary" @click="dshCopyUrl">复制地址</button>
-            <button class="secondary" @click="dshLogOpen = !dshLogOpen">{{ dshLogOpen ? '收起日志' : '查看日志' }}</button>
-            <button v-if="dshLogOpen" class="secondary" @click="dshClearLog">清空日志</button>
-            <button v-if="dshLogOpen" class="secondary" @click="dshCopyLog">复制日志</button>
+            <!-- 日志按钮都带 dsh 前缀：帮助 Tab 里另有一处「复制诊断日志 / 打开日志文件」，
+                 那是插件自身的 whale-debug.log，与这里的 dsh 子进程日志是两回事 -->
+            <button class="secondary" @click="dshLogOpen = !dshLogOpen">{{ dshLogOpen ? '收起 dsh 日志' : '查看 dsh 日志' }}</button>
+            <button v-if="dshLogOpen" class="secondary" @click="dshClearLog">清空 dsh 日志</button>
+            <button v-if="dshLogOpen" class="secondary" @click="dshCopyLog">复制 dsh 日志</button>
           </div>
           <pre v-if="dshLogOpen" ref="dshLogEl" class="log-box">{{ dsh.log || '（暂无日志：启动或更新 dsh 后再看）' }}</pre>
+        </div>
+      </div>
+
+      <!-- 故障排查：与「诊断信息」紧邻、都在主控卡头部 —— 这两块是「出问题时才看」的，
+           早先故障排查被排在卡尾（诊断信息 → 高级选项 → 使用说明 → 故障排查），
+           真出问题时用户根本滚不到。标题带 dsh 前缀：帮助 Tab 里另有一块也叫「故障排查」，
+           讲的是插件自身（whale-debug.log），不写前缀会让人以为是一回事。 -->
+      <div class="fold">
+        <button class="link-btn" @click="dshFolds.trouble = !dshFolds.trouble">{{ dshFolds.trouble ? '收起 dsh 故障排查' : 'dsh 故障排查' }}</button>
+        <div v-if="dshFolds.trouble" class="guide">
+          <p class="guide-use"><strong>结束 / 重启：</strong>不只管本插件启动的进程 —— 只要 3080 上跑着 dsh（含在别的终端里启动的）都能被结束；非 dsh 占用端口时会拒绝执行，避免误杀。</p>
+          <p class="guide-use"><strong>首次安装很慢：</strong>要下载约 500 个包，国内建议把「npm 注册源」改成淘宝镜像；等待期间状态行会显示「已等待 x 秒」。</p>
+          <p class="guide-use"><strong>占用空间：</strong>「删除插件目录的 dsh」清掉插件装的那份（有全局安装时用不到它）；「清理 npx 旧缓存」清掉旧版本留在 npx 缓存里的副本。</p>
+          <div class="btn-row">
+            <button class="secondary" :disabled="!dsh.installed || dshBusy" @click="dshMaintain('remove-plugin')">
+              {{ dshConfirm === 'remove-plugin' ? '确认删除插件目录的 dsh？' : '删除插件目录的 dsh' }}
+            </button>
+            <button class="secondary" :disabled="dshBusy" @click="dshMaintain('clean-npx')">
+              {{ dshConfirm === 'clean-npx' ? '确认清理 npx 旧缓存？' : '清理 npx 旧缓存' }}
+            </button>
+            <button v-if="dshConfirm" class="secondary" @click="dshConfirm = ''">取消</button>
+          </div>
         </div>
       </div>
 
@@ -5145,129 +5481,13 @@ onUnmounted(() => {
           <p class="guide-use"><strong>dsh 自己的数据：</strong>工作目录取用户主目录，配置与数据由 dsh 自己管理（默认 <code>~/.dsh</code>），本插件不做改动。</p>
         </div>
       </div>
-      <div class="fold">
-        <button class="link-btn" @click="dshFolds.trouble = !dshFolds.trouble">{{ dshFolds.trouble ? '收起故障排查' : '故障排查' }}</button>
-        <div v-if="dshFolds.trouble" class="guide">
-          <p class="guide-use"><strong>结束 / 重启：</strong>不只管本插件启动的进程 —— 只要 3080 上跑着 dsh（含在别的终端里启动的）都能被结束；非 dsh 占用端口时会拒绝执行，避免误杀。</p>
-          <p class="guide-use"><strong>首次安装很慢：</strong>要下载约 500 个包，国内建议把「npm 注册源」改成淘宝镜像；等待期间状态行会显示「已等待 x 秒」。</p>
-          <p class="guide-use"><strong>占用空间：</strong>「删除插件目录的 dsh」清掉插件装的那份（有全局安装时用不到它）；「清理 npx 旧缓存」清掉旧版本留在 npx 缓存里的副本。</p>
-          <div class="btn-row">
-            <button class="secondary" :disabled="!dsh.installed || dshBusy" @click="dshMaintain('remove-plugin')">
-              {{ dshConfirm === 'remove-plugin' ? '确认删除插件目录的 dsh？' : '删除插件目录的 dsh' }}
-            </button>
-            <button class="secondary" :disabled="dshBusy" @click="dshMaintain('clean-npx')">
-              {{ dshConfirm === 'clean-npx' ? '确认清理 npx 旧缓存？' : '清理 npx 旧缓存' }}
-            </button>
-            <button v-if="dshConfirm" class="secondary" @click="dshConfirm = ''">取消</button>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <!-- [dsh] dsh 本地用量统计：读 ~/.dsh 下 dsh-usage 的账本与会话投影缓存，纯本地、不联网 -->
-    <section v-if="activeTab === 'dev'" class="card">
-      <div class="card-head">
-        <h2 class="card-toggle" @click="toggleDevCard('dshUsage')">
-          <span class="caret">{{ devFolds.dshUsage ? '▾' : '▸' }}</span>dsh 用量统计
-          <!-- 收起态摘要：只在「本会话已展开读过」后才显示，否则不预读、直接提示点开 -->
-          <span v-if="!devFolds.dshUsage" class="card-sum">
-            <template v-if="devStatsLoaded.dshUsage && dshUsage && dshUsage.ok">今日 {{ fmtTokens(dshUsage.todayTokens) }} tokens · 本月 {{ fmtTokens(dshUsage.monthTokens) }}</template>
-            <template v-else>点击展开查看</template>
-          </span>
-        </h2>
-      </div>
-      <template v-if="devFolds.dshUsage">
-      <p class="hint">
-        读 dsh 自己写在 <code>~/.dsh</code>（或 <code>$DSH_HOME</code>）下的用量数据做统计，
-        <strong>纯本地读取、不需要 API Key、不发任何网络请求</strong>。优先用 dsh-usage 的按天账本，
-        账本还没落盘时回落到会话投影缓存。
-      </p>
-      <div class="btn-row">
-        <!-- 首次展开已自动读过一次，按钮主要当「刷新」用 -->
-        <button :disabled="dshUsageBusy" @click="dshUsageRefresh">{{ dshUsageBusy ? '读取中…' : (dshUsage ? '刷新' : '读取统计') }}</button>
-        <button v-if="dshUsage" class="secondary" :disabled="dshUsageBusy" @click="dshUsageClearCache">清除缓存并重扫</button>
-      </div>
-      <p v-if="dshUsageFlash.msg" class="msg" :class="msgCls(dshUsageFlash)">{{ dshUsageFlash.msg }}</p>
-
-      <template v-if="dshUsage && dshUsage.ok">
-        <label class="field row">
-          <span class="label">数据目录</span>
-          <span class="cmdline">{{ dshUsage.home }}</span>
-        </label>
-        <label class="field row">
-          <span class="label">数据来源</span>
-          <span class="ver">{{ dshUsageSourceText }}</span>
-        </label>
-        <label class="field row">
-          <span class="label">会话</span>
-          <span class="ver">{{ dshUsage.sessions }} 个（{{ dshUsage.activeSessions }} 个有用量）</span>
-        </label>
-        <label class="field row">
-          <span class="label">今日</span>
-          <span class="ver"><strong>{{ fmtTokens(dshUsage.todayTokens) }}</strong> tokens · {{ fmtDshCost(dshUsage.costToday) }}</span>
-        </label>
-        <label class="field row">
-          <span class="label">本月</span>
-          <span class="ver">{{ fmtTokens(dshUsage.monthTokens) }} tokens · {{ fmtDshCost(dshUsage.costMonth) }}</span>
-        </label>
-        <label class="field row">
-          <span class="label">累计</span>
-          <span class="ver">
-            {{ fmtTokens(dshUsage.totalTokens) }} tokens（输入 {{ fmtTokens(dshUsage.inTokens) }} · 缓存命中 {{ fmtTokens(dshUsage.cachedTokens) }} · 输出 {{ fmtTokens(dshUsage.outTokens) }} · 推理 {{ fmtTokens(dshUsage.reasonTokens) }}）
-            · {{ fmtDshCost(dshUsage.costTotal) }} · 共 {{ dshUsage.turns }} {{ dshUsage.turnsLabel || '轮' }}
-          </span>
-        </label>
-        <label v-if="dshUsage.balance" class="field row">
-          <span class="label">dsh-usage 抓到的余额</span>
-          <span class="ver">{{ fmtDshBalance() }}</span>
-        </label>
-        <p v-if="dshUsage.note" class="hint">{{ dshUsage.note }}</p>
-
-        <div class="range-tabs-row">
-          <div class="range-tabs">
-            <button v-for="r in DSH_USAGE_RANGES" :key="r" class="range-tab"
-                    :class="{ 'range-tab-on': dshUsageRange === r }" @click="dshUsageRange = r">{{ r }} 天</button>
-          </div>
-        </div>
-        <div v-if="dshUsageDayMax > 0" class="chart" :class="{ 'chart-dense': dshUsageRange >= 14 }">
-          <div v-for="(d, i) in dshUsageDays" :key="d.date" class="bar-col">
-            <div class="bar-val">{{ d.tokens > 0 && (dshUsageLabelEvery === 1 || i % dshUsageLabelEvery === 0) ? fmtTokens(d.tokens) : '' }}</div>
-            <div class="bar-track">
-              <div class="bar" :style="{ height: dshUsageBarHeight(d.tokens) }"></div>
-            </div>
-            <div class="bar-day">{{ i % dshUsageLabelEvery === 0 ? codexDayLabel(d.date) : '' }}</div>
-          </div>
-        </div>
-        <p v-else class="hint">近 {{ dshUsageRange }} 天没有用量记录。</p>
-
-        <div class="fold">
-          <button class="link-btn" @click="dshUsageFolds.models = !dshUsageFolds.models">{{ dshUsageFolds.models ? '收起各模型用量' : '各模型用量' }}</button>
-          <div v-if="dshUsageFolds.models" class="guide">
-            <label v-for="m in dshUsageModels" :key="m.name" class="field row">
-              <span class="label">{{ m.name }}</span>
-              <span class="ver">{{ fmtTokens(m.tokens) }} tokens · {{ m.turns }} {{ dshUsage.turnsLabel || '轮' }} · 输出 {{ fmtTokens(m.out) }} · {{ fmtDshCost(m.cost) }}</span>
-            </label>
-          </div>
-        </div>
-        <div class="fold">
-          <button class="link-btn" @click="dshUsageFolds.help = !dshUsageFolds.help">{{ dshUsageFolds.help ? '收起说明' : '说明' }}</button>
-          <div v-if="dshUsageFolds.help" class="guide">
-            <p class="guide-use"><strong>数据来源：</strong>优先读 <code>dsh-usage/usage-ledger.json</code>（dsh-usage 插件的按天账本，能画趋势）；账本还没有数据时回落到 <code>storages/session_projcache/sessions/*.json</code>，按「会话创建日」把该会话的全部用量记在一天里。两者不会同时累加，避免同一批 token 被算两遍。</p>
-            <p class="guide-use"><strong>花费：</strong>账本里的 <code>cost</code> 只有 DeepSeek 官方那档有值（单位人民币），其它 provider 未定价恒为 0，所以不会混币种。</p>
-            <p class="guide-use"><strong>轮次：</strong>按天账本给的是 LLM 调用次数，会话缓存给的是对话轮次，两者的单位不同，已在上面标出。</p>
-            <p class="guide-use"><strong>缓存：</strong>按会话缓存文件的 size/mtime 判断是否变化，只有变过的才重新解析。缓存里只有聚合数与文件指纹，<strong>不含任何凭据</strong>。</p>
-            <p class="guide-use"><strong>读不到数据：</strong>dsh 的账本由 dsh-usage / cost-meter 这类插件写入，装好并跑过几轮对话后才有数；也可以点「清除缓存并重扫」强制重读。</p>
-          </div>
-        </div>
-      </template>
       </template>
     </section>
-
     <!-- [dsh] dsh 只读诊断：五项本地检查，纯只读、不改任何配置、不联网 -->
     <section v-if="activeTab === 'dev'" class="card">
       <div class="card-head">
         <h2 class="card-toggle" @click="toggleDevCard('diagnose')">
-          <span class="caret">{{ devFolds.diagnose ? '▾' : '▸' }}</span>dsh 诊断
+          <span class="caret">{{ devFolds.diagnose ? '▾' : '▸' }}</span>dsh 环境诊断
           <!-- 收起态摘要：只在「本会话已展开跑过」后才显示，否则不预读、直接提示点开 -->
           <span v-if="!devFolds.diagnose" class="card-sum">
             <template v-if="devStatsLoaded.diagnose">{{ diagnoseSummary }}</template>
@@ -5319,8 +5539,12 @@ onUnmounted(() => {
         <div class="fold">
           <button class="link-btn" @click="diagnoseFolds.help = !diagnoseFolds.help">{{ diagnoseFolds.help ? '收起说明' : '说明' }}</button>
           <div v-if="diagnoseFolds.help" class="guide">
+            <!-- 与「配置转储」「插件开关」两张卡分工：这张只回答「哪里坏了」，
+                 转储卡回答「这个条目是谁改的」，插件开关卡负责动手改。
+                 判据与改进办法在各自卡里只讲一遍，这里只留指引，避免三处说法随时间漂移。 -->
+            <p class="guide-use"><strong>本卡只诊断，不动手：</strong>这里回答「哪里坏了」，不会改任何文件。要看清某个条目是被谁改的用「dsh 配置转储」，要真的禁掉某个插件用「dsh 插件开关」。</p>
             <p class="guide-use"><strong>重复模块：</strong>profile 的 <code>node_modules</code> 里装出了一份与全局 dsh 树<strong>同版本</strong>的 <code>@deepseek-ai/*</code>（比对包名 + 版本号判定，不看路径），会让 cordis 认成两份不同的包，报 <code>prompt section "deployment:persona" is already registered</code>，所有 preset 挂载失败。每次升级全局 dsh 都可能复现。</p>
-            <p class="guide-use"><strong>patch 条目：</strong><code>cordis.patch.yml</code> 里 <code>- id: X</code> 指向的条目必须真的存在于组装树中，否则 dsh 报 <code>patch: entry "X" not found</code> 直接起不来。</p>
+            <p class="guide-use"><strong>patch 条目：</strong><code>cordis.patch.yml</code> 里 <code>- id: X</code> 指向的条目必须真的存在于组装树中，否则 dsh 报 <code>patch: entry "X" not found</code> 直接起不来。这一项的判据由 dsh 自己打印的 not-found 行给出 —— 所以要先在「dsh 配置转储」里读一次，否则显示 <code>[!]</code>「无法判定」，不猜。</p>
             <p class="guide-use"><strong>3080 端口：</strong>被非 dsh 进程占用时 dsh 起不来；已有 dsh 在跑则不必再启。这一项要读进程名，个别系统上可能查不出归属 —— 那种情况显示 <code>[!]</code> 并附原因，属于「没查出来」，不是「查出来有问题」。</p>
             <p class="guide-use"><strong>只读与缓存：</strong>本诊断不修任何东西，也不写 dsh 的任何文件。结果缓存 60 秒：「重新诊断」在缓存有效时直接复用（省掉一次遍历 <code>node_modules</code>），需要抹掉缓存重跑就点「强制重跑」。</p>
           </div>
@@ -5328,7 +5552,6 @@ onUnmounted(() => {
       </template>
       </template>
     </section>
-
     <!-- [dsh] dsh 配置转储：一次 CLI 读取，摊开 patch 分层与生效/默认树差异，纯只读、不改配置、不联网 -->
     <section v-if="activeTab === 'dev'" class="card">
       <div class="card-head">
@@ -5416,6 +5639,11 @@ onUnmounted(() => {
         <div class="fold">
           <button class="link-btn" @click="dshDumpFolds.help = !dshDumpFolds.help">{{ dshDumpFolds.help ? '收起说明' : '说明' }}</button>
           <div v-if="dshDumpFolds.help" class="guide">
+            <!-- 与「环境诊断」卡的分工：这张解释「谁改的 / 默认长什么样」，
+                 诊断卡负责判「坏了没」。读一次转储同时给诊断卡提供 patch 判据，
+                 这点在两边都要说清，否则用户不知道「诊断说无法判定」时该去哪。 -->
+            <p class="guide-use"><strong>本卡解释「为什么」，不诊断也不改配置：</strong>回答「这个条目是谁改的、默认长什么样」。判断配置有没有坏用「dsh 环境诊断」，要改某个插件的开关用「dsh 插件开关」。</p>
+            <p class="guide-use"><strong>顺手给诊断卡提供判据：</strong>dsh 解析 patch 时会打印 <code>patch: entry "X" not found</code>。诊断卡的「patch 条目指向不存在的 id」一项就是读这里的缓存来判定的 —— 没读过转储时那一项显示「无法判定」，读过才给结论。所以先读转储再跑诊断，结果最准。</p>
             <p class="guide-use"><strong>分层怎么来的：</strong>dump 里每个分节头写着「这份配置来自哪个包」以及「被谁 patch 过」。包名来源算<strong>包内层</strong>（bundle 自带的 patch），<code>cordis.patch.yml</code> 的绝对路径算<strong>用户层</strong>（你自己写的 patch），没有任何来源的算<strong>基线</strong>。判用户层看的是「像不像绝对路径」，不写死某个目录 —— 改过 <code>$DSH_HOME</code> 也能认出来。</p>
             <p class="guide-use"><strong>差异是怎么比的：</strong>生效树（<code>--dump-config</code>）与默认树（<code>--dump-default-config</code>）按条目 id 对齐，比三样：包名、是否禁用、config 的<strong>字段名</strong>。patch 是把整条替换掉的，所以同 id 后出现的分节会盖住先出现的，这里也按同样规则合并。</p>
             <p class="guide-use"><strong>为什么看不到 config 的值：</strong>config 里可能带密钥，转储一律只留字段名不留值，界面上与「复制」里都是如此。</p>
@@ -5426,141 +5654,148 @@ onUnmounted(() => {
       </template>
       </template>
     </section>
-
-    <!-- [dsh] 插件开关（E2）：**本页唯一会写 dsh 文件的卡**。逐条禁用/启用 + 写前强制快照 + 一键还原 -->
+    <!-- [dsh] dsh 本地用量统计：读 ~/.dsh 下 dsh-usage 的账本与会话投影缓存，纯本地、不联网 -->
     <section v-if="activeTab === 'dev'" class="card">
       <div class="card-head">
-        <h2 class="card-toggle" @click="toggleDevCard('dshPatch')">
-          <span class="caret">{{ devFolds.dshPatch ? '▾' : '▸' }}</span>dsh 插件开关
-          <span v-if="!devFolds.dshPatch" class="card-sum">
-            <template v-if="devStatsLoaded.dshPatch">{{ dshPatchFlash.msg || '点击展开' }}</template>
-            <template v-else>点击展开读取</template>
+        <h2 class="card-toggle" @click="toggleDevCard('dshUsage')">
+          <span class="caret">{{ devFolds.dshUsage ? '▾' : '▸' }}</span>dsh 用量统计
+          <!-- 收起态摘要：只在「本会话已展开读过」后才显示，否则不预读、直接提示点开 -->
+          <span v-if="!devFolds.dshUsage" class="card-sum">
+            <template v-if="devStatsLoaded.dshUsage && dshUsage && dshUsage.ok">今日 {{ fmtTokens(dshUsage.todayTokens) }} tokens · 本月 {{ fmtTokens(dshUsage.monthTokens) }}</template>
+            <template v-else>点击展开查看</template>
           </span>
         </h2>
       </div>
-      <template v-if="devFolds.dshPatch">
+      <template v-if="devFolds.dshUsage">
       <p class="hint">
-        逐条<strong>禁用 / 启用</strong> dsh 插件。改的是<strong>用户层 patch</strong>
-        <code>profiles/{{ dshPatchProfile }}/cordis.patch.yml</code>（行级追加 <code>- id: X</code> + <code>disabled: true</code>），
-        <strong>每次写入前自动建一份快照</strong>，可随时整文件还原。
-      </p>
-      <p class="hint">
-        ⚠️ <strong>对带前端界面的插件可能无效</strong>：实测只有<strong>纯服务端</strong>插件
-        （cost-meter / modlens / mnemon 这类）能被 patch 可靠禁用；带 client 入口的插件（如 dsh-better-sidebar）
-        加载入口在 <code>package.json</code> 的 <code>dependencies</code> 里，禁用 patch 条目不生效。
-        <br>⚠️ <strong>启用需重启</strong>：dsh 的 patch 热重载是<strong>单向</strong>的 —— 加 <code>disabled</code> 即时生效，
-        但<strong>删掉不恢复</strong>，所以「启用」后要重启 dsh 才看得到。
+        读 dsh 自己写在 <code>~/.dsh</code>（或 <code>$DSH_HOME</code>）下的用量数据做统计，
+        <strong>纯本地读取、不需要 API Key、不发任何网络请求</strong>。优先用 dsh-usage 的按天账本，
+        账本还没落盘时回落到会话投影缓存。
       </p>
       <div class="btn-row">
-        <button :disabled="dshPatchBusy" @click="dshPatchRefresh()">{{ dshPatchBusy ? '读取中…' : '刷新清单' }}</button>
-        <button class="secondary" @click="dshBackupCreate()">立即备份</button>
-        <button class="link-btn" @click="dshPatchFolds.help = !dshPatchFolds.help">{{ dshPatchFolds.help ? '收起说明' : '说明' }}</button>
+        <!-- 首次展开已自动读过一次，按钮主要当「刷新」用 -->
+        <button :disabled="dshUsageBusy" @click="dshUsageRefresh">{{ dshUsageBusy ? '读取中…' : (dshUsage ? '刷新' : '读取统计') }}</button>
+        <button v-if="dshUsage" class="secondary" :disabled="dshUsageBusy" @click="dshUsageClearCache">清除缓存并重扫</button>
       </div>
-      <p v-if="dshPatchFlash.msg" class="msg" :class="msgCls(dshPatchFlash)">{{ dshPatchFlash.msg }}</p>
+      <p v-if="dshUsageFlash.msg" class="msg" :class="msgCls(dshUsageFlash)">{{ dshUsageFlash.msg }}</p>
 
-      <template v-if="dshPatch && !dshPatch.ok">
-        <p class="hint">{{ dshPatch.error || '读取失败，请稍后重试。' }}</p>
-      </template>
-
-      <template v-else-if="dshPatch">
+      <template v-if="dshUsage && dshUsage.ok">
         <label class="field row">
-          <span class="label">写入位置</span>
-          <span class="ver" :title="dshPatch.file">{{ dshPatch.file }}</span>
+          <span class="label">数据目录</span>
+          <span class="cmdline">{{ dshUsage.home }}</span>
         </label>
+        <label class="field row">
+          <span class="label">数据来源</span>
+          <span class="ver">{{ dshUsageSourceText }}</span>
+        </label>
+        <label class="field row">
+          <span class="label">会话</span>
+          <span class="ver">{{ dshUsage.sessions }} 个（{{ dshUsage.activeSessions }} 个有用量）</span>
+        </label>
+        <label class="field row">
+          <span class="label">今日</span>
+          <span class="ver"><strong>{{ fmtTokens(dshUsage.todayTokens) }}</strong> tokens · {{ fmtDshCost(dshUsage.costToday) }}</span>
+        </label>
+        <label class="field row">
+          <span class="label">本月</span>
+          <span class="ver">{{ fmtTokens(dshUsage.monthTokens) }} tokens · {{ fmtDshCost(dshUsage.costMonth) }}</span>
+        </label>
+        <label class="field row">
+          <span class="label">累计</span>
+          <span class="ver">
+            {{ fmtTokens(dshUsage.totalTokens) }} tokens（输入 {{ fmtTokens(dshUsage.inTokens) }} · 缓存命中 {{ fmtTokens(dshUsage.cachedTokens) }} · 输出 {{ fmtTokens(dshUsage.outTokens) }} · 推理 {{ fmtTokens(dshUsage.reasonTokens) }}）
+            · {{ fmtDshCost(dshUsage.costTotal) }} · 共 {{ dshUsage.turns }} {{ dshUsage.turnsLabel || '轮' }}
+          </span>
+        </label>
+        <label v-if="dshUsage.balance" class="field row">
+          <span class="label">dsh-usage 抓到的余额</span>
+          <span class="ver">{{ fmtDshBalance() }}</span>
+        </label>
+        <p v-if="dshUsage.note" class="hint">{{ dshUsage.note }}</p>
 
-        <p v-if="!dshPatch.exists" class="hint">
-          这个 profile 还没有 <code>cordis.patch.yml</code> —— 点任意插件的「禁用」会自动创建它。
-        </p>
-        <p v-else-if="!dshPatch.items?.length" class="hint">这个 patch 文件里还没有条目。</p>
+        <!-- 图表 + 各模型用量由共用组件渲染：与 Codex 卡那两块逐字相同，
+             抽出来避免改一处漏一处（详见 UsageChart.vue 顶部注释） -->
+        <UsageChart
+          v-model:range="dshUsageRange"
+          :ranges="DSH_USAGE_RANGES"
+          :days="dshUsageDays"
+          :label-every="dshUsageLabelEvery"
+          :bar-height="dshUsageBarHeight"
+          :day-label="codexDayLabel"
+          :models="dshUsageModels"
+          :turns-label="dshUsage.turnsLabel || '轮'"
+          :show-cost="true"
+          :fmt-cost="fmtDshCost"
+        />
 
-        <div v-else class="patch-list">
-          <div v-for="it in dshPatch.items" :key="it.id" class="patch-item" :class="{ 'patch-off': it.disabled }">
-            <span class="patch-id" :title="`第 ${it.line} 行`">{{ it.id }}</span>
-            <span v-if="it.hasConfig" class="patch-tag">带 config</span>
-            <span class="patch-state">{{ it.disabled ? '已禁用' : '启用中' }}</span>
-            <button
-              class="secondary patch-btn"
-              :disabled="!!dshPatchPending"
-              @click="dshPatchToggle(it)"
-            >{{ dshPatchPending === it.id ? '写入中…' : (it.disabled ? '启用' : '禁用') }}</button>
-          </div>
-        </div>
-
-        <!-- 快照：写前自动建的那些 + 手动备份的，都在这里回滚 -->
         <div class="fold">
-          <button class="link-btn" @click="dshBackupFolds.list = !dshBackupFolds.list">
-            {{ dshBackupFolds.list ? '收起快照' : '展开快照' }}（{{ dshBackups?.snapshots?.length || 0 }} 份，保留最近 {{ dshBackups?.max ?? 20 }} 份）
-          </button>
-          <div v-if="dshBackupFolds.list">
-            <p v-if="dshBackups && !dshBackups.ok" class="hint">{{ dshBackups.error || '快照列表读取失败。' }}</p>
-            <p v-else-if="!dshBackups?.snapshots?.length" class="hint">还没有快照。</p>
-            <template v-else>
-              <p class="hint" :title="dshBackups.root">存放在 <code>whale-dsh-backup/</code>（与 dsh 配置同目录，可自行删除）</p>
-              <div v-for="s in dshBackups.snapshots" :key="s.dirName" class="bak-item">
-                <span class="bak-time">{{ dshBackupTime(s) }}</span>
-                <span class="bak-tag">{{ dshBackupReasonText(s.reason) }}</span>
-                <span class="bak-meta">{{ s.present }}/{{ s.total }} 个文件</span>
-                <button
-                  class="secondary patch-btn"
-                  :class="{ 'bak-confirm': dshRestoreConfirm === s.dirName }"
-                  @click="dshBackupRestore(s.dirName)"
-                >{{ dshRestoreConfirm === s.dirName ? '确认还原' : '还原' }}</button>
-              </div>
-            </template>
+          <button class="link-btn" @click="dshUsageFolds.help = !dshUsageFolds.help">{{ dshUsageFolds.help ? '收起说明' : '说明' }}</button>
+          <div v-if="dshUsageFolds.help" class="guide">
+            <p class="guide-use"><strong>数据来源：</strong>优先读 <code>dsh-usage/usage-ledger.json</code>（dsh-usage 插件的按天账本，能画趋势）；账本还没有数据时回落到 <code>storages/session_projcache/sessions/*.json</code>，按「会话创建日」把该会话的全部用量记在一天里。两者不会同时累加，避免同一批 token 被算两遍。</p>
+            <p class="guide-use"><strong>花费：</strong>账本里的 <code>cost</code> 只有 DeepSeek 官方那档有值（单位人民币），其它 provider 未定价恒为 0，所以不会混币种。</p>
+            <p class="guide-use"><strong>轮次：</strong>按天账本给的是 LLM 调用次数，会话缓存给的是对话轮次，两者的单位不同，已在上面标出。</p>
+            <p class="guide-use"><strong>缓存：</strong>按会话缓存文件的 size/mtime 判断是否变化，只有变过的才重新解析。缓存里只有聚合数与文件指纹，<strong>不含任何凭据</strong>。</p>
+            <p class="guide-use"><strong>读不到数据：</strong>dsh 的账本由 dsh-usage / cost-meter 这类插件写入，装好并跑过几轮对话后才有数；也可以点「清除缓存并重扫」强制重读。</p>
           </div>
-        </div>
-
-        <div v-if="dshPatchFolds.help" class="guide">
-          <p class="guide-use"><strong>为什么清单只有这几条：</strong>这一页列出的是<strong>这个 patch 文件里写了什么</strong>，不是 dump 出来的完整组装树。后者包含官方 bundle 与各层 patch，而这里能改的只有用户层这一个文件 —— 拿一份「能看不能改」的清单来当操作对象，只会让人对着开关点半天没反应。</p>
-          <p class="guide-use"><strong>禁用是怎么写的：</strong>沿用 dsh 自己的行级写法 —— 已有条目就只改它那一行的 <code>disabled</code> 值；没有该条目就在文件末尾追加 <code>- id: X</code> + <code>disabled: true</code>（patch 是后者覆盖前者，追加在末尾等于优先级最高）。整份文件<strong>不会重新序列化</strong>，你的注释、引号风格、键顺序都原样保留。</p>
-          <p class="guide-use"><strong>为什么每次都要备份：</strong>实测 dsh 对写坏的 patch <strong>不报错</strong> —— 写一个不存在的 id，它只在 stderr 打一行 <code>patch: entry "X" not found</code>、退出码 0、启动照常。所以这里写完会<strong>回读磁盘校验</strong>，并且改动前一定先建快照：宁可不让改，也不能让改动不可撤销。</p>
-          <p class="guide-use"><strong>还原是整文件覆盖：</strong>因为热重载单向（删行不恢复），只有让文件真正回到改动前的完整内容才有效。代价是<strong>会一并回退这份文件上的其他改动</strong> —— 备份的价值就是拿到一个已知良好的状态。快照<strong>绝不包含</strong> <code>.credentials.yaml</code> 等凭据文件。</p>
         </div>
       </template>
       </template>
     </section>
-
-    <!-- [dsh] 一键隔离（E3）：与上一卡的区别是「只动勾选的条目」，并把将改动的行先摆出来过目 -->
+    <!-- [dsh] 插件开关 / 批量隔离（E2 + E3 合并卡）
+         合并理由：两卡改的是**同一个文件、同一个 profile、同一套快照**，差别只在粒度与候选范围。
+         而候选范围不一致是会让人迷路的 —— E2 只列 patch 里已有的 12 条，用户想禁的第三方插件
+         往往不在其中，在 E2 卡里根本找不到，得切到 E3 卡才行，而 E2 卡完全没提示这一点。 -->
     <section v-if="activeTab === 'dev'" class="card">
       <div class="card-head">
         <h2 class="card-toggle" @click="toggleDevCard('dshIsolate')">
-          <span class="caret">{{ devFolds.dshIsolate ? '▾' : '▸' }}</span>dsh 一键隔离
+          <span class="caret">{{ devFolds.dshIsolate ? '▾' : '▸' }}</span>dsh 插件开关
           <span v-if="!devFolds.dshIsolate" class="card-sum">
-            <template v-if="devStatsLoaded.dshIsolate">{{ dshPatchFlash.msg || '点击展开' }}</template>
+            <template v-if="devStatsLoaded.dshIsolate">{{ dshIsolateSummary }}</template>
             <template v-else>点击展开读取</template>
           </span>
         </h2>
       </div>
       <template v-if="devFolds.dshIsolate">
         <p class="hint">
-          上面那张卡是<strong>一条一条</strong>改；这张是<strong>一次改一批</strong>：
-          勾出你要<strong>禁掉</strong>的插件，点「预览改动」看清会动哪几行，再点「确认隔离」。
-          <strong>没勾的条目一个字节都不会碰</strong> —— 这里的「隔离」不是「把所有插件全禁」。
+          改的是用户层 patch（<code>cordis.patch.yml</code>）。<strong>两种改法</strong>：
+          行尾按钮<strong>一条一条</strong>即时改；或者勾选若干条后点「预览改动」→「确认隔离」<strong>一次改一批</strong>。
+          <strong>没勾的条目一个字节都不会碰</strong> —— 批量那侧的「隔离」不是「把所有插件全禁」。
         </p>
         <p class="hint">
           ⚠️ 候选 = <strong>用户层 patch 里已有的条目</strong> ∪ <strong>组装树里读到的插件</strong>。
           后者写进去等于<strong>新加</strong>一条 patch，而实测带前端界面的插件这样就禁不掉
           （加载入口在 <code>package.json</code> 的 <code>dependencies</code> 里）；
           纯服务端插件（cost-meter / modlens / mnemon 这类）才可靠生效。
-          <br>⚠️ <strong>写前必先建快照</strong>（记作「隔离前」），快照建不出来就中止写入，不会出现改完没法回滚的情况。
+          <br>⚠️ <strong>任何写入前都强制建快照</strong>，快照建不出来就中止写入，不会出现改完没法回滚的情况。
+          <br>⚠️ <strong>启用需重启</strong>：dsh 的 patch 热重载是<strong>单向</strong>的 —— 加 <code>disabled</code> 即时生效，
+          但<strong>删掉不恢复</strong>，所以「启用」后要重启 dsh 才看得到。
         </p>
         <div class="btn-row">
-          <button :disabled="dshIsolateBusy" @click="dshIsolateRefresh()">{{ dshIsolateBusy ? '读取中…' : '刷新候选' }}</button>
+          <button :disabled="dshIsolateBusy" @click="dshIsolateRefresh()">{{ dshIsolateBusy ? '读取中…' : '刷新清单' }}</button>
+          <button class="secondary" @click="dshBackupCreate()">立即备份</button>
           <button class="secondary" :disabled="dshIsolateBusy" @click="dshIsolatePreview()">预览改动</button>
-          <button class="link-btn" @click="dshIsolateFolds.help = !dshIsolateFolds.help">{{ dshIsolateFolds.help ? '收起说明' : '说明' }}</button>
         </div>
+        <!-- ⚠️ 「说明」不能放进上面那个 .btn-row：.btn-row 的 `flex: 1` 会展开成 `flex-basis: 0`，
+             而 .link-btn 的 `padding: 0` 让「文字撑出宽度」这条退路也没了 —— 两者相加宽度恒为 0，
+             按钮看得见却点不到（点击落到邻座的「预览改动」上）。
+             所以独立成 .fold 一行；位置放在整卡最后 —— 与本 Tab 其余 5 张卡统一（说明都在末尾），
+             说明是补充信息，不该插在「候选 → 预览 → 确认」这条动作链中间。 -->
+        <!-- 两个回执各自一条：逐条开关（含快照还原/命名/清理）归 dshPatchFlash，
+             批量隔离归 dshIsolateFlash。合并成一张卡后仍不复用同一个 flash ——
+             否则点「禁用」会在同一条消息行里覆盖掉上一句「已隔离：改了 N 条」。 -->
         <p v-if="dshPatchFlash.msg" class="msg" :class="msgCls(dshPatchFlash)">{{ dshPatchFlash.msg }}</p>
+        <p v-if="dshIsolateFlash.msg" class="msg" :class="msgCls(dshIsolateFlash)">{{ dshIsolateFlash.msg }}</p>
+
+        <label v-if="dshIsolate?.ok" class="field row">
+          <span class="label">写入位置</span>
+          <span class="ver" :title="dshIsolate.file">{{ dshIsolate.file }}</span>
+        </label>
 
         <template v-if="dshIsolate && !dshIsolate.ok">
           <p class="hint">{{ dshIsolate.error || '读取候选失败，请稍后重试。' }}</p>
         </template>
 
         <template v-else-if="dshIsolate">
-          <label class="field row">
-            <span class="label">写入位置</span>
-            <span class="ver" :title="dshIsolate.file">{{ dshIsolate.file }}</span>
-          </label>
-
           <p v-if="!dshIsolate.items?.length" class="hint">
             没有可隔离的候选 —— patch 文件里还没有条目，也没能从组装树里读到插件。
           </p>
@@ -5570,24 +5805,102 @@ onUnmounted(() => {
               <button class="link-btn" @click="dshIsolateFolds.list = !dshIsolateFolds.list">
                 {{ dshIsolateFolds.list ? '收起候选' : '展开候选' }}（已勾 {{ dshIsolatePicked.size }} / 共 {{ dshIsolate.items.length }} 条）
               </button>
-              <div class="btn-row">
-                <button class="secondary" @click="dshIsolateAll()">全选</button>
-                <button class="secondary" @click="dshIsolateNoneDisabled()">只选启用中的</button>
+              <!-- 用小胶囊样式而不是 .btn-row：上一行是 12px 的下划线链接，
+                   放进 .btn-row 会被 `flex: 1` 撑成两个等宽大按钮，一行小链接配一行大按钮，
+                   视觉重量差太多（同类小控件见下面的分组轴切换） -->
+              <div class="iso-axis iso-pick-row">
+                <button class="iso-axis-btn" @click="dshIsolateAll()">全选</button>
+                <button class="iso-axis-btn" :title="'只勾当前确定启用中的条目（超过 ' + DSH_ISOLATE_MAX_BATCH + ' 条时会自动停在上限）'" @click="dshIsolateNoneDisabled()">只选启用中的</button>
               </div>
             </div>
+            <!-- 一次写入有上限（MAX_BATCH）。超过就必须说清楚，否则用户以为「全选 = 全禁」，
+                 而实际只写进去前 100 条 —— 这正是早先候选被截断时的静默失效形态。
+                 现在宿主是「超限直接拒绝」而不是截断，所以这里说「会被拦下」而不是「会分批」 -->
+            <p v-if="dshIsolatePicked.size > DSH_ISOLATE_MAX_BATCH" class="hint">
+              ⚠️ 已勾 <strong>{{ dshIsolatePicked.size }}</strong> 条，超过单次写入上限
+              <strong>{{ DSH_ISOLATE_MAX_BATCH }}</strong> 条，点「预览改动」会被拦下。
+              先点「只选启用中的」缩小范围最快 —— 已禁用的条目本来就不需要再禁一次。
+            </p>
             <div v-if="dshIsolateFolds.list" class="patch-list">
-              <label
-                v-for="it in dshIsolate.items"
-                :key="it.id"
-                class="patch-item iso-item"
-                :class="{ 'patch-off': it.disabled }"
-              >
-                <input type="checkbox" :checked="dshIsolatePicked.has(it.id)" @change="dshIsolateTogglePick(it.id)">
-                <span class="patch-id" :title="it.source === 'patch' ? `patch 第 ${it.line} 行` : '不在 patch 里，隔离会新加一条'">{{ it.id }}</span>
-                <span v-if="it.source === 'plugin'" class="patch-tag">新加</span>
-                <span v-if="it.hasConfig" class="patch-tag">带 config</span>
-                <span class="patch-state">{{ it.disabled ? '已禁用' : '启用中' }}</span>
-              </label>
+              <!-- 分组轴切换放在列表内部：它只对下面这堆候选有意义，列表没展开时露在外面就是个悬空控件。
+                   也避开了 .btn-row 的 `flex: 1` —— 进去会被无差别撑成大按钮 -->
+              <div class="iso-axis">
+                <span class="iso-axis-label">分组</span>
+                <button
+                  class="iso-axis-btn"
+                  :class="{ 'iso-axis-on': dshIsolateGroupBy === 'tier' }"
+                  @click="dshIsolateSetGroupBy('tier')"
+                >
+                  按来源
+                </button>
+                <button
+                  class="iso-axis-btn"
+                  :class="{ 'iso-axis-on': dshIsolateGroupBy === 'state' }"
+                  @click="dshIsolateSetGroupBy('state')"
+                >
+                  按启用状态
+                </button>
+                <button
+                  class="iso-axis-btn"
+                  :class="{ 'iso-axis-on': dshIsolateGroupBy === 'both' }"
+                  @click="dshIsolateSetGroupBy('both')"
+                >
+                  按来源+状态
+                </button>
+              </div>
+              <!-- 单轴（按来源 / 按状态）与双轴（按来源+状态）共用这一层渲染：
+                   单轴时 dshIsolateSubLevels 回一个「无头层」直接把 g.items 交出去；
+                   双轴时外层组 items 恒空、条数都在子组里，每个子组各成一个带头层。
+                   两层共用同一段行模板（含徽章与行尾开关按钮）——
+                   早先这两层各抄了一份一模一样的行模板，改一处漏一处，加个徽章得改两遍。 -->
+              <template v-for="g in dshIsolateGroups" :key="g.key">
+                <div class="iso-tier">
+                  <button class="link-btn" @click="dshIsolateToggleTier(g.key)">
+                    {{ dshIsolateTierFolds[g.key] ? '▸' : '▾' }} {{ g.label
+                    }}（{{ dshIsolateGroupCount(g) }} 条）
+                  </button>
+                  <span class="iso-tier-hint">{{ g.hint }}</span>
+                </div>
+                <template v-if="!dshIsolateTierFolds[g.key]">
+                  <template v-for="lvl in dshIsolateSubLevels(g)" :key="lvl.key">
+                    <!-- 双轴时的内层组头：用 iso-tier-sub 与主组头拉开层级。
+                         单轴时 dshIsolateSubLevels 只回一个「无头层」（head 为 false），不渲染组头。 -->
+                    <div v-if="lvl.head" class="iso-tier iso-tier-sub">
+                      <button class="link-btn" @click="dshIsolateToggleTier(lvl.key)">
+                        {{ dshIsolateTierFolds[lvl.key] ? '▸' : '▾' }} {{ lvl.label }}（{{ lvl.items.length }} 条）
+                      </button>
+                      <span class="iso-tier-hint">{{ lvl.hint }}</span>
+                    </div>
+                    <template v-if="!lvl.head || !dshIsolateTierFolds[lvl.key]">
+                      <label
+                        v-for="it in lvl.items"
+                        :key="it.id"
+                        class="patch-item iso-item"
+                        :class="{ 'patch-off': it.disabled === true }"
+                      >
+                        <input type="checkbox" :checked="dshIsolatePicked.has(it.id)" @change="dshIsolateTogglePick(it.id)">
+                        <span class="patch-id" :title="it.source === 'patch' ? `patch 第 ${it.line} 行` : `不在 patch 里，隔离会新加一条${it.bundle ? '（来自 ' + it.bundle + '）' : ''}`">{{ it.id }}</span>
+                        <span v-if="it.source === 'plugin'" class="patch-tag">新加</span>
+                        <span v-if="it.hasConfig" class="patch-tag">带 config</span>
+                        <span
+                          class="patch-state"
+                          :class="it.disabled === true ? 'state-off' : it.disabled === false ? 'state-on' : 'state-unknown'"
+                        >{{ it.disabled === true ? '已禁用' : it.disabled === false ? '启用中' : '状态未知' }}</span>
+                        <!-- 行尾即时开关：只有「已经在 patch 里」的条目才给。
+                             不在 patch 里的（source=plugin）想禁只能靠批量那条路 —— 宿主 dshPatchToggle 要求该 id
+                             已在 patch 中存在，单条切换做不到「新加」，硬给按钮必然报「patch 里没有这条」。
+                             状态未知的也不给：连它现在开没开都不知道，就不该让一键把它翻过去。 -->
+                        <button
+                          v-if="it.source === 'patch' && it.disabled !== undefined"
+                          class="secondary patch-btn"
+                          :disabled="!!dshPatchPending"
+                          @click.prevent="dshPatchToggle({ id: it.id, disabled: it.disabled, hasConfig: it.hasConfig, line: it.line })"
+                        >{{ dshPatchPending === it.id ? '写入中…' : (it.disabled ? '启用' : '禁用') }}</button>
+                      </label>
+                    </template>
+                  </template>
+                </template>
+              </template>
             </div>
           </template>
 
@@ -5608,18 +5921,102 @@ onUnmounted(() => {
               <button class="secondary" @click="dshIsolatePlan = null">取消</button>
             </div>
           </template>
-
-          <div v-if="dshIsolateFolds.help" class="guide">
-            <p class="guide-use"><strong>「隔离」为什么不是「全禁」：</strong>原方案是往 profile 里补十几条 <code>disabled: true</code> 把用户整个 profile 干掉。这里改成只操作用户<strong>显式勾选</strong>的条目 —— 界面上点不出「我没选的东西」，改动范围永远能追溯到一份真实读到的清单。</p>
-            <p class="guide-use"><strong>候选为什么要读组装树：</strong>实测写一个<strong>不存在的 id</strong>，dsh 只在 stderr 打一行 <code>patch: entry "X" not found</code>、退出码 0、启动照常 —— 也就是「写坏了不报错」。所以候选先用 <code>--dump-config</code> 拿一份真实存在的条目，与 patch 里的取并集，让你<strong>勾不到拼错的 id</strong>。读不到组装树时降级为「只有 patch 里的条目」，不把整件事判死。</p>
-            <p class="guide-use"><strong>为什么分两步：</strong>「预览改动」是 <strong>dryRun</strong>，只计算不写盘，返回本次会改哪些行；你过目后点「确认隔离」才真正落笔。一次改多条与单条不同 —— 往中间插行会让后面的行号整体顺延，所以实现里是<strong>从后往前</strong>改、并且<strong>一次写盘</strong>，不会半截写入。</p>
-            <p class="guide-use"><strong>已是禁用的条目：</strong>勾了也不会重复写，计划里会标成「已是禁用（不动）」，界面上说「改了 N 条」而不是「N 条已隔离」，免得把没动过的算进战果。</p>
-          </div>
         </template>
+
+        <!-- 快照：写前自动建的那些 + 手动备份的，都在这里回滚。
+             放在候选与「待确认计划」之后 —— 快照是**事后回滚**用的，不是写入流程的一环。
+             早先它夹在说明与候选之间，把「预览改动 → 确认隔离」这条动作链硬生生截断，
+             用户从预览滚到确认要跨过整块快照管理（份数/还原/命名/删除/清理）。 -->
+        <div class="fold">
+          <button class="link-btn" @click="dshBackupFolds.list = !dshBackupFolds.list">
+            {{ dshBackupFolds.list ? '收起快照' : '展开快照' }}（{{ dshBackups?.snapshots?.length || 0 }} 份，保留最近 {{ dshBackups?.max ?? 20 }} 份）
+          </button>
+          <div v-if="dshBackupFolds.list">
+            <p v-if="dshBackups && !dshBackups.ok" class="hint">{{ dshBackups.error || '快照列表读取失败。' }}</p>
+            <template v-else>
+              <!-- 保留份数：已知良好与手动命名的快照不参与轮转，所以实际留的会比这个数多 -->
+              <div class="bak-keep">
+                <span class="label">保留份数</span>
+                <input
+                  class="bak-keep-input"
+                  type="number"
+                  :min="dshBackups?.keepMin ?? 1"
+                  :max="dshBackups?.keepMax ?? 200"
+                  :value="dshKeepDraft ?? (dshBackups?.max ?? 20)"
+                  @input="dshKeepDraft = Number(($event.target as HTMLInputElement).value)"
+                />
+                <button class="secondary patch-btn" :disabled="dshKeepDraft === null || dshKeepBusy" @click="dshSaveKeep()">
+                  {{ dshKeepBusy ? '保存中…' : '保存' }}
+                </button>
+                <button class="secondary patch-btn" @click="dshPruneNow()">立即清理</button>
+                <span class="hint bak-keep-note">「已知良好」与手动命名的备份不受这个数限制</span>
+              </div>
+
+              <p v-if="!dshBackups?.snapshots?.length" class="hint">还没有快照。</p>
+              <template v-else>
+                <p class="hint" :title="dshBackups.root">存放在 <code>whale-dsh-backup/</code>（与 dsh 配置同目录，可自行删除）</p>
+                <div v-for="s in dshBackups.snapshots" :key="s.dirName" class="bak-item" :class="{ 'bak-known': s.knownGood }">
+                  <div class="bak-line">
+                    <span class="bak-time">{{ dshBackupTime(s) }}</span>
+                    <span v-if="s.knownGood" class="bak-known-tag" title="不会被自动清理">已知良好</span>
+                    <span v-if="s.name" class="bak-name" :title="s.name">{{ s.name }}</span>
+                    <span class="bak-tag">{{ dshBackupReasonText(s.reason) }}</span>
+                    <span class="bak-meta">{{ s.present }}/{{ s.total }} 个文件</span>
+                  </div>
+                  <div class="bak-actions">
+                    <button
+                      class="secondary patch-btn"
+                      :class="{ 'bak-confirm': dshRestoreConfirm === s.dirName }"
+                      @click="dshBackupRestore(s.dirName)"
+                    >{{ dshRestoreConfirm === s.dirName ? '确认还原' : '还原' }}</button>
+                    <button class="secondary patch-btn" @click="dshToggleKnownGood(s)">{{ s.knownGood ? '取消标记' : '标为已知良好' }}</button>
+                    <button class="link-btn" @click="dshRenameStart(s)">{{ s.name ? '改名' : '命名' }}</button>
+                    <button class="link-btn bak-del" :class="{ 'bak-confirm': dshDeleteConfirm === s.dirName }" @click="dshDeleteSnapshot(s.dirName)">
+                      {{ dshDeleteConfirm === s.dirName ? '确认删除' : '删除' }}
+                    </button>
+                  </div>
+                  <div v-if="dshRenameFor === s.dirName" class="bak-rename">
+                    <input
+                      class="bak-rename-input"
+                      type="text"
+                      maxlength="40"
+                      placeholder="给这份快照起个名字（如「装插件前」）"
+                      :value="dshRenameText"
+                      @input="dshRenameText = ($event.target as HTMLInputElement).value"
+                      @keyup.enter="dshRenameSave()"
+                      @keyup.esc="dshRenameCancel()"
+                    />
+                    <button class="secondary patch-btn" @click="dshRenameSave()">保存</button>
+                    <button class="link-btn" @click="dshRenameCancel()">取消</button>
+                  </div>
+                </div>
+              </template>
+            </template>
+          </div>
+        </div>
+
+        <div class="fold">
+          <button class="link-btn" @click="dshIsolateFolds.help = !dshIsolateFolds.help">{{ dshIsolateFolds.help ? '收起说明' : '说明' }}</button>
+          <div v-if="dshIsolateFolds.help" class="guide">
+            <p class="guide-use"><strong>为什么清单里有 200 多条：</strong>候选是<strong>用户层 patch 里已有的条目</strong> ∪ <strong>组装树里读到的插件</strong>。前者是「你已经写过的」，后者写进去等于<strong>新加</strong>一条 patch —— 只列前者的话，你想禁的第三方插件往往根本不在清单里，会找不到入口。加起来实测常有 200 条以上，用上面的分组轴收窄。</p>
+            <p class="guide-use"><strong>为什么候选要读组装树：</strong>实测写一个<strong>不存在的 id</strong>，dsh 只在 stderr 打一行 <code>patch: entry "X" not found</code>、退出码 0、启动照常 —— 也就是「写坏了不报错」。所以候选先拿一份真实存在的条目，让你<strong>勾不到拼错的 id</strong>。读不到组装树时降级为「只有 patch 里的条目」，不把整件事判死。</p>
+            <p class="guide-use"><strong>禁用是怎么写的：</strong>沿用 dsh 自己的行级写法 —— 已有条目就只改它那一行的 <code>disabled</code>；没有该条目就在文件末尾追加 <code>- id: X</code> + <code>disabled: true</code>（patch 是后者覆盖前者，追加在末尾等于优先级最高）。整份文件<strong>不会重新序列化</strong>，你的注释、引号风格、键顺序都原样保留。</p>
+            <p class="guide-use"><strong>单条改与批量改的区别：</strong>行尾按钮是立即写入一条；「预览改动」是 <strong>dryRun</strong>，只计算不写盘、把「会动哪几行」摆出来，你过目后再点「确认隔离」。批量改多条与单条不同 —— 往中间插行会让后面的行号整体顺延，所以实现里是<strong>从后往前</strong>改、并且<strong>一次写盘</strong>，不会半截写入。</p>
+            <p class="guide-use"><strong>「隔离」为什么不是「全禁」：</strong>原方案是往 profile 里补十几条 <code>disabled: true</code> 把用户整个 profile 干掉。这里改成只操作<strong>显式勾选</strong>的条目 —— 界面上点不出「我没选的东西」，改动范围永远能追溯到一份真实读到的清单。</p>
+            <p class="guide-use"><strong>一次最多写 100 条：</strong>超过会被拦下并提示先缩小范围（点「只选启用中的」最快 —— 已禁用的条目本来就不需要再禁一次）。<strong>是拒绝，不是分批</strong>，所以不会出现「以为全禁了、其实只写进去前 100 条」的静默失效。</p>
+            <p class="guide-use"><strong>三个分组轴怎么选：</strong>「按来源」回答「这条是谁的」（已在你 patch 里 / 第三方插件 / dsh 官方框架），「按启用状态」回答「这条现在开没开」，「按来源+状态」把两者叠起来看（外层来源、内层状态）。三个问题不重叠，所以做成可切换而不是合并成一个。官方框架默认折叠 —— 200 多条里绝大多数是 dsh 自己的组装树节点，铺开会把真正要操作的插件淹掉。</p>
+            <p class="guide-use"><strong>「状态未知」是什么：</strong>宿主没读到该条目的 dump 状态（组装树读取降级）时会显示成<strong>黄色虚线</strong>「状态未知」，而不是蓝色「启用中」 —— 拿「启用中」的颜色去画一个未知状态，等于替它背书。「只选启用中的」也只勾<strong>确定</strong>启用中的条目，未知的不替你决定。</p>
+            <p class="guide-use"><strong>已是禁用的条目：</strong>勾了也不会重复写，计划里会标成「已是禁用（不动）」，界面上说「改了 N 条」而不是「N 条已隔离」，免得把没动过的算进战果。</p>
+            <p class="guide-use"><strong>为什么每次都要备份：</strong>实测 dsh 对写坏的 patch <strong>不报错</strong>（见上），所以这里写完会<strong>回读磁盘校验</strong>，并且改动前一定先建快照：宁可不让改，也不能让改动不可撤销。</p>
+            <p class="guide-use"><strong>还原是整文件覆盖：</strong>因为热重载单向（删行不恢复），只有让文件真正回到改动前的完整内容才有效。代价是<strong>会一并回退这份文件上的其他改动</strong> —— 备份的价值就是拿到一个已知良好的状态。快照<strong>绝不包含</strong> <code>.credentials.yaml</code> 等凭据文件。</p>
+          </div>
+        </div>
       </template>
     </section>
-
-    <!-- [dsh] Codex 本地会话统计：读 ~/.codex/sessions 的 rollout JSONL，纯本地、不联网 -->
+    <!-- [dsh] Codex 本地会话统计：读 ~/.codex/sessions 的 rollout JSONL，纯本地、不联网。
+         上方 5 张卡都属于 dsh，这张不是 —— 用一条纯分界线隔开即可，不写字：
+         写字会和紧邻的卡标题「Codex 会话统计」重复，反而更啰嗦。 -->
+    <hr v-if="activeTab === 'dev'" class="group-sep">
     <section v-if="activeTab === 'dev'" class="card">
       <div class="card-head">
         <h2 class="card-toggle" @click="toggleDevCard('codex')">
@@ -5670,32 +6067,19 @@ onUnmounted(() => {
           <span class="ver">{{ codexWindowsText }}</span>
         </label>
 
-        <div class="range-tabs-row">
-          <div class="range-tabs">
-            <button v-for="r in DSH_USAGE_RANGES" :key="r" class="range-tab"
-                    :class="{ 'range-tab-on': codexRange === r }" @click="codexRange = r">{{ r }} 天</button>
-          </div>
-        </div>
-        <div v-if="codexDayMax > 0" class="chart" :class="{ 'chart-dense': codexRange >= 14 }">
-          <div v-for="(d, i) in codexDays" :key="d.date" class="bar-col">
-            <div class="bar-val">{{ d.tokens > 0 && (codexLabelEvery === 1 || i % codexLabelEvery === 0) ? fmtTokens(d.tokens) : '' }}</div>
-            <div class="bar-track">
-              <div class="bar" :style="{ height: codexBarHeight(d.tokens) }"></div>
-            </div>
-            <div class="bar-day">{{ i % codexLabelEvery === 0 ? codexDayLabel(d.date) : '' }}</div>
-          </div>
-        </div>
-        <p v-else class="hint">近 {{ codexRange }} 天没有用量记录。</p>
+        <UsageChart
+          v-model:range="codexRange"
+          :ranges="DSH_USAGE_RANGES"
+          :days="codexDays"
+          :label-every="codexLabelEvery"
+          :bar-height="codexBarHeight"
+          :day-label="codexDayLabel"
+          :models="codexModels"
+          turns-label="轮"
+          :show-cost="false"
+          :fmt-cost="() => ''"
+        />
 
-        <div class="fold">
-          <button class="link-btn" @click="codexFolds.models = !codexFolds.models">{{ codexFolds.models ? '收起各模型用量' : '各模型用量' }}</button>
-          <div v-if="codexFolds.models" class="guide">
-            <label v-for="m in codexModels" :key="m.name" class="field row">
-              <span class="label">{{ m.name }}</span>
-              <span class="ver">{{ fmtTokens(m.tokens) }} tokens · {{ m.turns }} 轮 · 输出 {{ fmtTokens(m.out) }}</span>
-            </label>
-          </div>
-        </div>
         <div class="fold">
           <button class="link-btn" @click="codexFolds.help = !codexFolds.help">{{ codexFolds.help ? '收起说明' : '说明' }}</button>
           <div v-if="codexFolds.help" class="guide">
@@ -5963,6 +6347,15 @@ h1 {
   font-weight: 400;
   color: var(--fg-dim);
   text-align: right;
+}
+/* 卡片组之间的纯分界线（如 dsh 组与 Codex 卡之间）：只划线不写字 ——
+   文字会和紧邻的卡标题重复。纯装饰，不抢卡片标题的视觉权重。
+   上下间距要自己给足：卡片只在下侧留 margin-bottom，紧挨着的下一张卡没有 margin-top，
+   若线只留 margin-top，线就会贴着下一张卡的边框（上图留白 16、下图 0，看着像贴歪）。 */
+.group-sep {
+  margin: 0 0 16px;
+  border: 0;
+  border-top: 1px solid var(--line);
 }
 /* 卡头里的危险操作（如「确认恢复默认？」）：与 .btn-row button.danger 同一套配色 */
 .head-actions button.danger {
@@ -6342,9 +6735,15 @@ select:focus,
   border-left: 3px solid #4a90d9;
   background: rgba(127, 127, 127, 0.05);
 }
-/* 已禁用：灰掉色条，一眼能扫出「哪些被我关了」 */
+/* 已禁用：灰掉色条 + 整行压暗。
+   只灰色条时扫不出「哪些被我关了」——状态字与启用态同色同字号，一行行看下来要逐个读字。
+   整行一起压暗后，「亮着的 = 启用中、暗着的 = 已禁用」可以一眼扫出来，不用读文字。 */
 .patch-off {
   border-left-color: rgba(127, 127, 127, 0.45);
+  background: rgba(127, 127, 127, 0.02);
+}
+.patch-off .patch-id {
+  color: var(--fg-dim);
 }
 .patch-id {
   font-family: ui-monospace, Consolas, monospace;
@@ -6361,16 +6760,48 @@ select:focus,
   color: var(--fg-dim);
   background: rgba(127, 127, 127, 0.15);
 }
+/* 状态徽章：已禁用 / 启用中 做成实心胶囊，两种状态颜色方向相反（灰 vs 蓝）。
+   原先两者共用一个纯文字样式，「禁用」这件事全靠用户读那三个字；做成徽章后是颜色差异，扫一眼就分得出。 */
 .patch-state {
   margin-left: auto;
   flex: none;
-  font-size: 12px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.state-on {
+  color: #2f7bd0;
+  background: rgba(74, 144, 217, 0.14);
+  border: 1px solid rgba(74, 144, 217, 0.35);
+}
+.state-off {
   color: var(--fg-dim);
+  background: rgba(127, 127, 127, 0.16);
+  border: 1px solid rgba(127, 127, 127, 0.28);
+}
+/* 状态未知：用警示色而不是「启用中」的蓝 —— 宿主没读到 dump 状态时，
+   把它画成启用中就是在替一条未知状态背书的谎报 */
+.state-unknown {
+  color: #b8860b;
+  background: rgba(224, 138, 46, 0.13);
+  border: 1px dashed rgba(224, 138, 46, 0.45);
 }
 .patch-btn {
   flex: none;
   padding: 2px 10px;
   font-size: 12px;
+}
+/* 候选行（.iso-item）里既可能有行尾开关按钮、也可能没有（source=plugin 与「状态未知」不给按钮）。
+   .patch-state 的 `margin-left: auto` 只把**第一个** auto 元素推到行尾，所以：
+   - 没有按钮时：auto 落在徽章上，徽章贴右，正确；
+   - 有按钮时：auto 仍落在徽章上，徽章被推右、按钮紧随其后 —— 但按钮自己没有左边距，
+     两个控件会**贴死**（徽章是胶囊形，右边框弧线紧挨按钮左边缘，看着像一个拼接控件）。
+   这里给按钮补 8px 间距（与 .patch-item 的 gap 一致），不动 auto 的归属 ——
+   把 auto 挪到按钮上会让「无按钮」的行不再贴右，反而破坏原本正确的那些行。 */
+.iso-item .patch-btn {
+  margin-left: 8px;
 }
 /* 还原前的二次确认：把按钮染成警示色，避免连点误操作 */
 .bak-confirm {
@@ -6386,19 +6817,143 @@ select:focus,
   margin: 0;
   accent-color: var(--accent);
 }
-.bak-item {
+/* 候选分组头：把 204 条收成 3 组后，这行是「哪些条属于哪一档」的唯一标识 */
+.iso-tier {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 8px 0 4px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--card-border);
+}
+.iso-tier:first-child {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
+}
+/* 「来源+状态」轴的内层组头：缩进 + 不画虚线，靠层级差说明「它属于上面那个来源」。
+   若沿用 .iso-tier 的分隔线，两层组头连在一起会看起来是平级的兄弟组 */
+.iso-tier-sub {
+  margin-left: 18px;
+  padding-top: 4px;
+  border-top: none;
+}
+.iso-tier-hint {
+  font-size: 12px;
+  opacity: 0.6;
+}
+/* 分组轴切换：自带按钮样式，不复用 .link-btn —— 那个带 margin-top: 10px，在这个 flex 行里会歪掉 */
+.iso-axis {
   display: flex;
   align-items: center;
   gap: 8px;
+  margin-bottom: 8px;
+  font-size: 12px;
+  color: var(--fg-dim);
+}
+.iso-axis-label {
+  flex: none;
+}
+.iso-axis-btn {
+  padding: 2px 10px;
+  border: 1px solid var(--card-border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--fg-dim);
+  font-size: 12px;
+  cursor: pointer;
+}
+.iso-axis-btn:hover {
+  color: var(--fg);
+}
+/* 「全选 / 只选启用中的」这一行：复用 .iso-axis 的横向排列，但去掉它的下边距 ——
+   那 8px 是给「分组轴 → 候选列表」留的，这两颗按钮下面紧跟的是超限警告，
+   .fold 与警告各有自己的间距，再叠 8px 会把它们顶开 */
+.iso-pick-row {
+  margin-bottom: 0;
+  margin-top: 8px;
+}
+/* 当前生效的那一轴：实心底 + 亮字，和另一轴拉开差距 */
+.iso-axis-on {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: rgba(83, 107, 169, 0.18);
+  font-weight: 600;
+}
+.bak-item {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
   margin-top: 6px;
-  padding: 5px 10px;
+  padding: 6px 10px;
   border-radius: 8px;
   border: 1px solid var(--card-border);
   background: rgba(127, 127, 127, 0.05);
 }
+/* known-good 是回滚目标，左侧加一条主色边，扫一眼就能找到 */
+.bak-known {
+  border-color: var(--accent);
+}
+.bak-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.bak-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
 .bak-time {
   font-size: 12px;
   color: var(--fg);
+}
+.bak-known-tag {
+  flex: none;
+  padding: 0 5px;
+  border-radius: 4px;
+  font-size: 11px;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+}
+.bak-name {
+  flex: none;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--fg);
+}
+.bak-rename {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.bak-rename-input {
+  flex: 1;
+  min-width: 0;
+}
+.bak-keep {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+.bak-keep-input {
+  width: 72px;
+  flex: none;
+}
+.bak-keep-note {
+  font-size: 11px;
+}
+/* 删除是不可逆的，单独染成警示色与「还原」的确认色区分开 */
+.bak-del.bak-confirm {
+  color: #d9534f;
 }
 .bak-tag {
   flex: none;

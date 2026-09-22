@@ -230,11 +230,12 @@ test('candidatesOf：patch 条目优先，dump 只补 patch 里没有的', () =>
   assert.equal(items[2].inPatch, false)
 })
 
-test('candidatesOf：dump 里已经禁用的条目不能凭空标成「已禁用」', () => {
-  // dump 的条目只有 disabled 状态，没有「在 patch 里写没写」这回事 ——
-  // 不在 patch 里的条目状态就是「未知」，按未禁用处理（界面上默认不勾，让用户自己决定）
+test('candidatesOf：dump 条目在没给状态时 disabled 为 undefined（未知），不凭空标成启用中', () => {
+  // dump 的条目只有 disabled 状态，没有「在 patch 里写没写」这回事。
+  // 调用方没传 disabledOf（组装树没读出来）时必须留 undefined：
+  // 早先默认成 false，等于把未知状态谎报成「启用中」，46 条已禁用插件会被显示成开着
   const items = I.candidatesOf({ patchItems: [], pluginIds: ['foo'] })
-  assert.equal(items[0].disabled, false)
+  assert.equal(items[0].disabled, undefined)
   assert.equal(items[0].inPatch, false)
 })
 
@@ -251,6 +252,9 @@ test('candidatesOf：候选顺序稳定（先 patch 后 dump，各自按输入�
 // ──────────────────────────────────────────────
 // ⑥ 勾选与上限
 // ──────────────────────────────────────────────
+// ⚠️ selectBatch 返回 `{ items, dropped }`（早先直接返回数组）。
+// 改成对象是因为截断必须能**如实报出丢了几条**：早先「边遍历边 break」会把
+// 用户明确勾选的项静默丢掉，调用方拿不到任何信号。
 test('selectBatch：缺省全选（一键隔离的意图是「只留我要的」）', () => {
   const batch = I.selectBatch({
     patchItems: [{ id: 'a', disabled: false }],
@@ -258,7 +262,8 @@ test('selectBatch：缺省全选（一键隔离的意图是「只留我要的」
     disabledMap: {},
     patchMap: {},
   })
-  assert.deepEqual(batch.map((x) => x.id), ['a', 'b', 'c'])
+  assert.deepEqual(batch.items.map((x) => x.id), ['a', 'b', 'c'])
+  assert.equal(batch.dropped, 0)
 })
 
 test('selectBatch：候选来源只有 patchItems 与 pluginIds（不认任意 id 列表）', () => {
@@ -267,7 +272,8 @@ test('selectBatch：候选来源只有 patchItems 与 pluginIds（不认任意 i
     disabledMap: {},
     patchMap: {},
   })
-  assert.deepEqual(batch, [])
+  assert.deepEqual(batch.items, [])
+  assert.equal(batch.dropped, 0)
 })
 
 test('selectBatch：给了 ids 就只选这些（未命中的忽略）', () => {
@@ -278,7 +284,7 @@ test('selectBatch：给了 ids 就只选这些（未命中的忽略）', () => {
     disabledMap: {},
     patchMap: {},
   })
-  assert.deepEqual(batch.map((x) => x.id), ['c'])
+  assert.deepEqual(batch.items.map((x) => x.id), ['c'])
 })
 
 test('selectBatch：冻结当前状态，界面据此默认不勾「已禁用」', () => {
@@ -288,15 +294,113 @@ test('selectBatch：冻结当前状态，界面据此默认不勾「已禁用」
     disabledMap: { a: true, b: true },
     patchMap: { a: true, b: true },
   })
-  const byId = Object.fromEntries(batch.map((x) => [x.id, x]))
+  const byId = Object.fromEntries(batch.items.map((x) => [x.id, x]))
   assert.equal(byId.a.disabled, true)
   assert.equal(byId.a.inPatch, true)
   assert.equal(byId.b.disabled, true)
 })
 
-test('selectBatch：超过 MAX_BATCH 就截断（防 id 列表被污染）', () => {
+test('selectBatch：超过 MAX_BATCH 就截断，并如实报出 dropped（防 id 列表被污染）', () => {
   const many = []
   for (let i = 0; i < I.MAX_BATCH + 25; i++) many.push('p' + i)
   const batch = I.selectBatch({ pluginIds: many, disabledMap: {}, patchMap: {} })
-  assert.equal(batch.length, I.MAX_BATCH)
+  assert.equal(batch.items.length, I.MAX_BATCH)
+  assert.equal(batch.dropped, 25)
+})
+
+test('selectBatch：勾选项不被截断静默丢弃（回归 B9）', () => {
+  // 背景：早先是「按输入顺序边遍历边 push，满 100 就 break」→ 排在后面的勾选项被静默丢弃。
+  // 现在命中项全部先收集、再统一截断，所以「勾选数 ≤ 上限」时**一条都不能少**。
+  const many = []
+  for (let i = 0; i < I.MAX_BATCH + 25; i++) many.push('p' + i)
+  // 只勾最后 3 个（早先按输入顺序遍历，它们排在 125 条之后，必然被丢掉）
+  const ids = ['p122', 'p123', 'p124']
+  const batch = I.selectBatch({ pluginIds: many, ids, disabledMap: {}, patchMap: {} })
+  assert.deepEqual(batch.items.map((x) => x.id), ids)
+  assert.equal(batch.dropped, 0)
+})
+
+// ──────────────────────────────────────────────
+// ⑦ 来源分档（官框架 vs 第三方插件）
+// ──────────────────────────────────────────────
+// 背景：实测本机 `--dump-config` 有 204 个条目，其中 199 个是 dsh 自己的框架节点
+// （tool-bash / session / llm / subagent…），第三方插件只有 5 个。平铺展示等于
+// 让用户在 204 条里找那 5 条 —— 分档就是为了把这件事收成 3 组。
+test('tierOfBundle：@deepseek-ai/ 作用域与已知官方包名归 core', () => {
+  assert.equal(I.tierOfBundle('@deepseek-ai/dsh-base'), 'core')
+  assert.equal(I.tierOfBundle('@deepseek-ai/dsh-web-app'), 'core')
+  assert.equal(I.tierOfBundle('dsh-base'), 'core')
+})
+
+test('tierOfBundle：`dsh-` 前缀不判官方（第三方大量占用这个前缀）', () => {
+  // 实测这几个都不是官方的，按前缀判会把它们错误地折进「官方框架」默认折叠区
+  assert.equal(I.tierOfBundle('dsh-mnemon'), 'third')
+  assert.equal(I.tierOfBundle('dshmarket'), 'third')
+  assert.equal(I.tierOfBundle('dsh-better-sidebar'), 'third')
+  assert.equal(I.tierOfBundle('@liustack/modlens'), 'third')
+})
+
+test('tierOfBundle：判不出来一律算 third（宁可不折叠，也不把插件藏起来）', () => {
+  assert.equal(I.tierOfBundle(''), 'third')
+  assert.equal(I.tierOfBundle(null), 'third')
+  assert.equal(I.tierOfBundle(undefined), 'third')
+})
+
+test('candidatesOf：patch 里的条目无条件归 patched（与它属于哪个 bundle 无关）', () => {
+  const items = I.candidatesOf({
+    patchItems: [{ id: 'cost-meter', disabled: true, line: 35 }],
+    pluginIds: ['cost-meter'],
+    // 即使 dump 说它属于第三方 bundle，只要已在 patch 里就是最高优先档
+    bundleOf: { 'cost-meter': 'dsh-cost-meter' },
+  })
+  assert.equal(items[0].tier, 'patched')
+  assert.equal(items[0].source, 'patch')
+})
+
+test('candidatesOf：按 bundle 分档，且 patched → third → core 排序', () => {
+  const items = I.candidatesOf({
+    patchItems: [{ id: 'webserver' }],
+    pluginIds: ['modlens', 'tool-bash'],
+    bundleOf: {
+      modlens: '@liustack/modlens',
+      'tool-bash': '@deepseek-ai/dsh-base',
+    },
+  })
+  assert.deepEqual(items.map((x) => x.id), ['webserver', 'modlens', 'tool-bash'])
+  assert.deepEqual(items.map((x) => x.tier), ['patched', 'third', 'core'])
+})
+
+test('candidatesOf：dump 里的 disabled / hasConfig 不再被硬编码成 false', () => {
+  // 早先 plugin 分支写死 `disabled: false`，于是「已禁用」标记只对 patch 里的条目准
+  const items = I.candidatesOf({
+    patchItems: [],
+    pluginIds: ['mnemon'],
+    disabledOf: { mnemon: true },
+    configOf: { mnemon: true },
+  })
+  assert.equal(items[0].disabled, true)
+  assert.equal(items[0].hasConfig, true)
+})
+
+test('candidatesOf：候选不再截断（204 条全给，早先截到 100 导致后面勾不到）', () => {
+  const many = []
+  for (let i = 0; i < 204; i++) many.push('p' + i)
+  const items = I.candidatesOf({ patchItems: [], pluginIds: many })
+  assert.equal(items.length, 204)
+})
+
+test('candidatesOf：没给 disabledOf 时 disabled 是 undefined（未知），不得谎报为启用中', () => {
+  // 回归：早先没传 disabledOf 时 `!!(o.disabledOf && o.disabledOf[id])` 恒为 false，
+  // 于是 46 条已禁用的插件在界面上被显示成「启用中」—— 会骗人的静默失效。
+  // 缺数据必须留 undefined，让界面能显示「状态未知」，而不是替未知状态背书
+  const bare = I.candidatesOf({ patchItems: [], pluginIds: ['mnemon'], bundleOf: { mnemon: 'dsh-mnemon' } })
+  assert.equal(bare[0].disabled, undefined)
+  // 给了就照给的值走（true / false 都要能区分出来）
+  const given = I.candidatesOf({
+    patchItems: [],
+    pluginIds: ['mnemon', 'other'],
+    disabledOf: { mnemon: true, other: false },
+  })
+  assert.equal(given[0].disabled, true)
+  assert.equal(given[1].disabled, false)
 })
