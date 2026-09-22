@@ -113,7 +113,6 @@ function scanPatchLines(text) {
   let prevIndent = -1
   let prevLineNo = 0
   let idCount = 0
-  let warnCount = 0
 
   for (let i = 0; i < lines.length; i++) {
     const raw = lines[i]
@@ -130,7 +129,6 @@ function scanPatchLines(text) {
     const indent = indentStr.replace(/\t/g, '  ').length
     // 跳变：比上一有效行深超过 2 级，且不是进入列表项的子键
     if (prevIndent >= 0 && indent - prevIndent > 2 && !trimmed.startsWith('-')) {
-      warnCount++
       findings.push({
         level: 'warn',
         text: '第 ' + lineNo + ' 行缩进从 ' + prevIndent + ' 跳到 ' + indent,
@@ -176,7 +174,7 @@ function scanPatchLines(text) {
   }
 
   // 结构性提示：文件里有内容但一个 id 都没有
-  if (idCount === 0 && warnCount === 0 && findings.length === 0) {
+  if (idCount === 0 && findings.length === 0) {
     findings.push({
       level: 'warn',
       text: 'patch 文件里没有任何 `- id:` 条目',
