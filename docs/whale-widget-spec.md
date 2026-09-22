@@ -552,6 +552,17 @@ DOM：`.dshwv-root`（定位：在窗口内**居中**，四周各留 `--whale-pa
     - **`dsh.js` 的两处同步收紧**：`externalPid()` 加 `looksLikeDsh(probe.cmdline) === true` 条件（名字像不算数，宁可返回 0 报「无法确认」，也不能把别的程序说成 dsh 骗用户去「接管」）；`portOccupiedByOther()` 对「名字像但命令行证明不是」的情况也返回进程名（此前直接放行，等于漏报）。
     - **顺带收掉了 `ps.name` 与 `ps.selfOwned` 两条早返回**：补测时发现 `portDsh: null` + `name: 'node'` 仍落进 `if (ps.name)` 报 `[✓]` —— **那还是拿名字当证据，只是换了个方向**；`name: 'nginx'` + 拿不到命令行时同样报 `[✓]`（端口明明被别的程序占着）。现在**「是本插件的 dsh」的唯一通路是 `portDsh === true`**，`selfOwned` 在新模型下冗余（本插件的 dsh 必然命令行含特征）。修 `[✓]` 侧的假通过比修 `[✗]` 侧更重要 —— 前者是「诊断说没事、其实起不来」。
     - **⚠ 测试侧同样的错**：既有用例 `{ pid: 22, externalPid: 22, name: 'node' }` 与实现犯了同一个假设（「pid 存在 + 名字是 node.exe = dsh」），**故四关全绿也拦不住这个 bug**。上一次同类事故是 C2/C3 双双少写一层 `profiles/<n>`。教训：判据里凡有「靠名字/靠路径就能认出来」的地方，都要拿真实样本（真 dsh、别的 node 进程、探针各一条）钉死。现补 4 条：`looksLikeDsh` 三态、C5 `portDsh:false → [✗]`、`portDsh:null → [!]`（含 `node` / `nginx` 两种名字）、以及「同名不同 `portDsh` 结论必须从 `[✓]` 变 `[!]`」的反向钉子（防止有人把名字判据改回来）。
+  - **⚠⚠ C5 认不出「自己人」：Windows 的 `cmd.exe` 中间层（v1.6.2 修复，第三次「测试与实现共享同一个错误假设」）**：`dsh.js` 启动 dsh 走 `spawn(..., { shell: true })`，Windows 下这会插入一层 `cmd /c`，**插件拿到的是 `cmd.exe` 的 pid，真正监听 3080 的是它的子进程 `node.exe`**。于是 `probe.pid !== state.pid` 恒成立，插件自己启的 dsh 被算成「外部 dsh」—— 界面显示「外部 dsh · 请到别的终端查看」、启动按钮被禁用。**判据改为父链上溯**：新增 `processParent(pid, cb)` 取 `ParentProcessId`（Windows 走 `wmic process ... get parentprocessid /value`，wmic 被移除时退回 `Get-CimInstance Win32_Process`；POSIX 走 `ps -p <pid> -o ppid=`）与纯函数 `isDescendantOf(pid, self, parents)`（邻接表 + 沿父链最多上溯 8 层，**带访问集合防环**）。`isSelfOwnedPort(pid, cb)` 先比同 pid，再上溯判断是否为本插件的后代。本机实测链：`插件 → cmd.exe(37112) → node.exe(28216 监听 3080)`。
+    - **状态卡 pid 与诊断 pid 必然不同**：状态卡认 `state.pid`（spawn 句柄 = `cmd.exe`），诊断报真正监听的 `node.exe`（如 13980 vs 14612）。这是正常现象，**不是 bug** —— 写文档与提示文案时不许把它当成「不一致」。
+    - **`probe.busy` 不能当业务结论**：`external` 字段一度写成 `!!externalPid() || !!probe.busy`，但 `probe.busy` 是异步探测的**工程状态**，`watchReady` 每 1.2s 探一次端口，插件自己启动 dsh 后它长期为 true → 界面显示「外部 dsh · pid 0」。现改为 `external: !!externalPid()`（`externalPid()` 读已算好的 probe 结果，未算好时保守返回 0），是否 busy 交给 `extBusy` 表达。
+  - **⚠⚠ C5 探测蹭上「陈旧轮次」：`waiters` 排队复用（v1.6.2 修复）**：`probePort` 原有的排队复用（`if (probe.busy) probe.waiters.push(cb)`）是为了合并并发调用，但**诊断点「强制重跑」时极可能撞上 `watchReady` 正在跑的那一轮** —— 那一轮的 `netstat` 是在 dsh 还没 bind 3080 时跑的空结果，于是诊断报「3080 空闲」，而状态卡同时显示「运行中 · pid 37112」。本机实测（2026-09-22）铁证：`netstat -ano` 明摆着 `28216` 在 `127.0.0.1:3080` 上 LISTENING。
+    - **修法：轮次号 `gen` + `force`**。`probe` 加 `gen` 字段（单调递增的轮次号）；`probePort(cb, force)` 在 `force=true` 时**即使有探测在跑也另起一轮**，两轮并存；纯函数 `__isStale(myGen, latestGen)` 判定某轮是否已被取代，**只让最新一轮写 `probe`**（`probe.pid` / `name` / `cmdline` / `selfOwned` 的写入前逐个判 stale）。`detectPort` 一律传 `force=true`。
+    - **`flushProbe(cb, gen)` 的守卫要给对**：**最新的轮次**才清空 `waiters` 并逐个回调；旧轮不许放行 waiters，**但必须回调它自己的那个 `cb`** —— 第一版写成「旧轮直接 return」，等于把旧轮调用方的回调吞掉，`detectPort` 只能等 8s 超时兜底（实测复现：只有 force 轮回调了）。给旧值也比永不回调好。
+  - **⚠⚠ C5 的 `pid` 字段一字段两义：把「有没有人占」与「占的是不是外人」混为一谈（v1.6.2 修复）**：`detectPort` 原写成 `pid: num(snap.externalPid) || (snap.portOther ? num(snap.pid) : 0)` —— `pid` 被 C5 当作「端口上有没有人」（`if (!ps.pid)` → 报「3080 空闲」），实际填的却是「**外部占用者**是谁」。**本插件自己启的 dsh 两个来源都为空**（`externalPid=0`、`portOther=''`，因为 `externalPid()` 本就只认外部 dsh）→ `pid` 置 0 → C5 判「3080 空闲（无进程监听）」，而状态卡同时显示「运行中 · pid 26916」，自相矛盾。本机实测（2026-09-22）。
+    - **修法：拆成两个字段**。`snapshot()` 新增 **`portPid`**（真正在监听端口的进程，本插件启的 / 外部的 / 别的程序都算）与 **`portName`**（同口径的进程名），未探测完时给 0 / `''`；`detectPort` 改用 `num(snap.portPid) || num(snap.externalPid) || (snap.portOther ? num(snap.pid) : 0)`，`name` 也先取 `portName`。**「端口上有没有人」与「占的人是不是外人」是两件事，必须两个字段**。
+    - **`probePort` 的两轮并存反过来要求 `portPid` 也做 stale 保护**：`portPid` 取 `probe.busy ? 0 : probe.pid`（探测中不给旧值，宁可给 0）。
+    - **`portDsh === true` 分支的 summary 必须带 pid**：用户对照状态卡（`cmd.exe`）与任务管理器（`node.exe`）排查时，**只有这个 pid 是「端口上那个人」**。这条是写测试时才发现实现漏了（断言 `/28216/` 失败）—— 「测试与实现共享错误假设」的又一次变体：这次测试反而是对的。
+    - **C5 判据链（补全后，含 `portDsh` 与 `selfOwned`）**：`!ps` / `ps.failed` → `[!]`；`!ps.pid` → `[✓]` 空闲（pid 取自 `portPid`）；`occupiedByOther` → `[✗]`；`externalPid` → `[!]` 外部 dsh；`portDsh === false` → `[✗]`；`portDsh === true` → `[✓]` 由本插件的 dsh 监听（带 pid）；`selfOwned` → `[✓]`；其余 → `[!]` 无法判定。三态实测（2026-09-22）：插件自启 → `[✓] 3080 由本插件的 dsh 监听（node.exe，pid 14612）`；外部 dsh 占着 → `[!] 3080 已有外部 dsh 在运行（外部进程 pid 28060）`；真空闲 → `[✓] 3080 空闲`；裸 node 探针占着 → `[✗]`。
   - **样式** `.diag-*` 一组：`.diag-item` 每项一块（细边框 + 极淡底）、`.diag-head` 弹性换行（标记 + 标题 + 摘要）、`.diag-detail` 左侧缩进 20px、`.diag-more` / `.diag-hint` 用 `--fg-faint`。
 - **「dsh 配置转储」卡片 v1.6.2 新增**（「开发者」Tab，紧跟「dsh 故障诊断」之后）：**整卡默认收起**（`devFolds.dshDump`，走同一个 `toggleDevCard`），**首次展开才跑**（`devStatsLoaded.dshDump` 只置一次）—— 要起两次子进程（最坏 16s），不看不跑。卡片头右侧摘要（`dshDumpSummary`）三段：没读过「点击展开读取」、失败「读取失败」、有结论「N 层 · 差异 M 处」。按钮三枚：**「重新读取」**（`dshDumpRefresh()`，走缓存 —— TTL 内直接复用并回显「60 秒内已有结果，直接复用」）、**「强制重跑」**（`dshDumpRefresh(true)`，绕开缓存重跑）与**「复制转储信息」**（`dshDumpCopy()`，复制完整的分层 + 差异清单，不受界面折叠影响）。
   - **⚠️ 缓存接线踩坑（v1.6.2 修复）**：原先只有两枚按钮且「重新读取」写死 `dshDumpRefresh(true)`，「重新诊断」同理 —— `force=true` 会跳过缓存判定，于是 **60s TTL 形同虚设**：同一秒内连点两次也照跑两遍完整扫描（诊断遍历 `node_modules`、转储 spawn 两次子进程），缓存写了没人读，界面里也看不出异样。现拆成「读缓存」与「强制重跑」两枚按钮，并把命中判定收敛进纯函数 `diagnostics.cacheHit(hit, ttl, now, {force, profile})`（转储多一项 `profile` 校验，避免切 profile 后读到上一棵树），由单测钉死 —— 这类接线错误只能靠可测的判定函数防住。
@@ -587,7 +598,7 @@ DOM：`.dshwv-root`（定位：在窗口内**居中**，四周各留 `--whale-pa
 | 场景 | 核验方式 | 结论 |
 |---|---|---|
 | **C5 降级不污染整轮**（D26） | 用 `diagnostics` 的纯函数注入 7 种 `portState` 形态逐项跑 `runChecks` | 探测未执行 / `failed:true` / 拿不到进程名 / 外部 dsh 在跑 → 一律 `warning`，**整轮 `ok:true`**，C1–C4 findings 零污染；仅「被非 dsh 进程占用」→ `error` 且整轮 `ok:false`（正确）；再注入一个「读 `pid` 就抛」的 `portState` → 只该 `threw:true`，其余四项照常。**注**：本轮只读验证时「外部 dsh 在跑」是直接注入 `externalPid` 得到的，**绕过了新加的 `looksLikeDsh` 判据** —— 正是 ③ 段用真实探针才暴露「名字当证据」的漏洞 |
-| **并发不抢占**（D15） | 并发发起 3 次 `detectPort(3080)` | 3 次回调**全部返回**、结果 `deepEqual` 一致，无吞调用、无卡死（`probePort` 的 `busy` + `waiters` 队列在 `detectPort` 层仍成立）；单次真实探测 88ms 返回 `{pid:0}` |
+| **并发不抢占**（D15） | 并发发起 3 次 `detectPort(3080)` | 3 次回调**全部返回**、结果 `deepEqual` 一致，无吞调用、无卡死（`probePort` 的 `busy` + `waiters` 队列在 `detectPort` 层仍成立）；单次真实探测 88ms 返回 `{pid:0}`。**注**：此后 `detectPort` 改为传 `force=true`（每轮另起），队列语义从「合并」变成「只让最新轮写结果」—— 但「所有调用方都必须拿到回调」这条不变，回归时仍按原样验 |
 | **dsh 未运行** | `portState = {pid:0}` | C1–C4 全部给出结论，C5 `[✓]`「3080 空闲」，整轮 `ok:true` |
 | **dsh 未安装** | `home` 置空 / profile 目录不存在 | C1–C4 统一「未定位 `$DSH_HOME`，跳过」或「profile 目录不存在，跳过」/「无 `cordis.patch.yml`（跳过）」，**不报错**；`isNotInstalled` 只认 `run()` 的两条文案（`未找到可用的 dsh` / `未找到 Node.js`），**超时 / 非零退出 / `ENOENT` 一律 `false`**，走「读取失败，请重试」而不误导用户去重装；`settings.js` 只在 `payload.ok` 时写缓存，**失败不落缓存** |
 | **用量 / Codex 统计回归**（D18） | 探针比对 `walkDir` 的 `silent` 口径 | `dsh-usage` 口径（`silent:false`）能收集 `{dir, reason}`；`codex` 口径（默认 silent）静默跳过 `EACCES` —— 与原实现一致，**未丢文件** |
@@ -604,6 +615,24 @@ DOM：`.dshwv-root`（定位：在窗口内**居中**，四周各留 `--whale-pa
 | **③ 端口被占** | 起裸 `node -e "net.createServer().listen(3080)"`（pid 26428）占住 3080 | C5 `[✗]` 被非 dsh 占用 | ⚠️ **发现真 bug**：C5 报 `[!] 已有外部 dsh 在运行（pid 26428）` —— 判据只看进程名，把裸 node 探针认成 dsh。当场定位根因并修复（见第十节 C5 两条踩坑），已关探针、3080 释放 |
 
 **已验证的坑：时序错位**。场景 ① 第一次复验时 C3 仍报 `[✓]`，一度误判为「诊断漏报」。查 mtime 才明白：用户点诊断（`15:45:09`）发生在我注入（`15:45:35`）**之前** —— 文件当时还是原样，判据没错。**流程修正：造故障后必须先确认 mtime 与 hash 都变了，再让用户操作界面**；否则会把「我还没改」误读成「工具没查出来」。
+
+**第 ④ 段（C5 端口归属的三态真机核验，v1.6.2 补做）**
+
+在 ③ 段修完「名字当证据」后，用真实进程链把 C5 的四个出口逐个走通。两侧都不需要造配置文件，只起/停 dsh 本体：
+
+| 场景 | 造法 | 期望 | 实测结论 |
+|---|---|---|---|
+| **插件自己启的 dsh 在监听** | 插件内点「启动」，等状态卡变「运行中」 | C5 `[✓]`「由本插件的 dsh 监听」，且 pid 是**真正监听的 node.exe** | ✅ `[✓] 3080 由本插件的 dsh 监听（node.exe，pid 14612）`，状态卡 pid 13980（`cmd.exe`）—— 两者不同是父链上溯生效的**正确**表现 |
+| **外部 dsh 占着** | 关掉插件内 dsh，在外部终端起一份 dsh 再点「重新诊断」 | C5 `[!]` 外部 dsh（warning，整轮仍 `ok:true`） | ✅ `[!] 3080 已有外部 dsh 在运行（[warn] 外部进程 pid 28060）`，4 项通过 1 项异常 |
+| **真空闲** | 两份 dsh 都停掉 | C5 `[✓]`「3080 空闲」 | ✅ 与 ② 段一致 |
+| **被非 dsh 进程占用** | 裸 `node -e "net.createServer().listen(3080)"` | C5 `[✗]` error | ✅ 见 ③ 段场景 ③（修完 `looksLikeDsh` 后） |
+
+**本段暴露并修掉的两个真 bug**（都不是判据本身的问题，而是探测层的工程错误，详见第十节 C5 两条新踩坑）：
+
+1. **探测蹭上陈旧轮次** —— 状态卡显示「运行中 · pid 37112」时诊断报「3080 空闲」。铁证是 `netstat -ano` 里 `28216` 正在 LISTENING。根因是 `probePort` 的 `waiters` 排队复用让诊断搭上了 `watchReady` 正在跑的那一轮（那轮的 netstat 是在 dsh 尚未 bind 时跑的）。修法：`gen` 轮次号 + `detectPort` 传 `force=true`。
+2. **`pid` 字段一字段两义** —— 状态卡「运行中 · pid 26916」时诊断报「3080 空闲（无进程监听）」。根因是 `detectPort` 把「端口上有没有人」与「占端口的是不是外人」塞进同一个 `pid` 字段，而本插件自启 dsh 时后者恒为空。修法：`snapshot()` 拆出 `portPid` / `portName`。
+
+**这两个 bug 的形态值得记一笔**：都不是某个判据的阈值或正则写错，而是「**同一份数据被两个语义共用**」与「**异步探测的结果被跨轮复用**」。判据层的单测（注入 `portState`）永远测不到它们 —— 必须靠**真机跑一遍 + 拿 `netstat` 对账**。这也解释了为什么四个出口的判据全对、界面却自相矛盾。
 
 **~~遗留~~ 已修复（v1.6.2）**：`parseDump` 原先只认行首 `^- id:`，`mnemon-bundle` 的 `config:` 列表里 4 空格缩进嵌套的 8 个子条目（`mnemon` / `mnemon-source-*` / `mnemon-strategy-*`）未进 `entries` —— 转储卡用户层条目数显示 3（现为 11）、总条目 195（现为 204）。改用按缩进的条目栈后，顺带修掉了字段归属错层（父条目收尾字段覆盖子条目）与 base 层同类漏收的 `openviking-memory-runtime` 共三个问题，详见第十节。
 

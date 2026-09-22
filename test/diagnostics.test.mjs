@@ -182,13 +182,17 @@ test('C5：portDsh 为 true / null 时不得走进「被非 dsh 占用」分支'
 
 // 反向钉子：**名字本身从来不是证据**。同一个 name='node'，只因为 portDsh 不同，
 // 结论必须从 [✓] 变成 [!] —— 这条用例的作用是防止有人把「名字像 dsh 就报 ok」改回来。
+// ⚠️ 2026-09-22 修正：原先这条用例把 selfOwned: true 也一起传了，于是断言「selfOwned 为真
+// 但命令行拿不到 → 不得报 ok」——那是在钉一个错误行为（插件自己启动的 dsh 恰恰该报 ok）。
+// 要让「名字不是证据」成立，必须把 selfOwned 也去掉：只剩名字，才真的没有证据。
 test('C5：name 是 node 但 portDsh 不是 true → 绝不报 ok（名字不是证据）', () => {
   const c5 = diag.CHECKS.find((c) => c.id === 'port-3080')
+  // 只有名字像 node/dsh：既非自己的进程树（selfOwned 假），也没命令行（portDsh null）
   const byName = c5.detect(diag.buildContext({
     home: 'X',
-    portState: { pid: 9692, name: 'node', selfOwned: true, portDsh: null },
+    portState: { pid: 9692, name: 'node', portDsh: null },
   }))
-  assert.notEqual(byName.ok, true, '拿不到命令行时，名字像 node 也不足以判定正常')
+  assert.notEqual(byName.ok, true, '拿不到命令行、也不是自己的进程树时，名字像 node 也不足以判定正常')
   const byCmdline = c5.detect(diag.buildContext({
     home: 'X',
     portState: { pid: 9692, name: 'node', selfOwned: true, portDsh: true },
@@ -212,6 +216,54 @@ test('C5：端口由本插件的 dsh 监听（selfOwned + portDsh）→ ok，不
   // 真正判不出来时（有 pid 但没拿到命令行）仍走「无法判定」warning
   const unknown = c5.detect(diag.buildContext({ home: 'X', portState: { pid: 4242, name: '' } }))
   assert.equal(diag.severestLevel(unknown.findings), 'warn')
+})
+
+// ⚠️ 本机实测（2026-09-22）暴露的回归：插件启动的 dsh 曾被误报成「外部进程在跑」。
+// 根因在 dsh.js 侧：Windows 下 spawn 走 shell:true，插件拿到 cmd.exe 的 pid、
+// 监听 3080 的是它的子进程 node.exe → externalPid() 的 `probe.pid === state.pid` 认不出，
+// 于是 externalPid 非 0，C5 在「外部 dsh」分支就返回了，永远走不到本插件的 [✓]。
+// 修法是父链上溯（probe.selfOwned）。这里钉住两条：
+//   1. externalPid 为空 + selfOwned → 必须 [✓]（修复目标）
+//   2. externalPid 非空 → 仍是 [!]（不能矫枉过正，真的外部 dsh 该照报）
+test('C5：命令行拿不到但进程树证明是自己人（selfOwned）→ 仍报 ok，不得误报「外部进程」', () => {
+  const c5 = diag.CHECKS.find((c) => c.id === 'port-3080')
+  // 命令行取不到（wmic 已从新版 Windows 移除 / powershell CIM 超时）→ portDsh 为 null
+  const onlyTree = c5.detect(diag.buildContext({
+    home: 'X',
+    portState: { pid: 12488, name: 'node', selfOwned: true, portDsh: null },
+  }))
+  assert.equal(onlyTree.ok, true, '父链证据足够，不依赖命令行')
+  assert.equal(diag.severestLevel(onlyTree.findings), '')
+  assert.ok(/本插件/.test(onlyTree.summary))
+  // 反例：真·外部 dsh（externalPid 非 0）即使 selfOwned 字段缺失也必须照报 [!]
+  const ext = c5.detect(diag.buildContext({
+    home: 'X',
+    portState: { pid: 5232, name: 'node', externalPid: 5232, portDsh: true },
+  }))
+  assert.equal(ext.ok, false, '真外部 dsh 不能被「自己人」逻辑吞掉')
+  assert.equal(diag.severestLevel(ext.findings), 'warn')
+})
+
+// ⚠️ 本机实测（2026-09-22）的**第二处**自相矛盾：状态卡「运行中 · pid 26916」，
+// 诊断卡同时报「3080 空闲（无进程监听）」。
+// 根因在 detectPort 的口径：pid 字段被当成「谁在监听端口」，实际填的是「外部占用者」，
+// 本插件自己启的 dsh 两个来源都为空（externalPid=0、portOther=''）→ pid 置 0 →
+// C5 的 `if (!ps.pid)` 判成空闲。修法是改用 snapshot().portPid（端口上到底有没有人）。
+// 这条钉住：「自己人监听着」绝不能报空闲，且必须一路走到 [✓]。
+test('C5：本插件自己的 dsh 在监听 → 报「由本插件监听」，绝不是「空闲」', () => {
+  const c5 = diag.CHECKS.find((c) => c.id === 'port-3080')
+  const own = c5.detect(diag.buildContext({
+    home: 'X',
+    portState: { pid: 28216, name: 'node', selfOwned: true, portDsh: true },
+  }))
+  assert.equal(own.ok, true)
+  assert.ok(!/空闲/.test(own.summary), '端口上有人，绝不能报空闲（本机实测的回归点）')
+  assert.ok(/本插件/.test(own.summary))
+  assert.ok(/28216/.test(own.summary), '要报出真正的监听 pid，而不是插件的 cmd 包装进程 pid')
+  // 真·空闲（pid 0）时仍要报空闲，不能因为上面加了兜底就一律说「有人」
+  const idle = c5.detect(diag.buildContext({ home: 'X', portState: { pid: 0 } }))
+  assert.equal(idle.ok, true)
+  assert.ok(/空闲/.test(idle.summary), 'pid 为 0 才是真空闲')
 })
 
 // ── 单项抛错隔离（§3.2 约定 2）──
@@ -263,6 +315,58 @@ test('looksLikeDsh：真 dsh 命令行 → true；别的 node 程序 → false�
   assert.equal(dsh.looksLikeDsh('   '), null)
   assert.equal(dsh.looksLikeDsh(undefined), null)
   assert.equal(dsh.looksLikeDsh(null), null)
+})
+
+// ── isDescendantOf：进程父链上溯（C5 判「3080 是不是本插件启的那份」的底座）──
+// 修的是本机实测（2026-09-22）的自相矛盾：插件 spawn 的是 cmd.exe(28260)，
+// 真正监听 3080 的是它的子进程 node.exe(12488)，单比 pid 会把自己的 dsh 误报成「外部」。
+// 参数是 `pid → 父pid` 邻接表，纯函数，不碰真实进程。
+test('isDescendantOf：沿父链能认出「孙进程」，中间隔一层 cmd 也要认出来', () => {
+  const dsh = require('../public/preload/lib/dsh.js')
+  // 本机实测链：插件(100) → cmd.exe(28260) → node.exe(12488 监听 3080)
+  const parents = { 12488: 28260, 28260: 100, 100: 0 }
+  assert.equal(dsh.isDescendantOf(12488, 100, parents), true, '隔一层 cmd 的孙进程必须认出')
+  assert.equal(dsh.isDescendantOf(28260, 100, parents), true, '直接子进程')
+  assert.equal(dsh.isDescendantOf(100, 100, parents), false, '自身不算自己的后代')
+  // 外人：父链上溯到头(0)也遇不到 self
+  const foreign = { 999: 888, 888: 0 }
+  assert.equal(dsh.isDescendantOf(999, 100, foreign), false, '别的进程树绝不能认成自己人')
+  assert.equal(dsh.isDescendantOf(999, 100, parents), false, '陌生 pid 不在表里 → false')
+})
+
+test('isDescendantOf：限量与防环，坏数据不得死循环', () => {
+  const dsh = require('../public/preload/lib/dsh.js')
+  // 环：父 pid 被复用造成的 a→b→a，必须在 seen 处停下
+  const cyc = { 1: 2, 2: 1 }
+  assert.equal(dsh.isDescendantOf(1, 100, cyc), false, '环必须被 seen 拦住')
+  assert.equal(dsh.isDescendantOf(1, 2, cyc), true, '环里若 self 就是父，仍应命中')
+  // 深链超过限量（默认 8 层）→ 不追，返回 false（宁可报「无法判定」也不猜）
+  const deep = {}
+  for (let i = 1; i <= 20; i++) deep[i] = i + 1
+  deep[20] = 0
+  assert.equal(dsh.isDescendantOf(1, 21, deep), false, '超出上溯限量 → false')
+  // 空/拿不到父（processParent 返回 0）→ 立即停
+  assert.equal(dsh.isDescendantOf(5, 100, { 5: 0 }), false)
+  assert.equal(dsh.isDescendantOf(0, 100, {}), false, 'from 为 0 → false')
+  assert.equal(dsh.isDescendantOf(5, 0, { 5: 100 }), false, 'self 为 0（插件没启动）→ false')
+})
+
+// ── probePort 轮次号（gen）：诊断要拿到新鲜结果，不能被「正在跑的旧轮」顶掉 ──
+// 修的是本机实测（2026-09-22）的自相矛盾：状态卡显示「运行中 · pid 37112」，
+// 诊断卡同时报「3080 空闲」——netstat 明摆着 28216 在监听。
+// 根因是 probePort 的排队复用：watchReady 每 1.2s 探一次，诊断点「强制重跑」时
+// 蹭上了正在跑的那一轮，而那一轮的 netstat 是在 dsh 还没 bind 时跑的（空结果）。
+// 修法：detectPort 传 force=true 另起一轮，并用 gen 保证只让最新一轮写结果/放行 waiters。
+test('probePort：force 另起一轮，旧轮不得覆盖新轮结果（gen 是唯一写口）', () => {
+  const dsh = require('../public/preload/lib/dsh.js')
+  assert.equal(typeof dsh.probePort, 'function', 'probePort 必须导出（白盒验证 gen 行为）')
+  assert.equal(typeof dsh.__probeState, 'function', '需要 __probeState 读内部 probe 供断言')
+  // 不真跑 netstat（环境相关、慢），只验 gen 单调递增 + 旧轮 stale 判定
+  const g0 = dsh.__probeState().gen
+  const stale = dsh.__isStale(g0, g0 + 1)
+  assert.equal(stale, true, 'gen 不一致 → 旧轮作废，不许写 probe')
+  assert.equal(dsh.__isStale(g0 + 1, g0 + 1), false, 'gen 相同 → 最新轮，可以写')
+  assert.equal(dsh.__isStale(g0, g0), false)
 })
 
 // ── C1 指纹判据（D25 必测）──

@@ -268,7 +268,9 @@ function bindOutput(child) {
 // ──────────────────────────────────────────────
 // 端口占用探测：识别「在别的终端里跑的 dsh」，支持由本插件结束/重启
 // ──────────────────────────────────────────────
-const probe = { pid: 0, name: '', cmdline: '', cmdlineKnown: false, at: 0, busy: false, waiters: [] }
+// gen = 探测轮次号：force 允许两轮并存，只让**最新一轮**写结果，
+// 否则先发起（但更旧）的那轮后回来会把新结果覆盖回去。
+const probe = { pid: 0, name: '', cmdline: '', cmdlineKnown: false, at: 0, busy: false, waiters: [], selfOwned: false, gen: 0 }
 function isDshName(name) { return /^(node|dsh)(\.exe)?$/i.test(String(name || '').trim()) }
 // 命令行里出现这些字样才算「这确实是 dsh」。
 // 只看进程名（node.exe）是不够的：任何 Node 程序都叫 node.exe。
@@ -410,42 +412,59 @@ function processCmdline(pid, cb) {
     })
   })
 }
-function flushProbe(cb) {
-  const ws = probe.waiters
-  probe.waiters = []
-  for (const w of ws) { try { w(probe.pid) } catch (err) {} }
+// 让本轮结束：**最新的轮次**清空队列并发通知；旧轮只回调自己那个 cb（给旧值也比永不回调好 ——
+// watchReady 的轮询可以被吞一轮，但 detectPort 的调用方若永不回调就只能等 8s 超时兜底）。
+function flushProbe(cb, gen) {
+  if (gen === probe.gen) {
+    const ws = probe.waiters
+    probe.waiters = []
+    for (const w of ws) { try { w(probe.pid) } catch (err) {} }
+  }
   if (cb) { try { cb(probe.pid) } catch (err) {} }
 }
-// 探测结果缓存在 probe 里，供同步的 snapshot()/stop() 使用；cb(pid) 在探测完成后回调
-function probePort(cb) {
-  if (probe.busy) { if (cb) probe.waiters.push(cb); return }
+// 探测结果缓存在 probe 里，供同步的 snapshot()/stop() 使用；cb(pid) 在探测完成后回调。
+// force=true 时即使有探测在跑也**另起一轮**（见 detectPort 的 staleness 问题）：
+// 排队复用正在跑的那一轮，拿到的可能是几毫秒前跑的、当时端口还没起来的空结果。
+function probePort(cb, force) {
+  if (probe.busy && !force) { if (cb) probe.waiters.push(cb); return }
   probe.busy = true
+  const myGen = ++probe.gen
+  const stale = () => __isStale(myGen, probe.gen) // 已有更新的轮次 → 本轮作废，不写 probe
   const exe = WIN ? 'netstat' : 'lsof'
   const args = WIN ? ['-ano', '-p', 'tcp'] : ['-nP', '-iTCP:' + DSH_PORT, '-sTCP:LISTEN', '-t']
   execFile(exe, args, { timeout: 6000, windowsHide: true, maxBuffer: 4 * 1024 * 1024 }, (err, stdout) => {
     const pid = err ? 0 : parsePortPid(stdout)
     if (!pid) {
-      probe.busy = false; probe.pid = 0; probe.name = ''; probe.cmdline = ''; probe.cmdlineKnown = false; probe.at = Date.now()
-      flushProbe(cb)
+      if (!stale()) {
+        probe.pid = 0; probe.name = ''; probe.cmdline = ''; probe.cmdlineKnown = false; probe.at = Date.now(); probe.selfOwned = false
+        probe.busy = false
+      }
+      flushProbe(cb, myGen)
       return
     }
-    // 名字与命令行各跑一次 execFile：串行会叠加两次进程创建开销（Windows 上各约 100–300ms），
+    // 名字 / 命令行 / 父链归属各跑一次 execFile：串行会叠加多次进程创建开销（Windows 上各约 100–300ms），
     // 这里并行发起、都回来才算探测完成，避免状态卡刷新时端口归属长时间「探测中」。
-    let left = 2
+    // 父链只在「监听 pid 不等于插件 pid」时才需要真查（同 pid 直接算自己人）。
+    let left = 3
     const done = () => {
       if (--left > 0) return
-      probe.busy = false
-      probe.pid = pid
-      probe.at = Date.now()
-      flushProbe(cb)
+      if (!stale()) {
+        probe.busy = false
+        probe.pid = pid
+        probe.at = Date.now()
+      }
+      flushProbe(cb, myGen)
     }
     processName(pid, (name) => {
-      probe.name = name
+      if (!stale()) probe.name = name
       done()
     })
     processCmdline(pid, (cmdline) => {
-      probe.cmdline = cmdline
-      probe.cmdlineKnown = !!cmdline
+      if (!stale()) { probe.cmdline = cmdline; probe.cmdlineKnown = !!cmdline }
+      done()
+    })
+    isSelfOwnedPort(pid, (self) => {
+      if (!stale()) probe.selfOwned = self
       done()
     })
   })
@@ -501,12 +520,85 @@ function stopExternal(pid, done) {
   if (WIN) execFile('taskkill', ['/pid', String(pid), '/T', '/F'], opts, onDone)
   else execFile('kill', ['-TERM', String(pid)], opts, onDone)
 }
-// 外部 dsh：3080 被占用、不是本插件的子进程、且**命令行能证明它是 dsh**。
+// 某 pid 的父进程 pid（拿不到返回 0）。
+// 用于「沿父链上溯」，判断监听 3080 的进程是不是本插件 spawn 出来的后代。
+// ⚠️ 不能只看 state.pid === probe.pid：Windows 下 spawn 用了 shell:true，插件拿到的是
+// cmd.exe 的 pid，真正监听 3080 的是它的子进程 node.exe（cmd 是中间层）。
+// 本机实测（2026-09-22）进程链：插件 → cmd.exe(28260) → node.exe(12488 监听 3080)，
+// 于是 probe.pid(12488) !== state.pid(28260)，externalPid() 判定成「外部 dsh」，
+// 状态卡说「运行中」而诊断卡说「外部进程在跑」，自相矛盾。必须上溯祖辈才能认出自己人。
+function processParent(pid, cb) {
+  const fail = () => cb(0)
+  if (!WIN) {
+    execFile('ps', ['-p', String(pid), '-o', 'ppid='], { timeout: 5000, encoding: 'buffer' }, (err, out) => {
+      if (err) return fail()
+      const v = Number(decodeOut(out).trim())
+      cb(Number.isFinite(v) && v > 0 ? v : 0)
+    })
+    return
+  }
+  execFile('wmic', ['process', 'where', 'processid=' + pid, 'get', 'parentprocessid', '/value'], { timeout: 5000, windowsHide: true, encoding: 'buffer' }, (err, out) => {
+    const text = err ? '' : decodeOut(out)
+    const m = /^\s*ParentProcessId=(\d+)/im.exec(text)
+    if (m) { cb(Number(m[1]) || 0); return }
+    // wmic 不可用（新版 Windows 已移除）→ 退回 powershell CIM
+    execFile(psExe(), ['-NoProfile', '-Command', '(Get-CimInstance Win32_Process -Filter "ProcessId=' + pid + '").ParentProcessId'], { timeout: 6000, windowsHide: true, encoding: 'buffer' }, (err2, out2) => {
+      if (err2) return fail()
+      const v = Number(decodeOut(out2).trim())
+      cb(Number.isFinite(v) && v > 0 ? v : 0)
+    })
+  })
+}
+// 纯函数（便于单测）：从 `pid → 父pid` 的邻接表上溯，判断 from 是否为 self 的后代。
+// depth 限量 + seen 防环：Windows 的父 pid 会被复用，且拿不到父时返回 0，
+// 若不设界可能一直追下去；遇到 0 或环即停。
+function isDescendantOf(from, self, parents, depth) {
+  const max = depth || 8
+  if (!from || !self) return false
+  let cur = from
+  const seen = {}
+  for (let i = 0; i < max; i++) {
+    if (!cur || seen[cur]) return false
+    seen[cur] = true
+    const p = parents && parents[cur]
+    if (!p) return false
+    if (p === self) return true
+    cur = p
+  }
+  return false
+}
+// 纯函数（便于单测）：某轮探测是否已被更新的轮次取代 —— 取代后不许再写 probe，
+// 也不许放行 waiters（否则调用方拿到的是旧值）。force 让两轮能并存，靠它定唯一写口。
+function __isStale(myGen, latestGen) { return myGen !== latestGen }
+// 监听 3080 的进程是不是本插件启动的那份（含「它是插件子进程的后代」）。
+// 快路径是同 pid 相等；慢路径才去查父链（要跑 execFile，有成本）。
+function isSelfOwnedPort(pid, cb) {
+  if (!pid) { cb(false); return }
+  if (pid === state.pid) { cb(true); return }
+  if (!state.pid) { cb(false); return }
+  // 只上溯 probe.pid 的祖辈，逐层取父；层级少（实测 2 层：node → cmd → 插件），
+  // 每次 processParent 一次 execFile，为省开销串行走到命中或到头
+  const parents = {}
+  const step = (cur, left) => {
+    if (!cur || left <= 0) { cb(false); return }
+    processParent(cur, (p) => {
+      parents[cur] = p
+      if (p && p === state.pid) { cb(true); return }
+      if (!p) { cb(false); return }
+      step(p, left - 1)
+    })
+  }
+  step(pid, 8)
+}
+// 外部 dsh：3080 被占用、不是本插件的子进程（含后代）、且**命令行能证明它是 dsh**。
 // ⚠️ 光看进程名（node.exe）不算数：任何 Node 程序都叫 node.exe，本机实测一个裸 node 探针
 // 占着 3080 时会被旧判据说成「外部 dsh」（漏报真占用）。命令行拿不到时保守返回 0 ——
 // 宁可报「无法确认」也不能把别的程序说成 dsh（会让用户去点「接管」，然后失败）。
 function externalPid() {
   if (!probe.pid || probe.pid === state.pid) return 0
+  // 本插件启动时 probe.pid 是 state.pid 的后代（cmd 中间层），父链归属在快照阶段
+  // 已由 probe.selfOwned 异步算好；这里同步读结果，未算好时保守当「不是自己的」
+  if (probe.selfOwned) return 0
   if (!isDshName(probe.name)) return 0
   return looksLikeDsh(probe.cmdline) === true ? probe.pid : 0
 }
@@ -517,6 +609,8 @@ function externalPid() {
 // 命令行拿不到（null）时返回 '' —— 这是「判不出来」，交给 C5 报「无法确认是不是 dsh」
 function portOccupiedByOther() {
   if (!probe.pid || probe.pid === state.pid) return ''
+  // 与 externalPid 同理：本插件启动的那份监听着 3080 时，不能算「别人占用」
+  if (probe.selfOwned) return ''
   if (!isDshName(probe.name)) return probe.name || '未知进程'
   return looksLikeDsh(probe.cmdline) === false ? (probe.name || 'node') : ''
 }
@@ -1245,13 +1339,27 @@ function snapshot() {
     // 本次启动用的版本 + 是否需要重启才生效（目录里已是另一个版本）
     runVersion: state.runVersion,
     needsRestart: !!state.child && !!state.runVersion && !!act && act.version !== state.runVersion,
-    // 3080 上的进程探测：识别别的终端里跑的 dsh
+    // 3080 上的进程探测：识别别的终端里跑的 dsh。
+    // ⚠️ 不能再拿 `probe.busy` 当「外部实例存在」的判据：那是异步探测的工程状态，不是业务结论。
+    // 2026-09-22 实测：插件自己启动 dsh 后，watchReady 每 1.2s 探一次端口，probe.busy 长期为 true，
+    // 界面于是显示「外部 dsh · pid 0」——启动按钮被禁用、提示还写着「别的终端启动的」。
+    // externalPid() 读的是已算好的 probe 结果（未算好时保守返回 0），是否 busy 交给 extBusy 表达。
     external: !!externalPid(),
     externalPid: externalPid() || 0,
-    externalName: probe.pid && probe.pid !== state.pid ? probe.name : '',
+    externalName: probe.pid && probe.pid !== state.pid && !probe.selfOwned ? probe.name : '',
+    // 监听 3080 的进程是本插件启动的那份（含父链上溯：Windows 下 spawn 有 cmd 中间层，
+    // 监听者是插件子进程的**子进程**，单比 pid 会认不出来）
+    selfOwned: !!probe.selfOwned,
     // 占端口的进程命令行能否证明「是 dsh」：true/false/null（null = 拿不到命令行，判不出来）。
     // C5 靠它决定报 error（确认是别的程序）还是 warning（无法确认）—— D26
     portDsh: looksLikeDsh(probe.cmdline),
+    // **谁在监听这个端口**（本插件启的 / 外部的 / 别的程序，都算）。
+    // ⚠️ 不能拿 externalPid 代替它：那是「外部 dsh」的 pid，本插件自己启的那份恒为 0。
+    // 2026-09-22 实测：插件启动 dsh 后 externalPid=0、portOther=''，C5 于是把 pid 当 0
+    // 判成「3080 空闲（无进程监听）」—— 状态卡同时显示「运行中 · pid 26916」，自相矛盾。
+    // 区分「有没有人占」与「占的人是不是外人」是两件事，必须两个字段。
+    portPid: (probe.busy ? 0 : probe.pid) || 0,
+    portName: probe.busy ? '' : probe.name,
     portCmdlineKnown: !!probe.cmdlineKnown,
     extBusy: !!probe.busy,
     portOther: portOccupiedByOther(),
@@ -1298,4 +1406,12 @@ module.exports = {
   // 单测直接喂样例 —— 这条判据的错法很隐蔽（旧版只看进程名，任何 node.exe 都算 dsh），
   // 必须钉住「裸 node 命令行 → false」而不是等线上漏报真占用
   looksLikeDsh,
+  // 父链上溯（纯函数，单测喂邻接表）：判断 pid 是否为 self 的后代。
+  // 修的是「插件启动的 dsh 被误报成外部进程」—— Windows 下 spawn 有 cmd 中间层，
+  // 监听 3080 的是插件的**孙进程**，单比 pid 认不出自己人
+  isDescendantOf,
+  // 探测轮次号的白盒入口（仅供单测）：诊断点「强制重跑」时若蹭上 watchReady
+  // 正在跑的旧轮，会拿到 dsh 尚未 bind 时的空结果 —— 这两个钩子钉住「旧轮不许写 probe」
+  __probeState() { return { gen: probe.gen, busy: probe.busy, pid: probe.pid, selfOwned: probe.selfOwned, waiters: probe.waiters.length } },
+  __isStale,
 }

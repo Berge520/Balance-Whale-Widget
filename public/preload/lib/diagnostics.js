@@ -575,8 +575,17 @@ CHECKS.push({
       return { ok: false, summary: ctx.port + ' 被非 dsh 进程占用', findings }
     }
     if (ps.portDsh === true) {
-      // 命令行已证明是 dsh，且不是外部 dsh（上面 externalPid 分支已拦）→ 就是本插件这份
-      return { ok: true, summary: ctx.port + ' 由本插件的 dsh 监听（' + (ps.name || 'node') + '）', findings }
+      // 命令行已证明是 dsh，且不是外部 dsh（上面 externalPid 分支已拦）→ 就是本插件这份。
+      // 带上 pid：用户对照状态卡（cmd 包装进程）与任务管理器（真正监听的 node）排查时，
+      // 只有这个 pid 是「端口上那个人」—— 本机实测状态卡 pid 26916 / 监听者 28216 不一致
+      return { ok: true, summary: ctx.port + ' 由本插件的 dsh 监听（' + (ps.name || 'node') + '，pid ' + ps.pid + '）', findings }
+    }
+    // 命令行拿不到、但进程树证明是本插件 spawn 的后代 —— 也是自己人，报 [✓]。
+    // 这条专门修「插件启动的 dsh 被误报成外部进程」：Windows 下命令行的获取可能失败
+    // （wmic 已从新版系统移除、powershell CIM 也可能超时），此时**父链证据**是唯一可靠依据，
+    // 比命令行更硬 —— 它是插件自己 spawn 出来的，不可能是别人的 dsh。
+    if (ps.selfOwned) {
+      return { ok: true, summary: ctx.port + ' 由本插件的 dsh 监听（' + (ps.name || 'node') + '，pid ' + ps.pid + '）', findings }
     }
     // ── 走到这里只剩「拿不到命令行」这条 ──
     // ⚠️ 唯一能证明「是本插件的 dsh」的证据是**命令行**（portDsh === true）。
@@ -608,6 +617,11 @@ function detectPort(port, cb) {
   // 探测本身有 6s execFile 超时，这里再兜一层 8s，覆盖 processName 阶段
   const timer = setTimeout(() => finish({ failed: true, reason: '探测超时' }), 8000)
   try {
+    // force=true：诊断必须拿到**本轮新鲜**的探测结果。
+    // 默认的排队复用会把调用方挂进 waiters，蹭上正在跑的那一轮 —— 而状态卡的 watchReady
+    // 每 1.2s 就探一次，用户点「强制重跑」时极可能撞上它，于是诊断读到的是几毫秒前
+    // （当时 dsh 还没 bind 3080）的空结果，界面报「3080 空闲」，而状态卡同时显示「运行中」。
+    // 本机实测（2026-09-22）：状态卡 pid 37112、诊断报「3080 空闲」，netstat 显示 28216 在监听。
     probePort(() => {
       clearTimeout(timer)
       try {
@@ -623,8 +637,13 @@ function detectPort(port, cb) {
         // 而真正监听 3080 的是 9692(node.exe)。pid 宁可为 0（让 C5 走「无法判定」），
         // 也不能给一个错的值。
         finish({
-          pid: num(snap.externalPid) || (snap.portOther ? num(snap.pid) : 0),
-          name: String(snap.externalName || ''),
+          // 「谁在监听端口」——本插件启的、外部的、别的程序，都算在这里。
+          // ⚠️ 不能写成 `externalPid || (portOther ? pid : 0)`：本插件自己启的 dsh 两个都为空，
+          // 于是 pid=0，C5 的 `if (!ps.pid)` 判成「3080 空闲（无进程监听）」，
+          // 而状态卡同时显示「运行中 · pid 26916」—— 本机实测（2026-09-22）的自相矛盾。
+          // snapshot().portPid 才是「端口上有人」的唯一真值。
+          pid: num(snap.portPid) || num(snap.externalPid) || (snap.portOther ? num(snap.pid) : 0),
+          name: String(snap.portName || snap.externalName || ''),
           occupiedByOther: String(snap.portOther || ''),
           externalPid: num(snap.externalPid),
           running: !!snap.running,
@@ -633,14 +652,20 @@ function detectPort(port, cb) {
           // 绝不默认成 true/false —— 猜错一边就变成误报或漏报
           portDsh: snap.portDsh === true ? true : (snap.portDsh === false ? false : null),
           // 端口在监听、且不是外部进程 —— 就是本插件这份 dsh 在服务（C5 据此报正常而非「无法判定」）。
-          // 用 ready（dsh.js 里「3080 已开始监听」）而不是 running（只是「有子进程」）：
-          // 子进程刚起、端口还没起来时不能算已归属
-          selfOwned: !!snap.ready,
+          // 两个来源任一成立就算自己人：
+          //   · snap.selfOwned —— 监听 3080 的进程是插件 spawn 进程的后代（父链上溯，2026-09-22 新增）。
+          //     Windows 下 spawn 走 shell:true，插件拿到 cmd.exe 的 pid、真正监听的是它的子进程
+          //     node.exe，单比 pid 必然认不出，会把自家的 dsh 误报成「外部进程在跑」。
+          //   · snap.ready —— 插件自己 watchReady 观察到「3080 已开始监听」（老判据，保留兜底）。
+          //     用 ready 而不是 running：子进程刚起、端口还没起来时不能算已归属。
+          // 注意 fail-open 方向：两者都取 false 时 C5 会报「无法判定」(warning) 而非 error，
+          // 认不出自己人最坏是多一句提示，不会诱导用户去点「接管」杀掉自己刚启的 dsh。
+          selfOwned: !!snap.selfOwned || !!snap.ready,
         })
       } catch (err) {
         finish({ failed: true, reason: (err && err.message) || '读取快照失败' })
       }
-    })
+    }, true)
   } catch (err) {
     clearTimeout(timer)
     finish({ failed: true, reason: (err && err.message) || '探测调用失败' })
