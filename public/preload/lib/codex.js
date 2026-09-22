@@ -12,10 +12,10 @@
  * 缓存：utools.dbStorage（whale:codex），只存各文件聚合与 size/mtime，不存任何凭据。
  */
 const path = require('path')
-const os = require('os')
 const fs = require('fs')
 const { K } = require('./constants')
 const { log, logErr } = require('./log')
+const { dayKeyFromTs, dayAdd, homeDir, walkDir } = require('./util')
 
 // ── 扫描上限 ──
 // 解析是同步的（readFileSync + split + 逐行 JSON.parse），整个插件主线程会被占住，
@@ -29,26 +29,13 @@ const CODEX_MAX_ROUND_FILES = 400
 const CODEX_MAX_ROUND_BYTES = 96 * 1024 * 1024
 
 // ── 工具 ──
-// 时间戳 → 'YYYY-MM-DD'（本地时区，用户在 Asia/Shanghai）
-function dayKeyFromTs(ts) {
-  const d = new Date(Number(ts))
-  const p2 = (n) => String(n).padStart(2, '0')
-  return d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate())
-}
-// 日期字符串 ±天数 → 'YYYY-MM-DD'
-function dayAdd(base, delta) {
-  const d = new Date(base + 'T00:00:00')
-  d.setDate(d.getDate() + delta)
-  return dayKeyFromTs(d.getTime())
-}
+// dayKeyFromTs / dayAdd 已提到 util.js（与 dsh-usage.js 原本逐字重复，D18）
 
 // ── Codex 目录定位 ──
+// 口径与改动前完全一致（D22）：**不支持** `~` 展开、**不**把相对路径按 cwd 解析
+// （原实现是把 env 原样丢给 existsSync）。所以 expand / relative 都保持默认 false。
 function codexHome() {
-  const env = String(process.env.CODEX_HOME || '').trim()
-  for (const c of [env, path.join(os.homedir(), '.codex')]) {
-    try { if (c && fs.existsSync(c)) return c } catch (_) {}
-  }
-  return ''
+  return homeDir({ env: 'CODEX_HOME', fallback: '.codex' })
 }
 
 // ── 缓存读写（utools.dbStorage）──
@@ -66,23 +53,16 @@ function writeCodexCache(c) {
 }
 
 // ── 列出所有会话文件 ──
+// sessions/ 下按 YYYY/MM/DD/rollout-*.jsonl 组织；archived_sessions/ 同理
+// walkDir（util.js）已内含 depth 上限 6、排序与「读不到的子目录跳过」，
+// 这里只需要把 match 定成文件名（不是整路径）
 function listCodexSessionFiles(root) {
-  const out = []
-  const walk = (dir, depth) => {
-    if (depth > 6) return
-    let ents = []
-    try { ents = fs.readdirSync(dir, { withFileTypes: true }) } catch (err) { return }
-    for (const e of ents) {
-      const p = path.join(dir, e.name)
-      if (e.isDirectory()) walk(p, depth + 1)
-      else if (/^rollout-.*\.jsonl$/i.test(e.name)) out.push(p)
-    }
-  }
-  // sessions/ 下按 YYYY/MM/DD/rollout-*.jsonl 组织
-  walk(path.join(root, 'sessions'), 0)
-  walk(path.join(root, 'archived_sessions'), 0)
-  // 按路径排序：walk 依赖 readdirSync 的目录顺序，在不同文件系统上不稳定。
-  // 排序后同一批文件每轮顺序一致，"预算用尽时优先解析哪些"才有确定行为（新文件按名字靠前）。
+  const match = /^rollout-.*\.jsonl$/i
+  const a = walkDir(path.join(root, 'sessions'), { match })
+  const b = walkDir(path.join(root, 'archived_sessions'), { match })
+  // 两棵树各自有序，合并后必须再排一次 —— 原实现是单次 walk 后统一 sort，
+  // 顺序会决定「预算用尽时优先解析哪些文件」，必须保持一致
+  const out = a.files.concat(b.files)
   out.sort()
   return out
 }

@@ -137,6 +137,8 @@ const K = {
   models: 'whale:models',   // dbStorage：多厂商模型的运行时状态（余额/今日已用/额度，不进备份）
   codex: 'whale:codex',     // dbStorage：Codex 会话统计缓存（各文件 size/mtime + 聚合，不含凭据）
   dshUsage: 'whale:dshUsage', // dbStorage：dsh 用量统计缓存（会话缓存的 size/mtime + 解析结果，不含凭据）
+  dshDiagnose: 'whale:dshDiagnose', // dbStorage：dsh 只读诊断结果缓存（60s TTL，纯派生数据，不进备份）
+  dshDump: 'whale:dshDump',     // dbStorage：dsh 配置转储（五层分层 + 树 diff）缓存（60s TTL，纯派生数据，不进备份）
 }
 
 // ──────────────────────────────────────────────

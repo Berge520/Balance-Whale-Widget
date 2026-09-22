@@ -171,8 +171,50 @@ function resolveNode(custom) {
     const nv = newestVersionDir(d)
     if (nv) { found = { dir: trimDir(nv), node: findExe(nv, 'node'), npm: findExe(nv, 'npm'), npx: findExe(nv, 'npx') }; break }
   }
+  // macOS/Linux 的 GUI 进程不执行 ~/.zshrc / ~/.bash_profile，PATH 里可能根本没有 node
+  // （nvm / homebrew 装的 node 都只写在 rc 文件里）。这里只在常规探测**全部失败**后才兜底，
+  // 且结果一并进 resolveCache —— 兜底要起一个交互 shell（可能几百毫秒），不能每次都跑。
+  if (!found && !WIN) found = resolveNodeViaLoginShell()
   state.resolveCache = { key: key, value: found }
   return found
+}
+
+// 登录 shell 兜底：`$SHELL -i -c 'command -v node'`，解析出 node 所在目录后按常规布局补齐 npm/npx。
+// 取**最后一行**：`-i` 会加载用户 rc 文件，可能先打印欢迎语 / nvm 提示 / 版本横幅，
+// 真正的路径在末尾。整段拿去当路径必然失败，所以只认最后一行里像绝对路径的那条。
+function resolveNodeViaLoginShell() {
+  const shell = String(process.env.SHELL || '')
+  if (!shell) return null
+  let out = ''
+  try {
+    // 同步执行：调用方（resolveNode）本身是同步契约，改成异步会波及所有调用点。
+    // 5s 超时兜住 rc 文件卡住的情况（timeout 选项会 kill 子进程）
+    out = decodeOut(execFileSync(shell, ['-i', '-c', 'command -v node'], { timeout: 5000, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] }))
+  } catch (err) {
+    return null
+  }
+  const p = lastPathLine(out)
+  if (!p) return null
+  // command -v 可能给的是 node 本身，也可能是 nvm 的 shim；取它所在目录后按常规布局找三个可执行文件
+  const dir = path.dirname(p)
+  if (!hasNode(dir)) return null
+  return { dir: trimDir(dir), node: findExe(dir, 'node'), npm: findExe(dir, 'npm'), npx: findExe(dir, 'npx') }
+}
+
+// 从 shell 输出里挑出「像 node 绝对路径」的最后一行。
+// 纯字符串处理，便于单测：不碰 fs、不碰进程。
+function lastPathLine(out) {
+  const lines = String(out == null ? '' : out).split('\n')
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const s = lines[i].trim().replace(/^['"]|['"]$/g, '')
+    if (!s) continue
+    // 必须看起来是绝对路径且以 node 结尾，避免把欢迎语里的普通单词当路径
+    // 绝对路径的三形态：POSIX `/x`、UNC `\\x`、Windows 盘符 `C:\x` / `C:/x`
+    if (!/^([\\/]|[a-zA-Z]:[\\/])/.test(s)) continue
+    if (!/[\\/]node(\.exe)?$/i.test(s)) continue
+    return s
+  }
+  return ''
 }
 function nodeVersion(node) {
   if (!node) return ''
@@ -226,8 +268,24 @@ function bindOutput(child) {
 // ──────────────────────────────────────────────
 // 端口占用探测：识别「在别的终端里跑的 dsh」，支持由本插件结束/重启
 // ──────────────────────────────────────────────
-const probe = { pid: 0, name: '', at: 0, busy: false, waiters: [] }
+const probe = { pid: 0, name: '', cmdline: '', cmdlineKnown: false, at: 0, busy: false, waiters: [] }
 function isDshName(name) { return /^(node|dsh)(\.exe)?$/i.test(String(name || '').trim()) }
+// 命令行里出现这些字样才算「这确实是 dsh」。
+// 只看进程名（node.exe）是不够的：任何 Node 程序都叫 node.exe。
+// 本机实测（2026-09-22）起一个裸 `node -e "net.createServer().listen(3080)"` 占住 3080，
+// 进程名同样是 node.exe，旧判据于是把它报成「3080 上已有外部 dsh 在运行」——
+// 把一个真占用降级成了无害的 warning，用户按提示去「接管」必然失败。
+// 真 dsh 的命令行长这样（本项目实测）：
+//   "D:\nodejs\node.exe" D:\nodejs\npm-global\node_modules\@deepseek-ai\dsh\lib\bin.js web --no-open
+const DSH_CMDLINE_RE = /(@deepseek-ai[\\/]dsh|dsh[\\/](lib[\\/])?bin\.js|[\\/]dsh\.(cmd|exe|js)\b|@deepseek-ai[\\/]dsh-)/i
+// 纯函数，便于单测：命令行能否证明「这是 dsh」。
+// 返回 true / false / null（null = 判不出来，调用方按 D26 报「无法确认」）
+function looksLikeDsh(cmdline) {
+  if (cmdline == null) return null
+  const s = String(cmdline).trim()
+  if (!s) return null
+  return DSH_CMDLINE_RE.test(s)
+}
 // netstat -ano（Windows）/ lsof（POSIX）输出 → 监听 DSH_PORT 的 pid
 function parsePortPid(out) {
   const text = String(out || '')
@@ -327,6 +385,31 @@ function processName(pid, cb) {
   }
   execFile('ps', ['-p', String(pid), '-o', 'comm='], { timeout: 5000, encoding: 'buffer' }, (err, out) => cb(err ? '' : decodeOut(out).trim()))
 }
+// 某个 pid 的完整命令行（用于区分「真 dsh」与「别的 node 程序」，见 looksLikeDsh）。
+// Windows 优先 wmic（Win11 起已从部分系统移除，失败就换 powershell CIM），
+// 两条都拿不到 → 返回 ''，调用方按「判不出来」处理（D26），绝不瞎猜。
+// ⚠️ 不能用 tasklist：它只给进程名，拿不到命令行 —— 本 bug 的根因就是「只有名字」。
+function processCmdline(pid, cb) {
+  const fail = () => cb('')
+  if (!WIN) {
+    execFile('ps', ['-p', String(pid), '-o', 'args='], { timeout: 5000, encoding: 'buffer' }, (err, out) => {
+      if (err) return fail()
+      cb(decodeOut(out).trim())
+    })
+    return
+  }
+  execFile('wmic', ['process', 'where', 'processid=' + pid, 'get', 'commandline', '/value'], { timeout: 5000, windowsHide: true, encoding: 'buffer' }, (err, out) => {
+    const text = err ? '' : decodeOut(out)
+    // 输出形如 `CommandLine=<完整命令行>`（含路径里的 `=` 也照取），取第一行有效值
+    const m = /^\s*CommandLine=(.*)$/im.exec(text)
+    const v = m ? m[1].trim() : ''
+    if (v) { cb(v); return }
+    // wmic 不可用（新版 Windows 已移除）→ 退回 powershell CIM，多花约 300ms，只在探测端口归属时走一次
+    execFile(psExe(), ['-NoProfile', '-Command', '(Get-CimInstance Win32_Process -Filter "ProcessId=' + pid + '").CommandLine'], { timeout: 6000, windowsHide: true, encoding: 'buffer' }, (err2, out2) => {
+      cb(err2 ? '' : decodeOut(out2).trim())
+    })
+  })
+}
 function flushProbe(cb) {
   const ws = probe.waiters
   probe.waiters = []
@@ -342,13 +425,28 @@ function probePort(cb) {
   execFile(exe, args, { timeout: 6000, windowsHide: true, maxBuffer: 4 * 1024 * 1024 }, (err, stdout) => {
     const pid = err ? 0 : parsePortPid(stdout)
     if (!pid) {
-      probe.busy = false; probe.pid = 0; probe.name = ''; probe.at = Date.now()
+      probe.busy = false; probe.pid = 0; probe.name = ''; probe.cmdline = ''; probe.cmdlineKnown = false; probe.at = Date.now()
       flushProbe(cb)
       return
     }
-    processName(pid, (name) => {
-      probe.busy = false; probe.pid = pid; probe.name = name; probe.at = Date.now()
+    // 名字与命令行各跑一次 execFile：串行会叠加两次进程创建开销（Windows 上各约 100–300ms），
+    // 这里并行发起、都回来才算探测完成，避免状态卡刷新时端口归属长时间「探测中」。
+    let left = 2
+    const done = () => {
+      if (--left > 0) return
+      probe.busy = false
+      probe.pid = pid
+      probe.at = Date.now()
       flushProbe(cb)
+    }
+    processName(pid, (name) => {
+      probe.name = name
+      done()
+    })
+    processCmdline(pid, (cmdline) => {
+      probe.cmdline = cmdline
+      probe.cmdlineKnown = !!cmdline
+      done()
     })
   })
 }
@@ -403,13 +501,24 @@ function stopExternal(pid, done) {
   if (WIN) execFile('taskkill', ['/pid', String(pid), '/T', '/F'], opts, onDone)
   else execFile('kill', ['-TERM', String(pid)], opts, onDone)
 }
-// 外部 dsh：3080 被占用、不是本插件的子进程、且进程名像 node/dsh
+// 外部 dsh：3080 被占用、不是本插件的子进程、且**命令行能证明它是 dsh**。
+// ⚠️ 光看进程名（node.exe）不算数：任何 Node 程序都叫 node.exe，本机实测一个裸 node 探针
+// 占着 3080 时会被旧判据说成「外部 dsh」（漏报真占用）。命令行拿不到时保守返回 0 ——
+// 宁可报「无法确认」也不能把别的程序说成 dsh（会让用户去点「接管」，然后失败）。
 function externalPid() {
-  return probe.pid && probe.pid !== state.pid && isDshName(probe.name) ? probe.pid : 0
+  if (!probe.pid || probe.pid === state.pid) return 0
+  if (!isDshName(probe.name)) return 0
+  return looksLikeDsh(probe.cmdline) === true ? probe.pid : 0
 }
-// 非 dsh 进程占着 3080 时不允许结束（避免误杀别的程序）
+// 非 dsh 进程占着 3080 时不允许结束（避免误杀别的程序）。
+// 分两种「非 dsh」：
+//   · 名字就不像 dsh（chrome.exe / nginx…）→ 直接给出进程名
+//   · 名字像（node.exe）但命令行证明不是 dsh → 也说成占用，且带上名字 + 明示「非 dsh 的 node 程序」
+// 命令行拿不到（null）时返回 '' —— 这是「判不出来」，交给 C5 报「无法确认是不是 dsh」
 function portOccupiedByOther() {
-  return !!probe.pid && probe.pid !== state.pid && !isDshName(probe.name) ? probe.name || '未知进程' : ''
+  if (!probe.pid || probe.pid === state.pid) return ''
+  if (!isDshName(probe.name)) return probe.name || '未知进程'
+  return looksLikeDsh(probe.cmdline) === false ? (probe.name || 'node') : ''
 }
 // ── 插件自己那份 dsh：装在插件数据目录，不依赖全局安装，也不受 npx 缓存影响 ──
 function dshPrefix() {
@@ -1140,6 +1249,10 @@ function snapshot() {
     external: !!externalPid(),
     externalPid: externalPid() || 0,
     externalName: probe.pid && probe.pid !== state.pid ? probe.name : '',
+    // 占端口的进程命令行能否证明「是 dsh」：true/false/null（null = 拿不到命令行，判不出来）。
+    // C5 靠它决定报 error（确认是别的程序）还是 warning（无法确认）—— D26
+    portDsh: looksLikeDsh(probe.cmdline),
+    portCmdlineKnown: !!probe.cmdlineKnown,
     extBusy: !!probe.busy,
     portOther: portOccupiedByOther(),
     // 本插件启动的进程是否已经能提供服务（3080 开始监听）
@@ -1173,4 +1286,16 @@ module.exports = {
   psExe,
   // 校验某个目录里是否有 node 可执行文件（设置页选择目录时用）
   nodeInDir(dir) { return !!hasNode(dir) },
+  // 一次性 CLI 读取（lib/dsh-dump.js）复用的底层能力：这些都是通用工具，
+  // 不是 dsh 的进程管理语义，单独复制一份只会造成 decodeOut/spawnCmd 两处漂移
+  decodeOut,
+  spawnCmd,
+  // dsh CLI 入口与「实际用哪一份」的定位（dump 要拿 bin.js 绝对路径）
+  activeDsh,
+  // 登录 shell 输出的路径行提取（纯函数，单测直接喂样例）
+  lastPathLine,
+  // 命令行能否证明「这是 dsh」（纯函数，三态：true/false/null）。
+  // 单测直接喂样例 —— 这条判据的错法很隐蔽（旧版只看进程名，任何 node.exe 都算 dsh），
+  // 必须钉住「裸 node 命令行 → false」而不是等线上漏报真占用
+  looksLikeDsh,
 }

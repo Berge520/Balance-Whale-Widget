@@ -339,6 +339,123 @@ export interface DshUsageResult {
   spendWatch?: { accruedCny: number; since: number; lastBalanceCny: number } | null
 }
 
+// dsh 只读诊断里单条问题明细。level 与 severity 是两套东西：
+// level 描述「这条明细有多严重」，severity 描述「这个检查项本身归哪一档」
+export interface DshDiagnoseFinding {
+  level: 'ok' | 'warn' | 'error'
+  text: string
+  // 给出下一步怎么办（诊断的价值在于说清「为什么」和「怎么办」）
+  hint?: string
+}
+
+// 单个检查项的结果。threw 表示该项自身抛错（§3.2 约定 2：不影响其余项）
+export interface DshDiagnoseItem {
+  id: string
+  title: string
+  severity: 'critical' | 'warning' | 'ok'
+  // 本期恒 false（只读诊断不做修复）
+  fixable: boolean
+  ok: boolean
+  summary: string
+  findings: DshDiagnoseFinding[]
+  threw: boolean
+}
+
+// dsh 只读诊断结果。
+// ⚠️ ok 只看「是否存在 error 级 finding」；C5 端口「无法判定」是 warning，
+// 会让对应项显示 [!] 但不应让整轮 ok 变 false（D26）
+export interface DshDiagnoseResult {
+  ok: boolean
+  at: number
+  // 命中 60s TTL 缓存时为 true（设置页据此提示「这是旧结果」）
+  cached: boolean
+  pass: number
+  bad: number
+  results: DshDiagnoseItem[]
+  // 整轮编排层失败时的原因（单项抛错不走这里）
+  error?: string
+  // 读环境失败 / 超时兜底时为 null，设置页要按「读不到」渲染而不是当「未安装」
+  env: {
+    // $DSH_HOME（默认 ~/.dsh），与 dsh 用量统计同口径
+    home: string
+    nodeVersion: string
+    dshVersion: string
+    dshSource: string
+    profile: string
+    installed: boolean
+  } | null
+}
+
+// dsh 配置转储的一层（D1 五层分层可视化）。
+// kind 的三种取值对应「这一层的来源」：
+//   · base   —— bundle 内置（没被任何 patch 覆盖的包）
+//   · bundle —— 包内另一份 patch（如 @deepseek-ai/dsh-web-app 覆盖 dsh-base）
+//   · user   —— 用户层（profile / home 的 cordis.patch.yml），按**绝对路径**聚合
+export interface DshDumpLayer {
+  kind: 'base' | 'bundle' | 'user'
+  // 界面显示名：包名，或用户层缩短后的来源名（如 profiles/web）
+  name: string
+  // 用户层为 cordis.patch.yml 绝对路径；包内层为包名；base 层为 ''
+  source: string
+  // 该层覆盖到的条目 id，**已去重**（dump 会把同一批条目在多个分节里重复列出）
+  items: string[]
+  // items 的条数
+  itemCount: number
+  // 界面直接渲染的预览：items 的前 40 个（避免一次渲染上百个 id）
+  preview: string[]
+  // dump 里该层的 id 出现次数是否多于去重后的条数（true 说明分节有重复列举）
+  repeat: boolean
+  // 该层涉及的 dump 分节数（一个包 patch 多个包就会有多个分节）
+  sectionCount: number
+  // 首次出现序号，用于稳定排序
+  order: number
+}
+
+// dump 里一个条目的骨架。⚠️ 刻意不含 config 的**值**：可能含密钥，且体积大（§4.3 只解析到条目级）
+export interface DshDumpEntry {
+  id: string
+  name: string
+  // disabled 为 `!!js '...'` 这类运行期表达式时同样算 true（原样保留不求值，§4.3）
+  disabled: boolean
+  hasConfig: boolean
+  // config 下的顶层字段名（最多 12 个），只留名字不留值
+  configKeys: string[]
+}
+
+// 生效树 vs 默认树 diff（D2）。三个数组都截断到 200 条，总数在 *Total 里。
+// added / removed 只给 id + name（没有对照物，比不出细节）；changed 带 before/after 两边骨架
+export interface DshDumpDiff {
+  changed: { id: string; name: string; before: DshDumpEntry; after: DshDumpEntry }[]
+  added: { id: string; name: string }[]
+  removed: { id: string; name: string }[]
+  changedTotal: number
+  addedTotal: number
+  removedTotal: number
+}
+
+// dsh 配置转储结果（阶段二 D1 + D2）。
+// ok:false 时只有 error，layers/entries/diff 均缺省
+export interface DshDumpResult {
+  ok: boolean
+  at: number
+  // 命中 60s TTL 缓存时为 true
+  cached: boolean
+  profile: string
+  error?: string
+  // dsh 根本没装到可用（全局与插件目录都没有）：界面要给「先装一次」的空态，
+  // 而不是笼统的「读取失败」—— 两者要做的事完全不同
+  notInstalled?: boolean
+  // dump 里的分节数（0 表示输出没能解析出任何分节，通常是 dsh 报错而非配置为空）
+  sections?: number
+  layers?: DshDumpLayer[]
+  entries?: DshDumpEntry[]
+  // 一个分节都没解析出来（输出格式变了 / dsh 报错）。界面要提示「解析不了」而不是「配置为空」
+  unparsed?: boolean
+  // 默认树读取失败时为 null，原因在 diffError（分层可视化仍可用，属降级不属失败）
+  diff?: DshDumpDiff | null
+  diffError?: string
+}
+
 export interface ClearDataResult {
   ok: boolean
   // 各项是否被清除（按项清除的结果回显）
@@ -1015,6 +1132,19 @@ export interface WhaleServices {
   // dsh 本地用量统计：读 $DSH_HOME（默认 ~/.dsh）下 dsh-usage 的账本与会话投影缓存，按天/模型聚合
   dshUsageSummary(): DshUsageResult
   clearDshUsageCache(): void
+  // dsh 只读诊断：跑 5 项本地检查（重复模块 / patch 条目 / patch 语法 / settings.yaml / 3080 端口）。
+  // 纯只读，不写入任何配置。60s TTL 缓存，force:true 绕过。
+  // ⚠️ 必须返回 Promise：C5 端口探测走异步回调，如果这里同步等结果，
+  // 宿主就把整个渲染进程冻住（设置页会卡死）—— 别把它改成同步返回
+  diagnoseDsh(opts?: { force?: boolean }): Promise<DshDiagnoseResult>
+  clearDshDiagnoseCache(): void
+  // dsh 配置转储（阶段二）：跑 `node bin.js --profile <n> --dump-config` 与
+  // `--dump-default-config`，解析成「五层 patch 分层」+「生效树 vs 默认树 diff」。
+  // 纯只读：不改任何配置、不写 dsh 的任何文件。
+  // ⚠️ 与 diagnoseDsh 同理必须返回 Promise：内部要 spawn 子进程（每次 8s 上限、两次串行），
+  // 同步等结果会冻住整个渲染进程。宿主侧另有 20s 兜底闸门保证一定 settle。
+  dumpDshConfig(opts?: { force?: boolean; profile?: string }): Promise<DshDumpResult>
+  clearDshDumpCache(): void
   exportUsageCsv(days?: number): UsageCsvResult
   importUsageCsv(): UsageCsvImportResult
   // 按项清除本地数据：true 的项才会被清除

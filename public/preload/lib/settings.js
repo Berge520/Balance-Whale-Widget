@@ -28,6 +28,8 @@ const skins = require('./skins')
 const bubbles = require('./bubbles')
 const codex = require('./codex')
 const dshUsage = require('./dsh-usage')
+const diagnostics = require('./diagnostics')
+const dshDump = require('./dsh-dump')
 
 // 近 N 天用量（含今日，缺失日期补 0），按日期升序。
 // 上限 = 配置的账本保留天数（默认 365，最低 35）：设置页要算「本月汇总」，31 号那天窗口必须能回溯到 1 号。
@@ -165,6 +167,127 @@ function runGhAccelOp(title, run, verdict) {
       hosts.opEnd(op, 'fail', String((err && err.message) || err))
       throw err
     })
+}
+
+// ── dsh 只读诊断编排（lib/diagnostics.js 的宿主入口）──
+// 顺序：命中缓存直接回 → 读环境 → 串行探测端口 → 跑五项检查 → 写缓存。
+// 探测端口必须串行（probePort 内部是全局单例 + busy 标志，与状态卡共用，D15）；
+// 探测失败不阻断其余项 —— detectPort 永不 reject，只会给 { failed, reason }。
+//
+// ⚠️ 本函数必须返回 Promise，且必须保证「一定会 settle」：
+// 它由主窗 preload 的 window.services 暴露给设置页，调用发生在设置页所在的渲染进程里。
+// 只要这里同步把结果算完，渲染进程就会被冻住（设置页整个卡死、按钮一直转圈）。
+// 所以绝不能再安一个「同步等探测结果」的分支 —— 回调万一不回来，Promise 就永久 pending，
+// 前端 finally 不会执行，「诊断中…」再也退不出来（以前就踩过这个坑）。
+function diagnoseDsh(opts) {
+  const o = opts && typeof opts === 'object' ? opts : {}
+  const force = o.force === true
+  const hit = diagnostics.readCache()
+  // 判定走纯函数（diagnostics.cacheHit）：这里以前把条件手写在两处，
+  // 结果设置页按钮把 force 写死成 true 就绕过了缓存，谁也没察觉
+  if (diagnostics.cacheHit(hit, diagnostics.DIAGNOSE_TTL_MS, Date.now(), { force })) {
+    // cached:true 让设置页知道「这是旧结果，需要重跑可点强制重跑」
+    return Promise.resolve(Object.assign({}, hit, { cached: true }))
+  }
+  return new Promise((resolve) => {
+    // 兜底闸门：detectPort 自带 8s 超时，这里再加一道，确保任何异常路径下 Promise 都会 settle，
+    // 不让设置页卡在「诊断中…」。正常路径会先 resolve，settled 后兜底变成空操作
+    let settled = false
+    const done = (payload) => {
+      if (settled) return
+      settled = true
+      clearTimeout(guard)
+      resolve(payload)
+    }
+    const guard = setTimeout(() => {
+      logErr('[whale][diagnostics] 诊断超时兜底（探测回调未回来）', '')
+      done({ ok: false, at: Date.now(), cached: false, pass: 0, bad: 0, results: [], env: null, error: '诊断超时，请重试' })
+    }, 15000)
+    // readEnv 是本轮唯一的同步重活（走 dsh.snapshot()），留在探测回调之外，
+    // 免得探测慢的时候把这段同步耗时叠加到用户感知的卡顿上
+    diagnostics.detectPort(3080, (portState) => {
+      let env
+      try {
+        env = diagnostics.readEnv()
+      } catch (err) {
+        logErr('[whale][diagnostics] 读环境失败', (err && err.message) || '')
+        done({ ok: false, at: Date.now(), cached: false, pass: 0, bad: 0, results: [], env: null, error: (err && err.message) || '读环境失败' })
+        return
+      }
+      const ctx = diagnostics.buildContext({
+        home: env.home,
+        nodeVersion: env.nodeVersion,
+        dshVersion: env.dshVersion,
+        dshSource: env.dshSource,
+        profile: env.profile,
+        port: 3080,
+        portState: portState,
+      })
+      let results
+      try {
+        results = diagnostics.runChecks(ctx)
+      } catch (err) {
+        // runChecks 内部已逐项 catch，走到这里说明是遍历本身出了问题（例如 CHECKS 被改坏）。
+        // 不能让设置页永远转圈，也要留痕
+        logErr('[whale][diagnostics] 诊断整体失败', (err && err.message) || '')
+        done({ ok: false, at: Date.now(), cached: false, pass: 0, bad: 0, results: [], env: env, error: (err && err.message) || '诊断失败' })
+        return
+      }
+      const ordered = diagnostics.orderResults(results)
+      const sum = diagnostics.summarize(ordered)
+      const payload = {
+        ok: diagnostics.overallOk(ordered),
+        at: Date.now(),
+        cached: false,
+        pass: sum.pass,
+        bad: sum.bad,
+        results: ordered,
+        env: env,
+      }
+      diagnostics.writeCache(payload)
+      done(payload)
+    })
+  })
+}
+
+// ── dsh 配置转储（lib/dsh-dump.js 的宿主入口）──
+// 顺序：命中缓存直接回 → 跑一次 --dump-config → 再跑 --dump-default-config → 解析归层 + diff → 写缓存。
+//
+// ⚠️ 与 diagnoseDsh 同一个坑：本函数由设置页渲染进程调用，**必须返回 Promise 且必须 settle**。
+// 这里比诊断更危险 —— 它要 spawn 子进程，最坏 8s + 8s = 16s，所以兜底闸门给到 20s
+// （比内部两道超时之和再多 4s 余量）。少了这道闸门，子进程 hang 住时设置页会永远转圈。
+function dumpDshConfig(opts) {
+  const o = opts && typeof opts === 'object' ? opts : {}
+  const force = o.force === true
+  const profile = String(o.profile || 'web')
+  const hit = dshDump.readCache()
+  // 与诊断同一个坑：profile 变了也必须作废缓存（否则切 profile 后读到上一个 profile 的树）
+  if (diagnostics.cacheHit(hit, dshDump.DUMP_TTL_MS, Date.now(), { force, profile })) {
+    return Promise.resolve(Object.assign({}, hit, { cached: true }))
+  }
+  return new Promise((resolve) => {
+    let settled = false
+    const done = (payload) => {
+      if (settled) return
+      settled = true
+      clearTimeout(guard)
+      resolve(payload)
+    }
+    const guard = setTimeout(() => {
+      logErr('[whale][dsh-dump] 转储超时兜底（子进程回调未回来）', '')
+      done({ ok: false, at: Date.now(), cached: false, profile: profile, error: '转储超时，请重试' })
+    }, 20000)
+    dshDump.collectDshDump({ profile: profile }, (err, payload) => {
+      if (err) {
+        logErr('[whale][dsh-dump] 转储失败', (err && err.message) || '')
+        done({ ok: false, at: Date.now(), cached: false, profile: profile, error: (err && err.message) || String(err) })
+        return
+      }
+      // 失败结果不写缓存：缓存了会让用户点「重新转储」也拿不到新结果
+      if (payload && payload.ok) dshDump.writeCache(payload)
+      done(Object.assign({}, payload, { cached: false }))
+    })
+  })
 }
 
 module.exports = {
@@ -727,6 +850,25 @@ module.exports = {
   },
   clearDshUsageCache() {
     return dshUsage.clearDshUsageCache()
+  },
+  // dsh 只读诊断（见 lib/diagnostics.js）：
+  // 用一次 Promise 收口 —— C5 的端口探测本身是异步的（probePort 回调），
+  // 其余项同步跑完。返回 { ok, at, cached, pass, bad, results, env }
+  diagnoseDsh(opts) {
+    return diagnoseDsh(opts)
+  },
+  clearDshDiagnoseCache() {
+    diagnostics.clearDshDiagnoseCache()
+    return { ok: true }
+  },
+  // dsh 配置转储（见 lib/dsh-dump.js）：读 --dump-config / --dump-default-config，
+  // 解析成「五层分层 + 生效树/默认树 diff」。返回 { ok, at, cached, profile, layers, entries, diff }
+  dumpDshConfig(opts) {
+    return dumpDshConfig(opts)
+  },
+  clearDshDumpCache() {
+    dshDump.clearDshDumpCache()
+    return { ok: true }
   },
   // 导出近 N 天用量为 CSV（UTF-8 BOM，Excel 可直接打开）
   exportUsageCsv(days) {

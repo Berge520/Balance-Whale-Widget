@@ -16,47 +16,18 @@
  * 缓存：utools.dbStorage（whale:dshUsage），只存会话文件的 size/mtime 指纹与解析结果，不含任何凭据。
  */
 const path = require('path')
-const os = require('os')
 const fs = require('fs')
 const { K } = require('./constants')
 const { log, logErr } = require('./log')
-
-// ── 工具 ──
-function num(v) {
-  const n = Number(v)
-  return Number.isFinite(n) ? n : 0
-}
-// 时间戳 → 'YYYY-MM-DD'（本地时区，用户在 Asia/Shanghai）
-function dayKeyFromTs(ts) {
-  const d = new Date(Number(ts))
-  const p2 = (n) => String(n).padStart(2, '0')
-  return d.getFullYear() + '-' + p2(d.getMonth() + 1) + '-' + p2(d.getDate())
-}
-// 日期字符串 ±天数 → 'YYYY-MM-DD'
-function dayAdd(base, delta) {
-  const d = new Date(base + 'T00:00:00')
-  d.setDate(d.getDate() + delta)
-  return dayKeyFromTs(d.getTime())
-}
+const { num, dayKeyFromTs, dayAdd, homeDir } = require('./util')
 
 // ── dsh 数据目录定位 ──
 // 与 dsh 自己（@linxin666/dsh-usage 的 dsh-home.ts）同规则：$DSH_HOME 优先（支持 ~ 展开，
-// 相对路径按 cwd 解析），否则 ~/.dsh
+// 相对路径按 cwd 解析），否则 ~/.dsh。
+// expand / relative 必须显式传 true（D22）：codexHome 原本不支持这两者，
+// 合并后各自的原始口径由调用方声明，避免静默放宽对方语义。
 function dshHome() {
-  const cands = []
-  const raw = String(process.env.DSH_HOME || '').trim()
-  if (raw) {
-    const home = os.homedir()
-    let p = raw
-    if (p === '~') p = home
-    else if (p.startsWith('~/') || p.startsWith('~\\')) p = path.join(home, p.slice(2))
-    cands.push(path.isAbsolute(p) ? p : path.join(process.cwd(), p))
-  }
-  cands.push(path.join(os.homedir(), '.dsh'))
-  for (const c of cands) {
-    try { if (c && fs.existsSync(c)) return c } catch (_) {}
-  }
-  return ''
+  return homeDir({ env: 'DSH_HOME', fallback: '.dsh', expand: true, relative: true })
 }
 
 // ── 缓存读写（utools.dbStorage）──

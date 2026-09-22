@@ -1,6 +1,6 @@
 <script lang="ts" setup>
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
-import type { AssetsApplyResult, AssetsExportResult, AssetsPreviewResult, BackupPreviewResult, BubbleMeta, CodexSummaryResult, CodexWindow, CodexWindows, DshUsageResult, LedgerDetailDay, LedgerDetailEntry, ModelUsageRow, SkinGallery, SkinMeta, SoundMeta, SoundRole, WhaleMailSecrets, WhaleModel, WhaleModelRow, WhaleModelTemplate, WhalePriceModel, WhaleServices, WhaleTokenPrice } from './types/services'
+import type { AssetsApplyResult, AssetsExportResult, AssetsPreviewResult, BackupPreviewResult, BubbleMeta, CodexSummaryResult, CodexWindow, CodexWindows, DshDiagnoseFinding, DshDiagnoseItem, DshDiagnoseResult, DshDumpResult, DshUsageResult, LedgerDetailDay, LedgerDetailEntry, ModelUsageRow, SkinGallery, SkinMeta, SoundMeta, SoundRole, WhaleMailSecrets, WhaleModel, WhaleModelRow, WhaleModelTemplate, WhalePriceModel, WhaleServices, WhaleTokenPrice } from './types/services'
 import SkinCropper from './components/SkinCropper.vue'
 import SoundTrimmer from './components/SoundTrimmer.vue'
 import FirstRunGuide from './components/FirstRunGuide.vue'
@@ -361,14 +361,16 @@ watch(activeTab, (tab) => {
 // 两张统计卡默认收起，首次「展开」时才读取：宿主是同步扫文件（会话日志可能几十 MB），
 // 不看不读，避免每次进开发者 Tab 都无条件付一次扫描成本；展开后即读，也不用手动再点一下。
 // 收起时摘要只在「本会话已读过」之后才显示（否则露「点击展开查看」），保证折叠 = 不预读。
-const devFolds = reactive({ dshUsage: false, codex: false })
-const devStatsLoaded = reactive({ dshUsage: false, codex: false })
-function toggleDevCard(key: 'dshUsage' | 'codex') {
+const devFolds = reactive({ dshUsage: false, codex: false, diagnose: false, dshDump: false })
+const devStatsLoaded = reactive({ dshUsage: false, codex: false, diagnose: false, dshDump: false })
+function toggleDevCard(key: 'dshUsage' | 'codex' | 'diagnose' | 'dshDump') {
   devFolds[key] = !devFolds[key]
   if (!devFolds[key] || devStatsLoaded[key]) return
   devStatsLoaded[key] = true
   if (key === 'dshUsage') dshUsageRefresh()
-  else codexRefresh()
+  else if (key === 'codex') codexRefresh()
+  else if (key === 'dshDump') dshDumpRefresh()
+  else diagnoseRefresh()
 }
 // 启动/结束是同步返回；重启要等旧进程退出、更新要下载，之后再补一次状态
 function dshDo(action: 'start' | 'stop' | 'restart' | 'update') {
@@ -793,6 +795,258 @@ function dshUsageClearCache() {
     dshUsageFlash.err = true
     dshUsageFlash.msg = '清除失败：' + String(err?.message || err)
   }
+}
+
+// —— dsh 只读诊断 ——
+// 五项检查全在宿主侧读本地文件（含遍历 node_modules），点开才跑；纯只读，不改任何配置。
+const diagnose = ref<DshDiagnoseResult | null>(null)
+const diagnoseBusy = ref(false)
+const diagnoseFlash: Flash = useFlash()
+const diagnoseFolds = reactive({ help: false })
+function diagnoseRefresh(force = false) {
+  if (diagnoseBusy.value) return
+  diagnoseBusy.value = true
+  diagnoseFlash.msg = ''
+  diagnoseFlash.err = false
+  // 宿主侧要读本地文件（C1 遍历 node_modules、C5 探测端口），直接调会占住消息循环；
+  // 先让 Vue 把「诊断中…」渲染出来，再在下一轮事件循环里发请求
+  window.setTimeout(() => diagnoseRefreshRun(force), 30)
+}
+function diagnoseRefreshRun(force: boolean) {
+  let p: Promise<DshDiagnoseResult> | undefined
+  try {
+    p = services.diagnoseDsh?.({ force })
+  } catch (err: any) {
+    diagnoseFlash.err = true
+    diagnoseFlash.msg = '诊断失败：' + String(err?.message || err)
+    diagnoseBusy.value = false
+    return
+  }
+  if (!p) {
+    diagnoseFlash.err = true
+    diagnoseFlash.msg = '宿主 API 不可用'
+    diagnoseBusy.value = false
+    return
+  }
+  // 宿主返回 Promise，必须 then 取结果：之前直接把 Promise 当结果用，
+  // 导致结果永远渲染不出来、且结论字段全是 undefined
+  p.then((r) => {
+    diagnose.value = r
+    if (r.error) {
+      diagnoseFlash.err = true
+      diagnoseFlash.msg = r.error
+      return
+    }
+    // 命中的是 TTL 内的旧结果时说清楚，免得用户以为刚跑完却没更新
+    diagnoseFlash.msg = (r.cached ? '60 秒内已有结果，直接复用；' : '') +
+      (r.bad ? `${r.pass} 项通过 · ${r.bad} 项异常` : '全部通过')
+    diagnoseFlash.err = false
+  }).catch((err: any) => {
+    diagnoseFlash.err = true
+    diagnoseFlash.msg = '诊断失败：' + String(err?.message || err)
+  }).finally(() => {
+    diagnoseBusy.value = false
+  })
+}
+// 折叠头摘要（§3.6）：有结论无事才说「全部通过」，C5 判不出来时仍算异常项
+const diagnoseSummary = computed(() => {
+  const r = diagnose.value
+  if (!r) return '点击展开诊断'
+  // env 可能为 null（读环境失败/超时兜底），此时不冒充「未安装」
+  if (r.env && !r.env.installed) return 'dsh 未安装'
+  return r.bad ? `${r.pass} 项通过 · ${r.bad} 项异常` : '全部通过'
+})
+// 状态标记用文本而非 emoji / SVG：与项目现有视觉一致，三平台字体都渲染（§3.6）
+function diagnoseMark(item: DshDiagnoseItem) {
+  if (item.threw) return '[✗]'
+  if (item.findings.some((f) => f.level === 'error')) return '[✗]'
+  if (item.findings.some((f) => f.level === 'warn')) return '[!]'
+  return '[✓]'
+}
+function diagnoseMarkCls(item: DshDiagnoseItem) {
+  const m = diagnoseMark(item)
+  return m === '[✗]' ? 'diag-bad' : m === '[!]' ? 'diag-warn' : 'diag-ok'
+}
+// 明细截断（D12）：C1 遍历 node_modules 可能产出几十行，不截断会把卡片撑爆。
+// 截断只作用于渲染，缓存里存的是完整结果 —— 「复制诊断信息」拿到的仍是全量
+const DIAGNOSE_SHOWN = 5
+function diagnoseShown(item: DshDiagnoseItem) {
+  return (item.findings || []).slice(0, DIAGNOSE_SHOWN)
+}
+function diagnoseRestCount(item: DshDiagnoseItem) {
+  return Math.max(0, (item.findings || []).length - DIAGNOSE_SHOWN)
+}
+function diagnoseLevelCls(f: DshDiagnoseFinding) {
+  return f.level === 'error' ? 'diag-bad' : f.level === 'warn' ? 'diag-warn' : 'diag-ok'
+}
+// 底部环境快照的展示口径：读不到就显示「未知」，不要留空白让人以为漏渲染
+function diagnoseEnvText() {
+  const e = diagnose.value && diagnose.value.env
+  if (!e) return '环境信息读取失败'
+  return [
+    'Node ' + (e.nodeVersion || '未知'),
+    'dsh ' + (e.dshVersion || '未知') + (e.dshSource ? '（' + e.dshSource + '）' : ''),
+    'profile ' + (e.profile || 'web'),
+    '$DSH_HOME ' + (e.home || '未知'),
+  ].join(' · ')
+}
+// 「复制诊断信息」兜底：复制的是未截断的完整结果，用户贴给他人排查时不会缺内容。
+// 环境快照一并带上，省得来回问版本
+function diagnoseCopy() {
+  const r = diagnose.value
+  if (!r) {
+    diagnoseFlash.err = true
+    diagnoseFlash.msg = '还没有诊断结果，先点「重新诊断」。'
+    return
+  }
+  const lines: string[] = []
+  lines.push('dsh 只读诊断 · ' + new Date(r.at).toLocaleString('zh-CN', { hour12: false }))
+  lines.push(diagnoseEnvText())
+  lines.push('结论：' + (r.ok ? '通过' : '有异常') + `（${r.pass} 项通过 · ${r.bad} 项异常）`)
+  for (const item of r.results || []) {
+    lines.push('')
+    lines.push(diagnoseMark(item) + ' ' + item.title + (item.summary ? ' — ' + item.summary : ''))
+    for (const f of item.findings || []) {
+      lines.push('  [' + f.level + '] ' + f.text + (f.hint ? '（' + f.hint + '）' : ''))
+    }
+  }
+  const text = lines.join('\n')
+  const ok = services.copyText?.(text)
+  diagnoseFlash.err = !ok
+  diagnoseFlash.msg = ok ? '已复制完整诊断信息（含未截断明细）' : '复制失败，请手动选中复制。'
+}
+
+// —— dsh 配置转储 ——
+// 一次 CLI 读取（node bin.js --profile <n> --dump-config / --dump-default-config），把「哪些层改了哪条」
+// 与「生效树 vs 默认树差了什么」摊成可读列表。纯只读、不发网络请求。
+const dshDump = ref<DshDumpResult | null>(null)
+const dshDumpBusy = ref(false)
+const dshDumpFlash: Flash = useFlash()
+const dshDumpFolds = reactive({ help: false, layers: true, diff: true })
+// 默认 profile 与诊断一致（'web'）：配置项化留给后续版本，避免这版就要用户先填对 profile 才看得到东西
+const DSH_DUMP_PROFILE = 'web'
+function dshDumpRefresh(force = false) {
+  if (dshDumpBusy.value) return
+  dshDumpBusy.value = true
+  dshDumpFlash.msg = ''
+  dshDumpFlash.err = false
+  // 与诊断同理：起子进程会占住消息循环，先让 Vue 渲染出「读取中…」再发请求
+  window.setTimeout(() => dshDumpRefreshRun(force), 30)
+}
+function dshDumpRefreshRun(force: boolean) {
+  let p: Promise<DshDumpResult> | undefined
+  try {
+    p = services.dumpDshConfig?.({ force, profile: DSH_DUMP_PROFILE })
+  } catch (err: any) {
+    dshDumpFlash.err = true
+    dshDumpFlash.msg = '读取失败：' + String(err?.message || err)
+    dshDumpBusy.value = false
+    return
+  }
+  if (!p) {
+    dshDumpFlash.err = true
+    dshDumpFlash.msg = '宿主 API 不可用'
+    dshDumpBusy.value = false
+    return
+  }
+  p.then((r) => {
+    dshDump.value = r
+    if (!r.ok) {
+      dshDumpFlash.err = true
+      dshDumpFlash.msg = r.error || '读取失败'
+      return
+    }
+    const d = r.diff
+    const diffText = d
+      ? `差异 ${d.changed.length + d.added.length + d.removed.length} 处`
+      : (r.diffError ? '默认树读取失败，仅展示分层' : '差异 0 处')
+    dshDumpFlash.msg = (r.cached ? '60 秒内已有结果，直接复用；' : '') +
+      `${r.layers?.length || 0} 层 · ${r.entries?.length || 0} 条目 · ${diffText}`
+    dshDumpFlash.err = false
+  }).catch((err: any) => {
+    dshDumpFlash.err = true
+    dshDumpFlash.msg = '读取失败：' + String(err?.message || err)
+  }).finally(() => {
+    dshDumpBusy.value = false
+  })
+}
+// 折叠头摘要（与诊断卡同口径）：未展开过就只说「点击展开」，不预读
+const dshDumpSummary = computed(() => {
+  const r = dshDump.value
+  if (!r) return '点击展开读取'
+  if (!r.ok) return '读取失败'
+  const d = r.diff
+  const n = d ? d.changed.length + d.added.length + d.removed.length : 0
+  return `${r.layers?.length || 0} 层 · 差异 ${d ? n : '—'} 处`
+})
+// 层卡片配色：base 灰（什么都没改）、bundle 蓝（包自带的 patch）、user 橙（用户自己写的 patch，最该被看见）
+function dshDumpLayerCls(l: { kind: string }) {
+  return l.kind === 'user' ? 'layer-user' : l.kind === 'bundle' ? 'layer-bundle' : 'layer-base'
+}
+function dshDumpLayerKindText(l: { kind: string }) {
+  return l.kind === 'user' ? '用户层' : l.kind === 'bundle' ? '包内层' : '基线'
+}
+function dshDumpDiffText(kind: 'changed' | 'added' | 'removed') {
+  return kind === 'changed' ? '被改' : kind === 'added' ? '生效树新增' : '生效树移除'
+}
+// 条目名可能为空（dump 里只有 id 没 name），退化成 id 显示，不要留空白
+function dshDumpEntryLabel(e: { id: string; name: string }) {
+  return e.name && e.name !== e.id ? `${e.name}（${e.id}）` : e.id
+}
+// 「被改」条目要看两边的差：把 before → after 摊开，只列真的变了的项
+function dshDumpChangedNote(e: { before: { disabled: boolean; hasConfig: boolean; configKeys: string[] }; after: { disabled: boolean; hasConfig: boolean; configKeys: string[] } }) {
+  const parts: string[] = []
+  if (e.before.disabled !== e.after.disabled) {
+    parts.push('禁用 ' + (e.before.disabled ? '是' : '否') + ' → ' + (e.after.disabled ? '是' : '否'))
+  }
+  const bk = e.before.configKeys.join(',')
+  const ak = e.after.configKeys.join(',')
+  if (bk !== ak) parts.push('config 字段 ' + (bk || '无') + ' → ' + (ak || '无'))
+  // 哈希也把包名算进去了，所以两边都没变时只可能是 name 变了
+  if (!parts.length) parts.push('包名或展示名不同')
+  return parts.join(' · ')
+}
+// 「复制转储信息」：给的是完整的分层 + 差异清单（界面里层卡片按需折叠，复制不受影响）
+function dshDumpCopy() {
+  const r = dshDump.value
+  if (!r || !r.ok) {
+    dshDumpFlash.err = true
+    dshDumpFlash.msg = '还没有转储结果，先点「重新读取」。'
+    return
+  }
+  const lines: string[] = []
+  lines.push('dsh 配置转储 · ' + new Date(r.at).toLocaleString('zh-CN', { hour12: false }))
+  lines.push('profile ' + (r.profile || DSH_DUMP_PROFILE) + ' · ' + (r.entries?.length || 0) + ' 条目 · ' + (r.sections || 0) + ' 分节')
+  lines.push('')
+  lines.push('== 分层 ==')
+  // 与界面同口径：给了条目数就要给出来（以前把数字漏掉，直接接在条目名后面成了「…tool-agent-team 条目」）。
+  // repeat 标记与界面统一成「 · 」而不是括号 —— 同一份数据两种写法会让人以为是两回事
+  for (const l of r.layers || []) {
+    // 层名优先给 source：界面为了排版宽度用的是短名（profiles/web），
+    // 而复制是给人回帖用的，完整路径（…\profiles\web\cordis.patch.yml）才看得出文件在哪；
+    // 两者不同时把短名附在后面，否则读者对不上界面看到的那一行
+    const label = l.source && l.name && l.source !== l.name ? `${l.source}（${l.name}）` : (l.source || l.name)
+    lines.push(`[${dshDumpLayerKindText(l)}] ${label} → ${l.itemCount ?? l.items?.length ?? 0} 条目 / ${l.sectionCount} 分节${l.repeat ? ' · 分节有重复列举' : ''}`)
+    // 条目 id 逐行列出：界面里被截到 40 个（超出显示「…还有 N 个」），复制是给人回帖用的，给全量
+    if (l.items?.length) lines.push('  ' + l.items.join(', '))
+  }
+  if (r.unparsed) lines.push(`（另有 ${r.unparsed} 行未识别，可能来自 dsh 输出格式变化）`)
+  if (r.diff) {
+    lines.push('')
+    lines.push(`== 生效树 vs 默认树（改动 ${r.diff.changedTotal} · 新增 ${r.diff.addedTotal} · 移除 ${r.diff.removedTotal}）==`)
+    // 分隔符与界面统一成 →（以前界面是 →、复制是 —，同一份数据两种写法容易让人以为不是同一回事）
+    for (const e of r.diff.changed) {
+      lines.push(`[${dshDumpDiffText('changed')}] ${dshDumpEntryLabel(e)} → ${dshDumpChangedNote(e)}`)
+    }
+    for (const e of r.diff.added) lines.push(`[${dshDumpDiffText('added')}] ${dshDumpEntryLabel(e)}`)
+    for (const e of r.diff.removed) lines.push(`[${dshDumpDiffText('removed')}] ${dshDumpEntryLabel(e)}`)
+  } else if (r.diffError) {
+    lines.push('')
+    lines.push('默认树读取失败，未能比对：' + r.diffError)
+  }
+  const ok = services.copyText?.(lines.join('\n'))
+  dshDumpFlash.err = !ok
+  dshDumpFlash.msg = ok ? '已复制完整转储信息' : '复制失败，请手动选中复制。'
 }
 
 // —— 检查更新 ——
@@ -4721,6 +4975,170 @@ onUnmounted(() => {
       </template>
     </section>
 
+    <!-- [dsh] dsh 只读诊断：五项本地检查，纯只读、不改任何配置、不联网 -->
+    <section v-if="activeTab === 'dev'" class="card">
+      <div class="card-head">
+        <h2 class="card-toggle" @click="toggleDevCard('diagnose')">
+          <span class="caret">{{ devFolds.diagnose ? '▾' : '▸' }}</span>dsh 诊断
+          <!-- 收起态摘要：只在「本会话已展开跑过」后才显示，否则不预读、直接提示点开 -->
+          <span v-if="!devFolds.diagnose" class="card-sum">
+            <template v-if="devStatsLoaded.diagnose">{{ diagnoseSummary }}</template>
+            <template v-else>点击展开诊断</template>
+          </span>
+        </h2>
+      </div>
+      <template v-if="devFolds.diagnose">
+      <p class="hint">
+        逐项检查 dsh 起不来 / preset 挂不上的常见原因（重复模块、patch 条目与语法、<code>settings.yaml</code>、3080 端口归属），
+        <strong>全部只读本地文件，不改动任何配置、不发任何网络请求</strong>。问题行的标记含义：<code>[✓]</code> 查过且正常 ·
+        <code>[!]</code> 有隐患或这一项没查出来 · <code>[✗]</code> 确实有问题。
+      </p>
+      <div class="btn-row">
+        <button :disabled="diagnoseBusy" @click="diagnoseRefresh()">{{ diagnoseBusy ? '诊断中…' : '重新诊断' }}</button>
+        <button class="secondary" :disabled="diagnoseBusy" @click="diagnoseRefresh(true)">强制重跑</button>
+        <button v-if="diagnose" class="secondary" :disabled="diagnoseBusy" @click="diagnoseCopy">复制诊断信息</button>
+      </div>
+      <p v-if="diagnoseFlash.msg" class="msg" :class="msgCls(diagnoseFlash)">{{ diagnoseFlash.msg }}</p>
+
+      <!-- dsh 未安装：给明确文案，不报错、不列检查项（D11） -->
+      <template v-if="diagnose && !diagnose.env?.installed">
+        <p class="hint">未检测到已安装的 dsh，无需诊断。先在「dsh」卡片里启动一次（会自动下载安装），再回来点「重新诊断」。</p>
+      </template>
+
+      <!-- 用 v-else-if 而非 v-if：两道分支各自收尾，否则会多出一个无主的 </template> -->
+      <template v-else-if="diagnose && diagnose.env?.installed">
+        <div v-for="item in diagnose.results" :key="item.id" class="diag-item">
+          <p class="diag-head">
+            <span class="diag-mark" :class="diagnoseMarkCls(item)">{{ diagnoseMark(item) }}</span>
+            <strong>{{ item.title }}</strong>
+            <span v-if="item.summary" class="diag-sum">{{ item.summary }}</span>
+          </p>
+          <!-- 明细截断到 5 行（D12）：超出部分由「复制诊断信息」兜底给出全量 -->
+          <div v-if="item.findings.length" class="diag-detail">
+            <p v-for="(f, i) in diagnoseShown(item)" :key="i" class="diag-line" :class="diagnoseLevelCls(f)">
+              <span class="diag-line-text">{{ f.text }}</span>
+              <span v-if="f.hint" class="diag-hint">→ {{ f.hint }}</span>
+            </p>
+            <p v-if="diagnoseRestCount(item)" class="diag-more">还有 {{ diagnoseRestCount(item) }} 项，点上方「复制诊断信息」看完整明细</p>
+          </div>
+        </div>
+
+        <label class="field row">
+          <span class="label">环境</span>
+          <span class="ver">{{ diagnoseEnvText() }}</span>
+        </label>
+
+        <div class="fold">
+          <button class="link-btn" @click="diagnoseFolds.help = !diagnoseFolds.help">{{ diagnoseFolds.help ? '收起说明' : '说明' }}</button>
+          <div v-if="diagnoseFolds.help" class="guide">
+            <p class="guide-use"><strong>重复模块：</strong>profile 的 <code>node_modules</code> 里装出了一份与全局 dsh 树<strong>同版本</strong>的 <code>@deepseek-ai/*</code>（比对包名 + 版本号判定，不看路径），会让 cordis 认成两份不同的包，报 <code>prompt section "deployment:persona" is already registered</code>，所有 preset 挂载失败。每次升级全局 dsh 都可能复现。</p>
+            <p class="guide-use"><strong>patch 条目：</strong><code>cordis.patch.yml</code> 里 <code>- id: X</code> 指向的条目必须真的存在于组装树中，否则 dsh 报 <code>patch: entry "X" not found</code> 直接起不来。</p>
+            <p class="guide-use"><strong>3080 端口：</strong>被非 dsh 进程占用时 dsh 起不来；已有 dsh 在跑则不必再启。这一项要读进程名，个别系统上可能查不出归属 —— 那种情况显示 <code>[!]</code> 并附原因，属于「没查出来」，不是「查出来有问题」。</p>
+            <p class="guide-use"><strong>只读与缓存：</strong>本诊断不修任何东西，也不写 dsh 的任何文件。结果缓存 60 秒：「重新诊断」在缓存有效时直接复用（省掉一次遍历 <code>node_modules</code>），需要抹掉缓存重跑就点「强制重跑」。</p>
+          </div>
+        </div>
+      </template>
+      </template>
+    </section>
+
+    <!-- [dsh] dsh 配置转储：一次 CLI 读取，摊开 patch 分层与生效/默认树差异，纯只读、不改配置、不联网 -->
+    <section v-if="activeTab === 'dev'" class="card">
+      <div class="card-head">
+        <h2 class="card-toggle" @click="toggleDevCard('dshDump')">
+          <span class="caret">{{ devFolds.dshDump ? '▾' : '▸' }}</span>dsh 配置转储
+          <span v-if="!devFolds.dshDump" class="card-sum">
+            <template v-if="devStatsLoaded.dshDump">{{ dshDumpSummary }}</template>
+            <template v-else>点击展开读取</template>
+          </span>
+        </h2>
+      </div>
+      <template v-if="devFolds.dshDump">
+      <p class="hint">
+        读出 dsh 实际组装用的配置树，摊成<strong>分层</strong>（哪一层、改了几条）与<strong>生效树 vs 默认树差异</strong>，
+        用来回答「这个条目到底是谁改的、默认长什么样」。一次 CLI 读取（<code>--dump-config</code> / <code>--dump-default-config</code>），
+        <strong>纯只读、不改动任何配置、不发任何网络请求</strong>。
+      </p>
+      <div class="btn-row">
+        <button :disabled="dshDumpBusy" @click="dshDumpRefresh()">{{ dshDumpBusy ? '读取中…' : '重新读取' }}</button>
+        <button class="secondary" :disabled="dshDumpBusy" @click="dshDumpRefresh(true)">强制重跑</button>
+        <button v-if="dshDump && dshDump.ok" class="secondary" :disabled="dshDumpBusy" @click="dshDumpCopy">复制转储信息</button>
+      </div>
+      <p v-if="dshDumpFlash.msg" class="msg" :class="msgCls(dshDumpFlash)">{{ dshDumpFlash.msg }}</p>
+
+      <!-- dsh 未安装 / 读取失败：只给文案，不摊空列表。
+           两种情况分开说 —— 没装要去「dsh」卡片装一次，失败才是重试 -->
+      <template v-if="dshDump && !dshDump.ok && dshDump.notInstalled">
+        <p class="hint">{{ dshDump.error || '未检测到可用的 dsh，先在「dsh」卡片里启动一次再回来读取。' }}</p>
+      </template>
+
+      <template v-else-if="dshDump && !dshDump.ok">
+        <p class="hint">{{ dshDump.error || '读取失败，请稍后重试。' }}</p>
+      </template>
+
+      <template v-else-if="dshDump && dshDump.ok">
+        <label class="field row">
+          <span class="label">概览</span>
+          <span class="ver">profile {{ dshDump.profile || DSH_DUMP_PROFILE }} · {{ dshDump.entries?.length || 0 }} 条目 · {{ dshDump.sections || 0 }} 分节{{ dshDump.unparsed ? ` · ${dshDump.unparsed} 行未识别` : '' }}</span>
+        </label>
+
+        <!-- D1：patch 分层。层数等于 dump 里的来源数，不固定为五，避免硬套模型失真 -->
+        <div class="fold">
+          <button class="link-btn" @click="dshDumpFolds.layers = !dshDumpFolds.layers">{{ dshDumpFolds.layers ? '收起分层' : '展开分层' }}（{{ dshDump.layers?.length || 0 }} 层）</button>
+          <div v-if="dshDumpFolds.layers" class="layer-list">
+            <div v-for="l in dshDump.layers" :key="l.order" class="layer-item" :class="dshDumpLayerCls(l)">
+              <p class="layer-head">
+                <span class="layer-kind">{{ dshDumpLayerKindText(l) }}</span>
+                <strong class="layer-name" :title="l.source || l.name">{{ l.name }}</strong>
+                <span class="layer-count">{{ l.itemCount }} 条目 / {{ l.sectionCount }} 分节{{ l.repeat ? ' · 分节有重复列举' : '' }}</span>
+              </p>
+              <!-- 层里到底有哪些条目：ID 本身就短，直接列出来比只给个数字有用得多 -->
+              <p class="layer-items" :title="l.items.join('\n')">
+                <span v-for="id in l.preview" :key="id" class="layer-id">{{ id }}</span>
+                <span v-if="l.items.length > l.preview.length" class="layer-more">…还有 {{ l.items.length - l.preview.length }} 个</span>
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <!-- D2：生效树 vs 默认树差异。默认树读失败时降级为只展示分层，不整卡失败 -->
+        <div class="fold">
+          <button class="link-btn" @click="dshDumpFolds.diff = !dshDumpFolds.diff">{{ dshDumpFolds.diff ? '收起差异' : '展开差异' }}</button>
+          <div v-if="dshDumpFolds.diff">
+            <p v-if="dshDump.diffError" class="hint">默认树读取失败，未能比对：{{ dshDump.diffError }}</p>
+            <p v-else-if="dshDump.diff && !dshDump.diff.changedTotal && !dshDump.diff.addedTotal && !dshDump.diff.removedTotal" class="hint">生效树与默认树完全一致，没有额外改动。</p>
+            <template v-else-if="dshDump.diff">
+              <p class="hint">改动 {{ dshDump.diff.changedTotal }} · 新增 {{ dshDump.diff.addedTotal }} · 移除 {{ dshDump.diff.removedTotal }}<template v-if="dshDump.diff.changed.length > 5">（下面列出前 5 条）</template></p>
+              <p v-for="(e, i) in dshDump.diff.changed.slice(0, 5)" :key="'c' + i" class="diag-line diag-warn">
+                <span class="diag-line-text">[{{ dshDumpDiffText('changed') }}] {{ dshDumpEntryLabel(e) }}</span>
+                <span class="diag-hint">→ {{ dshDumpChangedNote(e) }}</span>
+              </p>
+              <template v-if="!dshDump.diff.changedTotal">
+                <p class="hint">生效树里没有条目被用户层改过。</p>
+              </template>
+              <p v-for="(e, i) in dshDump.diff.added.slice(0, 5)" :key="'a' + i" class="diag-line diag-ok">
+                <span class="diag-line-text">[{{ dshDumpDiffText('added') }}] {{ dshDumpEntryLabel(e) }}</span>
+              </p>
+              <p v-for="(e, i) in dshDump.diff.removed.slice(0, 5)" :key="'r' + i" class="diag-line diag-bad">
+                <span class="diag-line-text">[{{ dshDumpDiffText('removed') }}] {{ dshDumpEntryLabel(e) }}</span>
+              </p>
+            </template>
+          </div>
+        </div>
+
+        <div class="fold">
+          <button class="link-btn" @click="dshDumpFolds.help = !dshDumpFolds.help">{{ dshDumpFolds.help ? '收起说明' : '说明' }}</button>
+          <div v-if="dshDumpFolds.help" class="guide">
+            <p class="guide-use"><strong>分层怎么来的：</strong>dump 里每个分节头写着「这份配置来自哪个包」以及「被谁 patch 过」。包名来源算<strong>包内层</strong>（bundle 自带的 patch），<code>cordis.patch.yml</code> 的绝对路径算<strong>用户层</strong>（你自己写的 patch），没有任何来源的算<strong>基线</strong>。判用户层看的是「像不像绝对路径」，不写死某个目录 —— 改过 <code>$DSH_HOME</code> 也能认出来。</p>
+            <p class="guide-use"><strong>差异是怎么比的：</strong>生效树（<code>--dump-config</code>）与默认树（<code>--dump-default-config</code>）按条目 id 对齐，比三样：包名、是否禁用、config 的<strong>字段名</strong>。patch 是把整条替换掉的，所以同 id 后出现的分节会盖住先出现的，这里也按同样规则合并。</p>
+            <p class="guide-use"><strong>为什么看不到 config 的值：</strong>config 里可能带密钥，转储一律只留字段名不留值，界面上与「复制」里都是如此。</p>
+            <p class="guide-use"><strong><code>!!js</code> 表达式：</strong>形如 <code>disabled: !!js '...'</code> 的条目要 cordis 上下文才能求值，静态解析做不到，一律按「已禁用」标注，不代表它真的被禁用。</p>
+            <p class="guide-use"><strong>只读与缓存：</strong>整个读取只跑 <code>bin.js</code> 的 dump 子命令，不写 dsh 的任何文件；子进程 8 秒超时，结果缓存 60 秒：「重新读取」在缓存有效时直接复用（省掉两次 spawn），需要抹掉缓存重跑就点「强制重跑」。</p>
+          </div>
+        </div>
+      </template>
+      </template>
+    </section>
+
     <!-- [dsh] Codex 本地会话统计：读 ~/.codex/sessions 的 rollout JSONL，纯本地、不联网 -->
     <section v-if="activeTab === 'dev'" class="card">
       <div class="card-head">
@@ -5296,6 +5714,138 @@ select:focus,
   max-height: 200px;
   overflow: auto;
   user-select: text;
+}
+/* dsh 诊断结果列表：每一项一块，明细缩进在标题下方 */
+.diag-item {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--card-border);
+  background: rgba(127, 127, 127, 0.05);
+}
+.diag-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin: 0;
+  font-size: 13px;
+  flex-wrap: wrap;
+}
+/* 标记等宽，避免 [✓]/[!]/[✗] 混排时标题起点参差 */
+.diag-mark {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  flex: none;
+}
+.diag-ok {
+  color: #2e9e5b;
+}
+.diag-warn {
+  color: #c98a00;
+}
+.diag-bad {
+  color: #d9534f;
+}
+.diag-sum {
+  color: var(--fg-dim);
+  font-size: 12px;
+}
+.diag-detail {
+  margin: 6px 0 0 20px;
+}
+.diag-line {
+  margin: 2px 0;
+  font-size: 12px;
+  line-height: 1.6;
+  /* 路径 / 报错原文可能很长，允许横向溢出由外层滚动，不撑破卡片 */
+  word-break: break-all;
+}
+.diag-line-text {
+  color: var(--fg);
+}
+.diag-hint {
+  margin-left: 6px;
+  color: var(--fg-faint);
+}
+.diag-more {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--fg-faint);
+}
+/* 配置转储的 patch 分层列表：每层一块，左侧色条区分 基线 / 包内层 / 用户层 */
+.layer-list {
+  margin-top: 6px;
+}
+.layer-item {
+  margin-top: 8px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--card-border);
+  border-left-width: 3px;
+  background: rgba(127, 127, 127, 0.05);
+}
+.layer-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin: 0;
+  font-size: 13px;
+  flex-wrap: wrap;
+}
+.layer-kind {
+  flex: none;
+  padding: 0 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  background: rgba(127, 127, 127, 0.18);
+  color: var(--fg-dim);
+}
+.layer-name {
+  color: var(--fg);
+  word-break: break-all;
+}
+/* 用户层是绝对路径（可达 50+ 字符），不省略会把「N 条目 / M 分节」挤到下一行错位 */
+.layer-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.layer-count {
+  margin-left: auto;
+  flex: none;
+  color: var(--fg-dim);
+  font-size: 12px;
+}
+/* 层里的条目 id：小号等宽、可换行，长列表不溢出卡片 */
+.layer-items {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 5px 0 0;
+}
+.layer-id {
+  padding: 0 5px;
+  border-radius: 4px;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 11px;
+  color: var(--fg-dim);
+  background: rgba(127, 127, 127, 0.12);
+  word-break: break-all;
+}
+.layer-more {
+  font-size: 11px;
+  color: var(--fg-dim);
+  align-self: center;
+}
+.layer-base {
+  border-left-color: rgba(127, 127, 127, 0.45);
+}
+.layer-bundle {
+  border-left-color: #4a90d9;
+}
+.layer-user {
+  border-left-color: #e08a2e;
 }
 input[type='checkbox'] {
   width: 16px;
