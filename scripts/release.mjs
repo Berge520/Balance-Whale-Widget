@@ -214,11 +214,24 @@ mkdirSync(tmpDir, { recursive: true })
 writeFileSync(msgPath, `${title}\n\n${body}\n`, 'utf8')
 
 run('git', ['add', '-A'])
-run('git', ['commit', '-F', path.relative(root, msgPath)])
+// 版本号 / 文档若已提前手工提交（前置检查允许 next == cur），这里就没有可提交的内容。
+// 无条件 commit 会以「nothing to commit」退出 1，把一次本可正常发版的流程打断 ——
+// 前置检查放行、执行却挂，属于脚本自身的不一致。故先看暂存区是否真有内容。
+const staged = capture('git', ['diff', '--cached', '--name-only']).out
+if (staged) {
+  run('git', ['commit', '-F', path.relative(root, msgPath)])
+} else {
+  console.log('  （版本号与文档已在历史提交中，无需 release commit，跳过）')
+}
 
 // ── 5. push main → 等 CI → tag ──
 step('推送 main 并等 CI')
-run('git', ['push', 'origin', 'main'])
+// 同上：release commit 被跳过时，main 可能已经在远端（本地无新提交）。
+// git push 在「Everything up-to-date」时本身退出 0，但仍要先确认本地不落后，
+// 否则会在旧 head 上打 tag，Release 的校验会莫名其妙地挂。
+const ahead = capture('git', ['rev-list', '--count', 'origin/main..HEAD']).out
+if (ahead !== '0') run('git', ['push', 'origin', 'main'])
+else console.log('  （main 已与 origin/main 同步，跳过 push）')
 
 const headSha = capture('git', ['rev-parse', 'HEAD']).out
 console.log(`\n  等待 CI（head=${headSha.slice(0, 7)}）…`)
