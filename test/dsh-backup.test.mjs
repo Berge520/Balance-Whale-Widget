@@ -387,6 +387,24 @@ test('pruneSnapshots：known-good 一份都不删（即使它在最旧那一头�
   assert.equal(left.find((s) => s.dirName === made[3].dirName).reason, 'r3')
 })
 
+test('createSnapshot：同一毫秒连建多份必须各自成目录，不许互相覆盖', () => {
+  // 回归 CI 上偶发的那次失败：dirName 是「秒级时间戳」+「同秒内才补的毫秒后缀」，
+  // 而 mkdir 用 recursive:true —— 目录已存在时不报错、直接复用。
+  // 于是同毫秒连建的几份会落进同一个目录、互相覆盖 manifest 与快照文件，
+  // 表现为「建了 N 份，列表里只剩 1 份」（CI 实测 4 份只活下 1 份）。
+  // 这里用**同一个注入时刻**连建 4 份，逼出这条路径。
+  makeHome(fullHome())
+  const at = atOf(0)
+  const made = []
+  for (let i = 0; i < 4; i++) made.push(bak.createSnapshot({ profile: 'web', reason: 'r' + i, at }))
+
+  const names = made.map((s) => s.dirName)
+  assert.equal(new Set(names).size, 4, '4 份快照必须拿到 4 个互不相同的目录名')
+  made.forEach((s) => assert.equal(s.ok, true))
+  // 目录名互不相同还不够 —— 磁盘上必须真的存在 4 个目录（否则就是共用了同一个）
+  assert.equal(bak.listSnapshots().length, 4, '列表里必须能看到全部 4 份')
+})
+
 test('pruneSnapshots：手动命名（reason 非 before-*）的快照受保护，before-* 的改名不免死', () => {
   makeHome(fullHome())
   const a = bak.createSnapshot({ profile: 'web', reason: 'r0', at: atOf(0) })

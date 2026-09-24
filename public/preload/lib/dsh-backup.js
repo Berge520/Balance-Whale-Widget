@@ -185,10 +185,20 @@ function createSnapshot(opts) {
   // （毫秒数、可解析的字符串）也一并接受，不为此引入更多约定
   const rawAt = o.at instanceof Date ? o.at : new Date(o.at)
   const at = Number.isNaN(rawAt.getTime()) ? new Date() : rawAt
-  // 同一秒内连建两份会撞名（目录已存在 → mkdir 抛错）。加毫秒后缀兜一层，
-  // 保证「连点两次手动备份」不会因为撞名失败
+  // 同一时刻连建多份会撞名。dirName 的构成是「秒级时间戳」+「同秒内才补的毫秒后缀」，
+  // 而 mkdir 用的是 recursive:true —— 它对**已存在**的目录不报错、直接复用，
+  // 于是同毫秒连建的两份会落进同一个目录：后者把前者的快照文件与 manifest 覆盖掉，
+  // 表现为「建了 N 份，列表里只有 1 份」（E1 回归实测：同毫秒连建 4 份只活下 2 份）。
+  // 所以这里必须**自己保证目录名唯一**：同毫秒被占用就往后递增毫秒，直到找到一个不存在的。
+  // why 不用时间戳直接重取：at 允许注入（测试要造确定的时间序），重取会破坏这个契约
   let dirName = stampOf(at)
-  if (fs.existsSync(path.join(root, dirName))) dirName = dirName + '-' + String(at.getMilliseconds()).padStart(3, '0')
+  if (fs.existsSync(path.join(root, dirName))) {
+    let ms = at.getMilliseconds()
+    do {
+      ms = (ms + 1) % 1000
+      dirName = stampOf(at) + '-' + String(ms).padStart(3, '0')
+    } while (fs.existsSync(path.join(root, dirName)) && ms !== at.getMilliseconds())
+  }
   const dir = path.join(root, dirName)
 
   const files = []
