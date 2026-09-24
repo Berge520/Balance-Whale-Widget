@@ -394,8 +394,8 @@
   rowTimer.appendChild(menuLabel('计时')); rowTimer.appendChild(timerSelect); rowTimer.appendChild(timerBtn);
   // 「目标」拆成两个互斥子行（倒计时 / 定时各一行）：
   // 原先两种输入挤在同一行、靠 display 二选一，但另一样虽看不见仍占着 flex 位置，
-  // 切模式时行宽不变、白白吃掉一块；拆开后每行都只放自己那套控件。
-  // 计时中/暂停时两行都让位给「重置」（见 syncTimerMenu）
+  // 切模式时行宽不变、白白吃掉一块；拆开后每行都只放自己那套控件（含该行的「重置」）。
+  // 两行按当前模式二选一显隐（正计时 / 关闭时两行都收起，见 syncTimerMenu）
   var rowTimerDown = menuRow();
   rowTimerDown.appendChild(menuLabel('目标'));
   rowTimerDown.appendChild(timerHour); rowTimerDown.appendChild(timerSegUnits[0]);
@@ -1287,7 +1287,6 @@
     return Math.min(TIMER_MAX_SEC, total);
   }
   function timerActive() { return timerRunning || timerPaused || timerFinished; }
-  function timerBusy() { return timerRunning || timerPaused; }
   // —— 到点动作条：只有「时间到」且气泡在显示时才出现（挂在 body 上，定位到气泡下缘） ——
   function updateTimerActions() {
     if (!timerFinished || !bubbleShown) { timerDoneActions.classList.remove('dshwv-actions-open'); return; }
@@ -1597,18 +1596,20 @@
   function syncTimerMenu() {
     timerSelect.value = timerMode;
     timerBtn.textContent = timerRunning ? '暂停' : (timerPaused ? '继续' : '开始');
-    var busy = timerBusy();
-    // 「刚结束」不算忙：到点后气泡可能还挂着（常驻或还没到 timerRemindSec），
-    // 但这只是展示态 —— 菜单必须能直接改时长/留言开下一轮，否则要等气泡消失才解锁，用起来像卡死
-    var idle = !busy;
-    // 「目标」两个互斥子行：倒计时行 / 定时刻行各显示自己那套；计时中/暂停时两行都让位给「重置」
-    var down = idle && timerMode === 'down';
-    var at = idle && timerMode === 'at';
-    rowTimerDown.style.display = (down || busy) ? '' : 'none';
-    rowTimerAt.style.display = (at || busy) ? '' : 'none';
-    // 重置按钮每行一个，按当前模式决定哪一行里的那个露出来（倒计时行为兜底，未开始时不显示）
-    timerResetBtn.style.display = (busy && (down || !at)) ? '' : 'none';
-    timerResetBtnAt.style.display = (busy && at) ? '' : 'none';
+    // 「目标」两个互斥子行：倒计时行 / 定时刻行各显示自己那套。
+    // 判定只看模式，不看忙闲 —— 早先写成 `idle && timerMode === ...` 是错的：
+    // busy 与 idle 互斥（busy = running || paused），计时中/暂停时 down/at 恒为 false，
+    // 于是两行同时露出、且倒计时的重置按钮被兜底分支塞进 rowTimerAt
+    // （`busy && (down || !at)` 在 down=false、at=false 时化简即 `busy`）：
+    // 定时刻行变成「目标 + 重置」而倒计时行只剩输入框。拆行时每行自带一个重置按钮
+    // （见 rowTimerDown / rowTimerAt 的构造），本就该按模式二选一。
+    var down = timerMode === 'down';
+    var at = timerMode === 'at';
+    rowTimerDown.style.display = down ? '' : 'none';
+    rowTimerAt.style.display = at ? '' : 'none';
+    // 重置按钮：跟着自己那行一起显隐（空闲时按钮仍在，但 resetTimer 对空闲态是 noop）
+    timerResetBtn.style.display = down ? '' : 'none';
+    timerResetBtnAt.style.display = at ? '' : 'none';
     timerHour.style.display = down ? '' : 'none';
     timerMin.style.display = down ? '' : 'none';
     timerSec.style.display = down ? '' : 'none';

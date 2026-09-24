@@ -108,7 +108,7 @@ function onTest() {
           <span class="label">API Key <em>（必填）</em></span>
           <input v-model="form.apiKey" type="password" placeholder="sk-..." autocomplete="off" spellcheck="false" />
         </label>
-        <button class="link-btn" type="button" @click="form.guideApiKey = !form.guideApiKey">
+        <button class="link-btn utils-btn utils-secondary" type="button" @click="form.guideApiKey = !form.guideApiKey">
           {{ form.guideApiKey ? '收起教程' : '如何获取 API Key？' }}
         </button>
         <div v-if="form.guideApiKey" class="guide2">
@@ -126,7 +126,7 @@ function onTest() {
           <span class="label">平台 Token <em>（可选）</em></span>
           <input v-model="form.platformToken" type="password" placeholder="platform.deepseek.com 令牌" autocomplete="off" spellcheck="false" />
         </label>
-        <button class="link-btn" type="button" @click="form.guideToken = !form.guideToken">
+        <button class="link-btn utils-btn utils-secondary" type="button" @click="form.guideToken = !form.guideToken">
           {{ form.guideToken ? '收起教程' : '如何获取平台 Token？' }}
         </button>
         <div v-if="form.guideToken" class="guide2">
@@ -181,25 +181,25 @@ function onTest() {
       <div class="btn-row">
         <!-- 第一步：主按钮「下一步」；能测就顺手测，测不通不阻止继续（用户可能只想先存上） -->
         <template v-if="step === 0">
-          <button type="button" :disabled="!canSubmit" @click="step = 1">下一步</button>
-          <button class="secondary" type="button" :disabled="!canTest" @click="onTest">
+          <button class="utils-btn utils-primary" type="button" :disabled="!canSubmit" @click="step = 1">下一步</button>
+          <button class="secondary utils-btn utils-secondary" type="button" :disabled="!canTest" @click="onTest">
             {{ testing ? '测试中…' : '测试连接' }}
           </button>
-          <button class="ghost" type="button" :disabled="!canSubmit" @click="emit('skip')">跳过</button>
+          <button class="ghost utils-btn utils-outline" type="button" :disabled="!canSubmit" @click="emit('skip')">跳过</button>
         </template>
 
         <!-- 第二步：主按钮保存（保存即结束引导）。放这里而不是第三步，是为了「关掉窗口也不会丢配置」 -->
         <template v-else-if="step === 1">
-          <button type="button" :disabled="!canSubmit" @click="onSave">
+          <button class="utils-btn utils-primary" type="button" :disabled="!canSubmit" @click="onSave">
             {{ saving ? '保存中…' : '保存并开始使用' }}
           </button>
-          <button class="ghost" type="button" @click="step = 0">上一步</button>
+          <button class="ghost utils-btn utils-outline" type="button" @click="step = 0">上一步</button>
         </template>
 
         <!-- 第三步：只收尾 -->
         <template v-else>
-          <button type="button" @click="emit('skip')">开始使用</button>
-          <button class="ghost" type="button" @click="emit('skip')">关闭</button>
+          <button class="utils-btn utils-primary" type="button" @click="emit('skip')">开始使用</button>
+          <button class="ghost utils-btn utils-outline" type="button" @click="emit('skip')">关闭</button>
         </template>
       </div>
     </div>
@@ -224,6 +224,8 @@ function onTest() {
   max-width: 520px;
   max-height: 100%;
   overflow: auto;
+  /* 引导内容高度随步骤变化，预留滚动条槽位免得每步布局横跳 */
+  scrollbar-gutter: stable;
   padding: 20px;
   border-radius: 14px;
   background: var(--input-bg, #fff);
@@ -392,20 +394,14 @@ input[type='password']:focus {
   color: var(--fg-dim);
 }
 
-.link-btn {
+/* 尺寸/配色走 utils 基类（markup 是 `class="link-btn utils-btn utils-secondary"`）。
+   这里压一级 `button.link-btn`（0,1,1）盖掉全局 .link-btn 的下划线 ——
+   全局 .link-btn 与 .utils-* 同为 (0,1,0) 且**注入更晚**（main.css 先于各 .vue），
+   不压特异性的话下划线会漏出来。 */
+button.link-btn {
   margin: 0;
-  padding: 0;
-  border: none;
-  background: none;
-  color: var(--fg-dim);
-  font-size: 12px;
-  text-align: left;
-  text-decoration: underline;
-  text-underline-offset: 2px;
-  cursor: pointer;
-}
-.link-btn:hover {
-  color: var(--fg);
+  text-decoration: none;
+  text-underline-offset: 0;
 }
 .guide2 {
   margin-top: 8px;
@@ -455,31 +451,20 @@ input[type='password']:focus {
   gap: 10px;
   margin-top: 18px;
 }
-/* 不设 padding：全局 main.css 已给 button 定了 line-height 2.5 的高度基准，
-   这里再叠 padding 会比项目里其它按钮（凭据卡的「保存凭据」等）明显高一圈 */
+/* 尺寸/配色走 main.css 的 utils 基类（markup 分别挂 .utils-btn，
+   再按主/次/描边叠 .utils-primary / .utils-secondary / .utils-outline）。
+   原先这里是独立一套：圆角 9px（全页唯一一档非 8px）、13px、靠 main.css 的
+   line-height 2.5 撑高 —— 是全页"高矮胖瘦不一"的来源之一，已随统一收敛。 */
 .btn-row button {
   flex: 1;
-  border-radius: 9px;
-  font-size: 13px;
 }
-.btn-row button.secondary {
-  background: rgba(83, 107, 169, 0.18);
-  color: var(--accent);
-}
-/* 跳过 / 上一步 / 关闭：弱化到「存在但不建议点」的层级，不和主按钮抢视线 */
+/* 跳过 / 上一步 / 关闭：弱化到「存在但不建议点」的层级，不和主按钮抢视线。
+   叠 utils-outline 拿到描边档配色，再把下划线加回来 —— 「不抢视线」这个语义
+   靠下划线表达，统一的是尺寸而非层级，所以这条要保留。 */
 .btn-row button.ghost {
   flex: 0 0 auto;
-  background: none;
-  color: var(--fg-dim);
   text-decoration: underline;
   text-underline-offset: 2px;
-}
-.btn-row button.ghost:hover {
-  color: var(--fg);
-}
-.btn-row button:disabled {
-  opacity: 0.45;
-  cursor: default;
 }
 /* 两项并排；窄窗下自动换行，不把文案挤成竖排 */
 .test-list {

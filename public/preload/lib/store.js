@@ -4,6 +4,7 @@
 const {
   K, MIN_SCALE, MAX_SCALE, MODEL_MAX, MODEL_TEMPLATES, DEFAULT_MAIN_MODEL, LOW_ALERT_BY_CURRENCY,
   TOKEN_PRICE_DEFAULT, TOKEN_PRICE_MAX, TOKEN_RATE_MAX, TOKEN_PRICE_MODELS_MAX, TIMER_NOTE_MAX,
+  NEWEST_VERSION,
 } = require('./constants')
 const { logErr } = require('./log')
 
@@ -344,12 +345,17 @@ function normMenuGroupsRev(v) {
   return n
 }
 function defaultConfig() {
-  return { scale: 1.3, vol: 0.9, soundOn: true, soundSet: 'duck', usageMode: 'ledger', peakMode: 'default', peakRemindOn: true, bubbleOn: true, menuBtn: true, onTop: true, lowAlertOn: true, lowAlertAmount: LOW_ALERT_BY_CURRENCY.CNY, budgetOn: false, budgetAmount: 0, dropAlertOn: false, dropAlertAmount: 5, clickQueueOn: false, remindSec: 8, quietOn: false, quietFrom: '23:00', quietTo: '07:00', timeBubbleOn: true, updateCheckOn: false, dragLock: false, enterMode: 'both', timerNotifyOn: true, timerMailOn: true, timerPersistOn: true, timerMode: 'off', timerSec: 1500, timerAt: '07:30', timerNote: '', timerBreakMin: 5, timerRemindSec: 8, timerBubblePin: true, timerBubbleOnly: true, guideDone: false, dshNodeDir: '', dshKeepAlive: false, dshRegistry: '', dshVersion: '', dshReinstall: false, dshNoOpen: true, avoidTaskbar: true, edgeTop: 0, edgeRight: 0, edgeBottom: 0, edgeLeft: 0, scrollGapOn: false, scrollGapPx: SCROLL_GAP_DEFAULT, snapMode: 'ratio', snapRatio: SNAP_RATIO_DEFAULT, opacity: 100, passThrough: false, skin: 'DSniang1', theme: 'default', quotes: normQuotes(null), alerts: normAlerts(null), quotaTotal: 0, quotaReset: 'monthly', tokenPrice: normTokenPrice(null), historyKeepDays: HISTORY_KEEP_DEFAULT, models: [], mainModelId: DEFAULT_MAIN_MODEL, dshBackupKeep: DSB_KEEP_DEFAULT, menuGroups: normMenuGroups(null), menuGroupsRev: 0, ghAccelOn: false, ghAccelIps: normIps(null), ghAccelRefreshedAt: 0, notifySystemOn: true, notifyMailOn: false, mailFrom: '', mailTo: '', mailFromName: '小鲸鱼余额挂件', mailSubjectPrefix: '[小鲸鱼余额挂件]' }
+  return { scale: 1.3, vol: 0.9, soundOn: true, soundSet: 'duck', usageMode: 'ledger', peakMode: 'default', peakRemindOn: true, bubbleOn: true, menuBtn: true, onTop: true, lowAlertOn: true, lowAlertAmount: LOW_ALERT_BY_CURRENCY.CNY, budgetOn: false, budgetAmount: 0, dropAlertOn: false, dropAlertAmount: 5, clickQueueOn: false, remindSec: 8, quietOn: false, quietFrom: '23:00', quietTo: '07:00', timeBubbleOn: true, updateCheckOn: false, dragLock: false, enterMode: 'both', timerNotifyOn: true, timerMailOn: true, timerPersistOn: true, timerMode: 'off', timerSec: 1500, timerAt: '07:30', timerNote: '', timerBreakMin: 5, timerRemindSec: 8, timerBubblePin: true, timerBubbleOnly: true, guideDone: false, dshNodeDir: '', dshKeepAlive: false, dshRegistry: '', dshVersion: '', dshReinstall: false, dshNoOpen: true, dshMarketUrl: '', dshMarketMirror: true, dshMarketRegistry: '', dshMarketOfficial: false, avoidTaskbar: true, edgeTop: 0, edgeRight: 0, edgeBottom: 0, edgeLeft: 0, scrollGapOn: false, scrollGapPx: SCROLL_GAP_DEFAULT, snapMode: 'ratio', snapRatio: SNAP_RATIO_DEFAULT, opacity: 100, passThrough: false, skin: 'DSniang1', theme: 'default', quotes: normQuotes(null), alerts: normAlerts(null), quotaTotal: 0, quotaReset: 'monthly', tokenPrice: normTokenPrice(null), historyKeepDays: HISTORY_KEEP_DEFAULT, models: [], mainModelId: DEFAULT_MAIN_MODEL, dshBackupKeep: DSB_KEEP_DEFAULT, menuGroups: normMenuGroups(null), menuGroupsRev: 0, ghAccelOn: false, ghAccelIps: normIps(null), ghAccelRefreshedAt: 0, notifySystemOn: true, notifyMailOn: false, mailFrom: '', mailTo: '', mailFromName: '小鲸鱼余额挂件', mailSubjectPrefix: '[小鲸鱼余额挂件]' }
 }
 // dsh 注册源：只接受 http(s) 或空（默认官方源）
 function normRegistry(v) {
   const s = String(v == null ? '' : v).trim()
   return /^https?:\/\//i.test(s) ? s.slice(0, 200) : ''
+}
+// dsh 插件市场的自定义目录 URL：同 normRegistry 的取舍（空 = 用官方目录）
+function normMarketUrl(v) {
+  const s = String(v == null ? '' : v).trim()
+  return /^https?:\/\//i.test(s) ? s.slice(0, 300) : ''
 }
 // 免打扰起止时刻：'HH:MM'（24 小时制），非法值回默认
 function normHm(v, dft) {
@@ -361,10 +367,13 @@ function normHm(v, dft) {
   if (!(h >= 0 && h <= 23 && m >= 0 && m <= 59)) return dft
   return (h < 10 ? '0' + h : String(h)) + ':' + (m < 10 ? '0' + m : String(m))
 }
-// dsh 版本：'' = 自动（安装/更新时取 latest）；否则固定版本号
+// dsh 版本：'' = 自动（安装/更新时取 latest）；NEWEST_VERSION = 取版本列表里最大的那个（含测试版）；
+// 否则固定版本号。哨兵值要在这里放行，否则会被当成非法版本号清成 ''，静默退回 latest ——
+// 而 latest 只指向稳定发布，用户想装 1.7.0-alpha.2 这类比它更新的预发布时正好相反。
 function normVersion(v) {
   const s = String(v == null ? '' : v).trim().replace(/^@/, '')
   if (!s || s === 'latest') return ''
+  if (s === NEWEST_VERSION) return s
   return /^[0-9A-Za-z][0-9A-Za-z.\-+]*$/.test(s) ? s.slice(0, 40) : ''
 }
 function clampNum(v, lo, hi, dft) {
@@ -595,6 +604,10 @@ function readConfig() {
     dshVersion: normVersion(p.dshVersion),
     dshReinstall: p.dshReinstall === true,
     dshNoOpen: p.dshNoOpen !== false,
+    dshMarketUrl: normMarketUrl(p.dshMarketUrl),
+    dshMarketMirror: p.dshMarketMirror !== false,
+    dshMarketRegistry: normRegistry(p.dshMarketRegistry),
+    dshMarketOfficial: p.dshMarketOfficial === true,
     avoidTaskbar: p.avoidTaskbar !== false,
     edgeTop: Math.round(clampNum(p.edgeTop, 0, 400, dft.edgeTop)),
     edgeRight: Math.round(clampNum(p.edgeRight, 0, 400, dft.edgeRight)),
@@ -689,6 +702,10 @@ function writeConfig(cfg) {
       dshVersion: normVersion(cfg.dshVersion),
       dshReinstall: cfg.dshReinstall === true,
       dshNoOpen: cfg.dshNoOpen !== false,
+      dshMarketUrl: normMarketUrl(cfg.dshMarketUrl),
+      dshMarketMirror: cfg.dshMarketMirror !== false,
+      dshMarketRegistry: normRegistry(cfg.dshMarketRegistry),
+      dshMarketOfficial: cfg.dshMarketOfficial === true,
       avoidTaskbar: cfg.avoidTaskbar !== false,
       edgeTop: Math.round(clampNum(cfg.edgeTop, 0, 400, 0)),
       edgeRight: Math.round(clampNum(cfg.edgeRight, 0, 400, 0)),
@@ -793,6 +810,15 @@ function patchConfig(patch) {
   if (p.dshVersion !== undefined) cfg.dshVersion = normVersion(p.dshVersion)
   if (p.dshReinstall !== undefined) cfg.dshReinstall = !!p.dshReinstall
   if (p.dshNoOpen !== undefined) cfg.dshNoOpen = p.dshNoOpen !== false
+  // 插件市场目录源（并发竞速，见 dsh-market.js 的 loadCatalog）：
+  //   · dshMarketMirror   —— 是否让镜像源参赛（默认开）
+  //   · dshMarketRegistry —— 参赛的 registry（空 = 用内置默认，即延迟最低的 npmmirror）
+  //   · dshMarketOfficial —— 是否让官方源参赛。**默认关**：实测它 4.37MB 要 52–99s、
+  //                          还常连不上，开着只会白占一个卡住的连接。要「官方最权威」可自行打开
+  if (p.dshMarketUrl !== undefined) cfg.dshMarketUrl = normMarketUrl(p.dshMarketUrl)
+  if (p.dshMarketMirror !== undefined) cfg.dshMarketMirror = p.dshMarketMirror !== false
+  if (p.dshMarketRegistry !== undefined) cfg.dshMarketRegistry = normRegistry(p.dshMarketRegistry)
+  if (p.dshMarketOfficial !== undefined) cfg.dshMarketOfficial = p.dshMarketOfficial === true
   if (p.avoidTaskbar !== undefined) cfg.avoidTaskbar = !!p.avoidTaskbar
   // 贴边间距（上/右/下/左，px）：0 = 紧贴该边（以系统当前可用区为准）
   if (p.edgeTop !== undefined) cfg.edgeTop = Math.round(clampNum(p.edgeTop, 0, 400, cfg.edgeTop))

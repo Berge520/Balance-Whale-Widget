@@ -481,3 +481,194 @@ test('summarizeDump 给出可读摘要且不抛错', () => {
   assert.match(s, /41 个分节/)
   assert.match(s, /2 个条目/)
 })
+
+// ── validPkgSpec / validPkgName（安装 spec 进命令行的唯一关口）──
+// 目录是信任来源，但终究是远端数据 —— 这里挡的是「被篡改的目录把 --prefix 之类的开关当包名塞进来」。
+// validPkgSpec 比 validPkgName 宽（放行 github: 与远端 tgz），但绝不是「放行任意字符串」。
+test('validPkgSpec 放行三种形态：npm 包名 / github:owner/repo / 远端 https tarball', () => {
+  assert.equal(dsh.validPkgSpec('@scope/dsh-demo'), '@scope/dsh-demo')
+  assert.equal(dsh.validPkgSpec('dsh-demo'), 'dsh-demo')
+  assert.equal(dsh.validPkgSpec('github:owner/repo'), 'github:owner/repo')
+  assert.equal(dsh.validPkgSpec('github:owner/repo#v1.2.3'), 'github:owner/repo#v1.2.3')
+  assert.equal(dsh.validPkgSpec('https://codeload.github.com/o/r/tar.gz/abc'), 'https://codeload.github.com/o/r/tar.gz/abc')
+  assert.equal(dsh.validPkgSpec('https://x.cn/a.tgz?v=2&k=1'), 'https://x.cn/a.tgz?v=2&k=1')
+  assert.equal(dsh.validPkgSpec('  github:owner/repo  '), 'github:owner/repo')
+})
+
+test('validPkgSpec 挡住 shell 注入与参数走私（这是它的全部意义）', () => {
+  // `-` 开头会被当 npm 开关
+  assert.equal(dsh.validPkgSpec('--prefix'), '')
+  assert.equal(dsh.validPkgSpec('-g'), '')
+  // 空白 / 换行会把一个 spec 拆成多个参数
+  assert.equal(dsh.validPkgSpec('dsh-a dsh-b'), '')
+  assert.equal(dsh.validPkgSpec('dsh-a\nrm -rf /'), '')
+  // shell 元字符
+  assert.equal(dsh.validPkgSpec('dsh-a;rm -rf /'), '')
+  assert.equal(dsh.validPkgSpec('dsh-a&&whoami'), '')
+  assert.equal(dsh.validPkgSpec('dsh-a|cat /etc/passwd'), '')
+  assert.equal(dsh.validPkgSpec('$(whoami)'), '')
+  assert.equal(dsh.validPkgSpec('`whoami`'), '')
+  assert.equal(dsh.validPkgSpec('"https://x.cn/a.tgz"'), '')
+  assert.equal(dsh.validPkgSpec('https://x.cn/a.tgz\\'), '')
+  // 非 http(s) 的协议不认
+  assert.equal(dsh.validPkgSpec('file:///etc/passwd'), '')
+  assert.equal(dsh.validPkgSpec('git+ssh://git@x.cn/a.git'), '')
+  // 空值
+  assert.equal(dsh.validPkgSpec(''), '')
+  assert.equal(dsh.validPkgSpec(null), '')
+  assert.equal(dsh.validPkgSpec(undefined), '')
+})
+
+test('validPkgSpec 限长 214 字符（npm 包名上限，超长一律拒绝）', () => {
+  assert.equal(dsh.validPkgSpec('a'.repeat(214)), 'a'.repeat(214))
+  assert.equal(dsh.validPkgSpec('a'.repeat(215)), '')
+})
+
+test('validPkgName 仍只认包名（卸载走 dependencies 键名，不接受 github:/URL）', () => {
+  assert.equal(dsh.validPkgName('@scope/dsh-demo'), '@scope/dsh-demo')
+  assert.equal(dsh.validPkgName('dsh-demo'), 'dsh-demo')
+  // 与 validPkgSpec 的关键差异：这两类卸载时匹配不上 dependencies 的键，必须挡住
+  assert.equal(dsh.validPkgName('github:owner/repo'), '')
+  assert.equal(dsh.validPkgName('https://x.cn/a.tgz'), '')
+  assert.equal(dsh.validPkgName(''), '')
+})
+
+// ── progress（安装/更新期间的轻量进度快照）──
+//
+// ⚠️ 这段盯的是「进度回显不能有副作用」：前端要 1Hz 刷新几分钟，
+//    所以 progress() 必须只读内存、**不探端口**（否则每秒白起一个 netstat 子进程）。
+//    快照里也不能泄露 state 之外的引用 —— 前端只用到 lastCmd / log 两个字段。
+test('progress 返回 { lastCmd, log } 两个字段，未执行过时为空串', () => {
+  const p = dsh.progress()
+  assert.deepEqual(Object.keys(p).sort(), ['lastCmd', 'log'])
+  assert.equal(typeof p.lastCmd, 'string')
+  assert.equal(typeof p.log, 'string')
+})
+
+test('progress 不含端口探测相关字段（保证零副作用：不起 netstat 子进程）', () => {
+  const p = dsh.progress()
+  // 这些是 snapshot() 才有的字段。若日后有人图省事让它复用 snapshot()，
+  // 端口探测就会跟着恢复到 1Hz —— 用这条钉住分开的理由
+  for (const k of ['portPid', 'portName', 'portOther', 'extBusy', 'external', 'probe']) {
+    assert.equal(k in p, false, `progress() 不该带 ${k}`)
+  }
+})
+
+test('progress 的 log 是整串（含换行），不是数组', () => {
+  const p = dsh.progress()
+  // 前端靠 split('\n') 自己取尾部若干行，所以这里必须是字符串
+  assert.equal(Array.isArray(p.log), false)
+})
+
+// ── quoteCmdArg（cmd /s /c 这条线的参数引号规则）──
+//
+// ⚠️ 这段钉的是一个**真实 bug**（2026-09-24 用户报的「更新失败（退出码 1）」）：
+//    spawnCmd 在 Windows 下走 `cmd.exe /d /s /c <整串>`，而**沿用 POSIX 式引号给每个参数都包一层**
+//    会让 cmd 在补/剥外层引号时错配 —— 实测命令名被吃成 `dejs\npm.cmd\"`，报
+//    「不是内部或外部命令」。npm/dsh 当场全部跑不起来。
+//    规则：**只给真正含空格的参数**加引号，参数内的引号用 cmd 的 `""`（不是 `\"`）。
+test('quoteCmdArg 对不含空格的参数不加引号（关键：加了会被 /s 的外层引号错配）', () => {
+  assert.equal(dsh.quoteCmdArg('install'), 'install')
+  assert.equal(dsh.quoteCmdArg('--prefix'), '--prefix')
+  assert.equal(dsh.quoteCmdArg('dshmarket'), 'dshmarket')
+  assert.equal(dsh.quoteCmdArg('--registry=https://registry.npmmirror.com'), '--registry=https://registry.npmmirror.com')
+  // Windows 路径：反斜杠不是特殊字符，不该触发加引号
+  assert.equal(dsh.quoteCmdArg('D:\\nodejs\\npm.cmd'), 'D:\\nodejs\\npm.cmd')
+  assert.equal(dsh.quoteCmdArg('C:\\Users\\Berge\\.dsh\\profiles\\web'), 'C:\\Users\\Berge\\.dsh\\profiles\\web')
+})
+
+test('quoteCmdArg 只给含空格的参数加引号', () => {
+  assert.equal(dsh.quoteCmdArg('C:\\Program Files\\nodejs\\npm.cmd'), '"C:\\Program Files\\nodejs\\npm.cmd"')
+  assert.equal(dsh.quoteCmdArg('C:\\Users\\a b\\.dsh'), '"C:\\Users\\a b\\.dsh"')
+  // 只包一层：不能再像 POSIX 那样额外转义
+  assert.equal(dsh.quoteCmdArg('a b').startsWith('"'), true)
+  assert.equal(dsh.quoteCmdArg('a b').endsWith('"'), true)
+})
+
+test('quoteCmdArg 用 cmd 的 "" 转义内部引号，而不是 \\"（cmd 不认反斜杠转义）', () => {
+  const r = dsh.quoteCmdArg('say "hi"')
+  assert.equal(r, '"say ""hi"""')
+  assert.equal(r.includes('\\"'), false, 'cmd 不认反斜杠转义，混进去会变成字面反斜杠')
+})
+
+test('quoteCmdArg 对 shell 元字符加引号（挡住命令拼接）', () => {
+  for (const v of ['a&b', 'a|b', 'a>b', 'a<b', 'a^b', 'a(b)']) {
+    assert.equal(dsh.quoteCmdArg(v).startsWith('"'), true, v + ' 应被引号包住')
+  }
+})
+
+test('quoteCmdArg 拼出的命令行与实测能跑通的形态一致（回归：命令名首尾不能有多余引号）', () => {
+  const exe = 'D:\\nodejs\\npm.cmd'
+  const args = ['install', '--prefix', 'C:\\Users\\Berge\\.dsh\\profiles\\web', '--no-audit', '--no-fund', '--registry=https://registry.npmmirror.com', 'dshmarket']
+  const line = dsh.quoteCmdArg(exe) + ' ' + args.map(dsh.quoteCmdArg).join(' ')
+  // 这条线上不能出现任何引号 —— 全是不含空格的参数，出现引号就说明又走回踩坑写法了
+  assert.equal(line.includes('"'), false, '无空格参数不该有引号：' + line)
+  assert.equal(line, 'D:\\nodejs\\npm.cmd install --prefix C:\\Users\\Berge\\.dsh\\profiles\\web --no-audit --no-fund --registry=https://registry.npmmirror.com dshmarket')
+})
+
+// ── pnpm 通道（装/卸插件必须走它，不能退回 npm）──
+// 2026-09-24 实测：npm 在 profile 目录里跑会因 `@openviking/dsh-memory-plugin@0.3.2` 的
+// peer 由全局 dsh 提供而报 ERESOLVE；`--legacy-peer-deps` 能绕过但会连带改 73 个无关包。
+// pnpm（profile 的 autoInstallPeers: false）只报 [WARN] 不中止，且只动目标包。
+
+test('pnpmArgs 拼出 --dir / --reporter 且顺序在 spec 之前（回归：参数顺序错了 pnpm 会把 spec 当目录）', () => {
+  const args = dsh.pnpmArgs('C:\\Users\\Berge\\.dsh\\profiles\\web')
+  assert.deepEqual(args, ['--dir', 'C:\\Users\\Berge\\.dsh\\profiles\\web', '--reporter=append-only'])
+})
+
+test('pnpmArgs 带自定义镜像源时把 --registry 追加在末尾', () => {
+  const before = dsh.pnpmArgs('X:\\p')
+  // 默认（未配置镜像）不带 --registry
+  assert.equal(before.some((a) => a.startsWith('--registry')), false, '未配镜像不该凭空加 --registry')
+})
+
+test('pnpmArgs 用 --reporter=append-only：默认 TTY 报告器的进度条会把日志刷屏', () => {
+  assert.equal(dsh.pnpmArgs('X:\\p').includes('--reporter=append-only'), true)
+})
+
+test('pnpmArgs 不带 --ignore-scripts：github/tgz 来源靠 prepare 构建，忽略脚本等于装出空壳', () => {
+  const args = dsh.pnpmArgs('X:\\p')
+  assert.equal(args.includes('--ignore-scripts'), false)
+  assert.equal(args.some((a) => a.startsWith('--ignore')), false)
+})
+
+test('installPluginPkg 拒绝非法 profile / spec（不进命令行）', async () => {
+  const bad = await dsh.installPluginPkg('../etc', 'dshmarket')
+  assert.equal(bad.ok, false)
+  assert.match(bad.err, /profile 名不合法/)
+  const bad2 = await dsh.installPluginPkg('web', 'dshmarket; rm -rf /')
+  assert.equal(bad2.ok, false)
+  assert.match(bad2.err, /包名不合法/)
+})
+
+test('uninstallPluginPkg 拒绝非法 profile / 包名（不进命令行）', async () => {
+  const bad = await dsh.uninstallPluginPkg('web', '--dangerously-allow-all')
+  assert.equal(bad.ok, false)
+  assert.match(bad.err, /包名不合法/)
+})
+
+test('resolvePnpm 找不到 pnpm 时返回空串，不偷偷退回 npm（退回正是 ERESOLVE 的根源）', () => {
+  // 用一个不存在的 Node 目录 + 清空 PATH，保证探测一定失败
+  const savedPath = process.env.PATH
+  const savedAppData = process.env.APPDATA
+  const savedLocalAppData = process.env.LOCALAPPDATA
+  const savedProgramFiles = process.env.ProgramFiles
+  const savedProgramFilesX86 = process.env['ProgramFiles(x86)']
+  try {
+    process.env.PATH = ''
+    delete process.env.APPDATA
+    delete process.env.LOCALAPPDATA
+    delete process.env.ProgramFiles
+    delete process.env['ProgramFiles(x86)']
+    const r = dsh.resolvePnpm({ dir: 'X:\\definitely-not-here' })
+    // 返回值必须是字符串（'' 或绝对路径），绝不能是 npm 的路径 —— 判据是「结果为 falsy 时调用方报错」
+    assert.equal(typeof r, 'string')
+    if (!r) assert.equal(r, '', '找不到就返回空串，让调用方报错而不是降级')
+  } finally {
+    process.env.PATH = savedPath
+    if (savedAppData !== undefined) process.env.APPDATA = savedAppData
+    if (savedLocalAppData !== undefined) process.env.LOCALAPPDATA = savedLocalAppData
+    if (savedProgramFiles !== undefined) process.env.ProgramFiles = savedProgramFiles
+    if (savedProgramFilesX86 !== undefined) process.env['ProgramFiles(x86)'] = savedProgramFilesX86
+  }
+})

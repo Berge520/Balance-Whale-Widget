@@ -102,6 +102,15 @@ export interface WhaleConfig {
   dshVersion: string
   dshReinstall: boolean
   dshNoOpen: boolean
+  // dsh 插件市场目录源（并发竞速，见 dsh-market.js 的 loadCatalog）：
+  //   url      = 自定义目录 URL（'' = 不加这条）
+  //   mirror   = 是否让镜像源参赛（默认开）
+  //   registry = 参赛的 registry（'' = 宿主内置默认，即实测延迟最低的那条）
+  //   official = 是否让官方源参赛。默认 false —— 实测官方源 4.37MB 要 52–99s 且常连不上
+  dshMarketUrl: string
+  dshMarketMirror: boolean
+  dshMarketRegistry: string
+  dshMarketOfficial: boolean
   // 多厂商模型（余额 / 额度）：注册表进配置（随备份与恢复走），运行时余额不在这里
   models: WhaleModel[]
   // 挂件主显示的模型 id（'deepseek' = 内置）
@@ -640,6 +649,182 @@ export interface DshIsolateApplyResult {
   needsRestart?: boolean
 }
 
+// ── dsh 插件市场（lib/dsh-market.js）──
+// 目录来源实测 https://awesome-dsh-plugin.com/plugins.json（2026-09-23：4183 条）
+export interface DshMarketPlugin {
+  name: string
+  owner: string
+  url: string
+  page: string
+  category: string
+  descZh: string
+  descEn: string
+  // ⚠️ 目录里这一项**可以是空串**（原始 JSON 里为 null，实测 4183 条里 2033 条即 48.6%）。
+  // 这些条目**并非装不了** —— 只是 install spec 换了形态，见下面的 spec。
+  // 仅用于展示与「去 scope 短名」的兜底比对，**不再作为安装能力的判据**
+  npm: string
+  version: string
+  stars: number
+  downloads: number
+  install: string
+  added: string
+  screenshots: string[]
+  // === 安装能力三件套（取代旧的 installable）===
+  // 真正交给安装命令的 spec：裸包名 / `github:owner/repo` / `https://…/x.tgz`
+  spec: string
+  // 'npm' | 'github' | 'tarball' | ''（''=我们认不出的形态，界面不给按钮）
+  specKind: string
+  // github / tarball 靠 prepare 脚本在安装时构建，pnpm 默认拦一次；界面据此标「需构建」
+  needsBuild: boolean
+}
+
+export interface DshMarketCatalogResult {
+  ok: boolean
+  error?: string
+  // 'official' | 'mirror' | 'custom' | 'cache'
+  from?: string
+  // 命中内存缓存（60s TTL）或 304：内容与上次一致
+  cached?: boolean
+  // 命中了 dbStorage 里的离线副本（所有来源都挂）—— 此时 ok 仍为 true，
+  // 但必须把 stale/staleReason 显示出来，不能让用户以为是刚抓的
+  stale?: boolean
+  staleReason?: string
+  // 离线副本的落库时间（epoch ms）
+  at?: number
+  // 目录自称的更新日期（YYYY-MM-DD）
+  updated?: string
+  // 分类键 → 双语名（目录里给的 24 类，保留原顺序）
+  categories?: Record<string, { en: string; zh: string }>
+  plugins?: DshMarketPlugin[]
+  count?: number
+  // 这次竞速从发起到胜出者拿到完整目录花掉的毫秒数（界面显示「耗时 x.xxs」）
+  tookMs?: number
+  // 胜出来源的 registry 地址；只有 from==='mirror' 时非空，界面据此反查 label
+  registry?: string
+  // 逐条链路的失败原因（ok:false 时给出，便于用户判断是网络还是来源挂了）
+  failures?: string[]
+}
+
+// 一次目录来源测速的结果。只打 registry 的元数据（不下载 tarball），故比抓目录快得多
+export interface DshMarketPingEntry {
+  id: string
+  url: string
+  label: string
+  // 元数据往返耗时（ms）；ok 为 false 时无意义
+  ms: number
+  ok: boolean
+  error?: string
+  // 该源当前发布的目录包版本号（能顺手证明它是不是活的）
+  version?: string
+}
+
+// 一个包在 profile 里的状态。两个来源说的是两件事，界面要分开显示
+export interface DshMarketInstalledEntry {
+  // npm 层面装没装（profile/package.json 的 dependencies）
+  inDeps: boolean
+  depVersion: string
+  // dsh 层面有没有 patch 条目 / 是否被禁用
+  inPatch: boolean
+  disabled: boolean
+}
+
+export interface DshMarketStatusResult {
+  ok: boolean
+  error?: string
+  profile: string
+  // profile/package.json 与 patch 文件的绝对路径（界面说清「装到哪儿、改的是哪个文件」）
+  file: string
+  patchFile: string
+  // 键是用户实际写的那个名字（可能是去掉 scope 的短名），界面用包名去对
+  installed: Record<string, DshMarketInstalledEntry>
+  count: number
+}
+
+export interface DshMarketInstallResult {
+  ok: boolean
+  error?: string
+  dryRun?: boolean
+  changed?: boolean
+  // 实际交给安装命令的 spec（github / tarball 条目只有它，没有 npm 名）
+  spec?: string
+  npm?: string
+  name?: string
+  version?: string
+  profile?: string
+  // 'install' | 'update' | 'already'
+  action?: string
+  message?: string
+  snapshot?: string
+  // 更新时的「更新前声明版本 → 更新后实装版本」中的前一端（只有 update 会给）
+  from?: string
+  // 目录条目给的版本（dryRun 按 `to` 回传，前端存进 plan、真写时再带回）。
+  // ⚠️ 被供应链策略挡下时靠它拼出可照抄的白名单行；缺了就只能写「目标版本」
+  to?: string
+  // github / tarball 靠 prepare 脚本构建；pnpm 会拦一次，界面据此提示「若加载失败按引导再来」
+  needsBuild?: boolean
+  // 失败时的 pnpm 构建拦截引导（只有 needsBuild 且输出里含 allowBuilds 才有）。
+  // key 带 commit hash —— 安装前拿不到，所以这类条目注定先失败一次
+  allowBuilds?: { key: string; file: string } | null
+  // 装完必须 dsh 重新加载才生效 —— 界面提示 + 手动「重启 dsh」按钮，宿主不自动重启
+  needsRestart?: boolean
+  // 更新时「pnpm 报成功但实装版本没变」（多为 profile 的供应链策略拦截）。
+  // 这时 ok:false —— 不能让界面显示「已更新 v1.48.0 → v1.48.0」这种假成功
+  blocked?: boolean
+  // 被挡时给出该改哪个文件的哪个键（pnpm-workspace.yaml 的 minimumReleaseAgeExclude）
+  policyFile?: string
+  policyKey?: string
+}
+
+export interface DshMarketUninstallResult {
+  ok: boolean
+  error?: string
+  dryRun?: boolean
+  changed?: boolean
+  npm?: string
+  name?: string
+  // true = 已连带删除磁盘包（npm uninstall）；false = 只写 disabled: true 禁用
+  remove?: boolean
+  // 实际写进 patch 的条目 id（可能是短名）
+  id?: string
+  profile?: string
+  action?: string
+  message?: string
+  snapshot?: string
+  needsRestart?: boolean
+}
+
+// 一条「已装 vs 目录」的版本比对结果。
+// ⚠️ installed 是 node_modules 里读到的**实装版本**（裸 `0.5.11`），不是 package.json 里的
+//    声明范围；后者放在 range 字段。口径：实装版本 < 目录版本 → 有更新。
+export interface DshMarketUpdateEntry {
+  spec: string
+  npm: string
+  name: string
+  // 实装版本（node_modules/<name>/package.json 的 version）。读不到时为空字符串 ——
+  // 此时若 range 有值，state 是按声明范围退回来的判定结果
+  installed: string
+  // profile/package.json 里写的声明范围（`^0.5.11` / `0.19.1`），仅作展示与退回判定用
+  range: string
+  latest: string
+  // 'update' = 实装版本低于目录版本（退回判定时：目录版本超出声明范围）；
+  // 'current' = 实装版本已不低（退回时：目录版本落在声明范围内）；
+  // 'unknown' = 目录没给 version（github/tgz 来源）或已装侧两边都拿不到，比不了
+  state: 'update' | 'current' | 'unknown'
+  // 判定依据：'realized' = 比实装版本；'range' = 退回比声明范围；'none' = 无法比对
+  basis: 'realized' | 'range' | 'none'
+}
+
+export interface DshMarketCheckUpdatesResult {
+  ok: boolean
+  error?: string
+  profile: string
+  // 只含**已装**的条目（未装的不参与「有没有新版」）
+  entries: DshMarketUpdateEntry[]
+  updates: number
+  unknown: number
+  checked: number
+}
+
 export interface ClearDataResult {
   ok: boolean
   // 各项是否被清除（按项清除的结果回显）
@@ -894,6 +1079,16 @@ export interface DebugLogResult {
   path: string
   // 日志末尾内容（非 dev 为空串）
   text: string
+}
+
+// dsh 长跑操作的轻量进度快照（安装 / 更新插件期间前端 1Hz 轮询）
+// ⚠️ 与 DshStatus 分开是有意的：这里**不探端口**，只读宿主内存里的两块数据。
+//    进度回显不需要端口信息，却会因 DshStatus 的探测每秒白起一个 netstat 子进程
+export interface DshProgress {
+  // 正在执行的命令行（宿主 setCmd 写入），未执行过为空串
+  lastCmd: string
+  // 宿主滚动日志的全文（含 npm 的 stdout / stderr，已清 ANSI）
+  log: string
 }
 
 // dsh（DeepSeek Harness）运行状态快照
@@ -1345,8 +1540,10 @@ export interface WhaleServices {
   // 命名与打标记只改快照目录里的 meta.json，**不碰快照内容**（标记错了重标即可）。
   // name 传空串清名字、knownGood 传 false 取消标记；只传一项时另一项保持不变
   dshBackupSetMeta(opts: { dirName: string; name?: string; knownGood?: boolean }): DshBackupMetaResult
-  // 按当前保留份数清理一次（known-good 与手动命名的快照不参与轮转）
-  dshBackupPrune(): DshBackupPruneResult
+  // 按保留份数清理一次（known-good 与手动命名的快照不参与轮转）。
+  // ⚠️ opts.keep 是**本次清理的临时份数**，只影响这一次、不写配置 —— 界面上「改了数字但没点保存
+  // 就点立即清理」时用它，否则会拿已保存的旧值去清、什么都不删（看着像按钮坏了）。省略则用配置值
+  dshBackupPrune(opts?: { keep?: number }): DshBackupPruneResult
   // 改保留份数（1–200）。**只写配置、不立即删**，删除由 dshBackupPrune 或下次建快照触发
   dshBackupSetKeep(n: number): { ok: boolean; error?: string; keep?: number }
   // ── E3「我的一键隔离」：一次把勾选的条目全禁掉 ──
@@ -1357,6 +1554,37 @@ export interface WhaleServices {
   // dryRun=true 只算不写，返回 plans 让界面把「会动哪几行」先摆给用户过目；
   // 真正写入时写前自动建快照（reason='before-isolate'），建失败即中止
   dshIsolateApply(opts: { profile?: string; ids: string[]; dryRun?: boolean }): DshIsolateApplyResult
+  // ── dsh 插件市场：本 Tab 里**唯一会联网**的卡 ──
+  // 抓目录。锁定的来源**同时发请求、先到先用**，胜出者一到就 abort 其余连接（实测官方源
+  // body 要下 50–130s，串行回退等于白等）。全部来源都挂时**不返回 ok:false**，而是降级给
+  // 上次的目录并置 stale=true + staleReason —— 界面必须把这两项显示出来。
+  // registry 传空串表示用内置默认（实测最快的 npmmirror）；official 默认 false（官方源实测常连不上）
+  dshMarketCatalog(opts?: { force?: boolean; url?: string; mirror?: boolean; registry?: string; official?: boolean }): Promise<DshMarketCatalogResult>
+  // 给「目录来源」选择区列出可选 registry（id/url/label），界面单选时用
+  dshMarketRegistries(): { id: string; url: string; label: string }[]
+  // 目录来源测速：并发打各 registry 的元数据，按延迟升序返回（不通的排最后并带 error）。
+  // **只测速不改配置** —— 改哪个源由用户点「用最快的」决定
+  dshMarketPing(opts?: { registries?: { id: string; url: string; label: string }[] }): Promise<{ ok: boolean; list: DshMarketPingEntry[] }>
+  // 已装状态（profile/package.json 的依赖 + 用户层 patch 条目）
+  dshMarketStatus(opts?: { profile?: string }): DshMarketStatusResult
+  // 安装：dryRun=true 只回「准备执行什么」不跑 npm。真装时写前建快照，npm 后回读 package.json 核验。
+  // ⚠️ 装的是 spec（目录 install 字段剥出来的原话），不是 npm 字段 —— 近半数条目 npm 为 null
+  // ⚠️ version 是**目录条目的版本号**（DshMarketPlugin.version），必须传：
+  //    宿主只靠 profile/package.json 的声明范围判「装没装」，而 `^1.48.0` 是容得下 `1.49.0` 的，
+  //    不传版本会让「已装但落后」的包被判成「无需重复安装」。传了才比实装版本、才判得出该更新
+  dshMarketInstall(opts: { profile?: string; spec: string; npm?: string; name?: string; version?: string; needsBuild?: boolean; dryRun?: boolean }): Promise<DshMarketInstallResult>
+  // 卸载：remove 缺省 = 只写 disabled: true 禁用（包留磁盘）；remove=true = npm uninstall 删包。
+  // spec 可替代 npm 传入，宿主会自己反查 package.json 里真实的键名
+  dshMarketUninstall(opts: { profile?: string; npm?: string; spec?: string; name?: string; remove?: boolean; dryRun?: boolean }): Promise<DshMarketUninstallResult>
+  // 检查已装插件有没有新版。⚠️ **要目录数据**（catalog 由界面把已拿到的目录原样传回来，
+  // 宿主不自己联网）—— 所以只在目录已加载后才调，否则就等于绕过「默认零网络请求」
+  dshMarketCheckUpdates(opts?: { profile?: string; catalog?: DshMarketCatalogResult }): DshMarketCheckUpdatesResult
+  // 更新一个已装插件：按目录 spec **重装**（不是 npm update —— 后者只在声明范围内升，
+  // 而「有更新」的定义正是超出范围）。dryRun 只算不写；真写与安装同链路：快照 → npm → 回读核验
+  //
+  // ⚠️ version = **目录条目给的版本**，dryRun 时传下去、真写时再带回来。没有它，更新被 profile 的
+  // 供应链策略（minimumReleaseAgeExclude）挡下时，宿主只能说「目标版本」，用户不知道该往白名单写哪个号
+  dshMarketUpdate(opts: { profile?: string; spec: string; npm?: string; name?: string; version?: string; dryRun?: boolean }): Promise<DshMarketInstallResult>
   exportUsageCsv(days?: number): UsageCsvResult
   importUsageCsv(): UsageCsvImportResult
   // 按项清除本地数据：true 的项才会被清除
@@ -1373,8 +1601,13 @@ export interface WhaleServices {
   // 诊断日志（落盘于 %TEMP%\whale-debug.log，进程被 uTools 结束也不丢）
   getDebugLog(): DebugLogResult
   openLogFile(): { ok: boolean; path: string }
+  // 用系统文件管理器打开指定目录（定位插件目录里的 dsh 用）；路径为空时 ok:false
+  openDir(dir: string): { ok: boolean; path: string }
   // DeepSeek Harness（dsh）：状态与 启动/重启/结束/更新/打开页面
   dshStatus(): DshStatus
+  // 轻量进度（只回命令行与日志尾部，不探端口）。安装/更新这类长跑操作期间前端 1Hz 轮询它
+  // 做进度回显 —— 复用 dshStatus() 会每秒起一个 netstat 子进程，代价与收益完全不成比例
+  dshProgress(): DshProgress
   dshStart(): DshStatus
   dshStop(): DshStatus
   dshRestart(): DshStatus

@@ -13,11 +13,17 @@ const FETCH_TIMEOUT_MS = 20000
 const UPDATE_CHECK_URL = 'https://ghfast.top/https://raw.githubusercontent.com/Berge520/Balance-Whale-Widget/refs/heads/main/package.json'
 // 当前插件版本。uTools 未提供读取插件自身版本的 API，此处由 scripts/sync-version.mjs
 // 在构建前从 package.json 的 version 自动写入，无需手动维护
-const PLUGIN_VERSION = '1.6.2'
+const PLUGIN_VERSION = '1.7.0'
 const UPDATE_TTL_MS = 12 * 3600 * 1000
 
 const MIN_SCALE = 0.6
 const MAX_SCALE = 2.5
+
+// dsh 版本配置的哨兵值：dshVersion 存它表示「装版本列表里最高的那个（含 alpha/rc 等测试版）」，
+// 而不是 npm 的 latest 标签（latest 只指向稳定发布）。宿主 store/dsh 与设置页都要认它，
+// 设置页持有一份字面量副本（见 App.vue 的 NEWEST_VERSION），改这里要同步，check-shared 会校验。
+const NEWEST_VERSION = 'newest'
+
 const BASE_MIN = 122   // 挂件基准尺寸下限 px
 const BASE_CAP = 250   // 视口相关基准上限 px
 const BASE_MAX = 625   // 挂件基准尺寸硬上限 px
@@ -139,6 +145,7 @@ const K = {
   dshUsage: 'whale:dshUsage', // dbStorage：dsh 用量统计缓存（会话缓存的 size/mtime + 解析结果，不含凭据）
   dshDiagnose: 'whale:dshDiagnose', // dbStorage：dsh 只读诊断结果缓存（60s TTL，纯派生数据，不进备份）
   dshDump: 'whale:dshDump',     // dbStorage：dsh 配置转储（五层分层 + 树 diff）缓存（60s TTL，纯派生数据，不进备份）
+  dshMarket: 'whale:dshMarket', // dbStorage：插件市场目录的**离线兜底**副本（官方/镜像都挂时仍能看上次的目录）
 }
 
 // ──────────────────────────────────────────────
@@ -282,6 +289,7 @@ module.exports = {
   UPDATE_TTL_MS,
   MIN_SCALE,
   MAX_SCALE,
+  NEWEST_VERSION,
   BASE_MIN,
   BASE_CAP,
   BASE_MAX,

@@ -204,8 +204,8 @@ onUnmounted(endDrag)
       </div>
 
       <div class="btn-row">
-        <button class="secondary" type="button" :disabled="!ready" @click="autoTrim">自动裁掉透明边</button>
-        <button class="secondary" type="button" :disabled="!ready" @click="selectAll">全选</button>
+        <button class="secondary utils-btn utils-secondary" type="button" :disabled="!ready" @click="autoTrim">自动裁掉透明边</button>
+        <button class="secondary utils-btn utils-secondary" type="button" :disabled="!ready" @click="selectAll">全选</button>
       </div>
       <p v-if="tip" class="tip">{{ tip }}</p>
       <p class="hint">
@@ -213,8 +213,8 @@ onUnmounted(endDrag)
       </p>
 
       <div class="btn-row">
-        <button class="secondary" type="button" @click="emit('cancel')">取消</button>
-        <button type="button" :disabled="!ready" @click="confirmCrop">确定裁剪</button>
+        <button class="secondary utils-btn utils-secondary" type="button" @click="emit('cancel')">取消</button>
+        <button class="utils-btn utils-primary" type="button" :disabled="!ready" @click="confirmCrop">确定裁剪</button>
       </div>
     </div>
   </div>
@@ -235,6 +235,8 @@ onUnmounted(endDrag)
   max-width: 540px;
   max-height: 100%;
   overflow: auto;
+  /* 裁剪面板高度随图片比例变，预留滚动条槽位避免弹窗左右晃 */
+  scrollbar-gutter: stable;
   padding: 16px;
   border-radius: 12px;
   background: var(--input-bg, #fff);
@@ -318,17 +320,11 @@ onUnmounted(endDrag)
   gap: 10px;
   margin-top: 12px;
 }
+/* 尺寸/配色走 main.css 的 utils 基类（markup 挂 .utils-btn + .utils-secondary /
+   .utils-primary），这里只留等分拉伸。原先这份是独立一套 13px + 靠 main.css
+   line-height 2.5 撑高，是全页"高矮胖瘦不一"的来源之一。 */
 .btn-row button {
   flex: 1;
-  border-radius: 8px;
-  font-size: 13px;
-}
-.btn-row button.secondary {
-  background: rgba(83, 107, 169, 0.18);
-  color: var(--accent, #536ba9);
-}
-.btn-row button:disabled {
-  opacity: 0.45;
 }
 .tip {
   margin: 10px 0 0;

@@ -34,7 +34,11 @@ const dshDump = require('./dsh-dump')
 const dshBackup = require('./dsh-backup')
 const { parsePatch, applyToggle, applyBatchDisable } = require('./dsh-patch')
 const dshIsolate = require('./dsh-isolate')
+const dshMarket = require('./dsh-market')
 const { readTextSafe } = require('./util')
+
+// 镜像测速超时：只打元数据（几百字节），8s 足够；等不到就说明该源当下不可用
+const PING_TIMEOUT_MS = 8000
 
 // ── dsh 插件开关（计划书 §6.2 E2）──
 // 目标文件固定是**用户层** profile patch（$DSH_HOME/profiles/<p>/cordis.patch.yml）。
@@ -341,6 +345,609 @@ function listDshBackups() {
     logErr('[whale][dsh-backup] 列快照失败', (err && err.message) || '')
     return { ok: false, error: '读取快照列表失败：' + ((err && err.message) || err), snapshots: [] }
   }
+}
+
+// ── dsh 插件市场（lib/dsh-market.js 的宿主入口）──
+//
+// 本卡是 dev tab 里**唯一会联网**的卡，所以每一步都要能被用户叫停与回看：
+//   · 目录只读、可缓存（内存 60s + dbStorage 离线兜底），抓失败也把上次的目录交出去
+//   · 安装/卸载是「三段式」：dryRun 预览 → 用户确认 → 写前建快照 → 跑 pnpm → 回读核验
+//
+// ⚠️ 不自动重启 dsh：装完插件要 dsh 重新加载才生效，但重启会掐掉用户正在跑的会话。
+//    界面提示 + 「重启 dsh」按钮（复用 dshRestart）交给用户自己决定时机。
+
+// 上次成功抓到的目录落库，供官方与镜像都挂时兜底（实测官方站是个人站，可用性有限）
+function readMarketCache() {
+  try {
+    const c = utools.dbStorage.getItem(K.dshMarket)
+    if (c && typeof c === 'object' && Array.isArray(c.plugins) && c.plugins.length) return c
+  } catch (err) {}
+  return null
+}
+function writeMarketCache(payload) {
+  try {
+    // plugins 只留界面要用的字段，原始 screenshots 之类不进库 —— dbStorage 是 uluru 文档库，
+    // 塞几兆 JSON 会让每次 getItem 都变慢
+    utools.dbStorage.setItem(K.dshMarket, {
+      at: Date.now(),
+      updated: payload.updated || '',
+      source: payload.source || '',
+      categories: payload.categories || {},
+      plugins: payload.plugins,
+    })
+  } catch (err) { logErr('[whale][dsh-market] 写目录缓存失败', (err && err.message) || '') }
+}
+
+// 抓目录：成功就更新离线兜底；失败时**降级返回上次的目录**（from:'cache'）而不是 ok:false
+function marketCatalog(opts) {
+  const o = opts && typeof opts === 'object' ? opts : {}
+  const cfg = readConfig()
+  const customUrl = String(o.url !== undefined ? o.url : cfg.dshMarketUrl || '').trim()
+  const mirror = o.mirror !== undefined ? o.mirror !== false : cfg.dshMarketMirror !== false
+  // 竞速参数：镜像用哪个 registry、官方源是否参赛（见 dsh-market.js 的 buildSources）
+  const registry = String(o.registry !== undefined ? o.registry : cfg.dshMarketRegistry || '').trim()
+  const official = o.official !== undefined ? o.official === true : cfg.dshMarketOfficial === true
+  return Promise.resolve()
+    .then(() => dshMarket.loadCatalog({ force: o.force === true, customUrl: customUrl, mirror: mirror, registry: registry, official: official }))
+    .then((res) => {
+      if (res && res.ok) {
+        writeMarketCache(res)
+        return res
+      }
+      const cached = readMarketCache()
+      if (!cached) return res
+      logErr('[whale][dsh-market] 目录抓取失败，改用离线副本', (res && res.error) || '')
+      return {
+        ok: true,
+        from: 'cache',
+        cached: true,
+        at: cached.at,
+        updated: cached.updated,
+        categories: cached.categories,
+        plugins: cached.plugins,
+        count: cached.plugins.length,
+        // 原始失败原因照样交出去：界面要显示「这是上次的目录（抓取失败：…）」
+        stale: true,
+        staleReason: (res && res.error) || '未知原因',
+      }
+    })
+    .catch((err) => {
+      logErr('[whale][dsh-market] 目录加载异常', (err && err.message) || '')
+      return { ok: false, error: '目录加载异常：' + ((err && err.message) || err), plugins: [], categories: {} }
+    })
+}
+
+// 给各镜像源测延迟，让界面能「自动选最快的」。
+//
+// 只打 registry 的**元数据**（几百字节），不下载 tarball —— 测速不该把 1MB 拉两遍。
+// 各源并发，互不影响；单个源失败记 ok:false 而不是把整次测速搞崩。
+// 返回 { ok, list: [{ id, url, label, ms, ok, error? }] }，list 按延迟升序（失败的排最后）。
+function marketPing(opts) {
+  const o = opts && typeof opts === 'object' ? opts : {}
+  const fetchImpl = typeof o.fetchImpl === 'function' ? o.fetchImpl : fetch
+  const list = Array.isArray(o.registries) && o.registries.length ? o.registries : dshMarket.MIRROR_REGISTRIES
+  return Promise.all(list.map((r) => {
+    const t0 = Date.now()
+    return Promise.resolve()
+      .then(() => fetchImpl(r.url.replace(/\/+$/, '') + '/' + dshMarket.MIRROR_PKG + '/latest', { signal: AbortSignal.timeout(PING_TIMEOUT_MS) }))
+      .then((res) => {
+        if (!res.ok) throw new Error('HTTP ' + res.status)
+        return res.json()
+      })
+      .then((meta) => {
+        const tb = meta && meta.dist && meta.dist.tarball
+        if (!tb) throw new Error('元数据里没有 dist.tarball')
+        return { id: r.id, url: r.url, label: r.label, ms: Date.now() - t0, ok: true, version: String(meta.version || '') }
+      })
+      .catch((err) => ({
+        id: r.id, url: r.url, label: r.label, ms: Date.now() - t0, ok: false,
+        error: (err && err.message) || '未知错误',
+      }))
+  })).then((arr) => {
+    const sorted = arr.slice().sort((a, b) => (a.ok === b.ok ? a.ms - b.ms : (a.ok ? -1 : 1)))
+    log('[whale][dsh-market] 镜像测速完成', sorted.map((x) => x.id + (x.ok ? '=' + x.ms + 'ms' : '=fail')).join(' '))
+    return { ok: true, list: sorted }
+  })
+}
+
+// 已装状态：把 patch 里的条目映射到目录条目的 npm 包名上（完整名优先、短名兜底）
+function marketStatus(opts) {
+  const o = opts && typeof opts === 'object' ? opts : {}
+  const profile = String(o.profile || 'web')
+  const patch = listDshPatchItems({ profile: profile })
+  const items = patch && patch.ok ? patch.items : []
+  const map = dshMarket.installedMap(dsh.installedDeps(profile), items)
+  return {
+    ok: true,
+    profile: profile,
+    file: dsh.profilePkgFile(profile),
+    patchFile: patch && patch.file ? patch.file : '',
+    // 键是**用户在 patch / package.json 里写的那个名字**，界面靠 matchInstalled 去对目录条目
+    installed: map,
+    count: Object.keys(map).length,
+  }
+}
+
+// 检查已装插件有没有新版。opts = { profile?, catalog? }
+//
+// ⚠️ 为什么不放在 marketStatus 里一起算：marketStatus 是**纯本地**的（只读 package.json +
+//    patch），展开卡片就会跑；而「有没有新版」需要**目录数据**，目录属于联网侧。
+//    两者生命周期不同（目录可以不加载，已装状态照样读），所以这里单独一个入口 ——
+//    界面在「已加载目录」之后才调它，没加载目录就不调，保持「默认零网络请求」。
+//
+// 口径（2026-09-24 调整）：拿目录条目的 version 去比 node_modules 里的**实装版本**
+// （见 dsh-market.updateState）。拿不到实装版本时退回比 package.json 的声明范围。
+//   · 有更新    —— 实装版本 < 目录版本（退回时：目录版本超出声明范围）
+//   · 已是最新  —— 实装版本 >= 目录版本（退回时：目录版本落在声明范围内）
+//   · 无法比对  —— 目录没给 version（github / tarball 来源），或已装侧两边都拿不到
+//
+// ⚠️ 实装版本表为什么在这里读一次而不是每条读一次：installedVersions 内部按 dependencies
+//    的键一次性读全（本机通常个位数到几十个），逐条调会反复读同一批文件。
+function marketCheckUpdates(opts) {
+  const o = opts && typeof opts === 'object' ? opts : {}
+  const profile = String(o.profile || 'web')
+  const catalog = o.catalog && typeof o.catalog === 'object' ? o.catalog : {}
+  const plugins = Array.isArray(catalog.plugins) ? catalog.plugins : []
+  const deps = dsh.installedDeps(profile)
+  const versions = dsh.installedVersions(profile)
+  const out = []
+  let updates = 0
+  let unknown = 0
+  for (let i = 0; i < plugins.length; i++) {
+    const p = plugins[i] && typeof plugins[i] === 'object' ? plugins[i] : {}
+    // 先按 npm 名对，再按 install spec 反查 —— 与界面 dshMarketHitAt 同一套口径，
+    // 否则会出现「卡片说已装、这里说找不到」的自相矛盾
+    const hit = (p.npm ? dshMarket.matchDepByNpm(deps, p.npm) : null)
+      || (p.spec ? dshMarket.matchInstalledBySpec(deps, p.spec) : null)
+    if (!hit) continue
+    // 实装版本：先按 npm 名查表（表键与 deps 键同源，命中判定的 hit.key 直接可用），
+    // 再用 spec 兜一层 —— github / tarball 来源的目录名与 npm 字段对不上时靠这个
+    let realized = versions[hit.key] || ''
+    if (!realized && p.spec) realized = dshMarket.realizedVersionBySpec(versions, p.spec)
+    const st = dshMarket.updateState(hit.depVersion, p.version, realized)
+    if (st.state === 'update') updates++
+    else if (st.state === 'unknown') unknown++
+    // 只回「已装」的那些，没装的条目界面自己用 dshMarketHitAt 判，不必重复传
+    out.push({
+      spec: String(p.spec || ''),
+      npm: String(p.npm || ''),
+      name: String(p.name || ''),
+      // installed = 实装版本（可能为空，界面据此决定显不显示）；range = 声明范围（退回展示用）
+      installed: st.installed,
+      range: st.range,
+      latest: st.latest,
+      state: st.state,
+      basis: st.basis,
+    })
+  }
+  return { ok: true, profile: profile, entries: out, updates: updates, unknown: unknown, checked: out.length }
+}
+
+// ⚠️ pnpm 报「成功」不等于「真的升级了」—— 判据必须是**回读到的实装版本变了**。
+//
+// 2026-09-24 实测的真实假成功：profile 的 `pnpm-workspace.yaml` 里有 `minimumReleaseAgeExclude`
+// 供应链白名单，`dshmarket` 那条被写死成 `dshmarket@1.45.1 || 1.48.0`。于是 pnpm 在解析时
+// **把目录里的 1.57.0 直接排除掉**，回退到「当前锁定的 1.48.0」这个唯一合法解 —— 它认为
+// 已经满足、无需改动，报 `Done` + 退出码 0（日志里那句 `✓ Lockfile passes supply-chain policies`
+// 就是它），磁盘上却一个字没变。界面于是显示「已更新 v1.48.0 → v1.48.0」这种荒谬结论。
+//
+// 这类拦截**只体现在输出里，不体现在退出码里**，所以只能靠回读版本发现。返回被挡住的详情
+// 供调用方拼文案；`blocked:false` 表示这次变化不是策略拦截造成的（真的升/降级，或读不到版本）。
+//
+// ⚠️ 判据只能是「回读版本没变」这一件事 —— 不能拿输出里的 `supply-chain` 字样当证据。
+//    `✓ Lockfile passes supply-chain policies` 是 pnpm **每次都会打的常规信息行**（2026-09-24 实测：
+//    连本来就在白名单里的包也照打），把它当拦截信号会给出「让用户去改白名单」这种**改不动也
+//    没用**的错误指引（用户报的 `@linxin666/dsh-web-all` 白名单里明明有，但只放行到 0.3.23）。
+//    所以 `sawPolicyHint` 降级为纯文案微调，true/false 都不影响 blocked 的判定。
+function blockedByPolicy(profile, from, to, out) {
+  if (!to || to === from) {
+    // 措辞里出现 minimumReleaseAge / supply-chain 时说明 pnpm 确实提到了这道策略，文案可以更笃定
+    const s = String(out || '')
+    const hit = /minimumReleaseAgeExclude|supply-chain|minimumReleaseAge/i.test(s)
+    const home = dshBackup.dshHome()
+    return {
+      blocked: true,
+      policyFile: home ? path.join(home, 'profiles', profile, 'pnpm-workspace.yaml') : '<$DSH_HOME>/profiles/' + profile + '/pnpm-workspace.yaml',
+      policyKey: 'minimumReleaseAgeExclude',
+      sawPolicyHint: hit,
+    }
+  }
+  return { blocked: false }
+}
+// 更新一个已装插件。opts = { profile?, spec, npm?, name?, dryRun? }
+//
+// ⚠️ 更新 = **按目录的 install spec 重装一次**，而不是 `pnpm update`：
+//    · `pnpm update` 只会在**声明范围内**升（`^0.5.11` 升不到 0.6.0），而「有更新」的定义
+//      正是「超出声明范围」—— 用它更新会永远更新不到，等于没实现。
+//    · 用目录 spec 重装，pnpm 会把 package.json 里的范围**改写**成新版本的写法，
+//      这恰好是用户期望的「升到市场里那个版本」。
+//    代价：github / tarball 来源装的就是最新 commit，本来也没什么可升的（它们 state 多为 unknown）。
+//
+// ⚠️ 与安装走同一条链路（快照 → pnpm add → 回读核验），只是快照 reason 与文案不同 ——
+//    更新失败同样能回滚，不应为省一个分支而让更新走没有快照的路。
+function marketUpdate(opts) {
+  const o = opts && typeof opts === 'object' ? opts : {}
+  const profile = String(o.profile || 'web')
+  const spec = dsh.validPkgSpec(o.spec !== undefined ? o.spec : o.npm)
+  if (!spec) return { ok: false, error: '不是可更新的 spec：' + String(o.spec || o.npm || '（空）') }
+  const label = String(o.name || o.npm || spec)
+  const npm = dsh.validPkgName(o.npm) || ''
+
+  if (o.dryRun === true) {
+    const deps = dsh.installedDeps(profile)
+    const hit = dshMarket.matchInstalledBySpec(deps, spec) || (npm ? dshMarket.matchDepByNpm(deps, npm) : null)
+    if (!hit) {
+      return { ok: true, dryRun: true, profile: profile, spec: spec, name: label, action: 'not-installed', changed: false, message: label + ' 不在 profile 依赖里，无需更新' }
+    }
+    // from 用**实装版本**：用户要看的是「我现在装的是哪个版本」，不是声明范围。
+    // ⚠️ 不退回 hit.depVersion（那是 `^0.5.11` 这类范围），拿不到就明确说未知
+    const from = realizedOf(profile, hit, spec)
+    return {
+      ok: true,
+      dryRun: true,
+      profile: profile,
+      spec: spec,
+      name: label,
+      action: 'update',
+      changed: true,
+      from: from,
+      // ⚠️ 把目录给的版本原样回传：真写时前端会再带回来，被策略挡下时才能拼出
+      //    「例如 `xxx@0.3.24`」这句可照抄的指引。不带回去就只能显示字面量「目标版本」（真实 bug）
+      to: String(o.version == null ? '' : o.version).trim(),
+      message: '将执行 pnpm add --dir <profiles/' + profile + '> ' + spec
+        + '\n当前版本：' + (from || '读不到实装版本（声明范围是 ' + (hit.depVersion || '无') + '）')
+        + ' —— 重装会把声明改写成目录给的版本',
+    }
+  }
+
+  const before = dshMarket.matchInstalledBySpec(dsh.installedDeps(profile), spec) || (npm ? dshMarket.matchDepByNpm(dsh.installedDeps(profile), npm) : null)
+  // ⚠️ 只取**实装版本**，拿不到就留空 —— 绝不退回 `hit.depVersion`：那是声明范围（`^0.5.11`），
+  //    界面会拼成 `v^0.5.11` 这种不成立的写法。空字符串时界面走不含 from 的那条文案分支。
+  const fromBefore = before ? realizedOf(profile, before, spec) : ''
+  const snap = dshBackup.createSnapshot({ profile: profile, reason: 'before-market-update' })
+  if (!snap.ok) {
+    logErr('[whale][dsh-market] 快照失败，已中止更新', snap.error || '')
+    return Promise.resolve({ ok: false, error: '建快照失败，已中止更新：' + (snap.error || '未知错误') })
+  }
+  return dsh.installPluginPkg(profile, spec).then((r) => {
+    if (!r.ok) {
+      logErr('[whale][dsh-market] 更新失败', spec + ' 退出码 ' + r.code + ' ' + (r.err || ''))
+      const build = o.needsBuild === true ? parseAllowBuilds(r.out || '') : null
+      return { ok: false, spec: spec, name: label, error: '更新失败（退出码 ' + r.code + '）：详见「日志」卡', snapshot: snap.dirName, allowBuilds: build }
+    }
+    const after = dsh.installedDeps(profile)
+    const hit = dshMarket.matchInstalledBySpec(after, spec) || (npm ? dshMarket.matchDepByNpm(after, npm) : null)
+    if (!hit) {
+      logErr('[whale][dsh-market] 更新后回读校验不符', spec)
+      return { ok: false, spec: spec, name: label, error: 'pnpm 报告成功，但 ' + spec + ' 没出现在 profile/package.json 里（已保留快照，可回滚）', snapshot: snap.dirName }
+    }
+    // ⚠️ 这里必须**重新读** node_modules：不重读会拿更新前的旧版本当新版本显示
+    const to = realizedOf(profile, hit, spec) || hit.depVersion
+    // ⚠️ 退出码 0 还不够：pnpm 可能被 profile 的供应链策略挡下、原样没动却报成功。
+    //    判据是「回读到的实装版本真的变了」，没变就不能说「已更新」—— 否则界面会显示
+    //    「已更新 v1.48.0 → v1.48.0」这种荒谬结论，用户以为成功、其实一个字没改。
+    const blk = blockedByPolicy(profile, fromBefore, to, r.out)
+    if (blk.blocked) {
+      // 目录给的版本（dryRun 回传 → 前端真写时带回）。拿不到就退回「目标版本」这种含糊说法
+      const aim = String(o.version == null ? '' : o.version).trim()
+      const aimTxt = aim || '目标版本'
+      logErr('[whale][dsh-market] 更新被供应链策略拦截，版本未变', { spec: spec, version: to, aim: aim, sawPolicyHint: blk.sawPolicyHint })
+      return {
+        ok: false,
+        spec: spec,
+        name: label,
+        blocked: true,
+        from: fromBefore,
+        version: to,
+        policyFile: blk.policyFile,
+        policyKey: blk.policyKey,
+        snapshot: snap.dirName,
+        error: 'pnpm 报成功但版本没变（仍是 v' + (to || '未知') + '）：' + (aim ? '目录给的 v' + aim + ' ' : '')
+          + '没能装上，被 profile 的供应链策略挡下了。'
+          + (blk.sawPolicyHint ? '' : '（pnpm 没报错，只是认为当前版本已满足要求。）')
+          + '\n如需放行，请把 ' + aimTxt + ' 加进 ' + blk.policyFile + ' 的 ' + blk.policyKey
+          + '（照抄这一行即可：`- ' + spec + '@' + aimTxt + '`），再重试。'
+          + '\n（profile 已建快照，可回滚）',
+      }
+    }
+    log('[whale][dsh-market] 已更新插件', { spec: spec, from: fromBefore, to: to })
+    return {
+      ok: true,
+      spec: spec,
+      npm: npm,
+      name: label,
+      from: fromBefore,
+      version: to,
+      profile: profile,
+      snapshot: snap.dirName,
+      needsRestart: true,
+    }
+  })
+}
+
+// 取一个已装命中项的**实装版本**（node_modules 里的真实 version），拿不到返 ''。
+// ⚠️ 每次调用都重新读表：更新完成后版本会变，不能缓存旧值。
+function realizedOf(profile, hit, spec) {
+  const versions = dsh.installedVersions(profile)
+  if (hit && hit.key && versions[hit.key]) return String(versions[hit.key])
+  return spec ? dshMarket.realizedVersionBySpec(versions, spec) : ''
+}
+
+// 从 dsh / pnpm 的失败输出里把 allowBuilds 引导信息抠出来。
+//
+// ⚠️ 为什么需要这个解析：github / tarball 来源的插件靠 `prepare` 脚本在安装时构建，
+//    **pnpm 默认拦截构建脚本**，报 `ERR_PNPM_GIT_DEP_PREPARE_NOT_ALLOWED`，并给出要写进
+//    pnpm-workspace.yaml 的 key。**那把 key 带 commit hash，安装前拿不到**，
+//    所以「需构建」的条目注定要先失败一次 —— 这不是 bug，而是 pnpm 的安全机制。
+//    既然注定要失败一次，就该把 pnpm 给的原文照搬给用户，省掉「去日志里自己找」这一步。
+//
+// ⚠️ 实测原文（2026-09-23，`dsh plugin --profile web add github:omdsh-dev/DSH-better-sidebar`）：
+//      Add the package to "allowBuilds" in your project's pnpm-workspace.yaml ... For example:
+//      allowBuilds:
+//        dsh-better-sidebar@git+https://github.com/omdsh-dev/DSH-better-sidebar.git#1fcf43cc...: true
+//    → key **不是**反引号包起来的，是缩进两格的裸 yaml 行；形态是 `名字@git+https://….git#<hash>`。
+//    （早先按「反引号 + codeload tar.gz」写的那版在真实输出上只会抠到空 key —— 这条注释就是防回退）
+//
+// 只在输出里出现 allowBuilds 字样时才启用，避免把普通的报错误读成构建拦截。
+function parseAllowBuilds(text) {
+  const s = String(text == null ? '' : text)
+  if (!/allowBuilds/i.test(s)) return null
+  // key = `名字@<来源 URL>`，「: true」之前、缩进之后的那一串。
+  // 来源可以是 `git+https://…`、`https://…/x.tgz` 或 codeload 归档地址，统一按「@ 后面跟协议」识别。
+  const km = s.match(/^\s*([^\s:][^\s]*@(?:git\+)?https?:\/\/[^\s:]+?)\s*:\s*(?:true|false)?\s*$/m)
+  const key = km ? km[1].trim() : ''
+  // pnpm-workspace.yaml 的路径：dsh 的结尾提示里给的是绝对路径（Windows 盘符或 POSIX）。
+  // ⚠️ 必须**先**匹配「带路径的」再退回裸文件名：报错正文里先出现的是裸名
+  //    （`project's pnpm-workspace.yaml`），先匹配裸名就会把绝对路径漏掉。
+  const pm = s.match(/([A-Za-z]:\\[^\s]*pnpm-workspace\.yaml|\/[^\s]*pnpm-workspace\.yaml|(?:[\w.\\/-]*pnpm-workspace\.yaml))/g)
+  let file = 'pnpm-workspace.yaml'
+  if (pm) {
+    for (let i = pm.length - 1; i >= 0; i--) {
+      const t = pm[i].trim()
+      if (t !== 'pnpm-workspace.yaml') { file = t; break }
+    }
+  }
+  return { key: key, file: file }
+}
+
+// 安装一个插件（三段式写法的第二阶段）。
+// opts = { profile?, spec: string, npm?: string, name?: string, needsBuild?, dryRun? }
+//
+// ⚠️ 装的是 **spec**（目录给的 install 字段剥出来的原话），不是 npm 字段：
+//    实测 4183 条目录里 2033 条（48.6%）npm 为 null，spec 是 `github:owner/repo`
+//    或远端 tgz 地址 —— npm / pnpm 都原生支持这两种形态，不给按钮等于砍掉近一半目录。
+function marketInstall(opts) {
+  const o = opts && typeof opts === 'object' ? opts : {}
+  const profile = String(o.profile || 'web')
+  const spec = dsh.validPkgSpec(o.spec !== undefined ? o.spec : o.npm)
+  if (!spec) return { ok: false, error: '不是可安装的 spec（只认包名 / github:owner/repo / https 地址）：' + String(o.spec || o.npm || '（空）') }
+  // 展示名优先用目录 entry 名（带 `#子包` 后缀的那个），没有才退化到 spec
+  const label = String(o.name || o.npm || spec)
+  // 归一出的 npm 名（有则用于回读核验；github/tarball 没有，靠 installSpec 反查）
+  const npm = dsh.validPkgName(o.npm) || ''
+  const needsBuild = o.needsBuild === true
+  // 目录条目带的版本号（github / tarball 条目常为 null，那就不参与判定）
+  const catalogVersion = String(o.version == null ? '' : o.version).trim()
+
+  // dryRun：只说清「准备执行什么」，不跑 npm 也不建快照
+  if (o.dryRun === true) {
+    const deps = dsh.installedDeps(profile)
+    const hit = dshMarket.matchInstalledBySpec(deps, spec) || (npm ? dshMarket.matchDepByNpm(deps, npm) : null)
+    // ⚠️ 光判「装没装」不够 —— 这正是本函数早先的一个真实 bug：声明范围 `^1.48.0` 是**容得下**
+    //    `1.49.0` 的，用户看着目录里有新版去点「安装」，却被告知「已装 …无需重复安装」。
+    //    所以这里还要比**实装版本**（读自 node_modules 的裸 x.y.z）：实装 < 目录版本 → 该走更新。
+    //    口径与 marketCheckUpdates 的 updateState 完全一致（那边也是「优先比实装，拿不到退回范围」），
+    //    两边不一致会出现「列表标着可更新、点进去却说已装」这种自相矛盾。
+    const realized = realizedOf(profile, hit, spec)
+    const st = hit ? dshMarket.updateState(hit.depVersion, catalogVersion, realized) : null
+    // changed 的语义是「这次点下去磁盘真的会变」：没装 → 变；装了但落后 → 也变
+    const changed = !hit || (st.state === 'update')
+    return {
+      ok: true,
+      dryRun: true,
+      profile: profile,
+      spec: spec,
+      npm: npm,
+      name: label,
+      needsBuild: needsBuild,
+      changed: changed,
+      action: changed ? 'install' : 'already',
+      // 已装且不比目录旧 → 才是真的不必重跑 pnpm（同一包重装是幂等的，但会白等一次网络）
+      message: changed
+        ? (!hit
+          ? '将执行 pnpm add --dir <profiles/' + profile + '> ' + spec
+          : '已装 ' + (realized || hit.depVersion || '') + '，目录提供 v' + catalogVersion
+            + ' —— 将重装覆盖到 v' + catalogVersion
+            + '（会改写 profile/package.json 里的版本范围）')
+        + (needsBuild ? '\n⚠️ 该来源靠 prepare 脚本构建，pnpm 默认拦截构建 —— 第一次大概率会失败并要求写入 allowBuilds，按提示再装一次即可' : '')
+        : '已装 ' + label + '（' + (realized || hit.depVersion || '') + '），'
+          // 实装版本与目录版本都拿得到才说得清「已是最新」；拿不到就别下这个结论
+          + (realized && catalogVersion ? '已是目录里的最新版 v' + catalogVersion : '无需重复安装'),
+    }
+  }
+  if (dsh.globalDsh()) {
+    // 与主安装链路同一取舍：有全局 dsh 时 pnpm 装插件的目标目录取决于 dsh 从哪加载，
+    // 这里只警告不阻断 —— 用户确实可能故意两个都装
+    log('[whale][dsh-market] 检测到全局 dsh，插件将装进 profile 目录', profile)
+  }
+
+  const snap = dshBackup.createSnapshot({ profile: profile, reason: 'before-market-install' })
+  if (!snap.ok) {
+    logErr('[whale][dsh-market] 快照失败，已中止安装', snap.error || '')
+    return Promise.resolve({ ok: false, error: '建快照失败，已中止安装：' + (snap.error || '未知错误') })
+  }
+  return dsh.installPluginPkg(profile, spec).then((r) => {
+    if (!r.ok) {
+      logErr('[whale][dsh-market] 安装失败', spec + ' 退出码 ' + r.code + ' ' + (r.err || ''))
+      // 「需构建」这一档把 dsh / pnpm 的 allowBuilds 原文交给界面 —— 用户照着写一遍
+      // 再点一次即可，不必自己翻日志找那把带 commit hash 的 key
+      const build = needsBuild ? parseAllowBuilds(r.out || '') : null
+      return {
+        ok: false,
+        spec: spec,
+        name: label,
+        error: '安装失败（退出码 ' + r.code + '）：详见「日志」卡',
+        snapshot: snap.dirName,
+        allowBuilds: build,
+      }
+    }
+    // ⚠️ 不信任「pnpm 退出码 0 = 装好了」：回读 profile/package.json 确认依赖真的出现了。
+    // 与 dsh-patch 写后回读同一个理由 —— V2 已证明写坏的东西不会报错。
+    // 判定用 spec 反查（github/tarball 的键名由包管理器归一，对不上 npm 字段）
+    const after = dsh.installedDeps(profile)
+    const hit = dshMarket.matchInstalledBySpec(after, spec) || (npm ? dshMarket.matchDepByNpm(after, npm) : null)
+    if (!hit) {
+      logErr('[whale][dsh-market] 安装后回读校验不符', spec)
+      return {
+        ok: false,
+        spec: spec,
+        name: label,
+        error: 'pnpm 报告成功，但 ' + spec + ' 没出现在 profile/package.json 里（已保留快照，可回滚）',
+        snapshot: snap.dirName,
+      }
+    }
+    log('[whale][dsh-market] 已安装插件', { spec: spec, version: hit.depVersion })
+    return {
+      ok: true,
+      spec: spec,
+      npm: npm,
+      name: label,
+      version: hit.depVersion,
+      profile: profile,
+      snapshot: snap.dirName,
+      // ⚠️ github / tarball 来源即使装成功也**不保证 dsh 能加载**：pnpm 仍会拦 prepare 构建。
+      //    界面据此提示「若加载失败，按 allowBuilds 引导再试」
+      needsBuild: needsBuild,
+      // 装完必须让 dsh 重新加载才生效，但重启会掐掉正在跑的会话 —— 交给用户点按钮
+      needsRestart: true,
+    }
+  })
+}
+
+// 卸载一个插件。opts = { profile?, npm?, spec?, name?, remove?, dryRun? }
+//   remove !== true  → 只禁用（往 patch 写 disabled: true），包留在磁盘
+//   remove === true  → pnpm remove 删磁盘包（**只删这一个包名**，不做依赖反查）
+//
+// ⚠️ npm 与 spec 的分工：卸载 / 禁用最终都要一个**已在 package.json 里的键名**
+//    （pnpm remove 只认键；patch 条目 id 也只认键），而这个键对 github / tarball
+//    来源是由包管理器归一出来的，目录里没有。所以这里若只拿到 spec，就先用 spec 反查
+//    已装映射拿到真实键 —— 反查不到说明根本没装，直接按「无需卸载」处理。
+function marketUninstall(opts) {
+  const o = opts && typeof opts === 'object' ? opts : {}
+  const profile = String(o.profile || 'web')
+  const spec = dsh.validPkgSpec(o.spec)
+  let npm = dsh.validPkgName(o.npm)
+  if (!npm && spec) {
+    // 反查要在「键名列表」上做，而不是拿 hit 的 depVersion 猜键 ——
+    // hit 只告诉我们「有这么一条」，键名还得自己从 dependencies 里取回来
+    npm = realDepKey(profile, spec)
+  }
+  if (!npm) return { ok: false, error: '不是合法的 npm 包名：' + String(o.npm || spec || '（空）') }
+  const label = String(o.name || npm)
+  const remove = o.remove === true
+
+  if (remove) {
+    if (o.dryRun === true) {
+      const deps = dsh.installedDeps(profile)
+      const has = !!deps[npm]
+      return {
+        ok: true,
+        dryRun: true,
+        remove: true,
+        profile: profile,
+        npm: npm,
+        name: label,
+        changed: has,
+        action: has ? 'uninstall' : 'missing',
+        message: has
+          ? '将从 <profiles/' + profile + '> 里删掉 ' + npm + '（pnpm remove）'
+          : npm + ' 不在 profile 依赖里，无需卸载',
+      }
+    }
+    const snap = dshBackup.createSnapshot({ profile: profile, reason: 'before-market-uninstall' })
+    if (!snap.ok) {
+      logErr('[whale][dsh-market] 快照失败，已中止卸载', snap.error || '')
+      return Promise.resolve({ ok: false, error: '建快照失败，已中止卸载：' + (snap.error || '未知错误') })
+    }
+    return dsh.uninstallPluginPkg(profile, npm).then((r) => {
+      if (!r.ok) {
+        logErr('[whale][dsh-market] 卸载失败', npm + ' 退出码 ' + r.code + ' ' + (r.err || ''))
+        return { ok: false, error: '卸载失败（退出码 ' + r.code + '）：详见「日志」卡', snapshot: snap.dirName }
+      }
+      const after = dsh.installedDeps(profile)
+      if (after[npm]) {
+        logErr('[whale][dsh-market] 卸载后回读校验不符', npm)
+        return {
+          ok: false,
+          error: 'pnpm 报告成功，但 ' + npm + ' 仍在 profile/package.json 里（已保留快照，可回滚）',
+          snapshot: snap.dirName,
+        }
+      }
+      log('[whale][dsh-market] 已卸载插件', npm)
+      return { ok: true, removed: true, npm: npm, name: label, profile: profile, snapshot: snap.dirName, needsRestart: true }
+    })
+  }
+
+  // 只禁用：复用 E2 的 toggle（dryRun / 快照 / 回读核验都在那一条链路上，不重写一遍）
+  // ⚠️ patch 的条目 id 用**用户当前写的那个名字**（可能是短名），而不是目录给的完整包名，
+  // 否则会 append 出一个新 id，等于往 dsh 里塞了一条指向不存在插件的 patch（V2：静默失效）
+  const status = marketStatus({ profile: profile })
+  const hit = dshMarket.matchInstalled(status.installed, npm)
+  const id = hit && hit.inPatch ? shortName(npm, status.installed) : npm
+  const probe = toggleDshPatchItem({ profile: profile, id: id, disabled: true, dryRun: true })
+  if (o.dryRun === true) {
+    if (!probe.ok) return probe
+    return {
+      ok: true,
+      dryRun: true,
+      remove: false,
+      profile: profile,
+      npm: npm,
+      id: id,
+      name: label,
+      changed: probe.changed,
+      action: probe.action,
+      message: probe.changed
+        ? '将在 patch 里把 ' + id + ' 标为 disabled: true（包保留在磁盘上）'
+        : id + ' 已经是禁用状态',
+    }
+  }
+  if (!probe.ok) return probe
+  if (!probe.changed) return { ok: true, changed: false, remove: false, npm: npm, id: id, name: label, profile: profile }
+  const snap = dshBackup.createSnapshot({ profile: profile, reason: 'before-market-disable' })
+  if (!snap.ok) {
+    logErr('[whale][dsh-market] 快照失败，已中止禁用', snap.error || '')
+    return { ok: false, error: '建快照失败，已中止禁用：' + (snap.error || '未知错误') }
+  }
+  const res = toggleDshPatchItem({ profile: profile, id: id, disabled: true })
+  log('[whale][dsh-market] 已禁用插件', { id: id })
+  return Object.assign({ remove: false, npm: npm, name: label, snapshot: snap.dirName }, res)
+}
+
+// 把完整包名对回到「用户实际写在 patch 里的那个 id」（可能是去掉 scope 的短名）
+function shortName(fullName, installed) {
+  const full = String(fullName || '')
+  const map = installed && typeof installed === 'object' ? installed : {}
+  if (map[full]) return full
+  const slash = full.indexOf('/')
+  const short = slash >= 0 ? full.slice(slash + 1) : full
+  return map[short] ? short : full
+}
+
+// 按 spec 反查 profile/package.json 里那个**真实的键名**。
+// matchInstalledBySpec 只回答「装了没有」，卸载 / 禁用要的是键本身（见 marketUninstall 注释）。
+// 找不到返回 ''。
+function realDepKey(profile, spec) {
+  const deps = dsh.installedDeps(profile)
+  const keys = Object.keys(deps)
+  for (let i = 0; i < keys.length; i++) {
+    // 逐个键拿去问 matchInstalledBySpec：命中就说明这个键就是我们要找的那个
+    // （用单键对象包一层，复用同一套归一逻辑，避免这里再抄一遍候选规则）
+    const one = {}
+    one[keys[i]] = 'x'
+    if (dshMarket.matchInstalledBySpec(one, spec)) return dsh.validPkgName(keys[i]) || keys[i]
+  }
+  return ''
 }
 
 // 近 N 天用量（含今日，缺失日期补 0），按日期升序。
@@ -658,6 +1265,12 @@ module.exports = {
     try { dsh.probePort(() => {}) } catch (err) {}
     return dsh.snapshot()
   },
+  // 轻量进度：只回 { lastCmd, log }，**不探端口**。
+  // ⚠️ 安装/更新期间前端要 1Hz 刷新进度，若复用 dshStatus() 会每秒起一个 netstat 子进程 ——
+  //    几分钟下来白起几百次，与进度显示毫无关系。所以单开这条零副作用的通道。
+  dshProgress() {
+    return dsh.progress()
+  },
   dshStart() {
     return dsh.start()
   },
@@ -739,6 +1352,49 @@ module.exports = {
     const res = isolateDshPlugins({ profile: profile, ids: o.ids })
     return Object.assign({ backedUp: true, snapshot: snap.dirName }, res)
   },
+  // ── dsh 插件市场（见 lib/dsh-market.js）──
+  // 目录数据是**派生缓存**：dbStorage 那份只当离线兜底，抓失败也照样返回内容 + from:'cache'，
+  // 让界面能显示「这是上次的目录（抓取失败：…）」，而不是一片空白
+  dshMarketCatalog(opts) {
+    return marketCatalog(opts)
+  },
+  // 已装状态 + 哪些是本卡装的。opts = { profile? }
+  dshMarketStatus(opts) {
+    return marketStatus(opts)
+  },
+  // 给各镜像源测延迟（界面用来「自动选最快的」）。opts = { registries? }
+  dshMarketPing(opts) {
+    return marketPing(opts)
+  },
+  // 内置镜像源清单：界面据此渲染选项，避免前后端各写一份常量对不上（同步返回）
+  dshMarketRegistries() {
+    return dshMarket.MIRROR_REGISTRIES.slice()
+  },
+  // 装一个插件：dryRun 只算不写（界面拿到「准备执行什么」给用户过目）；
+  // 真写时**先建快照**，pnpm 跑完**回读 package.json** 核验依赖真的出现了（V2 的教训）
+  dshMarketInstall(opts) {
+    return marketInstall(opts)
+  },
+  // 卸一个插件。opts.remove=true = 连带删磁盘文件（pnpm remove）；
+  // false/缺省 = **只加一行 disabled: true 禁用**，包留在磁盘上（可随时启用回来）
+  dshMarketUninstall(opts) {
+    return marketUninstall(opts)
+  },
+  // 检查已装插件有没有新版（**要目录数据**，所以只在目录已加载后才调）。
+  // opts = { profile?, catalog? } —— catalog 由界面把已拿到的目录原样传回来，这里不自己联网
+  dshMarketCheckUpdates(opts) {
+    return marketCheckUpdates(opts)
+  },
+  // 更新一个已装插件：按目录 spec 重装（不是 pnpm update，见 marketUpdate 注释）。
+  // dryRun 只算不写；真写与安装同链路：快照 → pnpm add → 回读核验
+  dshMarketUpdate(opts) {
+    return marketUpdate(opts)
+  },
+  // allowBuilds 引导信息的解析（纯函数，单测直接喂 dsh 真实报错原文）：
+  // 那把 key 带 commit hash、安装前拿不到，只能从失败输出里抠 —— 抠错会引导用户写错 key
+  parseAllowBuilds(text) {
+    return parseAllowBuilds(text)
+  },
   // 快照列表 / 还原（E1 的 dsh-backup 透传）
   dshBackupList() {
     return listDshBackups()
@@ -780,10 +1436,19 @@ module.exports = {
       return { ok: false, error: '更新标记失败：' + ((err && err.message) || err) }
     }
   },
-  // 按当前保留份数清理一次（E4：调小保留份数后手动触发，不必等下次建快照）
-  dshBackupPrune() {
+  // 按保留份数清理一次（E4：调小保留份数后手动触发，不必等下次建快照）
+  //
+  // ⚠️ o.keep 是**本次清理的临时份数**，只影响这一次、**不写配置**（写配置是 dshBackupSetKeep 的事）。
+  //    修的真实 bug（2026-09-24 用户报「立即清理功能存在问题」）：早先这里恒用 retentionKeep()
+  //    （= 已保存的配置值），于是「把输入框改成 2 → 不点保存 → 直接点立即清理」会拿**旧的 20** 去清，
+  //    什么都不删还提示「没有超出保留份数」，用户看到的现象就是「立即清理不工作」。
+  //    清理是用户的即时意图，按眼前那个数字执行才符合直觉；clamp 与 setKeep 同一套边界。
+  dshBackupPrune(opts) {
+    const o = opts && typeof opts === 'object' ? opts : {}
     try {
-      const keep = dshBackup.retentionKeep()
+      const keep = o.keep === undefined
+        ? dshBackup.retentionKeep()
+        : Math.round(clampNum(o.keep, dshBackup.KEEP_MIN, dshBackup.KEEP_MAX, dshBackup.MAX_SNAPSHOTS))
       return { ok: true, keep: keep, removed: dshBackup.pruneSnapshots({ keep: keep }) }
     } catch (err) {
       logErr('[whale][dsh-backup] 清理快照失败', (err && err.message) || '')
@@ -1517,6 +2182,20 @@ module.exports = {
     } catch (err) {
       logErr('[whale][log] 打开日志文件失败', err && err.message)
       return { ok: false, path: LOG_FILE }
+    }
+  },
+  // 在文件管理器里定位插件目录里的 dsh（菜单「定位 dsh 目录」用）。
+  // 与 openLogFile 的取舍一致：shellOpenPath 是「用默认程序打开」，目录会被资源管理器接手；
+  // 传空路径要先拦掉 —— shellOpenPath('') 会打开「我的电脑」之类的默认位置，看着像成功实则没定位到。
+  openDir(dir) {
+    const p = String(dir || '')
+    if (!p) return { ok: false, path: '' }
+    try {
+      utools.shellOpenPath(p)
+      return { ok: true, path: p }
+    } catch (err) {
+      logErr('[whale][shell] 打开目录失败', p, err && err.message)
+      return { ok: false, path: p }
     }
   },
 }

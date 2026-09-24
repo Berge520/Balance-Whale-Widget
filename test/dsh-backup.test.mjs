@@ -72,6 +72,11 @@ function fullHome(extra = {}) {
   }, extra)
 }
 
+// 按 index 递增的注入时间戳：**秒级**递增，制造一个确定的先后顺序。
+// 不靠「改完 manifest.json 再读回来」——那种做法在 Windows 上会因为写文件占住句柄，
+// 让随后的 listSnapshots 读到旧内容（CI 里表现为 pruneSnapshots 删错份数）。
+function atOf(i) { return new Date(Date.UTC(2026, 0, 1, 0, 0, i)) }
+
 // ── ① 建快照 ──
 test('createSnapshot：三个受管文件都备到，manifest 记 sha256 与字节数', () => {
   makeHome(fullHome())
@@ -261,15 +266,8 @@ test('pruneSnapshots：只留 keep 份，最旧的先删', () => {
   makeHome(fullHome())
   const made = []
   for (let i = 0; i < 4; i++) {
-    made.push(bak.createSnapshot({ profile: 'web', reason: 'r' + i }))
+    made.push(bak.createSnapshot({ profile: 'web', reason: 'r' + i, at: atOf(i) }))
   }
-  // 目录名带毫秒后缀时排序靠 at 字段；这里人为把 at 改成递增顺序，确保「最旧」判定稳定
-  made.forEach((s, i) => {
-    const mp = path.join(s.dir, 'manifest.json')
-    const m = JSON.parse(fs.readFileSync(mp, 'utf8'))
-    m.at = new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString()
-    fs.writeFileSync(mp, JSON.stringify(m))
-  })
 
   const removed = bak.pruneSnapshots({ keep: 2 })
   assert.equal(removed.length, 2)
@@ -391,17 +389,10 @@ test('pruneSnapshots：known-good 一份都不删（即使它在最旧那一头�
 
 test('pruneSnapshots：手动命名（reason 非 before-*）的快照受保护，before-* 的改名不免死', () => {
   makeHome(fullHome())
-  const a = bak.createSnapshot({ profile: 'web', reason: 'r0' })
-  const b = bak.createSnapshot({ profile: 'web', reason: 'r1' })
-  const c = bak.createSnapshot({ profile: 'web', reason: 'before-disable' })
-  const d = bak.createSnapshot({ profile: 'web', reason: 'before-isolate' })
-  const all = [a, b, c, d]
-  all.forEach((s, i) => {
-    const mp = path.join(s.dir, 'manifest.json')
-    const m = JSON.parse(fs.readFileSync(mp, 'utf8'))
-    m.at = new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString()
-    fs.writeFileSync(mp, JSON.stringify(m))
-  })
+  const a = bak.createSnapshot({ profile: 'web', reason: 'r0', at: atOf(0) })
+  const b = bak.createSnapshot({ profile: 'web', reason: 'r1', at: atOf(1) })
+  const c = bak.createSnapshot({ profile: 'web', reason: 'before-disable', at: atOf(2) })
+  const d = bak.createSnapshot({ profile: 'web', reason: 'before-isolate', at: atOf(3) })
   // a 是最旧的普通快照，b 手动命名，c/d 是写入前自动建的（改名也不该免死）
   bak.setMeta({ dirName: b.dirName, name: '我的备份' })
   bak.setMeta({ dirName: c.dirName, name: '硬起个名字' })
@@ -417,15 +408,8 @@ test('pruneSnapshots：手动命名（reason 非 before-*）的快照受保护�
 
 test('pruneSnapshots：protectPinned=false 时退回纯计数语义（内部调用可用）', () => {
   makeHome(fullHome())
-  const a = bak.createSnapshot({ profile: 'web', reason: 'r0' })
-  const b = bak.createSnapshot({ profile: 'web', reason: 'r1' })
-  const all = [a, b]
-  all.forEach((s, i) => {
-    const mp = path.join(s.dir, 'manifest.json')
-    const m = JSON.parse(fs.readFileSync(mp, 'utf8'))
-    m.at = new Date(Date.UTC(2026, 0, 1, 0, 0, i)).toISOString()
-    fs.writeFileSync(mp, JSON.stringify(m))
-  })
+  const a = bak.createSnapshot({ profile: 'web', reason: 'r0', at: atOf(0) })
+  const b = bak.createSnapshot({ profile: 'web', reason: 'r1', at: atOf(1) })
   bak.setMeta({ dirName: a.dirName, knownGood: true })
   // ⚠️ 注意 listSnapshots 会把 known-good 排到最前，所以「最新的」是 b，但「排第一的」是 a。
   // 关闭保护后 keep=1 保留的是列表第一项（a，known-good），被删的是 b —— 这里刻意用这个

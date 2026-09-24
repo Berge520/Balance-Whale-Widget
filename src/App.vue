@@ -1,6 +1,6 @@
 <script lang="ts" setup>
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
-import type { AssetsApplyResult, AssetsExportResult, AssetsPreviewResult, BackupPreviewResult, BubbleMeta, CodexSummaryResult, CodexWindow, CodexWindows, DshBackupListResult, DshBackupSnapshot, DshDiagnoseFinding, DshDiagnoseItem, DshDiagnoseResult, DshDumpResult, DshIsolateCandidate, DshIsolateCandidatesResult, DshIsolatePlan, DshPatchItem, DshPatchListResult, DshUsageResult, LedgerDetailDay, LedgerDetailEntry, ModelUsageRow, SkinGallery, SkinMeta, SoundMeta, SoundRole, WhaleMailSecrets, WhaleModel, WhaleModelRow, WhaleModelTemplate, WhalePriceModel, WhaleServices, WhaleTokenPrice } from './types/services'
+import type { AssetsApplyResult, AssetsExportResult, AssetsPreviewResult, BackupPreviewResult, BubbleMeta, CodexSummaryResult, CodexWindow, CodexWindows, DshBackupListResult, DshBackupSnapshot, DshDiagnoseFinding, DshDiagnoseItem, DshDiagnoseResult, DshDumpResult, DshIsolateCandidate, DshIsolateCandidatesResult, DshIsolatePlan, DshMarketCatalogResult, DshMarketInstallResult, DshMarketInstalledEntry, DshMarketPingEntry, DshMarketPlugin, DshMarketStatusResult, DshMarketUninstallResult, DshMarketUpdateEntry, DshPatchItem, DshPatchListResult, DshUsageResult, LedgerDetailDay, LedgerDetailEntry, ModelUsageRow, SkinGallery, SkinMeta, SoundMeta, SoundRole, WhaleMailSecrets, WhaleModel, WhaleModelRow, WhaleModelTemplate, WhalePriceModel, WhaleServices, WhaleTokenPrice } from './types/services'
 import SkinCropper from './components/SkinCropper.vue'
 import SoundTrimmer from './components/SoundTrimmer.vue'
 import FirstRunGuide from './components/FirstRunGuide.vue'
@@ -166,6 +166,15 @@ const cfg = reactive({
   dshVersion: '',
   dshReinstall: false,
   dshNoOpen: true,
+  // dsh 插件市场目录源（**并发竞速**，见 dsh-market.js 的 loadCatalog）：
+  //   · url      —— 自定义目录 URL（自己搭的镜像），空则不加这条
+  //   · mirror   —— 是否让镜像源参赛（默认开）
+  //   · registry —— 参赛的 registry，空 = 用宿主内置默认（实测延迟最低的 npmmirror）
+  //   · official —— 是否让官方源参赛。**默认关**：实测它 4.37MB 要 52–99s、还常连不上
+  dshMarketUrl: '',
+  dshMarketMirror: true,
+  dshMarketRegistry: '',
+  dshMarketOfficial: false,
   // 台词库：可增删的随机组 + 两项不走抽签的固定文案（报时模板 / 动图降级）。
   // 组里的台词按「一行一条」编辑（保存时才拆行交给宿主清洗），这里存的是编辑用的文本
   quotes: { time: '', gifFail: '', groups: [] as QuoteGroupEdit[] },
@@ -233,6 +242,8 @@ const diagFlash: Flash = useFlash()
 const diagReady = true
 
 // —— DeepSeek Harness（dsh，开发者） ——
+// dsh 默认监听地址：未启动时拿不到 dsh.url，展示与复制都退回它，避免两处文案不一致
+const DEFAULT_DSH_URL = 'http://127.0.0.1:3080'
 const dsh = reactive({
   running: false, stopping: false, busy: '', pid: 0, startedAt: 0, ready: false, readyAt: 0,
   keepAlive: false, url: '', port: 3080,
@@ -246,19 +257,27 @@ const dshFlash: Flash = useFlash()
 const dshLogOpen = ref(false)
 const dshLogEl = ref<HTMLElement | null>(null)
 // 折叠区（默认收起，卡片更短）。
-// 主控卡里的实际顺序：诊断信息 / dsh 故障排查 / 高级选项 / 使用说明 —— 诊断与排查提到最前，
+// 主控卡里的实际顺序：运行详情 / dsh 故障排查 / 高级选项 / 使用说明 —— 运行详情与排查提到最前，
 // 它们是「出问题时才看」的，排在卡尾等于出事时滚不到；高级选项与使用说明是配置与说明，靠后无妨。
 const dshFolds = reactive({ advanced: false, help: false, trouble: false, versions: false })
+// 折叠「dsh 故障排查」时清掉二段确认态：dshConfirm 是单值且不随折叠重置，
+// 用户点出「确认删除插件目录的 dsh？」后若收起该块再展开，按钮仍停在确认态，容易误点第二次直接执行。
+function dshToggleTrouble() {
+  dshFolds.trouble = !dshFolds.trouble
+  if (!dshFolds.trouble) dshConfirm.value = ''
+}
 // 主控卡整体折叠：与其他 5 张卡保持一致（都带 caret + 收起态摘要）。默认展开 ——
 // 启动/重启/结束是本 tab 最高频的动作，默认收起等于每次进来都要多点一下。
 const dshMainFold = ref(true)
 // 诊断折叠展开时顺手查一次「最新版本」：版本明细都是只读诊断，展开本身就是「我想核对版本」的信号，
 // 此时查一次比让用户再点一次「查询可用版本」更省事。npm view 要联网、较慢，失败也不打断（dshQueryVersions 内部已兜底）
+// 折叠「运行详情」时清掉二段确认态：与 dshToggleTrouble 同理，防止收起后按钮停在确认态被误点
 function dshToggleVersions() {
   dshFolds.versions = !dshFolds.versions
-  if (dshFolds.versions && !(dsh.versions && dsh.versions.latest)) dshQueryVersions()
+  if (!dshFolds.versions) dshConfirm.value = ''
+  if (dshFolds.versions && !dshHasVersions.value) dshQueryVersions()
 }
-const dshConfirm = ref('') // '' | 'remove-plugin' | 'clean-npx'
+const dshConfirm = ref('') // '' | 'remove-plugin' | 'clean-npx' | 'clear-log'
 const dshNow = ref(Date.now()) // 未就绪时的「已等待 x 秒」
 let dshTickTimer = 0
 function dshTickSync(running: boolean, ready: boolean) {
@@ -268,21 +287,53 @@ function dshTickSync(running: boolean, ready: boolean) {
   if (need) dshNow.value = Date.now()
 }
 // 有新版本提示（查询过可用版本才有）
+// 「装最新（含测试版）」的哨兵版本号，与宿主 constants.js 的 NEWEST_VERSION 必须一致
+// （设置页不能 require 宿主模块，只能各持一份；改一处要同步，check-shared 会校验）。
+const NEWEST_VERSION = 'newest'
+// 版本号比较：数字段逐位比，数字段 > 字母段，与宿主 isNewer 同一套口径
+// （同上，这里也是副本，改一处务必同步另一处）。
+function dshVerNewer(a: string, b: string) {
+  const pa = String(a || '').split(/[.\-+]/), pb = String(b || '').split(/[.\-+]/)
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const x = pa[i], y = pb[i]
+    if (x === undefined) return false
+    if (y === undefined) return true
+    const ix = parseInt(x, 10), iy = parseInt(y, 10)
+    const sx = isNaN(ix), sy = isNaN(iy)
+    if (sx && sy) { if (x !== y) return x > y; continue }
+    if (sx !== sy) return sx
+    if (ix !== iy) return ix > iy
+  }
+  return false
+}
+// 当前配置下「更新」会装到哪个版本：'' = latest 标签，'newest' = 版本列表里最高（含测试版），
+// 其余为固定版本号。与宿主 installVersion 的口径保持一致。
+const dshTargetVersion = computed(() => {
+  if (cfg.dshVersion === NEWEST_VERSION) {
+    const list = (dsh.versions && dsh.versions.list) || []
+    // 列表是 npm 的发布顺序而非版本序，所以要按版本号比较取最大值，不能取末位
+    let best = ''
+    for (const v of list) if (!best || dshVerNewer(v, best)) best = v
+    return best
+  }
+  return cfg.dshVersion || ((dsh.versions && dsh.versions.latest) || '')
+})
 const dshLatestTip = computed(() => {
   if (!dsh.hasUpdate) return ''
-  return '有新版本 ' + ((dsh.versions && dsh.versions.latest) || '') + '，点「更新」'
+  return '有新版本 ' + dshTargetVersion.value + '，点「更新」'
 })
 // 「实际使用」与「更新会装到的版本」是否一致。
 // 注意这是**另一个维度**、不是「谁更新」：手动装过 alpha / 指定过版本时，
-// npm latest 可能比在用的旧（如 latest=1.5.0-rc.2 而实际 1.6.0-alpha.2），
-// 此时按 semver「没有更新」（状态行的 dshLatestTip 不会出现），但点「更新」仍会把你**替换**成 latest。
+// 目标版本可能比在用的旧（如目标 1.5.0-rc.2 而实际 1.6.0-alpha.2），
+// 此时按 semver「没有更新」（状态行的 dshLatestTip 不会出现），但点「更新」仍会把你**替换**成目标版本。
 // 这句提示专门补这个盲区，避免用户以为「没提示就是已是最新」。
 const dshVerMismatch = computed(() => {
   if (dsh.hasUpdate) return '' // 升级情形已由状态行的 dshLatestTip 覆盖，不重复
-  const latest = (dsh.versions && dsh.versions.latest) || ''
+  const latest = dshTargetVersion.value
+  if (!latest) return ''
   const cur = dsh.resolved || dsh.installed || ''
-  if (!latest || !cur || latest === cur) return ''
-  return '当前 ' + cur + ' 与 npm latest（' + latest + '）不同，点「更新」会替换为 ' + latest
+  if (!cur || latest === cur) return ''
+  return '当前 ' + cur + ' 与所选版本（' + latest + '）不同，点「更新」会替换为 ' + latest
 })
 function dshApply(s: any) {
   if (!s || typeof s !== 'object') return
@@ -370,16 +421,21 @@ watch(activeTab, (tab) => {
 // 两张统计卡默认收起，首次「展开」时才读取：宿主是同步扫文件（会话日志可能几十 MB），
 // 不看不读，避免每次进开发者 Tab 都无条件付一次扫描成本；展开后即读，也不用手动再点一下。
 // 收起时摘要只在「本会话已读过」之后才显示（否则露「点击展开查看」），保证折叠 = 不预读。
-const devFolds = reactive({ dshUsage: false, codex: false, diagnose: false, dshDump: false, dshIsolate: false })
-const devStatsLoaded = reactive({ dshUsage: false, codex: false, diagnose: false, dshDump: false, dshIsolate: false })
-function toggleDevCard(key: 'dshUsage' | 'codex' | 'diagnose' | 'dshDump' | 'dshIsolate') {
+const devFolds = reactive({ dshUsage: false, codex: false, diagnose: false, dshDump: false, dshIsolate: false, dshMarket: false })
+const devStatsLoaded = reactive({ dshUsage: false, codex: false, diagnose: false, dshDump: false, dshIsolate: false, dshMarket: false })
+function toggleDevCard(key: 'dshUsage' | 'codex' | 'diagnose' | 'dshDump' | 'dshIsolate' | 'dshMarket') {
   devFolds[key] = !devFolds[key]
   if (!devFolds[key] || devStatsLoaded[key]) return
   devStatsLoaded[key] = true
   if (key === 'dshUsage') dshUsageRefresh()
   else if (key === 'codex') codexRefresh()
   else if (key === 'dshDump') dshDumpRefresh()
-  else if (key === 'dshIsolate') dshIsolateRefresh()
+  else if (key === 'dshIsolate') { dshIsolateRefresh(); dshBackupRefresh() }
+  // ⚠️ dshMarket **不在此处联网**：本 Tab 其余卡都是「展开即读本地文件」，
+  // 唯独这张卡要发 HTTP。展开就自动抓等于「用户只是翻一眼 tab 就产生一次出站请求」，
+  // 与其余卡的语义不一致，且用户没法预知。这里只读本地已装状态（不联网），
+  // 目录由用户在卡内显式点「加载目录」才抓。
+  else if (key === 'dshMarket') dshMarketRefreshStatus()
   else diagnoseRefresh()
 }
 // 启动/结束是同步返回；重启要等旧进程退出、更新要下载，之后再补一次状态
@@ -403,13 +459,15 @@ function dshDo(action: 'start' | 'stop' | 'restart' | 'update') {
     dshFlash.msg = '操作失败：' + String(err?.message || err)
   }
 }
-// 清空内存日志
+// 清空日志：与维护类操作同一套二段确认（日志是排查现场，点错就没法复原）
 function dshClearLog() {
+  if (dshConfirm.value !== 'clear-log') { dshConfirm.value = 'clear-log'; dshFlash.msg = ''; return }
+  dshConfirm.value = ''
   try {
     dshApply(services.dshClearLog?.())
-    dshFlash.err = false
-    dshFlash.msg = '已清空日志'
+    dshValueTip('log', '已清空日志')
   } catch (err: any) {
+    dshValueTip('log', '清空失败', true)
     dshFlash.err = true
     dshFlash.msg = '清空失败：' + String(err?.message || err)
   }
@@ -429,11 +487,15 @@ function dshMaintain(kind: 'remove-plugin' | 'clean-npx') {
     dshFlash.msg = '操作失败：' + String(err?.message || err)
   }
 }
-function dshCopyPath(p: string, label: string) {
-  if (!p) { dshFlash.err = true; dshFlash.msg = '暂无' + label; return }
-  const ok = services.copyText?.(p)
-  dshFlash.err = !ok
-  dshFlash.msg = ok ? '已复制' + label + '：' + p : '复制失败，请手动选中复制。'
+// 复制 / 定位这类「指着某个值做的动作」，反馈就近显示在那个值上：
+// 卡底的 dshFlash 在运行详情展开、日志拉高之后已经滚出视野，用户还得多滚一趟才看得见结果。
+// 只记结果与序号，不再把消息 push 进 dshFlash —— 否则同一条消息会在卡底再显示一遍。
+const dshValueFlash = ref({ key: '', text: '', err: false })
+let dshValueTick = 0
+function dshValueTip(key: string, tip: string, err = false) {
+  const token = ++dshValueTick
+  dshValueFlash.value = { key, text: tip, err }
+  window.setTimeout(() => { if (token === dshValueTick) dshValueFlash.value = { key: '', text: '', err: false } }, 2000)
 }
 function dshOpenPage() {
   try {
@@ -453,15 +515,32 @@ function dshOpenPage() {
   }
 }
 function dshCopyUrl() {
-  const url = dsh.webUrl || dsh.url
+  // 兜底与「页面地址」那一行的展示文案保持一致：未启动时展示端会拼出默认地址，
+  // 复制端若只认 dsh.webUrl/dsh.url 就会回「暂无地址」，用户看着屏幕上的地址却说没有。
+  const url = dsh.webUrl || dsh.url || DEFAULT_DSH_URL
   if (!url) {
-    dshFlash.err = true
-    dshFlash.msg = '暂无地址'
+    dshValueTip('url', '暂无地址', true)
     return
   }
   const ok = services.copyText?.(url)
-  dshFlash.err = !ok
-  dshFlash.msg = ok ? '已复制页面地址：' + url : '复制失败，请手动选中上面的地址复制。'
+  dshValueTip('url', ok ? '已复制' : '复制失败，请手动选中地址复制', !ok)
+}
+// 定位安装目录：node 全局装的那份不必复制路径、更不能点开 —— 是拿去找人核对才用得上
+function dshLocatePrefix() {
+  try {
+    const r = services.openDir?.(dsh.prefix)
+    if (!r || !r.ok) {
+      dshValueTip('prefix', '打开目录失败', true)
+      dshFlash.err = true
+      dshFlash.msg = '打开插件目录失败：系统未返回结果'
+      return
+    }
+    dshValueTip('prefix', '已打开目录', false)
+  } catch (err: any) {
+    dshValueTip('prefix', '打开目录失败', true)
+    dshFlash.err = true
+    dshFlash.msg = '打开插件目录失败：' + String(err?.message || err)
+  }
 }
 // 选择 Node.js 安装目录（校验目录里有 node 可执行文件）
 function dshPickDir() {
@@ -496,8 +575,7 @@ function dshCopyLog() {
     return
   }
   const ok = services.copyText?.(text)
-  dshFlash.err = !ok
-  dshFlash.msg = ok ? '已复制 dsh 日志（' + text.split('\n').length + ' 行）' : '复制失败，请手动选中日志复制。'
+  dshValueTip('log', ok ? '已复制 ' + text.split('\n').length + ' 行' : '复制失败，请手动选中日志复制', !ok)
 }
 const dshNodeText = computed(() => {
   if (cfg.dshNodeDir) return cfg.dshNodeDir + (dsh.nodeDir && dsh.nodeDir !== cfg.dshNodeDir ? '（无效，实际用 ' + dsh.nodeDir + '）' : '')
@@ -536,11 +614,20 @@ const dshVersionOptions = computed(() => {
   }
   // 「已安装」要标在**实际在用**的那份上（resolved 优先全局，见宿主 snapshot）
   if (dsh.resolved) addMark(dsh.resolved, dsh.source === 'global' ? '全局已安装' : '插件目录已安装')
-  if (cfg.dshVersion) addMark(cfg.dshVersion, '已选')
+  // 哨兵值不是真实版本号，不能拿去 addMark：那会在下面多推出一条 value='newest' 的选项，
+  // 与固定写的那条「最新（含测试版…）」重复。它的「已选」改由选项的 label 自己拼。
+  if (cfg.dshVersion && cfg.dshVersion !== NEWEST_VERSION) addMark(cfg.dshVersion, '已选')
   if (latest) addMark(latest, 'latest 标签')
 
-  const out: Array<{ v: string; label: string }> = [{ v: '', label: '自动（安装/更新时取 latest）' }]
+  const out: Array<{ v: string; label: string }> = [
+    { v: '', label: '自动（安装/更新时取 latest）' },
+    {
+      v: NEWEST_VERSION,
+      label: '最新（含测试版，取列表中最高版本）' + (cfg.dshVersion === NEWEST_VERSION ? '（已选）' : ''),
+    },
+  ]
   const seen: Record<string, boolean> = { '': true }
+  seen[NEWEST_VERSION] = true
   const push = (v: string) => {
     if (!v || seen[v]) return
     seen[v] = true
@@ -554,12 +641,27 @@ const dshVersionOptions = computed(() => {
 })
 // 查询可用版本：npm view 要联网，慢一点，稍后多次刷新状态
 const DSH_QUERY_MSG = '正在查询可用版本…'
+// 查询结果已经上屏（或正在查询）时就没必要再摆一个按钮占位：
+// 「查询可用版本」只在两种情况下有意义 —— 还没查过、以及上次查失败要重试。
+// 查询成功后 latest 直接显示在下面的「npm latest」行里，按钮留着只会让人怀疑「是不是还要再点一下」。
+const dshQueryFailed = ref(false)
+// 已经查到 latest 就别自动再查一遍：npm view 要联网、较慢，
+// 每次展开运行详情都打一次是白花流量（用户想看最新的可手动点「重新查询」）。
+const dshHasVersions = computed(() => !!(dsh.versions && dsh.versions.latest))
+// 「npm latest」那一行的取值：查询结果是异步回来的（宿主查到 latest 后由轮询带回），
+// 所以要区分三态 —— 查到 / 正在查 / 没查过。写成 `latest || '未查询'` 会让查询途中就报「未查询」，
+// 与旁边按钮上的「查询中…」自相矛盾。
+const dshLatestText = computed(() => {
+  if (dshHasVersions.value) return (dsh.versions && dsh.versions.latest) || ''
+  return dshQueryFailed.value ? '查询失败' : '未查询'
+})
 // 轮询是异步的，等结果期间先挂个「正在查询」。查到了要主动清掉：
 // dshStatus 是通用轮询入口、成功时不碰 dshFlash，若不在这里清，提示会一直挂着到下次操作。
 let dshQueryDone = 0 // 本次查询的令牌，防止上一轮的兜底定时器清掉下一轮刚设的提示
 function dshQueryVersions() {
   try {
     services.dshListVersions?.()
+    dshQueryFailed.value = false
     dshFlash.err = false
     dshFlash.msg = DSH_QUERY_MSG
     const token = ++dshQueryDone
@@ -570,6 +672,7 @@ function dshQueryVersions() {
       if (dsh.versions && dsh.versions.latest) { dshFlash.msg = ''; dshQueryDone++; return }
       // 只有「还是我发的那条」才清，避免覆盖用户期间其他操作的消息
       if (dshFlash.msg === DSH_QUERY_MSG && Date.now() - t0 > 12000) {
+        dshQueryFailed.value = true // 留下来给用户一个「重试」入口，按钮不再自动隐藏
         dshFlash.err = true
         dshFlash.msg = '查询超时：未取到可用版本，请检查网络或 npm 注册源后重试。'
         dshQueryDone++
@@ -579,6 +682,7 @@ function dshQueryVersions() {
     for (const ms of [2000, 5000, 9000]) window.setTimeout(probe, ms)
     window.setTimeout(probe, 12000)
   } catch (err: any) {
+    dshQueryFailed.value = true
     dshFlash.err = true
     dshFlash.msg = '查询失败：' + String(err?.message || err)
   }
@@ -600,7 +704,9 @@ function fmtTokens(n?: number) {
 }
 // 图表档位：宿主一次给 31 天（days31，索引 0 是今天），切档只改前端切片、不重扫
 const codexRange = ref(7)
-const codexDays = computed(() => ((codex.value && codex.value.days31) || []).slice(-codexRange.value))
+// 同 dshUsageDays：days31 是新→旧，最近 N 天在开头，故 slice(0, N)。
+// 原用 slice(-N) 取到的是最旧的 N 天（见 dshUsageDays 处的说明）。
+const codexDays = computed(() => ((codex.value && codex.value.days31) || []).slice(0, codexRange.value))
 // 30 天档标签抽稀：每 5 天一个，避免糊成一片
 const codexLabelEvery = computed(() => (codexRange.value >= 30 ? 5 : 1))
 const codexModels = computed(() => {
@@ -719,7 +825,11 @@ const dshUsageFolds = reactive({ help: false })
 // 图表档位：宿主一次给 31 天（days31，索引 0 是今天），切档只改前端切片、不重扫
 const DSH_USAGE_RANGES = [7, 14, 30] as const
 const dshUsageRange = ref(7)
-const dshUsageDays = computed(() => ((dshUsage.value && dshUsage.value.days31) || []).slice(-dshUsageRange.value))
+// 取「最近的 N 天」。days31 是**新→旧**（索引 0 是今天，宿主用 dayAdd(today, -i) 递减生成），
+// 所以最近 N 天在数组**开头**，必须用 slice(0, N)。
+// 早先用 slice(-N) 取的是**尾部**，即 31 天里最旧的 N 天 —— 症状是「7 天档」实际画的是
+// 30~24 天前那一周（日期从 9-22 一路排到 8-28，跨了 26 天），今日/近期数据完全不出图。
+const dshUsageDays = computed(() => ((dshUsage.value && dshUsage.value.days31) || []).slice(0, dshUsageRange.value))
 // 30 天档标签抽稀：每 5 天一个，避免糊成一片
 const dshUsageLabelEvery = computed(() => (dshUsageRange.value >= 30 ? 5 : 1))
 const dshUsageModels = computed(() => {
@@ -749,13 +859,19 @@ function fmtDshCost(v?: number) {
   const cur = (dshUsage.value && dshUsage.value.costCurrency) || 'CNY'
   return (cur === 'CNY' ? '¥ ' : '') + (n > 0 && n < 0.01 ? n.toFixed(4) : n.toFixed(2))
 }
-// dsh-usage 自己抓的余额快照：与挂件轮询的余额互为印证，只作对照展示
-function fmtDshBalance() {
+// dsh-usage 自己抓的余额快照：与挂件轮询的余额互为印证，只作对照展示。
+// 金额与抓取时间拆成两个函数 —— 指标格里它们分处价值行与副行，
+// 而且金额要能被 nowrap 保住不被折行（原先拼成一句时日期会把金额挤到换行）。
+function fmtDshBalanceAmount() {
   const b = dshUsage.value && dshUsage.value.balance
   if (!b) return ''
-  const cur = b.currency === 'CNY' ? '¥ ' : b.currency === 'USD' ? '$' : ''
-  const at = b.at ? new Date(b.at).toLocaleString('zh-CN', { hour12: false }) : ''
-  return cur + Number(b.amount || 0).toFixed(2) + (at ? ' · ' + at : '')
+  const cur = b.currency === 'CNY' ? '¥' : b.currency === 'USD' ? '$' : ''
+  return cur + Number(b.amount || 0).toFixed(2)
+}
+function fmtDshBalanceAt() {
+  const b = dshUsage.value && dshUsage.value.balance
+  if (!b || !b.at) return ''
+  return new Date(b.at).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit', hour12: false })
 }
 function dshUsageRefresh() {
   if (dshUsageBusy.value) return
@@ -1112,7 +1228,26 @@ function dshBackupRefresh() {
   } catch (err: any) {
     // 快照列表读不到不该让整卡失败（禁用/启用仍可用，只是看不到历史）
     dshBackups.value = { ok: false, snapshots: [], error: String(err?.message || err) }
+  } finally {
+    dshBackupsLoaded.value = true
   }
+}
+// ⚠️ 快照列表必须**进卡就读一次 + 展开时补读一次**，不能只在展开时按 null 兜底。
+// 修复的两个真实 bug：
+//  ①（2026-09-24 用户报「快照功能」）dshBackups 初值是 null，而自动刷新藏在 dshPatchRefresh
+//    的 finally 里 —— 进设置页后不先点「刷新」patch 清单、直接展开快照，读到 null，
+//    界面显示「0 份 / 还没有快照」，而磁盘上其实躺着 7 份完好的快照。
+//  ②（2026-09-24 用户报「展开快照（0 份…）/ 收起快照（1 份…）」）上一版把补读条件写成
+//    `if (next && !dshBackups.value)`，可这个列表**恰好在本卡内会被写脏**：「立即备份」按钮
+//    走 dshBackupCreate()，它写完刷一次列表（此时折叠着，计数是对的），而展开那一下因为
+//    dshBackups 已有值就**不再补读**——于是标题停在写之前的快照数，列表体却是新的，同一处
+//    出现「0 份」和「1 份」两个答案。改成「展开就一定补读」：listSnapshots 是本地 readdir，
+//    代价可忽略，而「展开」正是用户要核对份数的那一刻，多读一次远好过显示一个过期的数。
+const dshBackupsLoaded = ref(false)
+function dshBackupToggleList() {
+  const next = !dshBackupFolds.list
+  dshBackupFolds.list = next
+  if (next) dshBackupRefresh()
 }
 // 切换一条的 disabled。**宿主侧会先建快照再写**，所以这里不做「先备份」的分步交互
 function dshPatchToggle(item: DshPatchItem) {
@@ -1339,18 +1474,25 @@ function dshSaveKeep() {
 function dshPruneNow() {
   dshPatchFlash.msg = ''
   dshPatchFlash.err = false
+  // ⚠️ 输入框里改了数字但没点「保存」时，「立即清理」要按**眼前的数字**清，不能用已保存的旧值。
+  // 修的真实 bug（2026-09-24 用户报）：早先恒用配置里的 20，于是「改成 2 → 直接点清理」
+  // 什么都不删还提示「没有超出保留份数」，看着就像按钮坏了。
+  const draft = dshKeepDraft.value
+  const useDraft = Number.isFinite(draft as number)
   try {
-    const r = services.dshBackupPrune?.()
+    const r = services.dshBackupPrune?.(useDraft ? { keep: Math.round(draft as number) } : undefined)
     if (!r || !r.ok) {
       dshPatchFlash.err = true
       dshPatchFlash.msg = (r && r.error) || '清理失败'
       return
     }
     const n = r.removed?.length || 0
+    // 用了草稿值就说明「这个数还没保存」—— 顺带提醒，否则用户以为配置也改了
+    const tail = useDraft ? `（用的是输入框里的 ${r.keep}，尚未保存为默认值）` : ''
     dshPatchFlash.err = false
     dshPatchFlash.msg = n
-      ? `已按保留 ${r.keep} 份清理，删掉 ${n} 份：${r.removed?.join('、')}`
-      : `当前没有超出保留份数（${r.keep} 份）的快照，未删任何东西`
+      ? `已按保留 ${r.keep} 份清理，删掉 ${n} 份：${r.removed?.join('、')}${tail}`
+      : `当前没有超出保留份数（${r.keep} 份）的快照，未删任何东西${tail}`
   } catch (err: any) {
     dshPatchFlash.err = true
     dshPatchFlash.msg = '清理失败：' + String(err?.message || err)
@@ -1625,6 +1767,741 @@ function dshIsolateActionText(action: string) {
     : action === 'insert' ? '补一行 disabled'
       : action === 'append' ? '新加条目'
         : '已是禁用（不动）'
+}
+
+// ── dsh 插件市场 ──
+//
+// 与其余 6 张 dev 卡的**唯一不同点：这张卡会联网**。其余卡都在 hint 里写明「不发网络请求」，
+// 所以这里反过来必须显式声明「本卡会联网」—— 不能靠用户自己猜。
+//
+// 三段式（预览 → 确认 → 写入）与 dshIsolate 同构，但**不共用** flash/busy/plan：
+// 两张卡操作的不是同一批对象（那边是 patch 条目 id，这边是 npm 包名），
+// 共用会让「插件开关」卡显示「正在安装 xxx」这种不成立的话。
+const dshMarketFlash: Flash = useFlash()
+// 目录：DshMarketCatalogResult | null；installed：DshMarketStatusResult | null
+const dshMarket = ref<DshMarketCatalogResult | null>(null)
+const dshMarketStatus = ref<DshMarketStatusResult | null>(null)
+const dshMarketBusy = ref(false)
+// 已装状态与目录是两个独立的只读请求（前者不联网、可单独刷新），所以各自一个 busy
+const dshMarketStatusBusy = ref(false)
+// 目录没来时只显示空态提示，不来一大片骨架
+const dshMarketLoaded = ref(false)
+// 「准备浏览」的显式动作：只有点过它（加载目录 / 强制重抓 / 改来源 / 用最快的）才解锁浏览区。
+// ⚠️ 为什么要有这层 gate：本卡展开只读本地、不联网，但一旦浏览区渲染出来，
+// 里面的来源单选、测速、已装状态就会跟着跑（改来源会触发 dshMarketLoad）。
+// 用一个显式开关把「打开卡片」与「进入市场」分开，保证**展开卡片本身零网络请求**。
+const dshMarketRevealed = ref(false)
+const dshMarketFolds = reactive({ help: false, filters: false, source: false, install: false })
+// 浏览条件（纯前端，不必进宿主配置：它们是「本次找什么」，不是「这个插件怎么跑」）
+const dshMarketKeyword = ref('')
+const dshMarketCategory = ref('')
+const dshMarketState = ref<'all' | 'installed' | 'notInstalled'>('all')
+const dshMarketSort = ref<'stars' | 'downloads' | 'added' | 'name'>('downloads')
+// 安装/卸载的待确认计划：非空即处于「待确认」态（三段式的第二步）
+const dshMarketPlan = ref<{ action: 'install' | 'uninstall' | 'remove' | 'update'; npm: string; name: string; message: string; id?: string; needsBuild?: boolean; spec?: string; version?: string } | null>(null)
+// 行级操作中的包名（避免同一行被连点两次）
+const dshMarketPending = ref('')
+// ── 安装/卸载进行中的进度反馈 ──
+// ⚠️ 为什么需要：`dshMarketConfirm` 要等 npm 退出才 resolve，而 github / tarball 来源的条目
+//    靠 prepare 脚本在安装时构建（clone + 装依赖 + 构建），动辄几分钟。此前界面上只有一个
+//    按钮文案「写入中…」，用户看到的是一动不动的一行字，既不知道在装、也不知道进行到哪。
+//    这里把「耗时计时 + npm 实时输出」回显出来，让等待可见。
+//
+// ⚠️ npm 输出**不需要新开通道**：runNpm 里 bindOutput 已经把 stdout/stderr 都 pushLog 进
+//    state.log，而 dshStatus() 的 snapshot 会带上它（`log` 字段）。所以这里只需在 busy 期间
+//    起一个更快的轮询读回来即可 —— 不动宿主 IPC 签名，也不违背「零依赖 / 最小改动」。
+const dshMarketTicking = ref(false)
+const dshMarketElapsed = ref(0)
+const dshMarketLogTail = ref('')
+// 当前正在跑的命令行（宿主快照的 lastCmd）：进度区把它显示出来，
+// 用户能一眼看到「确实在跑 pnpm add …」而不是界面卡住
+const dshMarketLastCmd = ref('')
+// 日志区的 DOM 引用：输出是追加式的，用户关心的是**尾部**，所以每次更新后滚到底
+const dshMarketLogEl = ref<HTMLElement | null>(null)
+let dshMarketTickTimer = 0
+const DSH_MARKET_TICK_MS = 1000
+// 只留尾部若干行：npm 输出可能上千行，全塞进 DOM 既慢又没人看（真要全量有「日志」卡）
+const DSH_MARKET_TAIL_LINES = 12
+// pnpm 构建拦截的引导信息：github / tarball 来源靠 prepare 脚本构建，pnpm 默认拦截，
+// 失败时 dsh 会给出那把带 commit hash 的 allowBuilds key。这里存下来让用户照着写一遍再重试
+const dshMarketAllowBuilds = ref<{ spec: string; name: string; key: string; file: string } | null>(null)
+
+// 更新检查结果：键是 spec（目录条目的 install spec，全目录唯一），值是判定结果。
+// ⚠️ 为什么按 spec 而不是 npm 名做键：目录近半数条目 npm 为 null，只有 spec 一定存在；
+//    而且宿主 marketCheckUpdates 也是按条目遍历的，spec 天然一一对应。
+// 空 Map = 还没查过（此时卡片不显示任何「可更新」标记，而**不是**显示成「已是最新」）
+const dshMarketUpdates = ref<Map<string, DshMarketUpdateEntry>>(new Map())
+const dshMarketUpdateBusy = ref(false)
+// 「只看可更新」——复用 dshMarketState 会让三选一变成四选一，语义也混（可更新必然已装），
+// 所以单开一个开关，与状态筛选是**与**关系
+const dshMarketOnlyUpdate = ref(false)
+
+// 镜像源测速结果（按延迟升序，失败的排最后）。空数组 = 还没测过
+const dshMarketPing = ref<DshMarketPingEntry[]>([])
+const dshMarketPingBusy = ref(false)
+// 按 registry URL 取测速结果（源列表不长，线性找足够；模板里别写重复的 find 链）
+function dshMarketPingOf(url: string) {
+  return dshMarketPing.value.find((x) => x.url === url)
+}
+
+// 目录上的可选分类：保留目录给的顺序（它自己排的序比我们重排更合理），
+// 并把「当前选中但已不在目录里」的情况一并考虑 —— 见 dshMarketCategories 的用法
+const dshMarketCategories = computed(() => {
+  const cats = dshMarket.value?.categories || {}
+  return Object.keys(cats).map((k) => ({ key: k, zh: cats[k]?.zh || '', en: cats[k]?.en || '' }))
+})
+
+// 每条的已装状态，按目录数组下标索引。
+// ⚠️ 别在模板里直接调 dshMarketHitOf：单个条目的模板要读它 7 次（已装 / 已禁用 / 未写 patch /
+// 按钮 disabled…），一次列表在屏上就上百条 → 几千次调用，而每次都要重建候选名数组 +
+// 对 package.json 的全部键做二次遍历。实测单次约 60ms，乘上渲染趟数就是明显的卡顿。
+// 这里跟 dshMarketList 用同一个数据源（都来自 dshMarket.value.plugins），索引天然对齐；
+// 目录或已装状态一变，这个 computed 自动重算
+const dshMarketHitMap = computed(() => {
+  const arr = dshMarket.value?.plugins || []
+  const out: (DshMarketInstalledEntry | null)[] = new Array(arr.length)
+  for (let i = 0; i < arr.length; i++) out[i] = dshMarketHitOf(arr[i])
+  return out
+})
+function dshMarketHitAt(i: number): DshMarketInstalledEntry | null {
+  return dshMarketHitMap.value[i] || null
+}
+
+// 按 spec 取更新判定结果（模板里一行会读好几次，走 Map 而不是每次 find 一遍 2000 条）
+function dshMarketUpdateOf(p: DshMarketPlugin): DshMarketUpdateEntry | null {
+  return dshMarketUpdates.value.get(String(p.spec || '')) || null
+}
+// 该条目是否**确定**有新版。⚠️ 必须是 === 'update'：'unknown' 是「目录没给版本、比不了」，
+// 不能当成「有更新」—— 那会把 2033 条 github/tarball 条目全标成可更新
+function dshMarketHasUpdate(p: DshMarketPlugin): boolean {
+  return dshMarketUpdateOf(p)?.state === 'update'
+}
+
+// 「已装 → 目录」的展示文案。
+// ⚠️ v 前缀只加在**能确定是版本号**的一侧：实装版本是裸 `0.5.11`，加 v 没问题；
+//    退回显示声明范围时是 `^0.5.11`，加 v 会变成 `v^0.5.11` 这种不成立的写法，
+//    所以那一档前面带「声明」二字、不加 v。
+function dshMarketVersionText(p: DshMarketPlugin): string {
+  const u = dshMarketUpdateOf(p)
+  if (!u) return ''
+  const latest = String(u.latest || '')
+  if (!latest) return ''
+  if (u.installed) return 'v' + u.installed + ' → v' + latest
+  return '声明 ' + (u.range || '?') + ' → v' + latest
+}
+
+// 版本条与「可更新」徽章的悬停说明：把判定依据讲清楚（尤其退回范围判定那一档，
+// 用户看到的是范围而不是具体版本，不说清会被当成 bug）
+function dshMarketUpdateTip(p: DshMarketPlugin): string {
+  const u = dshMarketUpdateOf(p)
+  if (!u) return ''
+  if (u.basis === 'realized') {
+    return '已安装 v' + u.installed + '（读自 node_modules），目录提供 v' + u.latest
+  }
+  if (u.basis === 'range') {
+    return '读不到实装版本，按 package.json 的声明范围判断：' + u.range + '，目录提供 v' + u.latest
+  }
+  return '目录提供 v' + u.latest
+}
+
+// 已装包名集合。⚠️ 目录条目的 npm 是完整包名（@scope/x），而宿主 installed 的键
+// 可能是短名（x）—— 所以要按「完整名优先、短名兜底」判，不能直接 has(npm)。
+// 这与宿主 dsh-market.matchInstalled 是**同一套口径**，两边的判法必须一致，
+// 否则会出现「卡片说未安装、宿主说已经装了」这种自相矛盾。
+function dshMarketInstalledOf(npm: string): DshMarketInstalledEntry | null {
+  const map = dshMarketStatus.value?.installed
+  if (!map || !npm) return null
+  if (map[npm]) return map[npm]
+  const slash = npm.indexOf('/')
+  const short = slash >= 0 ? npm.slice(slash + 1) : npm
+  return map[short] || null
+}
+
+// 按 install spec 反查已装（npm 字段为 null 的那近半数条目靠这个）。
+// 与宿主 dsh-market.matchInstalledBySpec 同一套候选规则 —— 两边口径必须一致，
+// 否则会出现「卡片说未安装、宿主 dryRun 说已装」
+function dshMarketInstalledBySpec(p: DshMarketPlugin): DshMarketInstalledEntry | null {
+  const map = dshMarketStatus.value?.installed
+  const spec = String(p.spec || '')
+  if (!map || !spec) return null
+  const cands: string[] = [spec]
+  const gh = spec.match(/^github:([^/#]+)\/([^/#]+)/i)
+  if (gh) {
+    cands.push(gh[1] + '/' + gh[2])
+    cands.push(gh[2])
+  }
+  if (/^https?:\/\//i.test(spec)) {
+    const noQuery = spec.split(/[?#]/)[0]
+    const seg = noQuery.slice(noQuery.lastIndexOf('/') + 1)
+    const base = seg.replace(/\.(tar\.gz|tgz)$/i, '')
+    cands.push(base)
+    cands.push(base.replace(/-\d+\.\d+\.\d+.*$/, ''))
+  }
+  const keys = Object.keys(map)
+  for (const c of cands) {
+    const lc = c.toLowerCase()
+    for (const k of keys) {
+      if (k.toLowerCase() === lc) return map[k]
+    }
+  }
+  return null
+}
+
+// 统一入口：先按 spec 反查，再退回 npm 名（对老数据 / 裸包名条目更稳）
+function dshMarketHitOf(p: DshMarketPlugin): DshMarketInstalledEntry | null {
+  return dshMarketInstalledBySpec(p) || dshMarketInstalledOf(p.npm)
+}
+
+// 过滤 + 排序搬到前端做（宿主 dsh-market.filterPlugins 是同一套逻辑的纯函数实现，
+// 但浏览是「每敲一个字就重筛」，走 IPC 要跨进程序列化 4000 多条，代价远高于本地筛）。
+const dshMarketList = computed(() => {
+  const all = dshMarket.value?.plugins || []
+  const kw = dshMarketKeyword.value.trim().toLowerCase()
+  const cat = dshMarketCategory.value
+  const st = dshMarketState.value
+  const out: DshMarketPlugin[] = []
+  for (const p of all) {
+    if (cat && p.category !== cat) continue
+    if (kw) {
+      const hay = (p.name + ' ' + p.owner + ' ' + p.descZh + ' ' + p.descEn).toLowerCase()
+      if (hay.indexOf(kw) < 0) continue
+    }
+    if (st !== 'all') {
+      // ⚠️ 读不到已装状态时**不冒充未安装**：宁可全都列出来，也不把已装的标成「未安装」
+      // 骗用户去点安装（同宿主 filterPlugins 的取舍）
+      if (!dshMarketStatus.value) continue
+      const hit = dshMarketHitOf(p)
+      if (st === 'installed' && !hit) continue
+      if (st === 'notInstalled' && hit) continue
+    }
+    // 「只看可更新」与状态筛选是**与**关系（可更新必然已装，但它是一个独立开关）
+    if (dshMarketOnlyUpdate.value && !dshMarketHasUpdate(p)) continue
+    out.push(p)
+  }
+  out.sort(
+    dshMarketSort.value === 'stars' ? (a, b) => b.stars - a.stars
+      : dshMarketSort.value === 'added' ? (a, b) => String(b.added).localeCompare(String(a.added))
+        : dshMarketSort.value === 'name' ? (a, b) => a.name.localeCompare(b.name)
+          : (a, b) => b.downloads - a.downloads,
+  )
+  return out
+})
+
+// 列表只渲染前 N 条：目录实测 4183 条，一次全渲染会卡住设置页（同 patch 候选卡的截断思路）。
+// 截断数由「再加载更多」按钮控制，且不做「按需隐藏」的花活 —— 用户能看见自己点了多少。
+const DSH_MARKET_PAGE = 80
+const dshMarketShown = ref(DSH_MARKET_PAGE)
+const dshMarketPageList = computed(() => dshMarketList.value.slice(0, dshMarketShown.value))
+const dshMarketRestCount = computed(() => Math.max(0, dshMarketList.value.length - dshMarketShown.value))
+// 条件一变就该从头看结果，停在「上次翻到的第 400 条」会让人以为筛选没生效
+watch([dshMarketKeyword, dshMarketCategory, dshMarketState, dshMarketSort], () => {
+  dshMarketShown.value = DSH_MARKET_PAGE
+})
+
+// 镜像源清单由宿主给（单一来源，避免两边各写一份常量对不上）
+const DSH_MARKET_REGISTRIES: { id: string; url: string; label: string }[] = services.dshMarketRegistries?.() || []
+
+// 结果行：说「这一份目录是从哪来的、什么时候的、花了多久」。
+// ⚠️ 与 dshMarketSourceShort（折叠按钮上的「偏好」摘要）分工不同，别合并：
+//   前者是**事实**（数据实际来自哪条源），后者是**配置**（你希望用哪条源）。
+//   默认走「延迟最低」时两者可能不一致 —— 那不是 bug，正是竞速的结果，要能分辨。
+const dshMarketSourceText = computed(() => {
+  const r = dshMarket.value
+  if (!r) return ''
+  // 镜像来源要说清**是哪个** registry —— 用户可能自己换过，硬编成「腾讯云」会撒谎
+  const from = r.from === 'official' ? '官方目录'
+    : r.from === 'mirror' ? ('npm 镜像（' + (DSH_MARKET_REGISTRIES.find((x) => x.url === r.registry)?.label || r.registry || '未知') + '）')
+      : r.from === 'custom' ? '自定义目录'
+        : r.from === 'cache' ? '上次的离线副本'
+          : (r.from || '未知来源')
+  const parts = [from]
+  if (r.updated) parts.push('更新于 ' + r.updated)
+  if (r.cached && !r.stale) parts.push('未变化，复用缓存')
+  // 耗时只在这一轮真的抓了网才显示：命中内存缓存时 tookMs 是最初那次的值，显示出来会误导
+  if (!r.cached && typeof r.tookMs === 'number' && r.tookMs > 0) parts.push('耗时 ' + (r.tookMs / 1000).toFixed(2) + 's')
+  return parts.join(' · ')
+})
+
+// 折叠时的来源摘要：只说要紧的两件事（用哪条源、官方参不参赛），
+// 让用户不展开也知道当前配置 —— 用完整 label 会太长，折叠按钮一行放不下。
+// 测过速之后把最快的一条的延迟也带上：否则「测速」的结果只出现在 flash 消息里，
+// 消息一被下一次操作清掉就再也看不到，用户等于白测。
+const dshMarketSourceShort = computed(() => {
+  const url = cfg.dshMarketRegistry
+  const label = url
+    ? (DSH_MARKET_REGISTRIES.find((x) => x.url === url)?.label || url)
+    : '默认'
+  const fastest = dshMarketPing.value.find((x) => x.ok)
+  const ping = fastest ? ` · 最快 ${fastest.ms} ms` : ''
+  return (cfg.dshMarketOfficial ? label + ' + 官方' : label) + ping
+})
+
+// 可更新条数。⚠️ 只数 state === 'update'，'unknown' 不算（目录没给版本，比不了）
+const dshMarketUpdateCount = computed(() => {
+  let n = 0
+  for (const e of dshMarketUpdates.value.values()) {
+    if (e.state === 'update') n++
+  }
+  return n
+})
+
+const dshMarketSummary = computed(() => {
+  const r = dshMarket.value
+  if (!dshMarketLoaded.value) return '点击展开浏览'
+  if (!r) return '还没加载目录'
+  if (!r.ok) return '目录加载失败'
+  const n = r.count || r.plugins?.length || 0
+  const inst = dshMarketStatus.value?.count || 0
+  // 有更新时把数字挂到摘要上 —— 这是用户最想一眼看到的（否则得自己翻筛选）
+  const up = dshMarketUpdateCount.value
+  return `${n} 个插件 · profile 里 ${inst} 个已装包` + (up ? ` · ${up} 个可更新` : '')
+})
+
+// 只读本地已装状态（**不联网**）：展开卡片时自动跑，装/卸之后也要重跑
+function dshMarketRefreshStatus() {
+  if (dshMarketStatusBusy.value) return
+  dshMarketStatusBusy.value = true
+  try {
+    const r = services.dshMarketStatus?.({ profile: dshPatchProfile })
+    dshMarketStatus.value = r || null
+    // 已装状态变了 → 「谁有新版」的结论也跟着变（装/卸/更新之后都会走到这里）。
+    // 目录没加载时它自己会清空 Map，不会误报
+    dshMarketCheckUpdates()
+  } catch (err: any) {
+    dshMarketFlash.err = true
+    dshMarketFlash.msg = '读取本地已装状态失败：' + String(err?.message || err)
+  } finally {
+    dshMarketStatusBusy.value = false
+  }
+}
+
+// 检查已装插件有没有新版（**纯本地计算**：拿已加载的目录去比 package.json 的声明范围，
+// 不联网 —— 目录已经在手上了，这里只是算）。
+// ⚠️ 只在目录 ok 之后才调：没有目录就没有 version 可比，查了也全是 unknown。
+// 每次目录刷新后都要重跑：目录换了，能比的条目也就变了。
+function dshMarketCheckUpdates() {
+  const cat = dshMarket.value
+  if (!cat?.ok) {
+    dshMarketUpdates.value = new Map()
+    // ⚠️ 必须同时关掉「只看可更新」：它是个与状态筛选并列的**与**条件，
+    //    目录一没就没人可更新，留着这个开关会让列表恒空 —— 用户看到的是
+    //    「没有符合条件的插件」，但真正原因是自己开着一个已经没有意义的开关
+    dshMarketOnlyUpdate.value = false
+    return
+  }
+  if (dshMarketUpdateBusy.value) return
+  dshMarketUpdateBusy.value = true
+  try {
+    const r = services.dshMarketCheckUpdates?.({ profile: dshPatchProfile, catalog: cat })
+    const map = new Map<string, DshMarketUpdateEntry>()
+    if (r && r.ok && Array.isArray(r.entries)) {
+      for (const e of r.entries) map.set(String(e.spec || ''), e)
+    }
+    dshMarketUpdates.value = map
+  } catch (err: any) {
+    // 查更新失败不该打断浏览 —— 只是没有「可更新」标记，卡片其余部分照常。
+    // 这里走 flash 而不是静默：宿主真出错时用户得能看见，否则「怎么没有可更新标记」
+    // 会变成一句查不出原因的疑问
+    dshMarketUpdates.value = new Map()
+    dshMarketFlash.err = true
+    dshMarketFlash.msg = '检查更新失败：' + String(err?.message || err)
+  } finally {
+    dshMarketUpdateBusy.value = false
+  }
+}
+
+// 抓目录（**会联网**）：force 用于「强制重抓」与「改了目录源之后」。
+// 注意宿主返回的是 Promise（要发 HTTP），与 dshMarketStatus 的同步返回不同
+function dshMarketLoad(force = false) {
+  if (dshMarketBusy.value) return
+  dshMarketBusy.value = true
+  dshMarketLoaded.value = true
+  // 走到这儿说明用户明确要抓目录 —— 解锁浏览区（来源选择等也跟着出现）
+  dshMarketRevealed.value = true
+  dshMarketFlash.msg = ''
+  dshMarketFlash.err = false
+  // 重抓意味着这一轮的筛选结果可能全变，上一轮的待确认计划随之作废
+  dshMarketPlan.value = null
+  Promise.resolve(services.dshMarketCatalog?.({ force, url: cfg.dshMarketUrl || '', mirror: cfg.dshMarketMirror, registry: cfg.dshMarketRegistry || '', official: cfg.dshMarketOfficial }))
+    .then((r) => {
+      if (!r) {
+        dshMarketFlash.err = true
+        dshMarketFlash.msg = '宿主 API 不可用'
+        return
+      }
+      dshMarket.value = r
+      if (!r.ok) {
+        dshMarketFlash.err = true
+        dshMarketFlash.msg = r.error || '目录加载失败'
+        return
+      }
+      // 降级到离线副本时必须说清楚 —— 否则用户以为看到的是最新目录，
+      // 会照着几天前的 stars/downloads 做判断
+      if (r.stale) {
+        dshMarketFlash.err = true
+        dshMarketFlash.msg = `在线来源都取不到（${r.staleReason || '未知原因'}），以下是上次抓到的目录，可能已过期。`
+        return
+      }
+      dshMarketFlash.msg = `已加载 ${r.count || r.plugins?.length || 0} 个插件（${dshMarketSourceText.value}）`
+      // 目录到手就顺手算一次「哪些已装包有新版」—— 纯本地计算，不额外发请求
+      dshMarketCheckUpdates()
+    })
+    .catch((err) => {
+      dshMarketFlash.err = true
+      dshMarketFlash.msg = '目录加载失败：' + String(err?.message || err)
+    })
+    .then(() => {
+      dshMarketBusy.value = false
+    })
+}
+
+// 给各镜像源测延迟。只打元数据（几百字节），不下载目录 —— 测速本身不该很慢。
+// 结果按延迟升序，界面在每项旁显示「xx ms」并据此推荐「用最快那个」。
+function dshMarketPingRun() {
+  if (dshMarketPingBusy.value) return
+  dshMarketPingBusy.value = true
+  dshMarketFlash.msg = ''
+  dshMarketFlash.err = false
+  Promise.resolve(services.dshMarketPing?.({}))
+    .then((r) => {
+      if (!r || !r.ok || !Array.isArray(r.list)) {
+        dshMarketFlash.err = true
+        dshMarketFlash.msg = '宿主 API 不可用'
+        return
+      }
+      dshMarketPing.value = r.list
+      const first = r.list.find((x) => x.ok)
+      if (!first) {
+        dshMarketFlash.err = true
+        dshMarketFlash.msg = '所有镜像源都测不通，检查网络后重试。'
+        return
+      }
+      // 测速不改用户的配置 —— 只报告结果。「用最快的」是个显式动作，避免静默改配置
+      dshMarketFlash.msg = `测速完成：最快是「${first.label}」（${first.ms} ms）。要改用它请点「用最快的」。`
+    })
+    .catch((err) => {
+      dshMarketFlash.err = true
+      dshMarketFlash.msg = '测速失败：' + String(err?.message || err)
+    })
+    .then(() => {
+      dshMarketPingBusy.value = false
+    })
+}
+
+// 把 registry 设成实测最快的那条。没有测速结果时先测一次再设。
+function dshMarketUseFastest() {
+  const first = dshMarketPing.value.find((x) => x.ok)
+  if (!first) {
+    dshMarketFlash.err = true
+    dshMarketFlash.msg = '先点「测速」拿到结果，再选最快的。'
+    return
+  }
+  cfg.dshMarketRegistry = first.url
+  dshMarketFlash.err = false
+  dshMarketFlash.msg = `已改用「${first.label}」（${first.ms} ms）。正在按新来源重新加载…`
+  // 来源变了，缓存键也就变了 —— 下一次 load 必然重抓，不需要额外 force
+  dshMarketLoad(false)
+}
+
+// 第一段：dryRun。宿主只回「准备执行什么」，不跑 npm、不建快照。
+// ⚠️ 宿主返回 Promise（与 dshMarketStatus 的同步不同）：dryRun 分支虽不跑 npm 也走 Promise，
+// 形状必须按 Promise 处理，否则拿到的是一整个 thenable 而不是结果对象
+function dshMarketPreviewInstall(p: DshMarketPlugin) {
+  // specKind 为空说明目录给的 spec 形态我们认不出来 —— 不给按钮，避免点下去必然失败
+  if (dshMarketBusy.value || !p.specKind) return
+  dshMarketBusy.value = true
+  dshMarketFlash.msg = ''
+  dshMarketFlash.err = false
+  // ⚠️ 必须把目录条目的 version 传下去：宿主只靠 profile/package.json 判「装没装」，
+  //    而声明范围 `^1.48.0` 是**容得下** `1.49.0` 的 —— 不传版本，已装的包永远被判成
+  //    「无需重复安装」，用户看着目录有新版本却点不动（真实 bug）。宿主拿到 version 才会比实装版本。
+  Promise.resolve(services.dshMarketInstall?.({ profile: dshPatchProfile, spec: p.spec, npm: p.npm, name: p.name, version: p.version, needsBuild: p.needsBuild, dryRun: true }))
+    .then((r) => {
+      if (!r) {
+        dshMarketFlash.err = true
+        dshMarketFlash.msg = '宿主 API 不可用'
+      } else if (!r.ok) {
+        dshMarketFlash.err = true
+        dshMarketFlash.msg = r.error || '无法生成安装计划'
+      } else if (!r.changed) {
+        dshMarketPlan.value = null
+        dshMarketFlash.msg = r.message || '已经装过这个包，无需重复安装。'
+      } else if (dshMarketHitOf(p)?.inDeps) {
+        // ⚠️ 走到这里说明「已装，但实装版本落后于目录」（宿主 dryRun 比的实装版本）——
+        //    这是「更新」，不是「安装」。不能复用安装入口：安装走 marketInstall 的写盘分支，
+        //    不带 from 版本、文案也说不出「从哪版到哪版」。所以转交给更新确认流程。
+        dshMarketFlash.err = false
+        dshMarketFlash.msg = r.message || ''
+        // ⚠️ 带上目录版本：真写被供应链策略挡下时，宿主靠它拼出「`- xxx@0.3.24`」这句可照抄的指引；
+        //    不带就只能显示字面量「目标版本」，用户不知道该往白名单里写哪个号（真实 bug）
+        dshMarketPlan.value = { action: 'update', npm: p.spec, name: p.name, message: r.message || '', spec: p.spec, version: r.to || p.version }
+      } else {
+        dshMarketPlan.value = { action: 'install', npm: p.spec, name: p.name, message: r.message || '', needsBuild: !!p.needsBuild }
+      }
+    })
+    .catch((err) => {
+      dshMarketFlash.err = true
+      dshMarketFlash.msg = '生成安装计划失败：' + String(err?.message || err)
+    })
+    .then(() => {
+      dshMarketBusy.value = false
+    })
+}
+
+// 第一段：dryRun（卸载）—— remove=false 走「只禁用」，remove=true 走「删磁盘包」。
+// 两者是同一条链路的不同分支，所以走同一个入口、由 remove 区分，避免两套并行逻辑漂移
+function dshMarketPreviewUninstall(p: DshMarketPlugin, remove: boolean) {
+  if (dshMarketBusy.value) return
+  dshMarketBusy.value = true
+  dshMarketFlash.msg = ''
+  dshMarketFlash.err = false
+  Promise.resolve(services.dshMarketUninstall?.({ profile: dshPatchProfile, spec: p.spec, npm: p.npm, name: p.name, remove, dryRun: true }))
+    .then((r) => {
+      if (!r) {
+        dshMarketFlash.err = true
+        dshMarketFlash.msg = '宿主 API 不可用'
+      } else if (!r.ok) {
+        dshMarketFlash.err = true
+        dshMarketFlash.msg = r.error || '无法生成卸载计划'
+      } else if (!r.changed) {
+        dshMarketPlan.value = null
+        dshMarketFlash.msg = r.message || '无需改动。'
+      } else {
+        dshMarketPlan.value = { action: remove ? 'remove' : 'uninstall', npm: p.npm || p.spec, name: p.name, message: r.message || '', id: r.id }
+      }
+    })
+    .catch((err) => {
+      dshMarketFlash.err = true
+      dshMarketFlash.msg = '生成卸载计划失败：' + String(err?.message || err)
+    })
+    .then(() => {
+      dshMarketBusy.value = false
+    })
+}
+
+// 第一段：dryRun（更新）。与安装同链路，只是宿主那边按「重装覆盖」算。
+// 为什么更新不走「先卸载再安装」：卸载会先删包，一旦重装失败就留下一个**空的**环境，
+// 而 pnpm add 同一个包是幂等的覆盖，失败时旧版本还在。
+function dshMarketPreviewUpdate(p: DshMarketPlugin) {
+  if (dshMarketBusy.value || !p.specKind) return
+  dshMarketBusy.value = true
+  dshMarketFlash.msg = ''
+  dshMarketFlash.err = false
+  // ⚠️ 与安装同款理由：必须把目录条目的 version 传下去 —— 宿主拿到它才知道「要升到哪一版」，
+  //    被供应链策略挡下时才能拼出可照抄的白名单行（不传只能显示字面量「目标版本」）
+  Promise.resolve(services.dshMarketUpdate?.({ profile: dshPatchProfile, spec: p.spec, npm: p.npm, name: p.name, version: p.version, dryRun: true }))
+    .then((r) => {
+      if (!r) {
+        dshMarketFlash.err = true
+        dshMarketFlash.msg = '宿主 API 不可用'
+      } else if (!r.ok) {
+        dshMarketFlash.err = true
+        dshMarketFlash.msg = r.error || '无法生成更新计划'
+      } else if (!r.changed) {
+        dshMarketPlan.value = null
+        dshMarketFlash.msg = r.message || '这个包不在 profile 依赖里，无需更新。'
+      } else {
+        dshMarketPlan.value = { action: 'update', npm: p.spec, name: p.name, message: r.message || '', spec: p.spec, version: r.to || p.version }
+      }
+    })
+    .catch((err) => {
+      dshMarketFlash.err = true
+      dshMarketFlash.msg = '生成更新计划失败：' + String(err?.message || err)
+    })
+    .then(() => {
+      dshMarketBusy.value = false
+    })
+}
+
+// 第二段：真写。宿主内部「先建快照 → 跑 npm → 回读 package.json 核验」，任一步失败即中止
+function dshMarketConfirm() {
+  const plan = dshMarketPlan.value
+  if (dshMarketBusy.value || !plan) return
+  const installing = plan.action === 'install'
+  const updating = plan.action === 'update'
+  dshMarketBusy.value = true
+  // 开进度回显：这一等可能是几分钟（github/tarball 要 clone + 构建），必须让人看见在动
+  dshMarketTickStart()
+  dshMarketPending.value = plan.npm
+  dshMarketFlash.msg = ''
+  dshMarketFlash.err = false
+  // 安装与更新都走 spec（github/tarball 条目没有 npm 名）；卸载走 npm 键名（宿主自己也会反查兜底）。
+  // ⚠️ 更新必须用 plan.spec：plan.npm 在 update 分支里存的也是 spec（目录给的安装原话），
+  //    但显式读 spec 才不会在日后改动里被误会成「npm 包名」
+  const call = installing
+    ? services.dshMarketInstall?.({ profile: dshPatchProfile, spec: plan.npm, name: plan.name, needsBuild: plan.needsBuild })
+    : updating
+      ? services.dshMarketUpdate?.({ profile: dshPatchProfile, spec: plan.spec || plan.npm, name: plan.name, version: plan.version })
+      : services.dshMarketUninstall?.({ profile: dshPatchProfile, npm: plan.npm, name: plan.name, remove: plan.action === 'remove' })
+  Promise.resolve(call)
+    .then((r) => {
+      if (!r) {
+        dshMarketFlash.err = true
+        dshMarketFlash.msg = '宿主 API 不可用'
+        return
+      }
+      if (!r.ok) {
+        dshMarketFlash.err = true
+        dshMarketFlash.msg = (r.error || '写入失败') + (r.snapshot ? `（快照 ${r.snapshot} 可回滚）` : '')
+        // ⚠️ 「版本没变」也算失败：pnpm 退出码 0 但被 profile 的供应链策略（minimumReleaseAgeExclude）
+        //    挡下、磁盘一个字没改。宿主回读发现后按失败上报，这里不再叠「已更新」的措辞。
+        if ((r as DshMarketInstallResult).blocked) dshMarketFlash.msg = '未升级：' + dshMarketFlash.msg
+        // ⚠️ 「需构建」的条目**注定要失败一次**：这类插件靠 prepare 脚本在安装时构建，
+        //    pnpm 默认拦截构建脚本，失败信息里会给出那把带 commit hash 的 allowBuilds key。
+        //    宿主已从输出里把它抠出来，这里直接展示给用户，省掉「去日志里自己找」这一步
+        const ab = (r as DshMarketInstallResult).allowBuilds
+        if (ab) {
+          dshMarketAllowBuilds.value = { spec: plan.npm, name: plan.name, key: ab.key, file: ab.file }
+          dshMarketFlash.msg += ' 这属于 pnpm 的构建拦截（不是安装失败）—— 见下方指引。'
+        }
+        return
+      }
+      dshMarketAllowBuilds.value = null
+      // 三种成功的说法要分清，否则用户不知道「卸载」到底删没删包。
+      // ⚠️ 装/卸返回的是两种不同结果类型（version 只有装那边有、id 只有禁用那边有），
+      // 联合类型下直接取字段会报错 —— 这里按 planned 动作分别缩窄
+      dshMarketFlash.err = false
+      if (plan.action === 'install') {
+        const res = r as DshMarketInstallResult
+        dshMarketFlash.msg = `已安装 ${plan.name || plan.npm}${res.version ? ' @' + res.version : ''}${res.snapshot ? `（快照 ${res.snapshot}）` : ''}。`
+      } else if (plan.action === 'update') {
+        const res = r as DshMarketInstallResult
+        dshMarketFlash.msg = `已更新 ${plan.name || plan.npm}${res.from ? `（v${res.from} → ${res.version ? 'v' + res.version : '?'}）` : (res.version ? ' @' + res.version : '')}${res.snapshot ? `（快照 ${res.snapshot}）` : ''}。`
+      } else if (plan.action === 'remove') {
+        dshMarketFlash.msg = `已从 profile 删掉 ${plan.npm}${r.snapshot ? `（快照 ${r.snapshot}）` : ''}。`
+      } else {
+        const res = r as DshMarketUninstallResult
+        dshMarketFlash.msg = `已在 patch 里禁用 ${res.id || plan.npm}，包仍在磁盘上${r.snapshot ? `（快照 ${res.snapshot}）` : ''}。`
+      }
+      if (r.needsRestart) {
+        dshMarketFlash.msg += 'dsh 需要重新加载才生效 —— 点上方「重启 dsh」，或稍后自行重启。'
+      }
+    })
+    .catch((err) => {
+      dshMarketFlash.err = true
+      dshMarketFlash.msg = '写入失败：' + String(err?.message || err)
+    })
+    .then(() => {
+      // 先停表再清 plan：停表会把 ticking 置 false，进度区随 plan 一起消失
+      dshMarketTickStop()
+      dshMarketBusy.value = false
+      dshMarketPending.value = ''
+      dshMarketPlan.value = null
+      // 磁盘真的变了，本地已装状态必须重读，否则界面上那一行还停留在装之前
+      dshMarketRefreshStatus()
+    })
+}
+
+// ── 进度回显：计时 + npm 实时输出 ──
+// 取 dshStatus() 快照里 log 的尾部若干行（宿主已经把它拼成整串了）。
+// ⚠️ 只取尾部：npm 装一个带构建的包能打上千行，全量塞 DOM 又慢又没人看；
+//    要看全量有「日志」卡，这里只需让人确认「它在动」。
+function dshMarketTailOf(text: string): string {
+  const all = String(text || '').replace(/\r/g, '').split('\n')
+  // 去掉尾部连续空行（npm 用 \r 刷进度条，清完 \r 会剩一堆空行）
+  while (all.length && !all[all.length - 1].trim()) all.pop()
+  return all.slice(-DSH_MARKET_TAIL_LINES).join('\n')
+}
+
+// 拉一次进度（耗时由本地时钟算，日志由宿主快照取）
+function dshMarketTick() {
+  if (dshMarketStartedAt) dshMarketElapsed.value = Math.floor((Date.now() - dshMarketStartedAt) / 1000)
+  try {
+    // ⚠️ 用 dshProgress() 而不是 dshStatus()：后者每次都探一次端口（起 netstat 子进程），
+    //    1Hz 刷新几分钟等于白起几百次；进度回显并不需要端口信息
+    const s = services.dshProgress?.()
+    if (s) {
+      dshMarketLogTail.value = dshMarketTailOf(s.log)
+      // lastCmd 在 npm 跑起来后才有值；没值时保留上一次，避免闪空
+      if (s.lastCmd) dshMarketLastCmd.value = String(s.lastCmd)
+    }
+  } catch (err) { /* 预期分支：宿主快照读不到就只走计时，不影响写入本身 */ }
+}
+
+// ⚠️ 计时基准放在组件外层的普通变量而非 ref：它只用来算差值，
+//    进响应式会让每次赋值都触发无谓的重渲染
+let dshMarketStartedAt = 0
+function dshMarketTickStart() {
+  dshMarketStartedAt = Date.now()
+  dshMarketElapsed.value = 0
+  dshMarketLogTail.value = ''
+  dshMarketTicking.value = true
+  dshMarketTick()
+  dshMarketTickStop()
+  dshMarketTickTimer = window.setInterval(dshMarketTick, DSH_MARKET_TICK_MS)
+}
+function dshMarketTickStop() {
+  if (dshMarketTickTimer) { window.clearInterval(dshMarketTickTimer); dshMarketTickTimer = 0 }
+  dshMarketTicking.value = false
+}
+// 卸载时务必停表：定时器持有组件闭包，不停会一直空跑
+onUnmounted(() => { dshMarketTickStop() })
+
+// 有新输出就滚到底：npm 的输出是追加式的，用户要看的是最新那几行；
+// 不自动滚的话进度区会一直停在最早那段，看起来像「卡住了」
+watch(dshMarketLogTail, () => {
+  nextTick(() => {
+    const el = dshMarketLogEl.value
+    if (el) el.scrollTop = el.scrollHeight
+  })
+})
+
+// 耗时文案：不到 1 分钟给秒，之后给「x 分 y 秒」—— 装带构建的包常等几分钟，
+// 只报秒数（如 187 秒）不直观
+function dshMarketElapsedText(): string {
+  const s = dshMarketElapsed.value
+  if (s < 60) return s + ' 秒'
+  return Math.floor(s / 60) + ' 分 ' + (s % 60) + ' 秒'
+}
+
+// 进行中的动作名（对话框标题与按钮都用它，避免「写入中…」这种不说明在做什么的话）
+function dshMarketActionLabel(): string {
+  const a = dshMarketPlan.value?.action
+  if (a === 'install') return '安装'
+  if (a === 'update') return '更新'
+  if (a === 'remove') return '彻底删除'
+  return '禁用'
+}
+
+// 阶段的粗粒度提示：拿 lastCmd 结尾的 npm 子命令 + 有无输出，猜当前在哪一步。
+// ⚠️ 这是**猜测**，措辞必须留余地（「正在…」而不是「已完成…」）：
+//    宿主没有细粒度进度事件，只凭输出推断，说满会说错。
+function dshMarketPhaseText(): string {
+  if (!dshMarketLogTail.value) {
+    // 还没拿到任何输出：多在建快照 / npm 刚启动这两个阶段
+    return dshMarketPlan.value?.needsBuild
+      ? '正在建快照并启动 npm（该来源要 clone 后构建，首次较慢）…'
+      : '正在建快照并启动 npm…'
+  }
+  if (/clone|Cloning|git/i.test(dshMarketLogTail.value)) return '正在拉取源码…'
+  if (/prepare|build|Building|gyp|tsc|compile/i.test(dshMarketLogTail.value)) return '正在构建（prepare 脚本）…'
+  if (/progress|reify|resolving|Fetch|download/i.test(dshMarketLogTail.value)) return '正在下载依赖…'
+  return 'npm 正在执行…'
+}
+
+// 重启 dsh：**永远由用户显式点**（装完插件不会自动重启 —— 会掐掉正在跑的会话）。
+// 复用既有的 services.dshRestart()，不另开通道 —— 它本来就在主控卡里当「重启」按钮用，
+// 这里只是把同一个动作摆到装完插件之后的位置
+function dshRestartNow() {
+  try {
+    const api = services as any
+    dshApply(api.dshRestart?.())
+    dshMarketFlash.err = false
+    dshMarketFlash.msg = '已请求重启 dsh，稍后自动刷新状态。'
+    window.setTimeout(dshStatus, 2500)
+    window.setTimeout(dshStatus, 6000)
+  } catch (err: any) {
+    dshMarketFlash.err = true
+    dshMarketFlash.msg = '重启请求失败：' + String(err?.message || err)
+  }
+}
+
+function dshMarketPinText(p: DshMarketPlugin) {
+  const parts = []
+  if (p.stars) parts.push(`★ ${p.stars}`)
+  if (p.downloads) parts.push(`${p.downloads} 次下载`)
+  if (p.version) parts.push('v' + p.version)
+  return parts.join(' · ')
 }
 
 // —— 检查更新 ——
@@ -3787,6 +4664,10 @@ function applyConfig(c: any) {
   cfg.dshVersion = typeof c.dshVersion === 'string' ? c.dshVersion : ''
   cfg.dshReinstall = c.dshReinstall === true
   cfg.dshNoOpen = c.dshNoOpen !== false
+  cfg.dshMarketUrl = typeof c.dshMarketUrl === 'string' ? c.dshMarketUrl : ''
+  cfg.dshMarketMirror = c.dshMarketMirror !== false
+  cfg.dshMarketRegistry = typeof c.dshMarketRegistry === 'string' ? c.dshMarketRegistry : ''
+  cfg.dshMarketOfficial = c.dshMarketOfficial === true
   cfg.avoidTaskbar = c.avoidTaskbar !== false
   cfg.edgeTop = typeof c.edgeTop === 'number' ? c.edgeTop : 0
   cfg.edgeRight = typeof c.edgeRight === 'number' ? c.edgeRight : 0
@@ -3974,7 +4855,7 @@ onUnmounted(() => {
     <!-- [数据] 凭据：填一次就不动，默认收起（展开状态见 toolOpen.credentials） -->
     <section v-if="activeTab === 'data'" class="card">
       <div class="fold">
-        <button class="link-btn" @click="toolOpen.credentials = !toolOpen.credentials">
+        <button class="link-btn utils-btn utils-secondary" @click="toolOpen.credentials = !toolOpen.credentials">
           {{ toolOpen.credentials ? '收起凭据设置' : 'DeepSeek 凭据（API Key / 平台 Token）' }}
         </button>
         <div v-if="toolOpen.credentials" class="guide">
@@ -3982,7 +4863,7 @@ onUnmounted(() => {
             <span class="label">API Key</span>
             <input v-model="secrets.apiKey" type="password" placeholder="sk-..." autocomplete="off" />
           </label>
-          <button class="link-btn" @click="guides.apiKey = !guides.apiKey">
+          <button class="link-btn utils-btn utils-secondary" @click="guides.apiKey = !guides.apiKey">
             {{ guides.apiKey ? '收起教程' : '如何获取 API Key？' }}
           </button>
           <div v-if="guides.apiKey" class="guide2">
@@ -4000,7 +4881,7 @@ onUnmounted(() => {
             <span class="label">平台 Token <em>（可选，「实时·令牌」用量模式需要）</em></span>
             <input v-model="secrets.platformToken" type="password" placeholder="platform.deepseek.com 令牌" autocomplete="off" />
           </label>
-          <button class="link-btn" @click="guides.token = !guides.token">
+          <button class="link-btn utils-btn utils-secondary" @click="guides.token = !guides.token">
             {{ guides.token ? '收起教程' : '如何获取平台 Token？' }}
           </button>
           <div v-if="guides.token" class="guide2">
@@ -4014,8 +4895,8 @@ onUnmounted(() => {
             <p class="guide-meta"><strong>保存与安全：</strong>同 API Key，本机加密存储、不上传服务器；只随请求发往 <code>platform.deepseek.com</code>。它属网页会话令牌，重登后可能失效，届时自动回落本地记账，重新复制一次即可。</p>
           </div>
           <div class="btn-row">
-            <button @click="saveSecrets">保存凭据（加密存储）</button>
-            <button class="secondary" :disabled="testing || (!secrets.apiKey.trim() && !secrets.platformToken.trim())" @click="testKey">
+            <button class="utils-btn utils-primary" @click="saveSecrets">保存凭据（加密存储）</button>
+            <button class="secondary utils-btn utils-secondary" :disabled="testing || (!secrets.apiKey.trim() && !secrets.platformToken.trim())" @click="testKey">
               {{ testing ? '测试中…' : '测试连接' }}
             </button>
           </div>
@@ -4059,7 +4940,7 @@ onUnmounted(() => {
           <option v-for="s in BUILTIN_SKINS" :key="s" :value="s">{{ s }}</option>
           <option value="custom">自定义</option>
         </select>
-        <button class="export-btn" type="button" title="随机换一个内置形象" @click="doRandomSkin()">随机</button>
+        <button class="export-btn utils-btn utils-outline" type="button" title="随机换一个内置形象" @click="doRandomSkin()">随机</button>
       </label>
       <p v-if="cfg.skin === 'custom' && !skinMeta" class="hint">
         还没有导入形象，去「资源」页加一张后这里才有「自定义」可用（当前会回退为「默认形象」）。
@@ -4072,7 +4953,7 @@ onUnmounted(() => {
       </p>
 
       <div class="fold">
-        <button class="link-btn" @click="lookFolds.bubble = !lookFolds.bubble">{{ lookFolds.bubble ? '收起气泡与文案' : '气泡与文案（主题 · 峰谷 · 报时 · 点按播放）' }}</button>
+        <button class="link-btn utils-btn utils-secondary" @click="lookFolds.bubble = !lookFolds.bubble">{{ lookFolds.bubble ? '收起气泡与文案' : '气泡与文案（主题 · 峰谷 · 报时 · 点按播放）' }}</button>
         <div v-if="lookFolds.bubble">
           <label class="field row">
             <span class="label">气泡主题</span>
@@ -4115,7 +4996,7 @@ onUnmounted(() => {
       </div>
 
       <div class="fold">
-        <button class="link-btn" @click="lookFolds.sound = !lookFolds.sound">{{ lookFolds.sound ? '收起音效' : '音效（开关 · 音色 · 音量）' }}</button>
+        <button class="link-btn utils-btn utils-secondary" @click="lookFolds.sound = !lookFolds.sound">{{ lookFolds.sound ? '收起音效' : '音效（开关 · 音色 · 音量）' }}</button>
         <div v-if="lookFolds.sound">
           <label class="field row check">
             <span class="label">音效开关</span>
@@ -4161,10 +5042,10 @@ onUnmounted(() => {
       <div class="card-head">
         <h2>资源概览</h2>
         <div class="head-actions">
-          <button class="export-btn" type="button" :disabled="!unusedCount" @click="doClearUnused()">
+          <button class="export-btn utils-btn utils-outline" type="button" :disabled="!unusedCount" @click="doClearUnused()">
             清除未使用{{ unusedCount ? `（${unusedCount}）` : '' }}
           </button>
-          <button class="export-btn" type="button" :disabled="!hasAssets" @click="doClearAssets()">清除全部素材</button>
+          <button class="export-btn utils-btn utils-outline" type="button" :disabled="!hasAssets" @click="doClearAssets()">清除全部素材</button>
         </div>
       </div>
       <label class="field row">
@@ -4180,7 +5061,7 @@ onUnmounted(() => {
       </p>
 
       <div class="fold">
-        <button class="link-btn" @click="assetsFold.open = !assetsFold.open">
+        <button class="link-btn utils-btn utils-secondary" @click="assetsFold.open = !assetsFold.open">
           {{ assetsFold.open ? '收起素材包' : '素材包（换机器一次带走）' }}
         </button>
         <div v-if="assetsFold.open" class="guide">
@@ -4190,9 +5071,9 @@ onUnmounted(() => {
             音效按<strong>槽位覆盖</strong>（同名槽位换成本包里的那段）。内置形象与内置音色不在包里，换机器后本来就有。
           </p>
           <div class="btn-row">
-            <button class="secondary" :disabled="assetsBusy || !hasAssets" @click="doExportAssets">导出素材包…</button>
-            <button class="secondary" :disabled="assetsBusy" @click="doPickAssets">导入素材包…</button>
-            <button v-if="assetsPack" class="secondary" @click="doCancelAssets">取消导入</button>
+            <button class="secondary utils-btn utils-secondary" :disabled="assetsBusy || !hasAssets" @click="doExportAssets">导出素材包…</button>
+            <button class="secondary utils-btn utils-secondary" :disabled="assetsBusy" @click="doPickAssets">导入素材包…</button>
+            <button v-if="assetsPack" class="secondary utils-btn utils-secondary" @click="doCancelAssets">取消导入</button>
           </div>
 
           <div v-if="assetsPack">
@@ -4213,10 +5094,10 @@ onUnmounted(() => {
               <input type="checkbox" v-model="assetsPicks.sounds" :disabled="!assetsPack.has?.sounds" @change="assetsConfirm = false" />
             </label>
             <div class="btn-row">
-              <button class="danger" :disabled="assetsBusy || !assetsAnyItem" @click="doApplyAssets">
+              <button class="danger utils-btn utils-danger" :disabled="assetsBusy || !assetsAnyItem" @click="doApplyAssets">
                 {{ assetsConfirm ? '确认导入？同名音效槽位会被覆盖' : '导入选中项' }}
               </button>
-              <button v-if="assetsConfirm" class="secondary" @click="assetsConfirm = false">取消</button>
+              <button v-if="assetsConfirm" class="secondary utils-btn utils-secondary" @click="assetsConfirm = false">取消</button>
             </div>
           </div>
           <p v-if="assetsFlash.msg" class="msg" :class="msgCls(assetsFlash)">{{ assetsFlash.msg }}</p>
@@ -4229,7 +5110,7 @@ onUnmounted(() => {
       <div class="card-head">
         <h2>导入的形象</h2>
         <div class="head-actions">
-          <button class="export-btn" type="button" @click="doImportSkin()">导入图片…</button>
+          <button class="export-btn utils-btn utils-outline" type="button" @click="doImportSkin()">导入图片…</button>
         </div>
       </div>
       <div class="skin-grid">
@@ -4270,7 +5151,7 @@ onUnmounted(() => {
       <div class="card-head">
         <h2>导入的气泡图</h2>
         <div class="head-actions">
-          <button class="export-btn" type="button" @click="doImportBubble()">导入图片…</button>
+          <button class="export-btn utils-btn utils-outline" type="button" @click="doImportBubble()">导入图片…</button>
         </div>
       </div>
       <div class="skin-grid">
@@ -4306,15 +5187,15 @@ onUnmounted(() => {
           <span class="sound-file" :title="soundLabel(r)">
             {{ soundLabel(r) || (ALERT_SOUND_ROLES.indexOf(r) >= 0 ? '未导入（静音）' : '未导入（可选）') }}
           </span>
-          <button class="export-btn" type="button" @click="doImportSound(r)">
+          <button class="export-btn utils-btn utils-outline" type="button" @click="doImportSound(r)">
             {{ soundMetaOf(r).length ? '追加' : '导入' }}
           </button>
         </div>
         <div class="field row sound-seg" v-for="(it, i) in soundMetaOf(r)" :key="it.file">
           <span class="sound-file" :title="it.name">{{ i + 1 }}. {{ it.name }}</span>
           <span class="asset-meta">{{ assetSize(it) }} · {{ assetAt(it) }}</span>
-          <button class="export-btn" type="button" @click="doPreviewSound(r, i)">试听</button>
-          <button class="export-btn" type="button" @click="doRemoveSound(r, it.file)">删除</button>
+          <button class="export-btn utils-btn utils-outline" type="button" @click="doPreviewSound(r, i)">试听</button>
+          <button class="export-btn utils-btn utils-outline" type="button" @click="doRemoveSound(r, it.file)">删除</button>
         </div>
       </div>
       <p v-if="cfg.soundSet === 'custom' && !soundsMeta.press.length" class="hint">
@@ -4335,7 +5216,7 @@ onUnmounted(() => {
          纯查阅用，默认收起，避免与「导入的…」三张卡一起铺满一屏 -->
     <section v-if="activeTab === 'assets'" class="card">
       <div class="fold">
-        <button class="link-btn" @click="assetFolds.builtin = !assetFolds.builtin">{{ assetFolds.builtin ? '收起内置资源' : '内置资源（随插件附带，只作对照）' }}</button>
+        <button class="link-btn utils-btn utils-secondary" @click="assetFolds.builtin = !assetFolds.builtin">{{ assetFolds.builtin ? '收起内置资源' : '内置资源（随插件附带，只作对照）' }}</button>
         <div v-if="assetFolds.builtin">
           <p class="hint">随插件附带、不可删除，列在这里只作对照；换形象 / 音色请到「挂件外观」。</p>
           <p class="group-title">内置形象 <em>（{{ BUILTIN_SKINS.length }} 张，当前：{{ cfg.skin === 'custom' ? '自定义' : cfg.skin }}）</em></p>
@@ -4349,8 +5230,8 @@ onUnmounted(() => {
           <div class="field row" v-for="g in BUILTIN_SOUND_SETS" :key="g.key">
             <span class="label">{{ g.label }}</span>
             <span class="sound-file">按压 {{ g.press }} · 释放 {{ g.release }}</span>
-            <button class="export-btn" type="button" @click="doPreviewBuiltin(g.press)">试听按压</button>
-            <button class="export-btn" type="button" @click="doPreviewBuiltin(g.release)">试听释放</button>
+            <button class="export-btn utils-btn utils-outline" type="button" @click="doPreviewBuiltin(g.press)">试听按压</button>
+            <button class="export-btn utils-btn utils-outline" type="button" @click="doPreviewBuiltin(g.release)">试听释放</button>
           </div>
           <p class="hint">
             内置形象与音色是插件包里的文件，不占本地数据目录空间，也不会被「清除素材」删掉。
@@ -4370,11 +5251,11 @@ onUnmounted(() => {
         </button>
         <div class="head-actions">
           <span v-if="quotesDirty" class="dirty-tag">未保存</span>
-          <button class="export-btn" type="button" @click="saveQuotes()">保存</button>
-          <button class="export-btn" :class="{ danger: quoteResetConfirm }" type="button" @click="resetQuotes()">
+          <button class="export-btn utils-btn utils-outline" type="button" @click="saveQuotes()">保存</button>
+          <button class="export-btn utils-btn" :class="quoteResetConfirm ? 'utils-danger' : 'utils-outline'" type="button" @click="resetQuotes()">
             {{ quoteResetConfirm ? '确认恢复默认？' : '恢复默认' }}
           </button>
-          <button v-if="quoteResetConfirm" class="export-btn" type="button" @click="quoteResetConfirm = false">取消</button>
+          <button v-if="quoteResetConfirm" class="export-btn utils-btn utils-outline" type="button" @click="quoteResetConfirm = false">取消</button>
         </div>
       </div>
       <p v-if="!quoteCardFolds.open" class="hint">
@@ -4404,9 +5285,9 @@ onUnmounted(() => {
               <option value="B">大字号</option>
             </select>
             <span class="quote-group-sp"></span>
-            <button class="export-btn" type="button" :disabled="i === 0" title="上移" @click="quoteGroupMove(i, -1)">↑</button>
-            <button class="export-btn" type="button" :disabled="i === cfg.quotes.groups.length - 1" title="下移" @click="quoteGroupMove(i, 1)">↓</button>
-            <button class="export-btn" type="button" @click="quoteGroupDel(i)">删除</button>
+            <button class="export-btn utils-btn utils-outline" type="button" :disabled="i === 0" title="上移" @click="quoteGroupMove(i, -1)">↑</button>
+            <button class="export-btn utils-btn utils-outline" type="button" :disabled="i === cfg.quotes.groups.length - 1" title="下移" @click="quoteGroupMove(i, 1)">↓</button>
+            <button class="export-btn utils-btn utils-outline" type="button" @click="quoteGroupDel(i)">删除</button>
           </div>
           <textarea v-if="g.kind === 'text'" class="quote-input" rows="3" spellcheck="false"
                     v-model="g.lines" placeholder="一行一条，随机抽一条显示；可写 {balance} / {today} / {peak} / {next} 占位符"></textarea>
@@ -4420,7 +5301,7 @@ onUnmounted(() => {
             抽一张「气泡图」里的图（导入在「资源」页）；没导入过时用内置的 rua.gif
           </p>
         </div>
-        <button class="export-btn" type="button" :disabled="cfg.quotes.groups.length >= QUOTE_GROUP_MAX"
+        <button class="export-btn utils-btn utils-outline" type="button" :disabled="cfg.quotes.groups.length >= QUOTE_GROUP_MAX"
                 @click="quoteGroupAdd()">{{ cfg.quotes.groups.length >= QUOTE_GROUP_MAX ? `已达上限（${QUOTE_GROUP_MAX} 组）` : '+ 添加组' }}</button>
       </div>
       <p class="hint">
@@ -4434,7 +5315,7 @@ onUnmounted(() => {
 
       <!-- 报时 / 动图降级是不走抽签的固定文案，平时不用改，收进折叠 -->
       <div class="fold">
-        <button class="link-btn" @click="quoteFolds.open = !quoteFolds.open">
+        <button class="link-btn utils-btn utils-secondary" @click="quoteFolds.open = !quoteFolds.open">
           {{ quoteFolds.open ? '收起固定文案' : '固定文案（报时 / 动图降级）' }}
         </button>
         <div v-if="quoteFolds.open" class="guide">
@@ -4461,12 +5342,14 @@ onUnmounted(() => {
       <div class="card-head">
         <h2>用量与账本</h2>
         <div class="head-actions">
+          <!-- 区间切换：同一组按钮在下方 UsageChart 组件里还有一份（那才是主入口，
+               本行是卡片头部就近快捷）。样式走 main.css 的 utils 基类，与组件内那份一致。 -->
           <div class="range-tabs">
-            <button v-for="r in usageRangeTabs" :key="r" class="range-tab"
-                    :class="{ 'range-tab-on': usageRange === r }" @click="setUsageRange(r)">{{ r }} 天</button>
+            <button v-for="r in usageRangeTabs" :key="r" class="range-tab utils-btn"
+                    :class="usageRange === r ? 'utils-primary' : 'utils-secondary'" @click="setUsageRange(r)">{{ r }} 天</button>
           </div>
-          <button class="export-btn" @click="importUsageCsv">导入 CSV</button>
-          <button class="export-btn" :disabled="historyMax <= 0" @click="exportUsageCsv">导出 CSV</button>
+          <button class="export-btn utils-btn utils-outline" @click="importUsageCsv">导入 CSV</button>
+          <button class="export-btn utils-btn utils-outline" :disabled="historyMax <= 0" @click="exportUsageCsv">导出 CSV</button>
         </div>
       </div>
 
@@ -4556,10 +5439,10 @@ onUnmounted(() => {
             <input class="num" type="number" min="0" step="0.01" v-model.number="it.out"
                    @change="onTokenPriceChange" />
           </label>
-          <button class="export-btn price-del" type="button" title="删除这一条"
+          <button class="export-btn price-del utils-btn utils-outline" type="button" title="删除这一条"
                   @click="removePriceModel(i)">删</button>
         </div>
-        <button class="export-btn" type="button"
+        <button class="export-btn utils-btn utils-outline" type="button"
                 :disabled="cfg.tokenPrice.models.length >= PRICE_MODEL_MAX"
                 @click="addPriceModel()">＋ 添加模型</button>
       </div>
@@ -4585,7 +5468,7 @@ onUnmounted(() => {
       <!-- 账本明细：按日展开当天的异常变动与校准记录。区间跟随上方区间，筛选在本地做 -->
       <div v-if="historyMax > 0 || detailDays.length" class="detail">
         <div class="detail-head">
-          <button class="detail-toggle" @click="toggleDetail">
+          <button class="detail-toggle utils-btn utils-outline" @click="toggleDetail">
             {{ detailOpen ? '收起账本明细' : '展开账本明细' }}
           </button>
           <input v-if="detailOpen" class="detail-search" type="search" v-model="detailQuery"
@@ -4677,7 +5560,7 @@ onUnmounted(() => {
         <span class="calibrate-label">校准今日已用</span>
         <input class="num calibrate-input" type="number" min="0" step="0.01"
                v-model.number="calibrateInput" placeholder="实际金额" @keyup.enter="calibrateToday" />
-        <button class="export-btn" :disabled="calibrateInputEmpty" @click="calibrateToday">校准</button>
+        <button class="export-btn utils-btn utils-outline" :disabled="calibrateInputEmpty" @click="calibrateToday">校准</button>
       </div>
       <p v-else class="hint">当前为「平台令牌」用量模式，今日已用以平台返回为准，无需校准。</p>
       <p v-if="calibrateFlash.msg" class="msg" :class="msgCls(calibrateFlash)">{{ calibrateFlash.msg }}</p>
@@ -4798,7 +5681,7 @@ onUnmounted(() => {
       <!-- 测试按钮：按当前开着的渠道各发一条，用来确认「开关 + 配置」确实能送达。
            系统通知渠道 = 宿主 notifySystem；邮件 = 宿主 sendMailAsync；都不做「每天一次」去重 -->
       <div class="btn-row">
-        <button class="export-btn" type="button" :disabled="notifyTesting" @click="testNotify()">
+        <button class="export-btn utils-btn utils-outline" type="button" :disabled="notifyTesting" @click="testNotify()">
           {{ notifyTesting ? '发送中…' : '测试通知' }}
         </button>
       </div>
@@ -4810,9 +5693,9 @@ onUnmounted(() => {
         <p v-if="mailConfigured && !mailOpen" class="mail-summary">
           <span class="ok-tag">已配置</span>
           {{ mail.mailHost }}:{{ mail.mailPort }} → {{ cfg.mailTo || '（未填收件人）' }}
-          <button class="link-btn inline" type="button" @click="toggleMailFold()">重新配置</button>
+          <button class="link-btn inline utils-btn utils-secondary" type="button" @click="toggleMailFold()">重新配置</button>
         </p>
-        <button v-else class="link-btn" type="button" @click="toggleMailFold()">
+        <button v-else class="link-btn utils-btn utils-secondary" type="button" @click="toggleMailFold()">
           {{ mailConfigured ? '收起 SMTP 配置' : 'SMTP 配置（必填）' }}
         </button>
 
@@ -4866,8 +5749,8 @@ onUnmounted(() => {
           </label>
 
           <div class="btn-row">
-            <button class="export-btn" type="button" @click="saveMailSettings()">保存邮件设置</button>
-            <button class="export-btn" type="button" :disabled="mailTesting" @click="testMail()">
+            <button class="export-btn utils-btn utils-outline" type="button" @click="saveMailSettings()">保存邮件设置</button>
+            <button class="export-btn utils-btn utils-outline" type="button" :disabled="mailTesting" @click="testMail()">
               {{ mailTesting ? '发送中…' : '发送测试邮件' }}
             </button>
           </div>
@@ -4882,7 +5765,7 @@ onUnmounted(() => {
 
       <!-- 低频的「提醒表现 + 时段 + 文案」收在一处折叠，卡片默认只留「哪几类提醒要开」 -->
       <div class="fold">
-        <button class="link-btn" @click="alertFolds.open = !alertFolds.open">
+        <button class="link-btn utils-btn utils-secondary" @click="alertFolds.open = !alertFolds.open">
           {{ alertFolds.open ? '收起更多提醒设置' : '更多提醒设置（停留时长 / 免打扰 / 文案）' }}
         </button>
         <div v-if="alertFolds.open" class="guide">
@@ -4933,11 +5816,11 @@ onUnmounted(() => {
           </p>
           <div class="btn-row">
             <span v-if="alertsDirty" class="dirty-tag">未保存</span>
-            <button class="export-btn" type="button" @click="saveAlerts()">保存</button>
-            <button class="export-btn" :class="{ danger: alertResetConfirm }" type="button" @click="resetAlerts()">
+            <button class="export-btn utils-btn utils-outline" type="button" @click="saveAlerts()">保存</button>
+            <button class="export-btn utils-btn" :class="alertResetConfirm ? 'utils-danger' : 'utils-outline'" type="button" @click="resetAlerts()">
               {{ alertResetConfirm ? '确认恢复默认？' : '恢复默认' }}
             </button>
-            <button v-if="alertResetConfirm" class="export-btn" type="button" @click="alertResetConfirm = false">取消</button>
+            <button v-if="alertResetConfirm" class="export-btn utils-btn utils-outline" type="button" @click="alertResetConfirm = false">取消</button>
           </div>
           <p v-if="alertFlash.msg" class="msg" :class="msgCls(alertFlash)">{{ alertFlash.msg }}</p>
         </div>
@@ -4949,10 +5832,10 @@ onUnmounted(() => {
       <div class="card-head">
         <h2>模型与余额</h2>
         <div class="head-actions">
-          <button class="export-btn" :disabled="modelsRefreshing" @click="refreshModelRows()">
+          <button class="export-btn utils-btn utils-outline" :disabled="modelsRefreshing" @click="refreshModelRows()">
             {{ modelsRefreshing ? '刷新中…' : '刷新全部' }}
           </button>
-          <button class="export-btn" :disabled="modelConfigs.length >= modelMax" @click="openNewModel">添加模型</button>
+          <button class="export-btn utils-btn utils-outline" :disabled="modelConfigs.length >= modelMax" @click="openNewModel">添加模型</button>
         </div>
       </div>
       <p class="hint">
@@ -4970,16 +5853,16 @@ onUnmounted(() => {
             <span class="mm-sub" :title="modelSubText(m)">{{ modelSubText(m) }}</span>
             <span v-if="m.builtin" class="mm-tag">内置</span>
             <template v-else>
-              <button class="link-btn mm-act" @click="openModelRow(m.id)">{{ modelOpen === m.id ? '收起' : '设置' }}</button>
-              <button class="link-btn mm-act" :disabled="modelsRefreshing" @click="refreshModelRows([m.id])">刷新</button>
-              <button class="link-btn mm-act mm-del"
+              <button class="link-btn mm-act utils-btn utils-secondary" @click="openModelRow(m.id)">{{ modelOpen === m.id ? '收起' : '设置' }}</button>
+              <button class="link-btn mm-act utils-btn utils-secondary" :disabled="modelsRefreshing" @click="refreshModelRows([m.id])">刷新</button>
+              <button class="link-btn mm-act mm-del utils-btn utils-secondary"
                       @click="modelDelConfirm = modelDelConfirm === m.id ? '' : m.id">删除</button>
             </template>
           </div>
           <div v-if="m.id !== NEW_MODEL_ROW && modelDelConfirm === m.id" class="mm-confirm">
             <span>删除「{{ m.name }}」？它的密钥与余额记录会一并清除。</span>
-            <button class="export-btn" @click="removeModelRow(m.id)">确认删除</button>
-            <button class="link-btn mm-act" @click="modelDelConfirm = ''">取消</button>
+            <button class="export-btn utils-btn utils-outline" @click="removeModelRow(m.id)">确认删除</button>
+            <button class="link-btn mm-act utils-btn utils-secondary" @click="modelDelConfirm = ''">取消</button>
           </div>
           <!-- 行内编辑：新增草稿（NEW_MODEL_ROW）与编辑已有模型共用这一套表单 -->
           <div v-if="modelOpen === m.id && modelForm" class="mm-form">
@@ -5038,7 +5921,7 @@ onUnmounted(() => {
               <span class="label">取值倍数 scale <em>（接口单位与展示单位不一致时用，如 0.0001）</em></span>
               <input class="num" type="number" step="any" min="0" v-model.number="modelForm.scale" />
             </label>
-            <button v-if="modelForm.kind !== 'codex'" class="link-btn" @click="modelAdv[modelForm.id] = !modelAdv[modelForm.id]">
+            <button v-if="modelForm.kind !== 'codex'" class="link-btn utils-btn utils-secondary" @click="modelAdv[modelForm.id] = !modelAdv[modelForm.id]">
               {{ modelAdv[modelForm.id] ? '收起高级设置' : '高级设置（字段路径 / 认证方式）' }}
             </button>
             <div v-if="modelAdv[modelForm.id] && modelForm.kind !== 'codex'" class="mm-grid">
@@ -5092,11 +5975,11 @@ onUnmounted(() => {
               <span class="num-text">{{ modelForm.currency === 'USD' ? '美元' : '元' }}</span>
             </label>
             <div class="btn-row">
-              <button @click="saveModelForm">保存</button>
-              <button class="secondary" :disabled="modelTesting === modelForm.id" @click="testModelForm">
+              <button class="utils-btn utils-primary" @click="saveModelForm">保存</button>
+              <button class="secondary utils-btn utils-secondary" :disabled="modelTesting === modelForm.id" @click="testModelForm">
                 {{ modelTesting === modelForm.id ? '测试中…' : '测试连接' }}
               </button>
-              <button class="secondary" @click="closeModelForm">取消</button>
+              <button class="secondary utils-btn utils-secondary" @click="closeModelForm">取消</button>
             </div>
             <p v-if="modelFormErr" class="msg err">{{ modelFormErr }}</p>
           </div>
@@ -5117,8 +6000,8 @@ onUnmounted(() => {
         </select>
       </label>
       <div class="btn-row">
-        <button @click="showWidget">显示挂件</button>
-        <button class="secondary" @click="hideWidget">隐藏挂件</button>
+        <button class="utils-btn utils-primary" @click="showWidget">显示挂件</button>
+        <button class="secondary utils-btn utils-secondary" @click="hideWidget">隐藏挂件</button>
       </div>
 
       <label class="field row check">
@@ -5147,8 +6030,8 @@ onUnmounted(() => {
         穿透开启后挂件自身菜单也点不到，建议先绑定全局快捷键作为「逃生通道」：uTools 设置 → 全局功能 → 新增 → 指令填「切换鼠标穿透」→ 按下组合键。也可在鲸鱼上停留约 1 秒临时接管后再关。
       </p>
       <div class="btn-row">
-        <button class="secondary" @click="copyHotkeyCmd('切换鼠标穿透')">复制「穿透」指令名</button>
-        <button class="secondary" @click="addHotkey('切换鼠标穿透')">新增「穿透」快捷键</button>
+        <button class="secondary utils-btn utils-secondary" @click="copyHotkeyCmd('切换鼠标穿透')">复制「穿透」指令名</button>
+        <button class="secondary utils-btn utils-secondary" @click="addHotkey('切换鼠标穿透')">新增「穿透」快捷键</button>
       </div>
 
       <label class="field row check">
@@ -5203,7 +6086,7 @@ onUnmounted(() => {
       <p class="hint" v-if="cfg.scrollGapOn">Windows 默认滚动条约 17px；填 0 等于贴边（与关闭开关等效）。与「贴边间距 → 右」取较大值，不会叠加。</p>
 
       <div class="btn-row">
-        <button class="secondary" @click="resetWidgetPos">复位窗口位置</button>
+        <button class="secondary utils-btn utils-secondary" @click="resetWidgetPos">复位窗口位置</button>
       </div>
       <p class="hint">把挂件挪回默认位置（右下角、紧贴边缘）——换显示器、改分辨率或拖出屏幕后用。</p>
       <p v-if="widgetFlash.msg" class="msg" :class="msgCls(widgetFlash)">{{ widgetFlash.msg }}</p>
@@ -5216,16 +6099,16 @@ onUnmounted(() => {
       <h2>使用帮助</h2>
       <p class="hint">给「显示/隐藏挂件」绑定一个全局快捷键（想给「鼠标穿透」也绑一个，见「窗口」组）。</p>
       <div class="btn-row">
-        <button class="secondary" @click="copyHotkeyCmd()">复制指令名</button>
-        <button class="secondary" @click="addHotkey()">新增快捷键</button>
+        <button class="secondary utils-btn utils-secondary" @click="copyHotkeyCmd()">复制指令名</button>
+        <button class="secondary utils-btn utils-secondary" @click="addHotkey()">新增快捷键</button>
       </div>
       <!-- 新手引导入口：首次引导只弹一次（guideDone），之后从帮助 Tab 重开。
            与「使用说明」「故障排查」同为折叠块、同一视觉语言，不额外占版面 -->
       <div class="fold">
-        <button class="link-btn" @click="onGuideReopen()">新手引导（填 DeepSeek 凭据）</button>
+        <button class="link-btn utils-btn utils-secondary" @click="onGuideReopen()">新手引导（填 DeepSeek 凭据）</button>
       </div>
       <div class="fold">
-        <button class="link-btn" @click="widgetFolds.help = !widgetFolds.help">{{ widgetFolds.help ? '收起使用说明' : '使用说明' }}</button>
+        <button class="link-btn utils-btn utils-secondary" @click="widgetFolds.help = !widgetFolds.help">{{ widgetFolds.help ? '收起使用说明' : '使用说明' }}</button>
         <div v-if="widgetFolds.help" class="guide">
           <p class="guide-use"><strong>进入插件时：</strong>选含挂件的模式后，挂件出现时会抢走焦点、本设置窗口自动收起；改设置请点挂件右上角菜单（或右键）→「打开设置」唤回本窗口。</p>
           <p class="guide-use"><strong>挂件操作：</strong>可拖拽到屏幕四边吸附（吸附区宽度与开关见「挂件窗口」卡片），鲸鱼始终朝屏幕内侧；点击鲸鱼刷新余额，悬停后点右上角菜单调整设置。</p>
@@ -5234,14 +6117,14 @@ onUnmounted(() => {
         </div>
       </div>
       <div v-if="diagReady" class="fold">
-        <button class="link-btn" @click="widgetFolds.trouble = !widgetFolds.trouble">{{ widgetFolds.trouble ? '收起挂件故障排查' : '挂件故障排查' }}</button>
+        <button class="link-btn utils-btn utils-secondary" @click="widgetFolds.trouble = !widgetFolds.trouble">{{ widgetFolds.trouble ? '收起挂件故障排查' : '挂件故障排查' }}</button>
         <div v-if="widgetFolds.trouble" class="guide">
           <!-- 标题与日志按钮都带「挂件」前缀：dsh 卡里另有一块「dsh 故障排查」讲 dsh 子进程日志，
                两块都叫「故障排查」时用户会把两处的日志当成同一份 -->
           <p class="guide-use">挂件消失或显示异常时，可复制插件自身的诊断日志（%TEMP%\whale-debug.log）或用系统程序打开日志文件。<strong>这只含挂件与插件自身的日志</strong>；dsh 的日志见「开发者 → dsh」卡里的「查看 dsh 日志」。</p>
           <div class="btn-row">
-            <button class="secondary" @click="copyDebugLog">复制挂件日志</button>
-            <button class="secondary" @click="openLogFile">打开挂件日志文件</button>
+            <button class="secondary utils-btn utils-secondary" @click="copyDebugLog">复制挂件日志</button>
+            <button class="secondary utils-btn utils-secondary" @click="openLogFile">打开挂件日志文件</button>
           </div>
           <p v-if="diagFlash.msg" class="msg" :class="msgCls(diagFlash)">{{ diagFlash.msg }}</p>
         </div>
@@ -5250,11 +6133,11 @@ onUnmounted(() => {
         <p class="err-title">挂件窗口创建失败</p>
         <pre class="err-box">{{ errDetail }}</pre>
         <div class="btn-row">
-          <button class="secondary" @click="copyWidgetError">复制错误信息</button>
-          <button class="secondary" @click="checkWidgetError()">重新检查</button>
+          <button class="secondary utils-btn utils-secondary" @click="copyWidgetError">复制错误信息</button>
+          <button class="secondary utils-btn utils-secondary" @click="checkWidgetError()">重新检查</button>
         </div>
       </div>
-      <button v-else class="link-btn" @click="checkWidgetError()">挂件异常？查看错误详情</button>
+      <button v-else class="link-btn utils-btn utils-secondary" @click="checkWidgetError()">挂件异常？查看错误详情</button>
       <p v-if="errFlash.msg" class="msg" :class="msgCls(errFlash)">{{ errFlash.msg }}</p>
     </section>
 
@@ -5284,16 +6167,16 @@ onUnmounted(() => {
         <input type="checkbox" v-model="clearItems.assets" @change="clearConfirm = false" />
       </label>
       <div class="btn-row">
-        <button class="danger" :disabled="!anyClearItem" @click="clearSelectedData()">
+        <button class="danger utils-btn utils-danger" :disabled="!anyClearItem" @click="clearSelectedData()">
           {{ clearConfirm ? '确认清除选中数据？不可恢复' : '清除选中数据' }}
         </button>
-        <button v-if="clearConfirm" class="secondary" @click="clearConfirm = false">取消</button>
+        <button v-if="clearConfirm" class="secondary utils-btn utils-secondary" @click="clearConfirm = false">取消</button>
       </div>
       <p v-if="clearConfirm" class="hint">将清除：{{ clearItemNames || '（未选中任何项）' }}。此操作不可撤销。</p>
       <p v-if="dataFlash.msg" class="msg" :class="msgCls(dataFlash)">{{ dataFlash.msg }}</p>
 
       <div class="fold">
-        <button class="link-btn" @click="backupFolds.open = !backupFolds.open">{{ backupFolds.open ? '收起备份与恢复' : '备份与恢复' }}</button>
+        <button class="link-btn utils-btn utils-secondary" @click="backupFolds.open = !backupFolds.open">{{ backupFolds.open ? '收起备份与恢复' : '备份与恢复' }}</button>
         <div v-if="backupFolds.open" class="guide">
           <p class="guide-use"><strong>导出：</strong>把「挂件设置 / 账本 / 窗口位置 / 计时」打包成一个 JSON 文件（不含 dsh 开发者配置与 Node 路径）；<strong>凭据默认不导出</strong>，勾选「包含凭据」后必须设密码，凭据会用 scrypt + AES-256-GCM 加密后才写入文件（文件里没有明文）。</p>
           <p class="guide-use"><strong>安全提示：</strong>密码不会保存到任何地方，忘记就无法解密（其余项仍可正常恢复）；备份文件本身含你的设置与用量记录，请妥善保管。</p>
@@ -5306,9 +6189,9 @@ onUnmounted(() => {
             <input type="password" v-model="backupPassword" placeholder="至少 6 位，导入时要用" autocomplete="new-password" />
           </label>
           <div class="btn-row">
-            <button class="secondary" :disabled="backupBusy" @click="backupExport">导出备份…</button>
-            <button class="secondary" :disabled="backupBusy" @click="backupPick">导入备份…</button>
-            <button v-if="backupPreview" class="secondary" @click="backupCancelPick">取消导入</button>
+            <button class="secondary utils-btn utils-secondary" :disabled="backupBusy" @click="backupExport">导出备份…</button>
+            <button class="secondary utils-btn utils-secondary" :disabled="backupBusy" @click="backupPick">导入备份…</button>
+            <button v-if="backupPreview" class="secondary utils-btn utils-secondary" @click="backupCancelPick">取消导入</button>
           </div>
 
           <div v-if="backupPreview">
@@ -5322,10 +6205,10 @@ onUnmounted(() => {
               <input type="password" v-model="backupPassword" placeholder="导出时设的密码（用于解密凭据）" autocomplete="off" />
             </label>
             <div class="btn-row">
-              <button class="danger" :disabled="backupBusy || !backupAnyItem" @click="backupApply">
+              <button class="danger utils-btn utils-danger" :disabled="backupBusy || !backupAnyItem" @click="backupApply">
                 {{ backupConfirm ? '确认覆盖写入？不可撤销' : '恢复选中项' }}
               </button>
-              <button v-if="backupConfirm" class="secondary" @click="backupConfirm = false">取消</button>
+              <button v-if="backupConfirm" class="secondary utils-btn utils-secondary" @click="backupConfirm = false">取消</button>
             </div>
           </div>
           <p v-if="backupFlash.msg" class="msg" :class="msgCls(backupFlash)">{{ backupFlash.msg }}</p>
@@ -5334,7 +6217,7 @@ onUnmounted(() => {
     </section>
 
     <!-- [开发者] DeepSeek Harness（dsh） -->
-    <section v-if="activeTab === 'dev'" class="card">
+    <section v-if="activeTab === 'dev'" class="card dsh-card">
       <div class="card-head">
         <h2 class="card-toggle" @click="dshMainFold = !dshMainFold">
           <span class="caret">{{ dshMainFold ? '▾' : '▸' }}</span>DeepSeek Harness（dsh）
@@ -5350,25 +6233,39 @@ onUnmounted(() => {
         <span class="ver">{{ dshStateText }}<span v-if="dsh.nodeVersion"> · Node {{ dsh.nodeVersion }}</span><span v-if="dshLatestTip" class="tag tag-new">{{ dshLatestTip }}</span></span>
       </label>
       <div class="btn-row">
-        <button :disabled="dsh.running || dsh.external || !!dsh.portOther || dshBusy" @click="dshDo('start')">启动</button>
-        <button class="secondary" :disabled="(!dsh.running && !dsh.external) || dshBusy" @click="dshDo('restart')">重启</button>
-        <button class="secondary" :disabled="(!dsh.running && !dsh.external) || dshBusy" @click="dshDo('stop')">结束</button>
-        <!-- 既无全局也无插件安装时实际走的是安装流程，按钮文案别再写「更新」误导 -->
-        <button class="secondary" :disabled="dshBusy" @click="dshDo('update')">{{ dsh.resolved || dsh.globalVersion ? '更新' : '安装' }}</button>
-        <button class="secondary" @click="dshOpenPage">打开 Web UI</button>
+        <button class="utils-btn utils-primary" :disabled="dsh.running || dsh.external || !!dsh.portOther || dshBusy" @click="dshDo('start')">启动</button>
+        <button class="secondary utils-btn utils-secondary" :disabled="(!dsh.running && !dsh.external) || dshBusy" @click="dshDo('restart')">重启</button>
+        <button class="secondary utils-btn utils-secondary" :disabled="(!dsh.running && !dsh.external) || dshBusy" @click="dshDo('stop')">结束</button>
+        <button class="secondary utils-btn utils-secondary" @click="dshOpenPage">打开 Web UI</button>
+      </div>
+      <!-- 装哪个版本 + 更新，是同一条动作链的两个环节，所以放同一行；
+           版本下拉原先在「高级选项」里，一次「装指定版本」要横跨三个折叠区才走完 -->
+      <div class="field row dsh-update-row">
+        <span class="label">更新版本</span>
+        <select v-model="cfg.dshVersion" @change="patchCfg({ dshVersion: cfg.dshVersion })">
+          <option v-for="o in dshVersionOptions" :key="o.v" :value="o.v">{{ o.label }}</option>
+        </select>
+        <!-- 既无全局也无插件安装时实际走的是安装流程，按钮文案别再写「更新」误导。
+             「有新版」标记用的是与标题 dshLatestTip 同一个 dsh.hasUpdate，不另算一套：
+             没有它时按钮和「没更新」时长得完全一样，用户得回头读标题小字才知道要不要点 -->
+        <button class="secondary utils-btn utils-secondary" :disabled="dshBusy" @click="dshDo('update')">
+          {{ dsh.resolved || dsh.globalVersion ? '更新' : '安装' }}<span v-if="dsh.hasUpdate" class="tag tag-new">有新版</span>
+        </button>
       </div>
       <p v-if="dsh.external" class="hint">3080 上检测到由<strong>别的终端</strong>启动的 dsh（pid {{ dsh.externalPid }}）：「结束」会结束它，「重启」会结束它并按当前版本重新启动。</p>
       <p v-else-if="dsh.portOther" class="hint">3080 被 {{ dsh.portOther }} 占用（不是 dsh）。为避免误杀，插件不会结束它。</p>
 
-      <!-- 诊断信息（只读）：版本对照 / 最近命令 / 页面地址 / 日志，展开时自动查一次最新版本 -->
+      <!-- 运行详情（只读）：版本对照 / 最近命令 / 页面地址 / 日志，展开时自动查一次最新版本。
+           标题不叫「诊断信息」：「dsh 环境诊断」那张卡才是排查启动失败的检查项，
+           两块都带「诊断」二字时用户分不清点哪个，这里本质是运行状态详情 -->
       <div class="fold">
-        <button class="link-btn" @click="dshToggleVersions">
-          {{ dshFolds.versions ? '收起诊断信息' : '诊断信息（版本 / 命令 / 地址 / 日志）' }}
+        <button class="link-btn utils-btn utils-secondary" @click="dshToggleVersions">
+          {{ dshFolds.versions ? '收起运行详情' : '运行详情（版本 / 命令 / 地址 / 日志）' }}
         </button>
         <div v-if="dshFolds.versions" class="guide">
           <label class="field row">
             <span class="label">实际使用</span>
-            <span class="ver">{{ dsh.resolved || '未安装' }}<span v-if="dsh.source" class="tag">{{ dsh.source === 'global' ? '全局' : '插件目录' }}</span></span>
+            <span class="ver">{{ dsh.resolved || '未安装' }}<span v-if="dsh.resolved && dsh.source" class="tag">{{ dsh.source === 'global' ? '全局' : '插件目录' }}</span></span>
           </label>
           <label class="field row">
             <span class="label">全局安装</span>
@@ -5380,7 +6277,9 @@ onUnmounted(() => {
           </label>
           <label class="field row">
             <span class="label">npm latest</span>
-            <span class="ver">{{ (dsh.versions && dsh.versions.latest) || '查询中…' }}<span v-if="dsh.versions && dsh.versions.latest" class="tag">点「更新」会装到这个版本</span></span>
+            <!-- 不再挂「点更新会装到这个版本」的 tag：那是常驻说明，且下方 dshVerMismatch
+                 已按实际情况给出对比句（两者不同才出现），比常驻标签更准也更省视觉噪音 -->
+            <span class="ver">{{ dshLatestText }}</span>
           </label>
           <label class="field row">
             <span class="label">最近命令</span>
@@ -5388,61 +6287,80 @@ onUnmounted(() => {
           </label>
           <label class="field row">
             <span class="label">页面地址</span>
-            <span class="cmdline">{{ dsh.webUrl || (dsh.url + '（未捕获 token，dsh 启动完成后会自动获取）') }}</span>
+            <span class="cmdline">{{ dsh.webUrl || (DEFAULT_DSH_URL + '（未捕获 token，dsh 启动完成后会自动获取）') }}</span>
+          </label>
+          <!-- 复制 / 定位的反馈就近显示：dshValueFlash 同时只挂一条，故四处共用同一行；
+               成功与失败都只靠颜色区分（内容对「复制」是同一句、对「定位」是同一句），
+               卡底只留错误与需用户决策的提示，见 dshValueTip 处的说明 -->
+          <label v-if="dshValueFlash.text" class="field row">
+            <span class="label"></span>
+            <span class="ver" :class="dshValueFlash.err ? 'err' : 'ok'">{{ dshValueFlash.text }}</span>
           </label>
           <p v-if="dshVerMismatch" class="hint">{{ dshVerMismatch }}</p>
+          <!-- 主按钮行只留「改变状态」的动作：查询会重打一次 npm，日志开合是这一块的主视角。
+               其余三个（刷新状态 / 定位 dsh 目录 / 复制地址）都是「顺手一下」的辅助动作，
+               降成下面一行的文字按钮 —— 否则 8 个等宽按钮并列，主次完全看不出来，还容易误点「清空」。 -->
           <div class="btn-row">
-            <button class="secondary" :disabled="dsh.busy === 'versions'" @click="dshQueryVersions">
-              {{ dsh.busy === 'versions' ? '查询中…' : '查询可用版本' }}
+            <!-- 查询过就不再摆按钮：结果已经显示在「npm latest」行里，留着反而让人以为还得再点一下。
+                 只有「还没查过」和「上次查失败」才需要这个入口（失败时文案变「重试」） -->
+            <button v-if="dshQueryFailed || !dshHasVersions" class="secondary utils-btn utils-secondary" :disabled="dsh.busy === 'versions'" @click="dshQueryVersions">
+              {{ dsh.busy === 'versions' ? '查询中…' : (dshQueryFailed ? '重试：查询可用版本' : '查询可用版本') }}
             </button>
-            <button class="secondary" @click="dshStatus(true)">刷新状态</button>
-            <button v-if="dsh.globalDir" class="secondary" @click="dshCopyPath(dsh.globalDir, '全局路径')">复制全局路径</button>
-            <button v-if="dsh.installed" class="secondary" @click="dshCopyPath(dsh.prefix, '插件路径')">复制插件路径</button>
-            <button class="secondary" @click="dshCopyUrl">复制地址</button>
             <!-- 日志按钮都带 dsh 前缀：帮助 Tab 里另有一处「复制诊断日志 / 打开日志文件」，
                  那是插件自身的 whale-debug.log，与这里的 dsh 子进程日志是两回事 -->
-            <button class="secondary" @click="dshLogOpen = !dshLogOpen">{{ dshLogOpen ? '收起 dsh 日志' : '查看 dsh 日志' }}</button>
-            <button v-if="dshLogOpen" class="secondary" @click="dshClearLog">清空 dsh 日志</button>
-            <button v-if="dshLogOpen" class="secondary" @click="dshCopyLog">复制 dsh 日志</button>
+            <button class="secondary utils-btn utils-secondary" @click="dshLogOpen = !dshLogOpen">{{ dshLogOpen ? '收起 dsh 日志' : '查看 dsh 日志' }}</button>
+          </div>
+          <div class="btn-row row-link">
+            <button class="link-btn utils-btn utils-secondary" @click="dshStatus(true)">刷新状态</button>
+            <button v-if="dsh.prefix" class="link-btn utils-btn utils-secondary" @click="dshLocatePrefix">定位 dsh 目录</button>
+            <button class="link-btn utils-btn utils-secondary" :disabled="!dsh.webUrl && !dsh.url" @click="dshCopyUrl">复制地址</button>
+            <!-- 清空也走二段确认：与「删除插件目录的 dsh」「清理 npx 旧缓存」同一套手势，
+                 日志是排查现场，误点一下就没了（且清掉后无法恢复） -->
+            <button v-if="dshLogOpen" class="link-btn utils-btn utils-secondary" @click="dshClearLog">
+              {{ dshConfirm === 'clear-log' ? '确认清空 dsh 日志？' : '清空 dsh 日志' }}
+            </button>
+            <button v-if="dshLogOpen" class="link-btn utils-btn utils-secondary" @click="dshCopyLog">复制 dsh 日志</button>
+            <span v-if="dshValueFlash.key === 'log'" class="ver" :class="dshValueFlash.err ? 'err' : 'ok'">{{ dshValueFlash.text }}</span>
           </div>
           <pre v-if="dshLogOpen" ref="dshLogEl" class="log-box">{{ dsh.log || '（暂无日志：启动或更新 dsh 后再看）' }}</pre>
         </div>
       </div>
 
-      <!-- 故障排查：与「诊断信息」紧邻、都在主控卡头部 —— 这两块是「出问题时才看」的，
-           早先故障排查被排在卡尾（诊断信息 → 高级选项 → 使用说明 → 故障排查），
+      <!-- 故障排查：与「运行详情」紧邻、都在主控卡头部 —— 这两块是「出问题时才看」的，
+           早先故障排查被排在卡尾（运行详情 → 高级选项 → 使用说明 → 故障排查），
            真出问题时用户根本滚不到。标题带 dsh 前缀：帮助 Tab 里另有一块也叫「故障排查」，
            讲的是插件自身（whale-debug.log），不写前缀会让人以为是一回事。 -->
       <div class="fold">
-        <button class="link-btn" @click="dshFolds.trouble = !dshFolds.trouble">{{ dshFolds.trouble ? '收起 dsh 故障排查' : 'dsh 故障排查' }}</button>
+        <button class="link-btn utils-btn utils-secondary" @click="dshToggleTrouble">{{ dshFolds.trouble ? '收起 dsh 故障排查' : 'dsh 故障排查' }}</button>
         <div v-if="dshFolds.trouble" class="guide">
           <p class="guide-use"><strong>结束 / 重启：</strong>不只管本插件启动的进程 —— 只要 3080 上跑着 dsh（含在别的终端里启动的）都能被结束；非 dsh 占用端口时会拒绝执行，避免误杀。</p>
           <p class="guide-use"><strong>首次安装很慢：</strong>要下载约 500 个包，国内建议把「npm 注册源」改成淘宝镜像；等待期间状态行会显示「已等待 x 秒」。</p>
           <p class="guide-use"><strong>占用空间：</strong>「删除插件目录的 dsh」清掉插件装的那份（有全局安装时用不到它）；「清理 npx 旧缓存」清掉旧版本留在 npx 缓存里的副本。</p>
           <div class="btn-row">
-            <button class="secondary" :disabled="!dsh.installed || dshBusy" @click="dshMaintain('remove-plugin')">
+            <button class="secondary utils-btn utils-secondary" :disabled="!dsh.installed || dshBusy" @click="dshMaintain('remove-plugin')">
               {{ dshConfirm === 'remove-plugin' ? '确认删除插件目录的 dsh？' : '删除插件目录的 dsh' }}
             </button>
-            <button class="secondary" :disabled="dshBusy" @click="dshMaintain('clean-npx')">
+            <button class="secondary utils-btn utils-secondary" :disabled="dshBusy" @click="dshMaintain('clean-npx')">
               {{ dshConfirm === 'clean-npx' ? '确认清理 npx 旧缓存？' : '清理 npx 旧缓存' }}
             </button>
-            <button v-if="dshConfirm" class="secondary" @click="dshConfirm = ''">取消</button>
+            <button v-if="dshConfirm" class="secondary utils-btn utils-secondary" @click="dshConfirm = ''">取消</button>
           </div>
         </div>
       </div>
 
-      <p v-if="dsh.error && !dshLogOpen" class="msg err">{{ dsh.error }}</p>
+      <!-- 操作失败与 dsh.error 合成一条：用户要读的是一句「出了什么事」，
+           两个 .msg 叠在卡底会出现两行红字、且与 dsh.error「日志已打开就隐藏」的取值无关；
+           合成后判断只落在 dsh.error 上，收起日志也不会突然换一种显示方式 -->
+      <p v-if="dsh.error && dshLogOpen" class="msg err">dsh 报错：{{ dsh.error }}（详见下方日志）</p>
+      <p v-else-if="dsh.error" class="msg err">dsh 报错：{{ dsh.error }}</p>
       <p v-if="dshFlash.msg" class="msg" :class="msgCls(dshFlash)">{{ dshFlash.msg }}</p>
 
       <div class="fold">
-        <button class="link-btn" @click="dshFolds.advanced = !dshFolds.advanced">{{ dshFolds.advanced ? '收起高级选项' : '高级选项（版本 / 注册源 / Node 目录 / 行为）' }}</button>
+        <button class="link-btn utils-btn utils-secondary" @click="dshFolds.advanced = !dshFolds.advanced">{{ dshFolds.advanced ? '收起高级选项' : '高级选项（注册源 / Node 目录 / 行为）' }}</button>
         <div v-if="dshFolds.advanced" class="guide">
-          <label class="field row">
-            <span class="label">dsh 版本</span>
-            <select v-model="cfg.dshVersion" @change="patchCfg({ dshVersion: cfg.dshVersion })">
-              <option v-for="o in dshVersionOptions" :key="o.v" :value="o.v">{{ o.label }}</option>
-            </select>
-          </label>
+          <!-- 「dsh 版本」已移到上面的「更新版本」行：它是安装/更新的入参，属于动作的一部分；
+               留在这里会让一次「装指定版本」横跨三个折叠区（运行详情查版本 → 这里选版本 → 上面点更新），
+               而另外三项（注册源 / Node 目录 / 行为）是设一次就不动的环境配置，才是名副其实的高级选项 -->
           <label class="field row">
             <span class="label">npm 注册源</span>
             <select v-model="cfg.dshRegistry" @change="patchCfg({ dshRegistry: cfg.dshRegistry })">
@@ -5455,8 +6373,8 @@ onUnmounted(() => {
             <span class="ver">{{ dshNodeText }}</span>
           </label>
           <div class="btn-row">
-            <button class="secondary" @click="dshPickDir">选择目录</button>
-            <button v-if="cfg.dshNodeDir" class="secondary" @click="dshAutoDir">改为自动探测</button>
+            <button class="secondary utils-btn utils-secondary" @click="dshPickDir">选择目录</button>
+            <button v-if="cfg.dshNodeDir" class="secondary utils-btn utils-secondary" @click="dshAutoDir">改为自动探测</button>
           </div>
           <label class="field row check">
             <span class="label">启动时不自动打开浏览器 <em>（勾选：命令追加 --no-open，启动后点「打开 Web UI」查看）</em></span>
@@ -5474,7 +6392,7 @@ onUnmounted(() => {
       </div>
 
       <div class="fold">
-        <button class="link-btn" @click="dshFolds.help = !dshFolds.help">{{ dshFolds.help ? '收起使用说明' : '使用说明' }}</button>
+        <button class="link-btn utils-btn utils-secondary" @click="dshFolds.help = !dshFolds.help">{{ dshFolds.help ? '收起使用说明' : '使用说明' }}</button>
         <div v-if="dshFolds.help" class="guide">
           <p class="guide-use"><strong>启动：</strong>直接 <code>node &lt;那份 dsh&gt;/lib/bin.js web [--no-open]</code>（有全局安装就用全局那份，否则用插件目录的）—— 不再经过 npx，也就不会再堆缓存副本。</p>
           <p class="guide-use"><strong>更新：</strong>结束正在运行的 dsh → 重新安装「dsh 版本」里选定的版本（自动＝latest）→ 原本在跑就用新版重新启动；已有全局安装时更新的就是全局那份（<code>npm i -g</code>）。</p>
@@ -5484,7 +6402,7 @@ onUnmounted(() => {
       </template>
     </section>
     <!-- [dsh] dsh 只读诊断：五项本地检查，纯只读、不改任何配置、不联网 -->
-    <section v-if="activeTab === 'dev'" class="card">
+    <section v-if="activeTab === 'dev'" class="card dsh-card">
       <div class="card-head">
         <h2 class="card-toggle" @click="toggleDevCard('diagnose')">
           <span class="caret">{{ devFolds.diagnose ? '▾' : '▸' }}</span>dsh 环境诊断
@@ -5502,9 +6420,9 @@ onUnmounted(() => {
         <code>[!]</code> 有隐患或这一项没查出来 · <code>[✗]</code> 确实有问题。
       </p>
       <div class="btn-row">
-        <button :disabled="diagnoseBusy" @click="diagnoseRefresh()">{{ diagnoseBusy ? '诊断中…' : '重新诊断' }}</button>
-        <button class="secondary" :disabled="diagnoseBusy" @click="diagnoseRefresh(true)">强制重跑</button>
-        <button v-if="diagnose" class="secondary" :disabled="diagnoseBusy" @click="diagnoseCopy">复制诊断信息</button>
+        <button class="utils-btn utils-primary" :disabled="diagnoseBusy" @click="diagnoseRefresh()">{{ diagnoseBusy ? '诊断中…' : '重新诊断' }}</button>
+        <button class="secondary utils-btn utils-secondary" :disabled="diagnoseBusy" @click="diagnoseRefresh(true)">强制重跑</button>
+        <button v-if="diagnose" class="secondary utils-btn utils-secondary" :disabled="diagnoseBusy" @click="diagnoseCopy">复制诊断信息</button>
       </div>
       <p v-if="diagnoseFlash.msg" class="msg" :class="msgCls(diagnoseFlash)">{{ diagnoseFlash.msg }}</p>
 
@@ -5537,7 +6455,7 @@ onUnmounted(() => {
         </label>
 
         <div class="fold">
-          <button class="link-btn" @click="diagnoseFolds.help = !diagnoseFolds.help">{{ diagnoseFolds.help ? '收起说明' : '说明' }}</button>
+          <button class="link-btn utils-btn utils-secondary" @click="diagnoseFolds.help = !diagnoseFolds.help">{{ diagnoseFolds.help ? '收起说明' : '说明' }}</button>
           <div v-if="diagnoseFolds.help" class="guide">
             <!-- 与「配置转储」「插件开关」两张卡分工：这张只回答「哪里坏了」，
                  转储卡回答「这个条目是谁改的」，插件开关卡负责动手改。
@@ -5553,7 +6471,7 @@ onUnmounted(() => {
       </template>
     </section>
     <!-- [dsh] dsh 配置转储：一次 CLI 读取，摊开 patch 分层与生效/默认树差异，纯只读、不改配置、不联网 -->
-    <section v-if="activeTab === 'dev'" class="card">
+    <section v-if="activeTab === 'dev'" class="card dsh-card">
       <div class="card-head">
         <h2 class="card-toggle" @click="toggleDevCard('dshDump')">
           <span class="caret">{{ devFolds.dshDump ? '▾' : '▸' }}</span>dsh 配置转储
@@ -5570,9 +6488,9 @@ onUnmounted(() => {
         <strong>纯只读、不改动任何配置、不发任何网络请求</strong>。
       </p>
       <div class="btn-row">
-        <button :disabled="dshDumpBusy" @click="dshDumpRefresh()">{{ dshDumpBusy ? '读取中…' : '重新读取' }}</button>
-        <button class="secondary" :disabled="dshDumpBusy" @click="dshDumpRefresh(true)">强制重跑</button>
-        <button v-if="dshDump && dshDump.ok" class="secondary" :disabled="dshDumpBusy" @click="dshDumpCopy">复制转储信息</button>
+        <button class="utils-btn utils-primary" :disabled="dshDumpBusy" @click="dshDumpRefresh()">{{ dshDumpBusy ? '读取中…' : '重新读取' }}</button>
+        <button class="secondary utils-btn utils-secondary" :disabled="dshDumpBusy" @click="dshDumpRefresh(true)">强制重跑</button>
+        <button v-if="dshDump && dshDump.ok" class="secondary utils-btn utils-secondary" :disabled="dshDumpBusy" @click="dshDumpCopy">复制转储信息</button>
       </div>
       <p v-if="dshDumpFlash.msg" class="msg" :class="msgCls(dshDumpFlash)">{{ dshDumpFlash.msg }}</p>
 
@@ -5594,7 +6512,7 @@ onUnmounted(() => {
 
         <!-- D1：patch 分层。层数等于 dump 里的来源数，不固定为五，避免硬套模型失真 -->
         <div class="fold">
-          <button class="link-btn" @click="dshDumpFolds.layers = !dshDumpFolds.layers">{{ dshDumpFolds.layers ? '收起分层' : '展开分层' }}（{{ dshDump.layers?.length || 0 }} 层）</button>
+          <button class="link-btn utils-btn utils-secondary" @click="dshDumpFolds.layers = !dshDumpFolds.layers">{{ dshDumpFolds.layers ? '收起分层' : '展开分层' }}（{{ dshDump.layers?.length || 0 }} 层）</button>
           <div v-if="dshDumpFolds.layers" class="layer-list">
             <div v-for="l in dshDump.layers" :key="l.order" class="layer-item" :class="dshDumpLayerCls(l)">
               <p class="layer-head">
@@ -5613,7 +6531,7 @@ onUnmounted(() => {
 
         <!-- D2：生效树 vs 默认树差异。默认树读失败时降级为只展示分层，不整卡失败 -->
         <div class="fold">
-          <button class="link-btn" @click="dshDumpFolds.diff = !dshDumpFolds.diff">{{ dshDumpFolds.diff ? '收起差异' : '展开差异' }}</button>
+          <button class="link-btn utils-btn utils-secondary" @click="dshDumpFolds.diff = !dshDumpFolds.diff">{{ dshDumpFolds.diff ? '收起差异' : '展开差异' }}</button>
           <div v-if="dshDumpFolds.diff">
             <p v-if="dshDump.diffError" class="hint">默认树读取失败，未能比对：{{ dshDump.diffError }}</p>
             <p v-else-if="dshDump.diff && !dshDump.diff.changedTotal && !dshDump.diff.addedTotal && !dshDump.diff.removedTotal" class="hint">生效树与默认树完全一致，没有额外改动。</p>
@@ -5637,7 +6555,7 @@ onUnmounted(() => {
         </div>
 
         <div class="fold">
-          <button class="link-btn" @click="dshDumpFolds.help = !dshDumpFolds.help">{{ dshDumpFolds.help ? '收起说明' : '说明' }}</button>
+          <button class="link-btn utils-btn utils-secondary" @click="dshDumpFolds.help = !dshDumpFolds.help">{{ dshDumpFolds.help ? '收起说明' : '说明' }}</button>
           <div v-if="dshDumpFolds.help" class="guide">
             <!-- 与「环境诊断」卡的分工：这张解释「谁改的 / 默认长什么样」，
                  诊断卡负责判「坏了没」。读一次转储同时给诊断卡提供 patch 判据，
@@ -5655,7 +6573,7 @@ onUnmounted(() => {
       </template>
     </section>
     <!-- [dsh] dsh 本地用量统计：读 ~/.dsh 下 dsh-usage 的账本与会话投影缓存，纯本地、不联网 -->
-    <section v-if="activeTab === 'dev'" class="card">
+    <section v-if="activeTab === 'dev'" class="card dsh-card">
       <div class="card-head">
         <h2 class="card-toggle" @click="toggleDevCard('dshUsage')">
           <span class="caret">{{ devFolds.dshUsage ? '▾' : '▸' }}</span>dsh 用量统计
@@ -5674,8 +6592,8 @@ onUnmounted(() => {
       </p>
       <div class="btn-row">
         <!-- 首次展开已自动读过一次，按钮主要当「刷新」用 -->
-        <button :disabled="dshUsageBusy" @click="dshUsageRefresh">{{ dshUsageBusy ? '读取中…' : (dshUsage ? '刷新' : '读取统计') }}</button>
-        <button v-if="dshUsage" class="secondary" :disabled="dshUsageBusy" @click="dshUsageClearCache">清除缓存并重扫</button>
+        <button class="utils-btn utils-primary" :disabled="dshUsageBusy" @click="dshUsageRefresh">{{ dshUsageBusy ? '读取中…' : (dshUsage ? '刷新' : '读取统计') }}</button>
+        <button v-if="dshUsage" class="secondary utils-btn utils-secondary" :disabled="dshUsageBusy" @click="dshUsageClearCache">清除缓存并重扫</button>
       </div>
       <p v-if="dshUsageFlash.msg" class="msg" :class="msgCls(dshUsageFlash)">{{ dshUsageFlash.msg }}</p>
 
@@ -5692,25 +6610,49 @@ onUnmounted(() => {
           <span class="label">会话</span>
           <span class="ver">{{ dshUsage.sessions }} 个（{{ dshUsage.activeSessions }} 个有用量）</span>
         </label>
-        <label class="field row">
-          <span class="label">今日</span>
-          <span class="ver"><strong>{{ fmtTokens(dshUsage.todayTokens) }}</strong> tokens · {{ fmtDshCost(dshUsage.costToday) }}</span>
-        </label>
-        <label class="field row">
-          <span class="label">本月</span>
-          <span class="ver">{{ fmtTokens(dshUsage.monthTokens) }} tokens · {{ fmtDshCost(dshUsage.costMonth) }}</span>
-        </label>
-        <label class="field row">
-          <span class="label">累计</span>
-          <span class="ver">
-            {{ fmtTokens(dshUsage.totalTokens) }} tokens（输入 {{ fmtTokens(dshUsage.inTokens) }} · 缓存命中 {{ fmtTokens(dshUsage.cachedTokens) }} · 输出 {{ fmtTokens(dshUsage.outTokens) }} · 推理 {{ fmtTokens(dshUsage.reasonTokens) }}）
-            · {{ fmtDshCost(dshUsage.costTotal) }} · 共 {{ dshUsage.turns }} {{ dshUsage.turnsLabel || '轮' }}
-          </span>
-        </label>
-        <label v-if="dshUsage.balance" class="field row">
-          <span class="label">dsh-usage 抓到的余额</span>
-          <span class="ver">{{ fmtDshBalance() }}</span>
-        </label>
+
+        <!-- 今日 / 本月 / 累计 / 轮次 / 余额五个口径：原先各占一行、数值与单位挤在同一段文字里，
+             扫读时要逐字读才知道哪个是哪个。改成等宽指标格：数字大一号、单位在下，
+             列宽由 grid 均分，各格对齐成一条基线，一眼能横向比较。
+             余额并进这里是因为它本来单独占一行 .field，而「dsh-usage 抓到的余额」这个标签
+             拖到卡片被挤散（见 .stat-cell 注释），值和日期都受了影响。 -->
+        <div class="stat-grid">
+          <div class="stat-cell" title="今日消耗的 token 数（含输入 / 缓存命中 / 输出 / 推理）">
+            <span class="stat-num">{{ fmtTokens(dshUsage.todayTokens) }}</span>
+            <span class="stat-label">今日</span>
+            <span class="stat-sub">{{ fmtDshCost(dshUsage.costToday) }}</span>
+          </div>
+          <div class="stat-cell" title="本月消耗的 token 数">
+            <span class="stat-num">{{ fmtTokens(dshUsage.monthTokens) }}</span>
+            <span class="stat-label">本月</span>
+            <span class="stat-sub">{{ fmtDshCost(dshUsage.costMonth) }}</span>
+          </div>
+          <div class="stat-cell" title="有记录以来的累计 token 数">
+            <span class="stat-num">{{ fmtTokens(dshUsage.totalTokens) }}</span>
+            <span class="stat-label">累计</span>
+            <span class="stat-sub">{{ fmtDshCost(dshUsage.costTotal) }}</span>
+          </div>
+          <div class="stat-cell">
+            <span class="stat-num">{{ dshUsage.turns || 0 }}</span>
+            <span class="stat-label">{{ dshUsage.turnsLabel || '轮' }}</span>
+            <span class="stat-sub">账本口径见说明</span>
+          </div>
+          <div v-if="dshUsage.balance" class="stat-cell" title="dsh-usage 自己抓的余额快照，与挂件轮询的余额互为印证">
+            <span class="stat-num">{{ fmtDshBalanceAmount() }}</span>
+            <span class="stat-label">dsh 抓到的余额</span>
+            <span class="stat-sub">{{ fmtDshBalanceAt() || '快照' }}</span>
+          </div>
+        </div>
+
+        <!-- 累计的 token 构成：四个分项本来塞在「累计」那一行的括号里，长度逼近两行且
+             与总数混排。挪进独立一行的小格 —— 它们只在读细账时才看，不该挡住「今日 / 本月」。 -->
+        <div class="stat-break">
+          <span class="stat-chip"><em>输入</em>{{ fmtTokens(dshUsage.inTokens) }}</span>
+          <span class="stat-chip"><em>缓存命中</em>{{ fmtTokens(dshUsage.cachedTokens) }}</span>
+          <span class="stat-chip"><em>输出</em>{{ fmtTokens(dshUsage.outTokens) }}</span>
+          <span class="stat-chip"><em>推理</em>{{ fmtTokens(dshUsage.reasonTokens) }}</span>
+        </div>
+
         <p v-if="dshUsage.note" class="hint">{{ dshUsage.note }}</p>
 
         <!-- 图表 + 各模型用量由共用组件渲染：与 Codex 卡那两块逐字相同，
@@ -5729,7 +6671,7 @@ onUnmounted(() => {
         />
 
         <div class="fold">
-          <button class="link-btn" @click="dshUsageFolds.help = !dshUsageFolds.help">{{ dshUsageFolds.help ? '收起说明' : '说明' }}</button>
+          <button class="link-btn utils-btn utils-secondary" @click="dshUsageFolds.help = !dshUsageFolds.help">{{ dshUsageFolds.help ? '收起说明' : '说明' }}</button>
           <div v-if="dshUsageFolds.help" class="guide">
             <p class="guide-use"><strong>数据来源：</strong>优先读 <code>dsh-usage/usage-ledger.json</code>（dsh-usage 插件的按天账本，能画趋势）；账本还没有数据时回落到 <code>storages/session_projcache/sessions/*.json</code>，按「会话创建日」把该会话的全部用量记在一天里。两者不会同时累加，避免同一批 token 被算两遍。</p>
             <p class="guide-use"><strong>花费：</strong>账本里的 <code>cost</code> 只有 DeepSeek 官方那档有值（单位人民币），其它 provider 未定价恒为 0，所以不会混币种。</p>
@@ -5745,7 +6687,7 @@ onUnmounted(() => {
          合并理由：两卡改的是**同一个文件、同一个 profile、同一套快照**，差别只在粒度与候选范围。
          而候选范围不一致是会让人迷路的 —— E2 只列 patch 里已有的 12 条，用户想禁的第三方插件
          往往不在其中，在 E2 卡里根本找不到，得切到 E3 卡才行，而 E2 卡完全没提示这一点。 -->
-    <section v-if="activeTab === 'dev'" class="card">
+    <section v-if="activeTab === 'dev'" class="card dsh-card">
       <div class="card-head">
         <h2 class="card-toggle" @click="toggleDevCard('dshIsolate')">
           <span class="caret">{{ devFolds.dshIsolate ? '▾' : '▸' }}</span>dsh 插件开关
@@ -5771,9 +6713,9 @@ onUnmounted(() => {
           但<strong>删掉不恢复</strong>，所以「启用」后要重启 dsh 才看得到。
         </p>
         <div class="btn-row">
-          <button :disabled="dshIsolateBusy" @click="dshIsolateRefresh()">{{ dshIsolateBusy ? '读取中…' : '刷新清单' }}</button>
-          <button class="secondary" @click="dshBackupCreate()">立即备份</button>
-          <button class="secondary" :disabled="dshIsolateBusy" @click="dshIsolatePreview()">预览改动</button>
+          <button class="utils-btn utils-primary" :disabled="dshIsolateBusy" @click="dshIsolateRefresh()">{{ dshIsolateBusy ? '读取中…' : '刷新清单' }}</button>
+          <button class="secondary utils-btn utils-secondary" @click="dshBackupCreate()">立即备份</button>
+          <button class="secondary utils-btn utils-secondary" :disabled="dshIsolateBusy" @click="dshIsolatePreview()">预览改动</button>
         </div>
         <!-- ⚠️ 「说明」不能放进上面那个 .btn-row：.btn-row 的 `flex: 1` 会展开成 `flex-basis: 0`，
              而 .link-btn 的 `padding: 0` 让「文字撑出宽度」这条退路也没了 —— 两者相加宽度恒为 0，
@@ -5802,7 +6744,7 @@ onUnmounted(() => {
 
           <template v-else>
             <div class="fold">
-              <button class="link-btn" @click="dshIsolateFolds.list = !dshIsolateFolds.list">
+              <button class="link-btn utils-btn utils-secondary" @click="dshIsolateFolds.list = !dshIsolateFolds.list">
                 {{ dshIsolateFolds.list ? '收起候选' : '展开候选' }}（已勾 {{ dshIsolatePicked.size }} / 共 {{ dshIsolate.items.length }} 条）
               </button>
               <!-- 用小胶囊样式而不是 .btn-row：上一行是 12px 的下划线链接，
@@ -5855,7 +6797,7 @@ onUnmounted(() => {
                    早先这两层各抄了一份一模一样的行模板，改一处漏一处，加个徽章得改两遍。 -->
               <template v-for="g in dshIsolateGroups" :key="g.key">
                 <div class="iso-tier">
-                  <button class="link-btn" @click="dshIsolateToggleTier(g.key)">
+                  <button class="link-btn utils-btn utils-secondary" @click="dshIsolateToggleTier(g.key)">
                     {{ dshIsolateTierFolds[g.key] ? '▸' : '▾' }} {{ g.label
                     }}（{{ dshIsolateGroupCount(g) }} 条）
                   </button>
@@ -5866,7 +6808,7 @@ onUnmounted(() => {
                     <!-- 双轴时的内层组头：用 iso-tier-sub 与主组头拉开层级。
                          单轴时 dshIsolateSubLevels 只回一个「无头层」（head 为 false），不渲染组头。 -->
                     <div v-if="lvl.head" class="iso-tier iso-tier-sub">
-                      <button class="link-btn" @click="dshIsolateToggleTier(lvl.key)">
+                      <button class="link-btn utils-btn utils-secondary" @click="dshIsolateToggleTier(lvl.key)">
                         {{ dshIsolateTierFolds[lvl.key] ? '▸' : '▾' }} {{ lvl.label }}（{{ lvl.items.length }} 条）
                       </button>
                       <span class="iso-tier-hint">{{ lvl.hint }}</span>
@@ -5892,7 +6834,7 @@ onUnmounted(() => {
                              状态未知的也不给：连它现在开没开都不知道，就不该让一键把它翻过去。 -->
                         <button
                           v-if="it.source === 'patch' && it.disabled !== undefined"
-                          class="secondary patch-btn"
+                          class="secondary patch-btn utils-btn utils-secondary"
                           :disabled="!!dshPatchPending"
                           @click.prevent="dshPatchToggle({ id: it.id, disabled: it.disabled, hasConfig: it.hasConfig, line: it.line })"
                         >{{ dshPatchPending === it.id ? '写入中…' : (it.disabled ? '启用' : '禁用') }}</button>
@@ -5917,8 +6859,8 @@ onUnmounted(() => {
               </div>
             </div>
             <div class="btn-row">
-              <button class="danger" :disabled="dshIsolateBusy" @click="dshIsolateConfirm()">{{ dshIsolateBusy ? '写入中…' : '确认隔离（先建快照）' }}</button>
-              <button class="secondary" @click="dshIsolatePlan = null">取消</button>
+              <button class="danger utils-btn utils-danger" :disabled="dshIsolateBusy" @click="dshIsolateConfirm()">{{ dshIsolateBusy ? '写入中…' : '确认隔离（先建快照）' }}</button>
+              <button class="secondary utils-btn utils-secondary" @click="dshIsolatePlan = null">取消</button>
             </div>
           </template>
         </template>
@@ -5928,7 +6870,7 @@ onUnmounted(() => {
              早先它夹在说明与候选之间，把「预览改动 → 确认隔离」这条动作链硬生生截断，
              用户从预览滚到确认要跨过整块快照管理（份数/还原/命名/删除/清理）。 -->
         <div class="fold">
-          <button class="link-btn" @click="dshBackupFolds.list = !dshBackupFolds.list">
+          <button class="link-btn utils-btn utils-secondary" @click="dshBackupToggleList()">
             {{ dshBackupFolds.list ? '收起快照' : '展开快照' }}（{{ dshBackups?.snapshots?.length || 0 }} 份，保留最近 {{ dshBackups?.max ?? 20 }} 份）
           </button>
           <div v-if="dshBackupFolds.list">
@@ -5943,12 +6885,12 @@ onUnmounted(() => {
                   :min="dshBackups?.keepMin ?? 1"
                   :max="dshBackups?.keepMax ?? 200"
                   :value="dshKeepDraft ?? (dshBackups?.max ?? 20)"
-                  @input="dshKeepDraft = Number(($event.target as HTMLInputElement).value)"
+                  @input="dshKeepDraft = (($event.target as HTMLInputElement).value.trim() === '' ? null : Number(($event.target as HTMLInputElement).value))"
                 />
-                <button class="secondary patch-btn" :disabled="dshKeepDraft === null || dshKeepBusy" @click="dshSaveKeep()">
+                <button class="secondary patch-btn utils-btn utils-secondary" :disabled="dshKeepDraft === null || dshKeepBusy" @click="dshSaveKeep()">
                   {{ dshKeepBusy ? '保存中…' : '保存' }}
                 </button>
-                <button class="secondary patch-btn" @click="dshPruneNow()">立即清理</button>
+                <button class="secondary patch-btn utils-btn utils-secondary" @click="dshPruneNow()">立即清理</button>
                 <span class="hint bak-keep-note">「已知良好」与手动命名的备份不受这个数限制</span>
               </div>
 
@@ -5965,13 +6907,13 @@ onUnmounted(() => {
                   </div>
                   <div class="bak-actions">
                     <button
-                      class="secondary patch-btn"
+                      class="secondary patch-btn utils-btn utils-secondary"
                       :class="{ 'bak-confirm': dshRestoreConfirm === s.dirName }"
                       @click="dshBackupRestore(s.dirName)"
                     >{{ dshRestoreConfirm === s.dirName ? '确认还原' : '还原' }}</button>
-                    <button class="secondary patch-btn" @click="dshToggleKnownGood(s)">{{ s.knownGood ? '取消标记' : '标为已知良好' }}</button>
-                    <button class="link-btn" @click="dshRenameStart(s)">{{ s.name ? '改名' : '命名' }}</button>
-                    <button class="link-btn bak-del" :class="{ 'bak-confirm': dshDeleteConfirm === s.dirName }" @click="dshDeleteSnapshot(s.dirName)">
+                    <button class="secondary patch-btn utils-btn utils-secondary" @click="dshToggleKnownGood(s)">{{ s.knownGood ? '取消标记' : '标为已知良好' }}</button>
+                    <button class="link-btn utils-btn utils-secondary" @click="dshRenameStart(s)">{{ s.name ? '改名' : '命名' }}</button>
+                    <button class="link-btn bak-del utils-btn utils-secondary" :class="{ 'bak-confirm': dshDeleteConfirm === s.dirName }" @click="dshDeleteSnapshot(s.dirName)">
                       {{ dshDeleteConfirm === s.dirName ? '确认删除' : '删除' }}
                     </button>
                   </div>
@@ -5986,8 +6928,8 @@ onUnmounted(() => {
                       @keyup.enter="dshRenameSave()"
                       @keyup.esc="dshRenameCancel()"
                     />
-                    <button class="secondary patch-btn" @click="dshRenameSave()">保存</button>
-                    <button class="link-btn" @click="dshRenameCancel()">取消</button>
+                    <button class="secondary patch-btn utils-btn utils-secondary" @click="dshRenameSave()">保存</button>
+                    <button class="link-btn utils-btn utils-secondary" @click="dshRenameCancel()">取消</button>
                   </div>
                 </div>
               </template>
@@ -5996,7 +6938,7 @@ onUnmounted(() => {
         </div>
 
         <div class="fold">
-          <button class="link-btn" @click="dshIsolateFolds.help = !dshIsolateFolds.help">{{ dshIsolateFolds.help ? '收起说明' : '说明' }}</button>
+          <button class="link-btn utils-btn utils-secondary" @click="dshIsolateFolds.help = !dshIsolateFolds.help">{{ dshIsolateFolds.help ? '收起说明' : '说明' }}</button>
           <div v-if="dshIsolateFolds.help" class="guide">
             <p class="guide-use"><strong>为什么清单里有 200 多条：</strong>候选是<strong>用户层 patch 里已有的条目</strong> ∪ <strong>组装树里读到的插件</strong>。前者是「你已经写过的」，后者写进去等于<strong>新加</strong>一条 patch —— 只列前者的话，你想禁的第三方插件往往根本不在清单里，会找不到入口。加起来实测常有 200 条以上，用上面的分组轴收窄。</p>
             <p class="guide-use"><strong>为什么候选要读组装树：</strong>实测写一个<strong>不存在的 id</strong>，dsh 只在 stderr 打一行 <code>patch: entry "X" not found</code>、退出码 0、启动照常 —— 也就是「写坏了不报错」。所以候选先拿一份真实存在的条目，让你<strong>勾不到拼错的 id</strong>。读不到组装树时降级为「只有 patch 里的条目」，不把整件事判死。</p>
@@ -6013,11 +6955,338 @@ onUnmounted(() => {
         </div>
       </template>
     </section>
+    <!-- [dsh] dsh 插件市场：浏览/搜索/筛选官方目录并安装插件。
+         ⚠️ 本 Tab 里**唯一会联网**的卡 —— 其余卡都在 hint 里写明「不发网络请求」，
+         所以这张反过来必须显式声明会联网，且**默认一个请求都不发**：
+         展开只读一次本地已装状态，要点「进入市场」+「加载目录」才出站（见 dshMarketRevealed）。
+         联网警示在「进入市场」前后各留一份（文案不同）—— 出站点在后面，不能只在入口说一次。 -->
+    <section v-if="activeTab === 'dev'" class="card dsh-card">
+      <div class="card-head">
+        <h2 class="card-toggle" @click="toggleDevCard('dshMarket')">
+          <span class="caret">{{ devFolds.dshMarket ? '▾' : '▸' }}</span>dsh 插件市场
+          <span v-if="!devFolds.dshMarket" class="card-sum">{{ dshMarketSummary }}</span>
+        </h2>
+      </div>
+      <template v-if="devFolds.dshMarket">
+      <!-- 入口态：按钮 + 一句介绍 + 联网警示。
+           ⚠️ 「进入市场」一旦点过，这三样里的**按钮与介绍**就该退场 —— 用户已经在市场里了，
+              再摆一个「进入市场」是死按钮，介绍也成了废话。但**联网警示必须留下**：
+              展开后紧接着就是「加载目录 / 强制重抓」这些真正出站的按钮，警示的落点正是那里，
+              跟着按钮一起消失等于在最该提醒的位置把话收走。
+              所以这里按 dshMarketRevealed 分成两态，而不是整块 v-if 掉。 -->
+      <template v-if="!dshMarketRevealed">
+        <p class="hint">
+          浏览 dsh 插件目录（4000+ 条），搜到后<strong>直接装进 profile</strong>。
+        </p>
+        <p class="hint">
+          ⚠️ <strong>本卡会联网</strong>（其余卡片只读本地文件）。默认不发请求：展开只读一次已装状态，
+          点「进入市场」才出站。
+        </p>
+        <div class="btn-row">
+          <button class="utils-btn utils-primary" @click="dshMarketRevealed = true">进入市场</button>
+        </div>
+      </template>
+      <p v-else class="hint">
+        ⚠️ <strong>本卡会联网</strong>（其余卡片只读本地文件）—— 点下面的「加载目录」才出站，
+        在此之前只读本地已装状态。
+      </p>
+
+      <template v-if="dshMarketRevealed">
+      <!-- 来源设置整块收进折叠：默认只留「加载目录」按钮，想调源才展开。
+           两段来源说明（竞速机制 + 设置不触发抓取）合并成一段放进折叠里 ——
+           说明与设置放一起，展开就看到全部上下文，不用回到上面找。 -->
+      <div class="fold">
+        <button class="link-btn utils-btn utils-secondary" @click="dshMarketFolds.source = !dshMarketFolds.source">
+          {{ dshMarketFolds.source ? '收起来源设置' : '来源设置' }}（{{ dshMarketSourceShort }}）
+        </button>
+        <div v-if="dshMarketFolds.source" class="guide">
+          <p class="hint">
+            ⚡ <strong>多源并发竞速，先到先用</strong>，其余立刻取消。官方源 4.37MB 实测 52–99 秒（还常连不上），
+            npm 镜像只有 1.09MB、0.2–0.7 秒，<strong>内容同源</strong>，所以官方源默认关闭；勾上它不影响快源，只是多占一条连接。
+            下方单选只改偏好、<strong>不触发抓取</strong>，抓取由「加载目录」发起；先「测速」再「用最快的」可挑出当前网络最快的一条。
+          </p>
+          <div class="mkt-src">
+            <label class="mkt-src-row">
+              <input type="radio" :value="''" v-model="cfg.dshMarketRegistry">
+              <span>默认（宿主内置，当前为延迟最低的一条）</span>
+            </label>
+            <label v-for="r in DSH_MARKET_REGISTRIES" :key="r.id" class="mkt-src-row">
+              <input type="radio" :value="r.url" v-model="cfg.dshMarketRegistry">
+              <span>{{ r.label }}</span>
+              <span v-if="dshMarketPingOf(r.url)" class="mkt-src-ms" :class="{ 'mkt-src-bad': !dshMarketPingOf(r.url)?.ok }">
+                {{ dshMarketPingOf(r.url)?.ok ? (dshMarketPingOf(r.url)?.ms + ' ms') : '测不通' }}
+              </span>
+            </label>
+            <label class="mkt-src-row">
+              <input type="checkbox" v-model="cfg.dshMarketOfficial">
+              <span>同时让官方源参赛（慢，但来源最权威）</span>
+            </label>
+            <div class="btn-row mkt-src-btns">
+              <button class="utils-btn utils-secondary" :disabled="dshMarketPingBusy" @click="dshMarketPingRun()">{{ dshMarketPingBusy ? '测速中…' : '测速' }}</button>
+              <button class="utils-btn utils-secondary" :disabled="dshMarketPingBusy || !dshMarketPing.some(x => x.ok)" @click="dshMarketUseFastest()">用最快的</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <!-- 安装机制收进折叠：展开卡片时默认只留按钮行。
+           这段是「为什么可以信它」的解释，不是操作步骤，常驻两行会压住下面的列表；
+           但它关系到用户敢不敢点安装，所以不能删，做成一行提示 + 可展开。 -->
+      <div class="fold">
+        <button class="link-btn utils-btn utils-secondary" @click="dshMarketFolds.install = !dshMarketFolds.install">
+          {{ dshMarketFolds.install ? '收起安装说明' : '安装说明' }}（快照 + 回读校验；装完需重启 dsh）
+        </button>
+        <div v-if="dshMarketFolds.install" class="guide">
+          <p class="hint">
+            ⚠️ 安装走 <code>pnpm add --dir &lt;profiles/{{ dshPatchProfile }}&gt;</code> 写进 profile 的
+            <code>package.json</code>。<strong>写入前强制建快照，装完回读校验</strong>（dsh 对写坏的配置不报错，不能只信 pnpm 退出码）。
+          </p>
+          <p class="hint">
+            ⚠️ 装完/禁用后 <strong>dsh 需重新加载才生效</strong>；不会自动重启（会掐掉你正在跑的会话），
+            由你点「重启 dsh」。
+          </p>
+        </div>
+      </div>
+      <div class="btn-row">
+        <button class="utils-btn utils-primary" :disabled="dshMarketBusy" @click="dshMarketLoad(false)">{{ dshMarketBusy ? '加载中…' : (dshMarket ? '刷新目录' : '加载目录') }}</button>
+        <button class="secondary utils-btn utils-secondary" :disabled="dshMarketBusy" @click="dshMarketLoad(true)">强制重抓</button>
+        <button class="secondary utils-btn utils-secondary" :disabled="dshMarketStatusBusy" @click="dshMarketRefreshStatus()">刷新已装状态</button>
+        <button class="secondary utils-btn utils-secondary" @click="dshRestartNow()">重启 dsh</button>
+      </div>
+      <p v-if="dshMarketFlash.msg" class="msg" :class="msgCls(dshMarketFlash)">{{ dshMarketFlash.msg }}</p>
+
+      <!-- pnpm 构建拦截的引导（只在本卡出现过一次 allowBuilds 失败后显示）。
+           ⚠️ 为什么不能自动帮用户写：那把 key 带 commit hash，只有在 dsh 报错时才出现；
+              而且它是 pnpm 的**安全机制**（阻止来源不明的包在安装时跑构建脚本），
+              替用户静默放行等于把这个机制废掉。所以这里只把原文和位置摆清楚，写由用户决定。 -->
+      <template v-if="dshMarketAllowBuilds">
+        <p class="hint">
+          ⚠️ <strong>pnpm 拦下了构建脚本</strong>：<code>{{ dshMarketAllowBuilds.name || dshMarketAllowBuilds.spec }}</code>
+          靠 <code>prepare</code> 在安装时构建，pnpm 默认不放行。这不是失败，是安全机制 —— 显式允许后再装一次。
+        </p>
+        <p class="hint">
+          把这行加进 <code>{{ dshMarketAllowBuilds.file }}</code> 的 <code>allowBuilds:</code> 下（缩进与已有条目一致），保存后重装：
+        </p>
+        <p class="hint"><code>{{ dshMarketAllowBuilds.key }}: true</code></p>
+        <p class="hint">
+          ⚠️ 放行后该包安装时<strong>可执行任意脚本</strong>，先确认来源可信。key 带 commit hash，<strong>装前无法预知</strong>，
+          所以这类插件注定先失败一次。
+        </p>
+        <div class="btn-row">
+          <button class="secondary utils-btn utils-secondary" @click="dshMarketAllowBuilds = null">知道了</button>
+        </div>
+      </template>
+
+      <label v-if="dshMarket && dshMarket.ok" class="field row">
+        <span class="label">数据来源</span>
+        <span class="ver">{{ dshMarketSourceText }}</span>
+      </label>
+      <label v-if="dshMarketStatus" class="field row">
+        <span class="label">写入位置</span>
+        <span class="ver" :title="dshMarketStatus.file">{{ dshMarketStatus.file }}</span>
+      </label>
+
+      <!-- 还没加载：给一句话，不摊空列表（空列表会被误读成「目录里没有插件」） -->
+      <p v-if="!dshMarketLoaded" class="hint">点「加载目录」抓取插件清单（默认走 npm 镜像，约 1MB；首次约 1 秒，之后 60 秒内复用缓存）。</p>
+
+      <template v-else-if="dshMarket && !dshMarket.ok">
+        <p class="hint">{{ dshMarket.error || '目录加载失败，请稍后重试。' }}</p>
+      </template>
+
+      <template v-else-if="dshMarket && dshMarket.ok">
+        <!-- 离线降级：内容不是刚抓的，必须挡在最前面 —— 用户会照 stars/downloads 做判断 -->
+        <p v-if="dshMarket.stale" class="hint">
+          ⚠️ 在线来源都取不到（{{ dshMarket.staleReason || '未知原因' }}），显示的是<strong>上次抓到的目录副本</strong>，可能已过期。
+        </p>
+
+        <!-- 筛选器收进折叠：浏览的主体是列表，三个筛选控件常驻会把列表挤下去 -->
+        <div class="fold">
+          <button class="link-btn utils-btn utils-secondary" @click="dshMarketFolds.filters = !dshMarketFolds.filters">
+            {{ dshMarketFolds.filters ? '收起筛选' : '筛选与排序' }}
+          </button>
+          <div v-if="dshMarketFolds.filters" class="guide">
+            <label class="field row">
+              <span class="label">关键词</span>
+              <input v-model="dshMarketKeyword" type="text" maxlength="60" placeholder="插件名 / 作者 / 描述" />
+            </label>
+            <label class="field row">
+              <span class="label">分类</span>
+              <select v-model="dshMarketCategory">
+                <option value="">全部（{{ dshMarketCategories.length }} 类）</option>
+                <option v-for="c in dshMarketCategories" :key="c.key" :value="c.key">{{ c.zh || c.en || c.key }}</option>
+              </select>
+            </label>
+            <div class="iso-axis">
+              <span class="iso-axis-label">范围</span>
+              <button class="iso-axis-btn" :class="{ 'iso-axis-on': dshMarketState === 'all' }" @click="dshMarketState = 'all'">全部</button>
+              <button class="iso-axis-btn" :class="{ 'iso-axis-on': dshMarketState === 'installed' }" @click="dshMarketState = 'installed'">已装</button>
+              <button class="iso-axis-btn" :class="{ 'iso-axis-on': dshMarketState === 'notInstalled' }" @click="dshMarketState = 'notInstalled'">未装</button>
+              <!-- 「只看可更新」单开一个开关而不并进「范围」三选一：可更新必然已装，
+                   并进去会出现「已装/未装/可更新」这种互斥关系不成立的选项 -->
+              <button
+                class="iso-axis-btn"
+                :class="{ 'iso-axis-on': dshMarketOnlyUpdate }"
+                :disabled="!dshMarketUpdateCount"
+                :title="dshMarketUpdateCount ? '只看已装且有新版的' : '当前没有可更新的插件'"
+                @click="dshMarketOnlyUpdate = !dshMarketOnlyUpdate"
+              >只看可更新{{ dshMarketUpdateCount ? '（' + dshMarketUpdateCount + '）' : '' }}</button>
+            </div>
+            <div class="iso-axis">
+              <span class="iso-axis-label">排序</span>
+              <button class="iso-axis-btn" :class="{ 'iso-axis-on': dshMarketSort === 'downloads' }" @click="dshMarketSort = 'downloads'">下载量</button>
+              <button class="iso-axis-btn" :class="{ 'iso-axis-on': dshMarketSort === 'stars' }" @click="dshMarketSort = 'stars'">星标</button>
+              <button class="iso-axis-btn" :class="{ 'iso-axis-on': dshMarketSort === 'added' }" @click="dshMarketSort = 'added'">最新收录</button>
+              <button class="iso-axis-btn" :class="{ 'iso-axis-on': dshMarketSort === 'name' }" @click="dshMarketSort = 'name'">名称</button>
+            </div>
+            <p v-if="!dshMarketStatus" class="hint">还没读到本地已装状态，「已装 / 未装」两个筛选项暂时不会过滤（读不到就不冒充未安装）。</p>
+          </div>
+        </div>
+
+        <!-- 空态：把「筛掉的原因」说清楚，并带上全量条数 —— 只说「没有符合条件」
+             会让人怀疑是目录没加载好，而不是自己筛得太窄 -->
+        <p v-if="!dshMarketList.length" class="hint">
+          没有符合条件的插件（目录共 {{ dshMarket.count || dshMarket.plugins?.length || 0 }} 条）
+          —— 换个关键词，或把「分类 / 范围」放宽到「全部」。
+        </p>
+
+        <template v-else>
+          <!-- 外面这层只负责给滚动条留槽位（见 .mkt-scroll）：滚动发生在里面的 .mkt-list，
+               槽位留在外面，条目就不会被滚动条压住 -->
+          <div class="mkt-scroll">
+          <div class="mkt-list">
+            <div v-for="(p, pi) in dshMarketPageList" :key="p.spec + '|' + p.name" class="mkt-item">
+              <div class="mkt-head">
+                <span class="mkt-name" :title="p.owner ? '作者：' + p.owner : ''">{{ p.name }}</span>
+                <span v-if="dshMarketHitAt(pi)" class="patch-tag">已装</span>
+                <!-- 「可更新」只在**确定**有新版时出（state==='update'）：
+                     目录没给版本的条目 state 是 'unknown'，不能标成可更新 -->
+                <span v-if="dshMarketHasUpdate(p)" class="patch-tag tag-update" :title="dshMarketUpdateTip(p)">可更新</span>
+                <span v-if="dshMarketHitAt(pi)?.disabled" class="patch-state state-off">已禁用</span>
+                <span v-else-if="dshMarketHitAt(pi)?.inDeps && !dshMarketHitAt(pi)?.inPatch" class="patch-state state-unknown">包在磁盘，未写 patch</span>
+                <!-- ⚠️ 「需构建」与「不认识」是两回事，必须分开说：
+                     前者有按钮（装一次、按引导加 allowBuilds 再装一次就能成），
+                     后者连按钮都不给（我们不知道拿什么去装，点了必然失败） -->
+                <span v-if="p.needsBuild" class="patch-tag" title="该来源靠 prepare 脚本在安装时构建，pnpm 默认拦截构建脚本">需构建</span>
+                <span v-if="!p.specKind" class="patch-tag">目录未给可识别的安装方式</span>
+                <span class="mkt-pin">{{ dshMarketPinText(p) }}</span>
+              </div>
+              <p v-if="p.descZh || p.descEn" class="mkt-desc">{{ p.descZh || p.descEn }}</p>
+              <div class="mkt-foot">
+                <span class="mkt-cat">{{ dshMarketCategories.find((c) => c.key === p.category)?.zh || p.category || '未分类' }}</span>
+                <span class="mkt-npm">{{ p.spec || p.npm || '（目录没给安装方式）' }}</span>
+                <!-- 已装版本 → 目录版本：只在**比得出来**时出（目录没给版本的条目 latest 是空，
+                     写「? → ?」纯属噪音）。
+                     ⚠️ 左侧取的是 node_modules 里的**实装版本**（裸 `0.5.11`），不是声明范围 ——
+                     改口径前这里放的是 `^0.5.11` 这种范围原文，再被硬拼一个 `v` 前缀，
+                     渲染成 `v^0.5.11` 这种不成立的写法，也答不了「我现在装的是哪版」。
+                     实在读不到实装版本（包在磁盘但 node_modules 里没有）才退回显示声明范围，
+                     此时不带 v —— `v^0.5.11` 不能出现。 -->
+                <span v-if="dshMarketUpdateOf(p)?.latest" class="mkt-ver" :title="dshMarketUpdateTip(p)">
+                  {{ dshMarketVersionText(p) }}
+                </span>
+                <span class="mkt-spacer"></span>
+                <!-- 认不出 spec 的条目**不给安装按钮**：不摆一个注定失败的按钮让用户点 -->
+                <button
+                  v-if="p.specKind && !dshMarketHitAt(pi)?.inDeps"
+                  class="secondary patch-btn utils-btn utils-secondary"
+                  :disabled="dshMarketBusy"
+                  :title="p.needsBuild ? '该来源靠 prepare 脚本构建，pnpm 默认会拦一次；失败后按界面指引加 allowBuilds 再试' : ''"
+                  @click="dshMarketPreviewInstall(p)"
+                >{{ dshMarketPending === p.spec ? '处理中…' : (p.needsBuild ? '安装（需构建）' : '安装') }}</button>
+                <template v-else-if="p.specKind && dshMarketHitAt(pi)?.inDeps">
+                  <!-- 「更新」只在**确定**有新版时出：放进已装分支里，因为没装的东西没有「更新」
+                       这个概念（那是安装）。更新=按目录 spec 重装，会改写 package.json 里的范围 -->
+                  <button
+                    v-if="dshMarketHasUpdate(p)"
+                    class="primary patch-btn utils-btn utils-primary"
+                    :disabled="dshMarketBusy"
+                    title="按目录里的安装方式重装一次（会改写 profile/package.json 里的版本范围）"
+                    @click="dshMarketPreviewUpdate(p)"
+                  >{{ dshMarketPending === p.spec ? '处理中…' : '更新' }}</button>
+                  <button
+                    class="secondary patch-btn utils-btn utils-secondary"
+                    :disabled="dshMarketBusy || dshMarketHitAt(pi)?.disabled"
+                    @click="dshMarketPreviewUninstall(p, false)"
+                  >{{ dshMarketHitAt(pi)?.disabled ? '已禁用' : '禁用（留包）' }}</button>
+                  <button
+                    class="link-btn bak-del utils-btn utils-secondary"
+                    :disabled="dshMarketBusy"
+                    title="从 profile 里彻底删掉这个包（npm uninstall），只删这一个包名，不做依赖反查"
+                    @click="dshMarketPreviewUninstall(p, true)"
+                  >彻底删除</button>
+                </template>
+                <a v-if="p.page || p.url" class="link-btn utils-btn utils-secondary" :href="p.page || p.url" target="_blank" rel="noreferrer">主页</a>
+              </div>
+            </div>
+            <!-- 「再加载」条**放进滚动区内部**：原先放在列表外面，用户得先滚到底才知道
+                 还有未显示条目；放进列表末尾后，滚到底自然就看到它，按钮不再与列表脱节。
+                 做成一条占满宽度的行（而不是 .btn-row 里的按钮），视觉上像列表的「续页尾巴」。 -->
+            <button
+              v-if="dshMarketRestCount"
+              class="mkt-more utils-btn utils-secondary"
+              @click="dshMarketShown += DSH_MARKET_PAGE"
+            >再加载 {{ Math.min(DSH_MARKET_PAGE, dshMarketRestCount) }} 条（还有 {{ dshMarketRestCount }} 条未显示）</button>
+          </div>
+          </div>
+
+          <!-- 截断计数另在列表外说一句：滚动区内的话，没滚到底的人永远不知道被截断了 -->
+          <p v-if="dshMarketRestCount" class="hint mkt-rest">
+            共 {{ dshMarketList.length }} 条符合条件，已显示前 {{ dshMarketPageList.length }} 条。
+          </p>
+        </template>
+
+        <!-- 待确认的安装/卸载计划：与「插件开关」卡同一套手势 —— 先摆出来再写 -->
+        <template v-if="dshMarketPlan">
+          <p class="hint">
+            {{ dshMarketPlan.action === 'install' ? '将安装' : dshMarketPlan.action === 'remove' ? '将彻底删除' : '将禁用' }}
+            <strong>{{ dshMarketPlan.npm }}</strong>（{{ dshMarketPlan.name }}）：
+          </p>
+          <p class="hint"><code>{{ dshMarketPlan.message }}</code></p>
+          <!-- 进行中的进度区：npm 要跑完才返回，github/tarball 来源还要 clone + 构建，
+               等待可能长达几分钟。这里给出「在做什么 + 已等多久 + 实时输出」，
+               让等待可见 —— 此前只有一个静止的「写入中…」，用户不知道到底动没动。 -->
+          <div v-if="dshMarketTicking" class="mkt-progress">
+            <p class="mkt-progress-head">
+              <span class="mkt-spin" aria-hidden="true"></span>
+              正在{{ dshMarketActionLabel() }}…已等 {{ dshMarketElapsedText() }}
+            </p>
+            <p class="hint mkt-progress-phase">{{ dshMarketPhaseText() }}</p>
+            <p v-if="dshMarketLastCmd" class="hint mkt-progress-cmd"><code>{{ dshMarketLastCmd }}</code></p>
+            <pre v-if="dshMarketLogTail" ref="dshMarketLogEl" class="mkt-progress-log">{{ dshMarketLogTail }}</pre>
+            <p v-else class="hint">还没有输出 —— 正在建快照、准备 npm 进程。带构建的来源首次会更慢。</p>
+            <p class="hint">请不要关掉本页：npm 由宿主进程托管，关页不会中断，但也看不到结果。</p>
+          </div>
+          <div class="btn-row">
+            <button
+              class="danger utils-btn utils-danger"
+              :disabled="dshMarketBusy"
+              @click="dshMarketConfirm()"
+            >{{ dshMarketBusy ? `正在${dshMarketActionLabel()}…` : '确认（先建快照）' }}</button>
+            <button class="secondary utils-btn utils-secondary" @click="dshMarketPlan = null">取消</button>
+          </div>
+        </template>
+
+        <div class="fold">
+          <button class="link-btn utils-btn utils-secondary" @click="dshMarketFolds.help = !dshMarketFolds.help">{{ dshMarketFolds.help ? '收起说明' : '说明' }}</button>
+          <div v-if="dshMarketFolds.help" class="guide">
+            <p class="guide-use"><strong>目录从哪来：</strong>默认走 npm 镜像（<code>registry.npmmirror.com</code> 的 <code>dsh-plugin-catalog</code>，与官方同源但只有 1.09MB）。勾「官方源」会让 <code>awesome-dsh-plugin.com/plugins.json</code>（4.37MB）一起参赛。多源<strong>并发竞速、先到先用</strong>；全挂则用本地副本并标「可能已过期」。也可填自定义 URL（优先于镜像）。</p>
+            <p class="guide-use"><strong>为什么默认不联网：</strong>本 Tab 其余卡片展开即读本地文件，唯独这张要发 HTTP。所以展开只读已装状态，点「进入市场」→「加载目录」才抓取；来源单选只改偏好，不触发抓取。</p>
+            <p class="guide-use"><strong>安装用什么 spec：</strong>用目录条目自带的 <code>install</code> 字段（目录作者原话），剥出末尾 spec 去装。<strong>不按 <code>npm</code> 字段拼</strong> —— 4183 条里 2033 条（48.6%）<code>npm</code> 为 null，装的是 <code>github:owner/repo</code> 或远端 <code>.tgz</code>，只认 npm 名等于判死近一半目录。三种形态：裸包名、<code>github:owner/repo</code>、<code>https://…/x.tgz</code>；认不出时<strong>不给安装按钮</strong>。</p>
+            <p class="guide-use"><strong>「需构建」是什么：</strong>github / tarball 来源靠 <code>prepare</code> 在安装时构建，pnpm 默认拦截（防止不明来源的包安装时执行代码）。报错给出带 commit hash 的 key，要写进 profile 的 <code>pnpm-workspace.yaml</code> → <code>allowBuilds</code>。<strong>装前拿不到 key</strong>，所以注定先失败一次。<strong>不会替你放行</strong> —— 那等于废掉这个安全机制。</p>
+            <p class="guide-use"><strong>禁用 vs 彻底删除：</strong>「禁用」只往 patch 写 <code>disabled: true</code>，包还在磁盘，随时改回；「彻底删除」跑 <code>npm uninstall</code>。<strong>只删你点的这个包名</strong>，不做依赖反查 —— 反查会连带删掉别的插件共用的依赖。</p>
+            <p class="guide-use"><strong>禁用为什么用短名：</strong>patch 条目 id 是你实际写的名字（常是去掉 <code>@scope/</code> 的短名），目录给的是完整包名。用完整名 append 等于新加一条指向不存在插件的条目 —— dsh <strong>不报错</strong>，只静默失效。所以先用完整名对，对不上再用短名兜。</p>
+            <p class="guide-use"><strong>缓存两层：</strong>内存 60 秒（挡反复刷新）+ 落本地存储做离线兜底。「强制重抓」绕开内存缓存真重新请求；改了来源后也会自动重抓。</p>
+          </div>
+        </div>
+      </template>
+
+      </template>
+      </template>
+    </section>
     <!-- [dsh] Codex 本地会话统计：读 ~/.codex/sessions 的 rollout JSONL，纯本地、不联网。
-         上方 5 张卡都属于 dsh，这张不是 —— 用一条纯分界线隔开即可，不写字：
+         上方 6 张卡都属于 dsh，这张不是 —— 用一条纯分界线隔开即可，不写字：
          写字会和紧邻的卡标题「Codex 会话统计」重复，反而更啰嗦。 -->
     <hr v-if="activeTab === 'dev'" class="group-sep">
-    <section v-if="activeTab === 'dev'" class="card">
+    <section v-if="activeTab === 'dev'" class="card dsh-card">
       <div class="card-head">
         <h2 class="card-toggle" @click="toggleDevCard('codex')">
           <span class="caret">{{ devFolds.codex ? '▾' : '▸' }}</span>Codex 会话统计
@@ -6035,8 +7304,8 @@ onUnmounted(() => {
       </p>
       <div class="btn-row">
         <!-- 首次展开已自动读过一次，按钮主要当「刷新」用 -->
-        <button :disabled="codexBusy" @click="codexRefresh">{{ codexBusy ? '读取中…' : (codex ? '刷新' : '读取统计') }}</button>
-        <button v-if="codex" class="secondary" :disabled="codexBusy" @click="codexClearCache">清除缓存并重扫</button>
+        <button class="utils-btn utils-primary" :disabled="codexBusy" @click="codexRefresh">{{ codexBusy ? '读取中…' : (codex ? '刷新' : '读取统计') }}</button>
+        <button v-if="codex" class="secondary utils-btn utils-secondary" :disabled="codexBusy" @click="codexClearCache">清除缓存并重扫</button>
       </div>
       <p v-if="codexFlash.msg" class="msg" :class="msgCls(codexFlash)">{{ codexFlash.msg }}</p>
 
@@ -6081,7 +7350,7 @@ onUnmounted(() => {
         />
 
         <div class="fold">
-          <button class="link-btn" @click="codexFolds.help = !codexFolds.help">{{ codexFolds.help ? '收起说明' : '说明' }}</button>
+          <button class="link-btn utils-btn utils-secondary" @click="codexFolds.help = !codexFolds.help">{{ codexFolds.help ? '收起说明' : '说明' }}</button>
           <div v-if="codexFolds.help" class="guide">
             <p class="guide-use"><strong>统计口径：</strong>优先用 <code>total_token_usage</code> 的累计差值（单调递增，一次轮次写多条 <code>token_count</code> 也不会重复计数）；累计缺失时退回 <code>last_token_usage</code>。</p>
             <p class="guide-use"><strong>模型归属：</strong>按 <code>turn_context</code> 事件里的 <code>model</code> 归类，未标注的记为 <code>codex</code>。</p>
@@ -6108,11 +7377,11 @@ onUnmounted(() => {
         <span class="ver">v{{ appVersion }}</span>
       </label>
       <div class="btn-row">
-        <button class="secondary" :disabled="updateChecking" @click="doCheckUpdate(true)">
+        <button class="secondary utils-btn utils-secondary" :disabled="updateChecking" @click="doCheckUpdate(true)">
           {{ updateChecking ? '检查中…' : '立即检查更新' }}
         </button>
-        <button class="secondary" @click="marketSearch">插件市场</button>
-        <button class="secondary" @click="openHomepage">项目主页</button>
+        <button class="secondary utils-btn utils-secondary" @click="marketSearch">插件市场</button>
+        <button class="secondary utils-btn utils-secondary" @click="openHomepage">项目主页</button>
       </div>
       <p v-if="updateMsg" class="msg" :class="[updateResult && updateResult.ok ? 'ok' : 'err', hasUpdate ? 'clickable' : '']"
          :title="hasUpdate ? '点击前往插件市场更新' : ''"
@@ -6120,7 +7389,7 @@ onUnmounted(() => {
       <p class="hint">开启后每次呼出插件自动检查一次（12 小时内最多一次），发现新版本会弹出系统通知。</p>
 
       <div class="fold">
-        <button class="link-btn" @click="aboutFolds.feedback = !aboutFolds.feedback">
+        <button class="link-btn utils-btn utils-secondary" @click="aboutFolds.feedback = !aboutFolds.feedback">
           {{ aboutFolds.feedback ? '收起反馈与建议' : '反馈与建议' }}
         </button>
         <div v-if="aboutFolds.feedback" class="guide">
@@ -6217,6 +7486,12 @@ onUnmounted(() => {
     --warn: #e0a63c;
     --bar-bg: #303133;
     color-scheme: dark;
+  }
+  /* 深色下悬停浮出的轨道：main.css 默认给的是浅色系灰，深底上会显脏，这里换成冷白 */
+  .log-box:hover::-webkit-scrollbar-track,
+  .detail-entries:hover::-webkit-scrollbar-track,
+  .mkt-list:hover::-webkit-scrollbar-track {
+    background-color: rgba(255, 255, 255, 0.09);
   }
 }
 h1 {
@@ -6322,6 +7597,17 @@ h1 {
   display: flex;
   gap: 8px;
 }
+/* 卡片头部的区间快捷切换：与 UsageChart.vue 里那份同构（等分、文字居中），
+   尺寸/配色来自 main.css 的 utils 基类。放在这里而不是沿用组件的 scoped 块 ——
+   这些按钮是本模板直接写的元素，只有 App 的哈希，引用组件内的规则匹配不上。 */
+.range-tabs {
+  display: flex;
+  gap: 4px;
+}
+.range-tab {
+  flex: 1 1 0;
+  text-align: center;
+}
 /* 开发者 Tab 两张统计卡的整卡折叠：标题即按钮，收起态在标题右侧挂一行摘要。
    摘要用次级色、可换行，保证窄窗口下不把标题挤走 */
 .card-toggle {
@@ -6374,55 +7660,22 @@ h1 {
   color: var(--err);
   white-space: nowrap;
 }
-/* 用量趋势区间切换（7 / 14 / 30 / 90 / 180 天）；.range-tabs-row 是开发者 Tab 的档位容器 */
-/* 开发者 Tab 里的图表档位：右对齐贴住图表上沿，与卡片内的按钮行区分开 */
-.range-tabs-row {
-  display: flex;
-  justify-content: flex-end;
-  margin: 4px 0 8px;
-}
-.range-tabs {
-  display: flex;
-  gap: 2px;
-  padding: 2px;
-  border: 1px solid var(--line);
-  border-radius: 9px;
-}
-.range-tab {
-  padding: 2px 9px;
-  font-size: 12px;
-  border: 0;
-  border-radius: 7px;
-  background: transparent;
-  color: var(--fg-dim);
-  cursor: pointer;
-}
-.range-tab:hover {
-  color: var(--fg);
-}
-.range-tab-on {
-  background: var(--accent);
-  color: #fff;
-}
-.range-tab-on:hover {
-  color: #fff;
-}
+/* 用量趋势区间切换与柱状图的样式**不在这里** —— 它们由 UsageChart.vue 渲染。
+   本文件是 <style scoped>，选择器会编译成 `.chart[data-v-App哈希]`，而 scoped 属性只加在
+   「本模板里直接写的元素」上；这些元素在子组件内部、只带 UsageChart 的哈希，规则整段失效。
+   症状尤其隐蔽：柱状图完全不出图（.bar-track 的 height:90px 没生效 → 柱子高 0），
+   但样式表里查得到、看着也没写错。现全部随组件放进 UsageChart.vue 自己的 scoped 块。 */
 .export-btn {
-  padding: 4px 10px;
-  font-size: 12px;
-  border-radius: 8px;
-  border: 1px solid var(--line);
-  background: transparent;
-  color: var(--fg-dim);
+  /* 尺寸与描边档配色来自 main.css 的 utils 基类；这里只补它没有的 hover 提亮。
+     注意 markup 里那些 `class="export-btn danger"` / `:class="{ danger: ... }"`：
+     它们在 scoped 块的 `[data-v]` 加持下特异性高于全局的 `.utils-danger`，
+     所以 danger 变体现在**真的会显红**（在此之前 `.export-btn.danger` 根本没写样式，
+     清除/删除类按钮一直只显示灰描边 —— 这是个既有 bug）。 */
   cursor: pointer;
 }
 .export-btn:hover:not(:disabled) {
   color: var(--fg);
   border-color: var(--accent);
-}
-.export-btn:disabled {
-  opacity: 0.45;
-  cursor: default;
 }
 .field {
   display: block;
@@ -6534,6 +7787,18 @@ select:focus,
 .ver {
   font-size: 13px;
   color: var(--fg-dim);
+  /* 值是版本号或安装路径（dsh 的「实际使用 / 全局安装 / 插件目录」），可能很长：
+     作为 .field.row 的 flex 项默认 min-width:auto 不肯收缩，长路径会把卡片撑出边界。
+     与 .field.check .label 同一处理，见那里的说明。 */
+  min-width: 0;
+  word-break: break-all;
+}
+/* 复制 / 定位的就地反馈：只靠颜色区分成败（文案相同），与 .msg.ok / .msg.err 同色系 */
+.ver.ok {
+  color: var(--ok);
+}
+.ver.err {
+  color: var(--err);
 }
 /* 贴边间距：一行四个数值（上/右/下/左） */
 .edge-row {
@@ -6586,7 +7851,17 @@ select:focus,
   word-break: break-all;
   max-height: 200px;
   overflow: auto;
+  /* 日志是等宽 pre-wrap，出不出滚动条只影响右侧留白；预留槽位免得日志变长时整块抖一下 */
+  scrollbar-gutter: stable;
   user-select: text;
+}
+/* 悬停时轨道浮出来（滚动条配色统一在 main.css，这里只补「何时显现」）。
+   伪元素上挂不了 :hover，只能写成「元素:hover 伪元素」；挂到真有滚动条的容器上，
+   鼠标在页面别处时不会误亮。 */
+.log-box:hover::-webkit-scrollbar-track,
+.detail-entries:hover::-webkit-scrollbar-track,
+.mkt-list:hover::-webkit-scrollbar-track {
+  background-color: rgba(120, 134, 170, 0.1);
 }
 /* dsh 诊断结果列表：每一项一块，明细缩进在标题下方 */
 .diag-item {
@@ -6760,6 +8035,14 @@ select:focus,
   color: var(--fg-dim);
   background: rgba(127, 127, 127, 0.15);
 }
+/* 「可更新」用实心绿：它是这批标签里唯一「建议你动手」的一个，
+   灰底跟「需构建」「已装」混在一起扫不出来。绿色与「禁用」的灰、「启用中」的蓝都不撞。 */
+.tag-update {
+  color: #2e8b57;
+  background: rgba(46, 139, 87, 0.14);
+  border: 1px solid rgba(46, 139, 87, 0.35);
+  font-weight: 500;
+}
 /* 状态徽章：已禁用 / 启用中 做成实心胶囊，两种状态颜色方向相反（灰 vs 蓝）。
    原先两者共用一个纯文字样式，「禁用」这件事全靠用户读那三个字；做成徽章后是颜色差异，扫一眼就分得出。 */
 .patch-state {
@@ -6789,9 +8072,8 @@ select:focus,
   border: 1px dashed rgba(224, 138, 46, 0.45);
 }
 .patch-btn {
+  /* 尺寸/配色走 main.css 的 utils 基类（markup 挂 .utils-btn .utils-secondary） */
   flex: none;
-  padding: 2px 10px;
-  font-size: 12px;
 }
 /* 候选行（.iso-item）里既可能有行尾开关按钮、也可能没有（source=plugin 与「状态未知」不给按钮）。
    .patch-state 的 `margin-left: auto` 只把**第一个** auto 元素推到行尾，所以：
@@ -6969,6 +8251,232 @@ select:focus,
   font-size: 12px;
   color: var(--fg-dim);
 }
+/* ===== dsh 插件市场（.mkt-*）=====
+   列表可能一次渲染 80 条（见 App.vue 的 DSH_MARKET_PAGE），条目因此压到两行：
+   head（名称 + 状态徽章 + 附加说明）与 foot（分类 + 包名 + 操作），描述单独一行。
+   不给左色条：那套（.patch-item / .iso-item）表达的是「启用 / 禁用」，而这里的
+   条目没有「行级开关」语义，色条会被读成状态。 */
+.mkt-list {
+  margin-top: 6px;
+  /* 目录列表自带滚动区：一次渲染 80 条会把整页撑得很长，用户想翻到卡片下方的
+     「待确认计划 / 说明」就得一路滚过上千行。这里给列表一个高度上限，**只有列表滚**，
+     外层页面滚动条不受影响（overscroll-behavior 防止滑到列表两端时把滚动传给页面）。
+
+     高度用 px 而非 vh：本卡下方还有「待确认计划」与说明，用 vh 时窗口一矮（或拉宽后
+     行数变少）列表就会把底下的内容顶出可视区，滚动条还会一直伸到卡片圆角上。
+     7 条 * 约 73px + 间距 ≈ 520px，是「一眼能比几条」与「不淹没卡片」的折中。
+     min() 兜住矮窗口：可视高度不足时按 60vh 收缩，不会占满整屏。
+     ⚠️ 矮窗口下 60vh 可能只剩 200 出头（连两条都放不下，滑块还短到抓不住），
+     所以再配一条 min-height 保底 —— 宁可让页面自己滚，也要保证列表是个能用的滚动区。 */
+  max-height: min(520px, 60vh);
+  min-height: 260px;
+  /* ⚠️ overflow 必须跟着 max-height 一起给：只有上限没有 overflow，浏览器不会生成
+     滚动区，而是把 80 条**全部摊开**——卡片被撑破，列表后面的「再加载 / 下一张卡」
+     会以「夹在条目中间」的样子出现（踩过一次）。 */
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  /* 滚动条槽位开在列表**外面**（.mkt-scroll 上），而不是自己 padding-right 挤——
+     挤出来的是内容的内边距，条目右边框仍会贴着滚动条，看上去像被压住。
+     开在容器上则由浏览器在列表与卡片边缘之间插一条真正的空白槽，条目完整不被遮。 */
+}
+.mkt-scroll {
+  scrollbar-gutter: stable;
+}
+/* 列表末尾的「再加载」条：占满整行、虚线框，读起来像「续页尾巴」而不是一个普通按钮。
+   宽度 100% + box-sizing 必须显式写 —— .utils-btn 基类带 padding，
+   默认 content-box 下会溢出滚动区、又催生一条横向滚动条。 */
+.mkt-more {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 8px;
+  border-style: dashed;
+  text-align: center;
+}
+/* 列表外的截断提示：右侧对齐、字号压小，只作补充不作正文 */
+.mkt-rest {
+  margin-top: 6px;
+  text-align: right;
+  font-size: 12px;
+}
+/* ── 安装/卸载进行中的进度区 ──
+   目的只有一个：让「要等几分钟」这件事可见。所以不追求好看，追求**一眼看出在动**：
+   转圈 + 秒表 + 实时输出尾部。 */
+.mkt-progress {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--card-border);
+  background: rgba(127, 127, 127, 0.06);
+}
+.mkt-progress-head {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+/* 纯 CSS 转圈：不引 GIF / SVG（零依赖），靠 border 半透明 + 旋转即可。
+   ⚠️ 本项目只跑 Chromium，animation 无需前缀 */
+.mkt-spin {
+  width: 12px;
+  height: 12px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  border: 2px solid rgba(127, 127, 127, 0.35);
+  border-top-color: currentColor;
+  animation: mkt-spin 0.8s linear infinite;
+}
+@keyframes mkt-spin {
+  to { transform: rotate(360deg); }
+}
+.mkt-progress-phase {
+  margin: 6px 0 0;
+}
+/* 命令行：允许横向滚动而不是换行 —— 长路径换行会把进度区撑得很高 */
+.mkt-progress-cmd {
+  margin: 4px 0 0;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+/* 实时输出尾部：等宽 + 限高 + 内部滚动。
+   ⚠️ `overscroll-behavior: contain` 防止滚到底后把滚动传给外层页面 */
+.mkt-progress-log {
+  margin: 6px 0 0;
+  max-height: 160px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.18);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.mkt-progress-log::-webkit-scrollbar {
+  width: 8px;
+}
+.mkt-progress-log::-webkit-scrollbar-thumb {
+  border-radius: 4px;
+  background: rgba(127, 127, 127, 0.4);
+}
+.mkt-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 6px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--card-border);
+  background: rgba(127, 127, 127, 0.05);
+}
+.mkt-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.mkt-name {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12px;
+  color: var(--fg);
+  word-break: break-all;
+  min-width: 0;
+}
+/* 下载量/星标这类附加说明：推到行尾、压暗、不换行。
+   用 margin-left: auto 而不是复用 .patch-state —— 徽章样式语义是「状态」，
+   把数据量画成徽章会和真正的「已装 / 已禁用」混淆。 */
+.mkt-pin {
+  margin-left: auto;
+  flex: none;
+  font-size: 11px;
+  color: var(--fg-dim);
+  white-space: nowrap;
+}
+/* 描述只给一行：全展开会把 80 条撑成上千行，列表内滚动区里逐条翻也很费劲 */
+.mkt-desc {
+  margin: 0;
+  font-size: 12px;
+  color: var(--fg-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.mkt-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.mkt-cat {
+  flex: none;
+  padding: 0 5px;
+  border-radius: 4px;
+  font-size: 11px;
+  color: var(--fg-dim);
+  background: rgba(127, 127, 127, 0.15);
+}
+.mkt-npm {
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 11px;
+  color: var(--fg-dim);
+  word-break: break-all;
+  min-width: 0;
+}
+/* 「v已装 → v目录」：等宽 + 略提亮。它比包名更值得看，但比按钮弱 ——
+   用亮度而不是颜色区分，免得跟同一行的「可更新」绿标抢注意力 */
+.mkt-ver {
+  flex: none;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 11px;
+  color: var(--fg);
+  opacity: 0.75;
+  white-space: nowrap;
+}
+/* 把右侧的操作按钮组推到行尾（对应 .mkt-foot 里 <span class="mkt-spacer">）。
+   .btn-row button 的 flex: 1 不适用于这里 —— .mkt-foot 不是 .btn-row。 */
+.mkt-spacer {
+  flex: 1;
+}
+/* 目录来源选择区：一行一个单/复选，右侧留出测速毫秒的位置。
+   刻意不用 .btn-row —— 那是按钮组（flex:1 拉伸），这里要的是纵向列表。 */
+.mkt-src {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel2);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.mkt-src-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.mkt-src-row > span:first-of-type {
+  flex: 1;
+  min-width: 0;
+}
+/* 测速结果：正常绿、测不通红。未测过时整个 span 不渲染（v-if），不会留空位 */
+.mkt-src-ms {
+  font-variant-numeric: tabular-nums;
+  color: var(--ok, #2e7d32);
+  font-size: 12px;
+  white-space: nowrap;
+}
+.mkt-src-bad {
+  color: var(--err, #c62828);
+}
+.mkt-src-btns {
+  margin-top: 2px;
+}
 input[type='checkbox'] {
   width: 16px;
   height: 16px;
@@ -6983,20 +8491,78 @@ input[type='checkbox'] {
 }
 .btn-row button {
   flex: 1;
-  border-radius: 8px;
-  font-size: 13px;
 }
-.btn-row button.secondary {
+/* 尺寸/配色来自 main.css 的 utils 基类（单一来源）。
+   这里只保留与布局强耦合的两条：等分拉伸、以及 `.secondary` / `.danger`
+   的**填充策略**差异 —— 参考卡片的主按钮是"无类名"，走 main.css 的
+   `button { background: none var(--blue) }` 实心蓝，而 .secondary / .danger
+   要把这个底清掉换成半透明，光靠 utils-secondary 的 background 盖不住
+   （同一个 background 简写但全局 button 规则更具体），必须显式 background: none 兜底。
+   顺带修掉一个既有 bug：`.danger` 原先只写了 background + color，没写 border
+   → 走 border: none，于是危险按钮比旁边的次按钮**矮 2px**（少一圈 1px 描边）。 */
+.btn-row button.secondary,
+.btn-row button.danger {
+  background: none;
+}
+/* ===== dsh 分组的按钮（dsh 主控 · 环境诊断 · 配置转储 · 用量统计 · 插件开关 · Codex 会话统计）=====
+   这 6 张卡原先各写各的按钮：主控卡用 .btn-row（实心蓝主 + .secondary 灰蓝、font-size 13 / 无 padding），
+   外围四张卡却把 .btn-row 当容器、里面清一色 .secondary（字号掉到按钮默认值），
+   候选行的 .patch-btn 又是 2px/10px 的迷你尺寸，分组轴 .iso-axis-btn 更是自带一套胶囊边框 ——
+   同一条动作链（刷新 → 预览 → 确认）上的按钮高矮胖瘦全不一样。
+
+   **尺寸/配色那半已经上提到 main.css 的 utils 基类**（markup 挂了 .utils-btn + 对应档），
+   这里只剩三件与 dsh 分组强耦合的事：flex 归属、胶囊圆角的例外、以及选中/危险的覆盖顺序。
+   之所以不能连这些一起上提：flex 是布局耦合（.btn-row 要等分、行尾按钮要贴内容宽），
+   而 `!important` 式的全局覆盖会误伤 .tab / .skin-cell 那些豁免件。
+
+   注意配色不再靠本块给出：.utils-secondary / .utils-danger 的 (0,1,0) 与
+   `.dsh-card .btn-row button` (0,2,1) 争时**后者赢**，所以这里只做覆盖、不做定义。 */
+.dsh-card .btn-row button {
+  flex: 1 1 auto;
+}
+/* 「运行详情」的次要动作行：全是文字按钮，贴内容宽即可 ——
+   继承上面的 flex:1 会把「刷新状态 / 定位 dsh 目录 …」也拉成等宽块状，
+   看着还是一条主按钮行，白降一级。.link-btn 的尺寸仍由基类给，这里只管排版。 */
+.dsh-card .btn-row.row-link {
+  margin-top: 6px;
+}
+.dsh-card .btn-row.row-link button {
+  flex: none;
+}
+/* 「更新版本」行：版本下拉 + 更新按钮。下拉吃满剩余宽度（.field.row select 已给 flex:1），
+   按钮贴内容宽；与上面的主操作行留一点间距，免得看成同一行。
+   注意这条按钮不在 .btn-row 里，所以不受 `.btn-row button { flex:1 }` 影响，无需再覆盖 flex。 */
+.dsh-card .dsh-update-row {
+  margin-top: 8px;
+}
+/* .iso-axis-btn 是分组轴，豁免基准圆角（胶囊），只借 utils-btn 的尺寸；
+   .dsh-card .iso-axis-btn 的 (0,2,0) 压过 .utils-btn 的 (0,1,0) */
+.dsh-card .iso-axis-btn {
+  border-radius: 999px;
+}
+.dsh-card .patch-btn,
+.dsh-card .iso-axis-btn {
+  flex: none;
+}
+/* 分组轴里「当前生效的那一轴」：.iso-axis-on 原规则靠背景+主色字表示选中，
+   这里必须排在上面的规则之后 —— 同为 (0,2,0)，后写的覆盖背景色，
+   否则选中态会被统一底色盖掉、三个分组按钮看起来一模一样。 */
+.dsh-card .iso-axis-btn.iso-axis-on {
+  border-color: var(--accent);
   background: rgba(83, 107, 169, 0.18);
   color: var(--accent);
 }
-.btn-row button.danger {
+/* 危险档（确认隔离 / 候选行禁用…）与 .btn-row button.danger 同色系。
+   同上一节：`.dsh-card .btn-row button` 的 (0,2,1) 高于 .utils-danger 的 (0,1,0)，
+   所以这里必须自己写全三色，否则实心蓝会漏出来。 */
+.dsh-card .btn-row button.danger {
   background: rgba(224, 67, 63, 0.16);
   color: var(--err);
+  border-color: rgba(224, 67, 63, 0.35);
 }
-.btn-row button:disabled {
-  opacity: 0.45;
-  cursor: default;
+.dsh-card .bak-confirm {
+  border-color: #d9534f;
+  color: #d9534f;
 }
 .msg {
   margin: 10px 0 0;
@@ -7198,12 +8764,7 @@ input[type='checkbox'] {
   flex-wrap: wrap;
 }
 .detail-toggle {
-  padding: 4px 10px;
-  font-size: 12px;
-  border-radius: 8px;
-  border: 1px solid var(--line);
-  background: transparent;
-  color: var(--fg-dim);
+  /* 尺寸/配色走 utils 基类（markup 挂 .utils-btn .utils-outline）；这里只留 hover 提亮 */
   cursor: pointer;
 }
 .detail-toggle:hover {
@@ -7284,6 +8845,8 @@ input[type='checkbox'] {
   background: var(--input-bg);
   max-height: 200px;
   overflow: auto;
+  /* 与 .log-box 同理：条目数随展开/收起变化，预留槽位避免右侧内容左右跳 */
+  scrollbar-gutter: stable;
 }
 .detail-entry {
   display: flex;
@@ -7566,63 +9129,91 @@ input[type='checkbox'] {
   min-width: 38px;
   text-align: right;
 }
-.chart {
-  display: flex;
-  align-items: flex-end;
-  gap: 8px;
-  padding-top: 6px;
+/* 用量统计卡的口径指标格（今日 / 本月 / 累计 / 轮次 / 余额）。
+   这五格原先各占一行 .field，值与单位（tokens、¥、轮）全挤在同一段文字里，
+   各行的「大数」处在不同水平位置，扫读时无法横向比较。
+   这里等分列：数字统一大一号、单位降到标签行、金额作次级说明，
+   各格的基线因此对齐 —— 一眼比出今日与本月差几倍。
+   列数用 auto-fit 而不是写死 4 或 5：余额格是 v-if 的（dsh-usage 没抓到余额时不存在），
+   写死列数会让 4 格时右边空一列、或 5 格时挤成两行里只放一个。 */
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(88px, 1fr));
+  gap: 6px;
+  margin: 10px 0 8px;
 }
-.bar-col {
-  flex: 1;
+.stat-cell {
   display: flex;
   flex-direction: column;
-  align-items: center;
-  gap: 4px;
+  gap: 1px;
   min-width: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--card-border);
+  border-radius: 8px;
+  background: var(--card-bg);
 }
-.bar-val {
-  font-size: 10px;
-  color: var(--fg-dim);
+.stat-num {
+  font-size: 17px;
+  font-weight: 600;
+  line-height: 1.25;
+  color: var(--fg);
+  /* 大数不换行：K/M 缩写后最长 5 字符，换行会让各格高度参差、基线错位 */
   white-space: nowrap;
-  height: 14px;
-}
-.bar-track {
-  width: 100%;
-  height: 90px;
-  display: flex;
-  align-items: flex-end;
-  background: var(--track);
-  border-radius: 6px;
   overflow: hidden;
+  text-overflow: ellipsis;
 }
-.bar {
-  width: 100%;
-  background: linear-gradient(180deg, #6f8ad6, var(--accent));
-  border-radius: 6px 6px 0 0;
-  transition: height 0.3s ease;
+.stat-label {
+  font-size: 11px;
+  color: var(--fg-dim);
+  /* 标签跟着 .stat-num 一起不换行 —— 一旦标签折成两行会把该格顶高、
+     与同行其它格的价值行错位。宁可省略号（完整含义都在 title 里）。 */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-.bar-day {
+.stat-sub {
   font-size: 10px;
   color: var(--fg-faint);
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-/* 14 / 30 天：柱子变窄，间距与日期字号一起收，否则会糊成一片 */
-.chart-dense {
-  gap: 3px;
+/* 累计 token 的四个分项。与 .stat-grid 分开成一行：
+   它们是读细账才看的口径，不该和「今日 / 本月」抢同一屏注意力。 */
+.stat-break {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
 }
-.chart-dense .bar-day {
-  font-size: 9px;
+.stat-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  padding: 3px 9px;
+  border-radius: 7px;
+  background: var(--track);
+  font-size: 12px;
+  color: var(--fg);
 }
-.chart-dense .bar-track {
-  border-radius: 4px;
+.stat-chip em {
+  font-style: normal;
+  font-size: 11px;
+  color: var(--fg-dim);
 }
-/* 90 / 180 天：柱子更密，间距再收一档，否则空隙会吃掉大半个图宽（卡片内容宽只有 524px） */
-.chart-ultra {
-  gap: 1px;
+/* 窄窗（uTools 侧栏拖到最窄约 420px）下四格会挤到数字截断，
+   降成两列让每格重新变宽；顺序仍是 今日 / 本月 / 累计 / 轮次，读序不变。 */
+@media (max-width: 460px) {
+  .stat-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
 }
-.chart-ultra .bar-track {
-  border-radius: 2px;
-}
+/* 各模型用量排行榜的样式**不在这里** —— 那几行由 UsageChart.vue 渲染，
+   而本文件是 <style scoped>，选择器会被编译成 `.m-row[data-v-App哈希]`，
+   只有 App.vue 模板里直接写的元素才带得上这个属性，子组件根节点以外的元素一律匹配不到。
+   早先写在这一侧，规则在构建产物里存在但整段失效（模型行掉回纯文本堆叠）。
+   现随组件放在 UsageChart.vue 自己的 scoped 块里。 */
+
 /* 今日模型占比（令牌模式）：名称 / 条 / 百分比 / 金额四列对齐 */
 .model-share {
   margin-top: 10px;

@@ -27,37 +27,174 @@ button:not(:disabled):active {
   opacity: 0.6;
 }
 
+/* ===== utils 按钮：全页统一按钮外观（单一来源）=====
+   为什么放在这里（真全局块）而不是各 .vue 的 <style scoped>：
+   本项目的 .vue 全都只有 scoped 块，子组件渲染的元素带的是**自己的**哈希，
+   父组件的 scoped 规则一律匹配不上 —— 这个坑已经踩过三次（.m-* / .chart-* 静默失效、
+   App.vue 那套 .range-tab 至今无样式）。按钮又散在 6 个文件里，写在 scoped 就是
+   逐文件复制、改一处漏一处。所以按钮基准只有这一处，各文件删掉自己的复刻版。
+
+   参数与原先 dsh Tab 内那套（.dsh-card .patch-btn 等）逐字一致，故 dsh 分组观感不变。
+
+   只放**尺寸与配色**，不放 margin / flex：那两项与所在布局强耦合（如 .fold > .link-btn
+   要 margin-top:0、.btn-row button 要 flex:1），留在各文件的 scoped 里按需覆写更清楚。
+
+   命名：`utils-` 前缀 + `utils-btn`。前者是为了不撞已有单字类名，且方便在产物里检索；
+   后者让"只想要基准尺寸、但自己有配色"的例外面板（.tab / .iso-axis-btn）也能复用。
+   值本身全部写死、不走 CSS 变量：--accent / --err 是各 scoped 块自定义的局部变量，
+   放到全局块里取不到，会静默 fallback 成继承色。 */
+
+/* 基准尺寸：任何按钮都能叠，只给盒模型不给配色 */
+.utils-btn {
+  padding: 4px 12px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.6;
+}
+
+/* 主操作：实心强调色 */
+.utils-primary {
+  background: #536ba9;
+  border-color: #536ba9;
+  color: #fff;
+}
+
+/* 次操作：半透明蓝底 + 蓝字描边 */
+.utils-secondary {
+  background: rgba(83, 107, 169, 0.18);
+  border-color: rgba(83, 107, 169, 0.3);
+  color: #536ba9;
+}
+
+/* 危险操作：半透明红底 + 红字描边 */
+.utils-danger {
+  background: rgba(224, 67, 63, 0.16);
+  border-color: rgba(224, 67, 63, 0.35);
+  color: #e0433f;
+}
+
+/* 禁用态压过各 scoped 里的 `:disabled { opacity: .45 }`：
+   后者特异性 (0,2,0)，全局 `button.utils-btn:disabled` 为 (0,2,1)，必然胜出。
+   用 0.45 而非全局那条的 grayscale —— dsh 那套原本就是压暗不脱色，保持一致。 */
+button.utils-btn:disabled {
+  filter: none;
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* hover 只兑 border-color，且仅限前两档：危险档 hover 保持红边（改蓝边会语义错乱） */
+button.utils-secondary:hover:not(:disabled),
+button.utils-outline:hover:not(:disabled) {
+  border-color: #536ba9;
+}
+
+/* 描边档：给 .export-btn / .detail-toggle 这类"透明底 + 灰字 + 灰描边"用 */
+.utils-outline {
+  background: transparent;
+  border-color: var(--line, rgba(83, 107, 169, 0.28));
+  color: var(--fg-dim, #536ba9);
+}
+
 textarea {
   display: block;
   margin: 0;
+}
+
+/* ===== 滚动条：全局唯一样式来源 =====
+   以前每个滚动块各写一套，宽度 6/8px 不一、颜色各取各的灰，同一页里能出现三种观感。
+   这里统一到一套（细、圆头、有底有芯），各滚动块不再自己复刻。
+
+   配色用**具体色值**，不走 CSS 变量：::-webkit-scrollbar-* 是伪元素，
+   变量在这层解析偶尔拿不到值（变量失效 → background-color 整条作废 → 浏览器
+   回退画成白色滑块，正是踩过的坑）。写死色值最稳，深浅两套各写一遍。
+
+   轨道给一层很淡的底（不是纯透明）：纯透明时滑块悬在内容上，滚动槽位置看不出来；
+   给 4% 的底色既圈出滚动区，又不会在卡片里切出一条明显的竖带。
+
+   ⚠️ **只写 ::-webkit-scrollbar，绝不写标准属性 `scrollbar-width` / `scrollbar-color`**：
+   Chromium 一旦看到 `scrollbar-color` 就整个接管滚动条绘制，把所有 ::-webkit-scrollbar-*
+   规则**全部忽略**——表现就是白底轨道 + 看不见的滑块（本项踩过一次，别再加回来）。
+   本项目只在 uTools（= Chromium）里跑，WebKit 前缀覆盖率足够；真要兼容 Firefox，
+   得改成给 Firefox 单独开 @supports 分支，不能两条路径混着写。 */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+  /* 关键：App.vue 的 .page 上写了 color-scheme（为了让下拉/复选框等**原生控件**
+     跟随页面主题），但 color-scheme 同时会让 Chromium 用系统原生样式画滚动条，
+     反过来盖掉下面的 ::-webkit-scrollbar-* 配色 —— 表现就是滑块变纯白、看不见。
+     在滚动条伪元素上把 color-scheme 显式关掉，等于告诉浏览器「这条滚动条我自己画」，
+     既保住原生控件的主题跟随，又拿回滚动条的完全控制权。 */
+  color-scheme: normal;
+}
+
+/* 轨道：常态几乎不可见（3% 底），只在鼠标进入时才浮出来。
+   ⚠️ 伪元素上不能挂 `:hover`（没有「滚动容器被悬停」这种选择器），只能挂到元素上写
+   `元素:hover::-webkit-scrollbar-track`。挂 `*:hover` 会让鼠标在页面任意角落都点亮
+   所有滚动槽，失去意义；所以挂到实际带滚动条的容器上（见 App.vue 的 .log-box /
+   .detail-entries / .mkt-list 与两个弹窗面板各自补的 hover 规则）。
+   这里只给**默认极淡**的底，保证即使容器没写 hover 也不会突兀。 */
+::-webkit-scrollbar-track {
+  background-color: rgba(120, 134, 170, 0.035);
+  border-radius: 10px;
+}
+
+/* 滑块：描边 + background-clip 把芯做细（10px 槽里画 8px），比实心满槽轻 */
+::-webkit-scrollbar-thumb {
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background-color: rgba(83, 107, 169, 0.42) !important;
+  background-clip: padding-box;
+  /* 内容极长时滑块会被压成一个小点，给个下限保住可抓面积。
+     部分 Chromium 版本不认，不认时无非回到原来的比例高度，无副作用。 */
+  min-height: 36px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(83, 107, 169, 0.72) !important;
+}
+
+::-webkit-scrollbar-thumb:active {
+  background-color: rgba(83, 107, 169, 0.88) !important;
+}
+
+/* 四角留白：横竖两条同时出现时交汇处不出现白块 */
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* 两端箭头不画（Chromium 默认也不画，但有的环境会带出来，显式压掉更稳） */
+::-webkit-scrollbar-button {
+  display: none;
 }
 
 @media (prefers-color-scheme: light) {
   body {
     background-color: #f4f4f4;
   }
-
-  ::-webkit-scrollbar-track-piece {
-    background-color: #f4f4f4;
-  }
-
-  ::-webkit-scrollbar-thumb {
-    border-color: #f4f4f4;
-  }
 }
 
 @media (prefers-color-scheme: dark) {
-  &::-webkit-scrollbar-track-piece {
-    background-color: #303133;
-  }
-
-  &::-webkit-scrollbar-thumb {
-    background-color: #666;
-    border-color: #303133;
-  }
-
   body {
     background-color: #303133;
     color: #fff;
+  }
+
+  /* 深色底：轨道压得更淡，滑块换成冷白，靠明度差而不是靠透明度区分 */
+  ::-webkit-scrollbar-track {
+    background-color: rgba(255, 255, 255, 0.07);
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background-color: rgba(190, 205, 240, 0.42);
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background-color: rgba(190, 205, 240, 0.66);
+  }
+
+  ::-webkit-scrollbar-thumb:active {
+    background-color: rgba(190, 205, 240, 0.82);
   }
 }

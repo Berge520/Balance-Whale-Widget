@@ -8,7 +8,38 @@
     overflow: hidden;
     background: transparent;
   }
-  :root { --whale-pad: 200px; }
+  :root {
+    --whale-pad: 200px;
+  }
+  /* ===== 滚动条 =====
+     挂件的菜单是浅色面板（见 .dshwv-menu 的 color-scheme: light），所以这里给**固定的浅色一套**，
+     不跟随系统深浅 —— 系统深色时若跟着变白，落在浅色菜单上反而更刺眼。
+     .dshwv-menu / .dshwv-models 不再各自写一套 6px 样式，统一吃这份。
+
+     配色用具体色值而非 CSS 变量：::-webkit-scrollbar-* 是伪元素，变量在这层可能解析不到，
+     失效后 background-color 整条作废 → 浏览器回退画白色滑块（设置页踩过，别再用变量）。
+
+     ⚠️ 同样**绝不写标准属性 scrollbar-width / scrollbar-color**：Chromium 一见
+     scrollbar-color 就接管绘制并忽略全部 ::-webkit-scrollbar-*。 */
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  /* 轨道常态几乎不可见，鼠标进到菜单/模型列表里才浮出来（伪元素挂不了 :hover，
+     只能写成「元素:hover 伪元素」） */
+  ::-webkit-scrollbar-track { background-color: rgba(32, 49, 112, 0.03); border-radius: 10px; }
+  .dshwv-menu:hover::-webkit-scrollbar-track,
+  .dshwv-models:hover::-webkit-scrollbar-track { background-color: rgba(32, 49, 112, 0.09); }
+  /* 描边 + background-clip 把芯做细：10px 槽里画 8px */
+  ::-webkit-scrollbar-thumb {
+    border: 1px solid transparent;
+    border-radius: 10px;
+    background-color: rgba(32, 49, 112, 0.3);
+    background-clip: padding-box;
+    /* 菜单项多时滑块会被压得很短，给个下限保住可抓面积（不认的版本忽略即可） */
+    min-height: 32px;
+  }
+  ::-webkit-scrollbar-thumb:hover { background-color: rgba(32, 49, 112, 0.52); }
+  ::-webkit-scrollbar-thumb:active { background-color: rgba(32, 49, 112, 0.68); }
+  ::-webkit-scrollbar-corner { background: transparent; }
+  ::-webkit-scrollbar-button { display: none; }
 
   .dshwv-root {
     position: fixed;
@@ -201,10 +232,6 @@
   /* 向下展开（挂件位于屏幕上方区域、按钮上方放不下时）：入场方向跟着反过来 */
   .dshwv-menu.dshwv-menu-down { transform: scale(.94) translateY(6px); }
   .dshwv-menu.dshwv-menu-down.dshwv-menu-open { transform: scale(1) translateY(0); }
-  .dshwv-menu::-webkit-scrollbar { width: 6px; }
-  .dshwv-menu::-webkit-scrollbar-thumb { background: rgba(32,49,112,.22); border-radius: 3px; }
-  .dshwv-menu::-webkit-scrollbar-thumb:hover { background: rgba(32,49,112,.36); }
-  .dshwv-menu::-webkit-scrollbar-track { background: transparent; }
 
   /* —— 行 —— */
   .dshwv-menu-row {
@@ -222,10 +249,6 @@
   /* 模型多时不给菜单无限加高（会把下面的组挤出可视区）：列表内部滚动。
      比「只列前 N 个」好在不把模型藏起来，每个都还点得到 */
   .dshwv-models { max-height: 168px; overflow-y: auto; overscroll-behavior: contain; }
-  .dshwv-models::-webkit-scrollbar { width: 6px; }
-  .dshwv-models::-webkit-scrollbar-thumb { background: rgba(32,49,112,.22); border-radius: 3px; }
-  .dshwv-models::-webkit-scrollbar-thumb:hover { background: rgba(32,49,112,.36); }
-  .dshwv-models::-webkit-scrollbar-track { background: transparent; }
   .dshwv-model-row {
     display: flex; align-items: center; gap: 6px;
     width: 100%; box-sizing: border-box;
@@ -368,7 +391,8 @@
      并显示 spinner —— 分钟档常用 25 → 5，手输不如点一下快 */
   .dshwv-timer-seg { width: 38px; flex: 0 0 auto; padding: 3px 2px 3px 5px; text-align: center; }
   .dshwv-timer-unit { flex: 0 0 auto; color: #8b9ac9; font-size: 11px; }
-  /* 重置：只在计时中/暂停时出现，占满「目标」行剩余宽度；用次要按钮配色与「开始」区分 */
+  /* 重置：跟着「目标」行一起显隐（倒计时 / 定时各一个，按当前模式二选一），
+     占满该行剩余宽度；用次要按钮配色与「开始」区分 */
   .dshwv-timer-reset { flex: 1; padding: 4px 0; border-color: rgba(32,49,112,.22); background: rgba(32,49,112,.06); color: #4a5a92; }
   .dshwv-timer-reset:hover { background: rgba(32,49,112,.12); border-color: rgba(32,49,112,.34); }
 

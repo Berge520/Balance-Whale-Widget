@@ -786,7 +786,7 @@ watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = nu
     <h2>GitHub 加速</h2>
     <!-- 原理说明默认折叠：卡片首屏只留标题 + 开关 + 实时进度，降低普通用户的理解成本 -->
     <div class="fold">
-      <button class="link-btn" @click="ghAccelIntroFold = !ghAccelIntroFold">
+      <button class="link-btn utils-btn utils-secondary" @click="ghAccelIntroFold = !ghAccelIntroFold">
         {{ ghAccelIntroFold ? '收起说明' : '这是什么 / 有什么影响' }}
       </button>
       <div v-if="ghAccelIntroFold" class="guide">
@@ -852,16 +852,16 @@ watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = nu
       检测到第三方条目<span v-if="ghAccelConflictWriters">（像是 {{ ghAccelConflictWriters }} 写的）</span><span v-else>（可能是其它加速工具写的）</span>：{{ ghAccelConflicts.map(c => c.domain).join('、') }}。本插件块写在文件最前会优先生效，可直接使用；若要彻底替换对方，请先在其设置里关闭对应的 GitHub 加速。
     </p>
     <div class="btn-row">
-      <button class="secondary" :class="{ 'btn-busy': ghPendingText('probe') }" :disabled="ghAccelProbing" @click="doGhAccelProbe">
+      <button class="secondary utils-btn utils-secondary" :class="{ 'btn-busy': ghPendingText('probe') }" :disabled="ghAccelProbing" @click="doGhAccelProbe">
         {{ ghPendingText('probe') || '检测连接' }}
       </button>
-      <button class="secondary" :class="{ 'btn-busy': ghPendingText('refresh') }" :disabled="ghAccelBusy" @click="doRefreshGhAccelIps">
+      <button class="secondary utils-btn utils-secondary" :class="{ 'btn-busy': ghPendingText('refresh') }" :disabled="ghAccelBusy" @click="doRefreshGhAccelIps">
         {{ ghPendingText('refresh') || '刷新 IP 表' }}
       </button>
       <!-- 「重新写入」按**实际状态**显示，不能只看意图 cfg.ghAccelOn：
            开启失败 / 取消 UAC 时意图会回弹成 false，但上一次成功的块可能仍在 hosts 里 ——
            此时实际已生效，却因为意图是 false 而看不到「重新写入」，页面上也没有别的入口重写 -->
-      <button v-if="ghAccelActual?.on || cfg.ghAccelOn" class="secondary" :class="{ 'btn-busy': ghPendingText('reapply') }" :disabled="ghAccelBusy" @click="doReapplyGhAccel">
+      <button v-if="ghAccelActual?.on || cfg.ghAccelOn" class="secondary utils-btn utils-secondary" :class="{ 'btn-busy': ghPendingText('reapply') }" :disabled="ghAccelBusy" @click="doReapplyGhAccel">
         {{ ghPendingText('reapply') || '重新写入 hosts' }}
       </button>
     </div>
@@ -873,14 +873,14 @@ watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = nu
          让他回顶部找复选框是本末倒置 -->
     <p v-if="ghAccelProbe && !ghAccelProbe.ok && ghAccelActual?.on && ghAccelActual.active.includes('github.com')" class="msg err">
       写入的 github.com IP 当前不可达（可能刚失效），点「重新写入 hosts」换一个可用 IP。
-      <button class="link-btn" :disabled="ghAccelBusy" @click="doReapplyGhAccel">重新写入 hosts</button>
-      <button class="link-btn" :disabled="ghAccelBusy" @click="doGhAccelDisable">关闭加速</button>
+      <button class="link-btn utils-btn utils-secondary" :disabled="ghAccelBusy" @click="doReapplyGhAccel">重新写入 hosts</button>
+      <button class="link-btn utils-btn utils-secondary" :disabled="ghAccelBusy" @click="doGhAccelDisable">关闭加速</button>
     </p>
     <p v-if="ghAccelFlash.msg" class="msg" :class="msgCls(ghAccelFlash)">{{ ghAccelFlash.msg }}</p>
     <!-- GitHub 加速日志：一次操作（开启/关闭/刷新/校验/检测）= 一条，默认只留一行摘要，点开看步骤。
          数据来自宿主的操作日志环形缓冲（内存态）+ 最近一次 IP 获取的来源追踪 -->
     <div class="fold">
-      <button class="link-btn" @click="toggleGhAccelLog">
+      <button class="link-btn utils-btn utils-secondary" @click="toggleGhAccelLog">
         {{ ghAccelLogFold ? '收起 GitHub 加速日志' : 'GitHub 加速日志' + (ghAccelOps.length ? '（' + ghAccelOps.length + '）' : '') }}
       </button>
       <div v-if="ghAccelLogFold" class="guide">
@@ -920,7 +920,7 @@ watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = nu
         </div>
         <p v-if="!ghAccelOps.length" class="hint">还没有操作记录：点一次「检测连接」或「刷新 IP 表」，这里会列出每一步做了什么、结果如何。</p>
         <div class="btn-row" v-if="ghAccelOps.length">
-          <button class="secondary" @click="clearGhAccelLogs">清除日志</button>
+          <button class="secondary utils-btn utils-secondary" @click="clearGhAccelLogs">清除日志</button>
         </div>
 
         <!-- IP 来源追踪：回答「每个域名的 IP 通过什么方式、从哪里获取」 -->
@@ -949,7 +949,7 @@ watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = nu
       </div>
     </div>
     <div class="fold">
-      <button class="link-btn" @click="ghAccelIpsFold = !ghAccelIpsFold">
+      <button class="link-btn utils-btn utils-secondary" @click="ghAccelIpsFold = !ghAccelIpsFold">
         {{ ghAccelIpsFold ? '收起 IP 表编辑' : '编辑 IP 表' }}
       </button>
       <div v-if="ghAccelIpsFold" class="guide">
@@ -958,17 +958,17 @@ watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = nu
           <input v-model="row.domain" class="gh-ip-domain" placeholder="域名，如 github.com" spellcheck="false" />
           <input v-model="row.ip" class="gh-ip-ip" placeholder="IPv4，如 140.82.112.3" spellcheck="false" />
           <span class="gh-ip-state" :class="'gh-ip-' + ghIpState(row.domain, row.ip)">{{ ghIpStateText(ghIpState(row.domain, row.ip)) }}</span>
-          <button class="link-btn" @click="removeGhAccelRow(i)">删除</button>
+          <button class="link-btn utils-btn utils-secondary" @click="removeGhAccelRow(i)">删除</button>
         </div>
         <div class="btn-row">
-          <button class="secondary" @click="addGhAccelRow">＋ 添加域名</button>
-          <button class="secondary" @click="saveGhAccelIps">保存 IP 表</button>
-          <button class="secondary" :class="{ 'btn-busy': ghPendingText('verify') }" :disabled="ghAccelVerifying" @click="doVerifyGhAccelIps">
+          <button class="secondary utils-btn utils-secondary" @click="addGhAccelRow">＋ 添加域名</button>
+          <button class="secondary utils-btn utils-secondary" @click="saveGhAccelIps">保存 IP 表</button>
+          <button class="secondary utils-btn utils-secondary" :class="{ 'btn-busy': ghPendingText('verify') }" :disabled="ghAccelVerifying" @click="doVerifyGhAccelIps">
             {{ ghPendingText('verify') || '校验可用性' }}
           </button>
           <button
             v-if="ghAccelVerify && ghAccelVerify.bad.length"
-            class="secondary"
+            class="secondary utils-btn utils-secondary"
             @click="dropBadGhAccelIps"
           >清除 {{ ghAccelVerify.bad.length }} 条不可用</button>
         </div>
@@ -980,7 +980,7 @@ watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = nu
       </div>
     </div>
     <div class="fold">
-      <button class="link-btn" @click="ghAccelSrcFold = !ghAccelSrcFold">
+      <button class="link-btn utils-btn utils-secondary" @click="ghAccelSrcFold = !ghAccelSrcFold">
         {{ ghAccelSrcFold ? '收起获取方式' : '获取方式（高级）' }}
       </button>
       <div v-if="ghAccelSrcFold" class="guide">
@@ -1015,7 +1015,7 @@ watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = nu
             <span class="gh-move">
               <button
                 v-if="r.custom"
-                class="link-btn"
+                class="link-btn utils-btn utils-secondary"
                 type="button"
                 title="删除这个自定义源"
                 :disabled="!!ghAccelSrcPending"
@@ -1051,7 +1051,7 @@ watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = nu
             @keydown.enter="addGhAccelSource"
           />
           <button
-            class="secondary"
+            class="secondary utils-btn utils-secondary"
             :class="{ 'btn-busy': ghAccelSrcPending }"
             :disabled="!ghAccelNewSrc.trim() || !!ghAccelSrcPending"
             @click="addGhAccelSource"
@@ -1186,22 +1186,13 @@ watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = nu
   flex-wrap: wrap;
 }
 .gh-accel .btn-row button {
+  /* 尺寸/配色走 main.css 的 utils 基类（markup 挂 .utils-btn + 对应档） */
   flex: 1;
-  border-radius: 8px;
-  font-size: 13px;
-}
-.gh-accel .btn-row button.secondary {
-  background: rgba(83, 107, 169, 0.18);
-  color: var(--accent);
-}
-.gh-accel .btn-row button:disabled {
-  opacity: 0.45;
-  cursor: default;
 }
 /* 执行中的按钮要同时满足「看得出被禁用」和「看得出在动」：
-   只靠上面的 0.45 会把亮度脉动一起压暗，脉动几乎不可见。
-   这里显式覆盖 opacity（用 :disabled 的选择器叠回来，保证特异性够高），
-   保留大致相同的灰底观感，再把动效交给 filter —— 两者互不干扰 */
+   .utils-btn 的全局禁用态（button.utils-btn:disabled，0,2,1）压过这里原本的
+   0.45 压暗，所以改由 `.btn-busy:disabled`（0,3,1）用 opacity: 1 抢回来，
+   保留大致相同的观感，再把动效交给 filter —— 两者互不干扰 */
 .gh-accel .btn-row button.btn-busy:disabled,
 .gh-accel .btn-row button.btn-busy {
   opacity: 1;
@@ -1286,28 +1277,18 @@ watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = nu
   font-size: 11px;
   word-break: break-all;
 }
-.gh-accel .link-btn {
+/* 尺寸/配色走 utils 基类（markup 是 `link-btn utils-btn utils-secondary`）。
+   这里压一级 `.gh-accel button.link-btn`（0,2,1）盖掉全局 .link-btn 的下划线 ——
+   全局 .link-btn 与 .utils-* 同为 (0,1,0) 且**注入更晚**（main.css 先于各 .vue），
+   不压特异性的话下划线会漏出来。 */
+.gh-accel button.link-btn {
   margin-top: 10px;
-  padding: 0;
-  border: none;
-  background: none;
-  color: var(--fg-dim);
-  font-size: 12px;
-  text-align: left;
-  text-decoration: underline;
-  text-underline-offset: 2px;
-  cursor: pointer;
-}
-.gh-accel .link-btn:hover {
-  color: var(--fg);
-}
-/* 文字链接按钮的禁用态：源列表「删除」在增删进行中要挡住连点，
-   不加这条会只靠 disabled 属性（浏览器默认只改 cursor，看起来仍像可点） */
-.gh-accel .link-btn:disabled {
-  opacity: 0.45;
-  cursor: default;
   text-decoration: none;
+  text-underline-offset: 0;
 }
+/* 禁用态不用另写：utils 基类的 button.utils-btn:disabled 已给 opacity + cursor。
+   原先这里那条 `.link-btn:disabled { text-decoration: none }` 是给
+   「源列表删除」在增删进行中挡连点用的，现在下划线常态就没有，无需再关。 */
 .gh-accel .guide {
   margin-top: 10px;
   padding: 10px 12px;

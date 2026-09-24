@@ -347,6 +347,17 @@ const CHECKS = [
       { file: APP_VUE, pick: jsNumber('const DSH_ISOLATE_MAX_BATCH') },
     ],
   },
+  // 「最新（含测试版）」哨兵值：宿主 constants.js 与设置页各一份 ——
+  // 设置页要按它算「更新会装到哪个版本」的提示文案（含下拉选项的 value），宿主拿它决定实际装什么。
+  // 字面量写错会出现「选得到、装不到」或「提示说要装 X、实际装了 Y」这类静默不一致。
+  // 版本比较口径（isNewer / dshVerNewer）是表达式、没法在这里比对，改一处务必同步另一处。
+  {
+    name: '最新版哨兵值 NEWEST_VERSION',
+    parts: [
+      { file: CONSTANTS, pick: jsString('const NEWEST_VERSION') },
+      { file: APP_VUE, pick: jsString('const NEWEST_VERSION') },
+    ],
+  },
 ]
 
 let bad = 0

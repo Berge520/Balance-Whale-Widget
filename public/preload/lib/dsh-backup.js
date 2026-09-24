@@ -164,10 +164,11 @@ function resolveDirName(diskName, manifestName) {
 }
 
 // ── 快照 ──
-// opts = { profile?: string, reason?: string, name?: string, knownGood?: boolean }
+// opts = { profile?: string, reason?: string, name?: string, knownGood?: boolean, at?: Date }
 //   reason：为什么建这份快照（'manual' / 'before-disable' / ...），只写进 manifest 供界面展示，
 //           本模块不解读它的值 —— 加新 reason 不需要改这里
 //   name / knownGood：用户标记，写进 meta.json（不进 manifest，见 META_NAME 的说明）
+//   at：快照时间戳，默认「此刻」，允许调用方注入（回归测试需要造出确定的时间序）
 //
 // 返回 { ok, dir, at, profile, files: [{rel, ok, sha256?, bytes?, reason?}], missing: n, error? }
 //   files[].ok=false 表示该文件**当时就不存在**（如本机 home 层 cordis.patch.yml 不存在），
@@ -180,7 +181,10 @@ function createSnapshot(opts) {
   const targets = targetFiles(profile)
   if (!targets.length) return { ok: false, error: '没有可备份的文件' }
 
-  const at = new Date()
+  // 允许注入时间戳（测试用）。只用 getTime() 是否为 NaN 做校验：Date 之外的可转换值
+  // （毫秒数、可解析的字符串）也一并接受，不为此引入更多约定
+  const rawAt = o.at instanceof Date ? o.at : new Date(o.at)
+  const at = Number.isNaN(rawAt.getTime()) ? new Date() : rawAt
   // 同一秒内连建两份会撞名（目录已存在 → mkdir 抛错）。加毫秒后缀兜一层，
   // 保证「连点两次手动备份」不会因为撞名失败
   let dirName = stampOf(at)

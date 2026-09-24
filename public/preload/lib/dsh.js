@@ -15,7 +15,8 @@ const path = require('path')
 const os = require('os')
 const { log, logErr } = require('./log')
 const { readConfig } = require('./store')
-const { K } = require('./constants')
+const { K, NEWEST_VERSION } = require('./constants')
+const { homeDir } = require('./util')
 
 const DSH_PORT = 3080
 const DSH_URL = 'http://127.0.0.1:' + DSH_PORT
@@ -55,6 +56,7 @@ const state = {
   tail: '',           // 输出滚动缓冲：token 地址可能被拆到两个 data 事件里
   versionCache: {},   // dir → node -v 结果
   resolveCache: { key: '\u0000', value: null },
+  pnpmCache: { key: '\u0000', value: '' }, // pnpm 可执行文件路径缓存（探测要扫多个目录）
 }
 
 // 记一条「要执行的命令」：既进日志，也作为状态暴露给界面
@@ -179,6 +181,39 @@ function resolveNode(custom) {
   return found
 }
 
+// 找 pnpm：profile 的依赖树由 pnpm 维护（node_modules/.modules.yaml 里逐条记着 pnpm 的
+// hoistPattern / allowBuilds / virtualStoreDir），所以装插件**必须**也走 pnpm，
+// 否则 pnpm 下次一同步就会把我们用 npm 改出来的树整个改回去。
+//
+// ⚠️ 为什么不用 `node.npm exec pnpm`：Electron 里的 process.execPath 是 uTools 自己，
+//    取不到 npm 前缀，这条兜底其实是死的。pnpm 在本机是**全局包**（D:\nodejs\npm-global\pnpm.cmd
+//    或 ~/AppData/Local/pnpm/pnpm.CMD），落在 Node 目录与 npm 全局目录两处，直接按这两个位置找即可。
+//    找不到就让调用方**明确报错**（提示用户装 pnpm）—— 不偷偷退回 npm：
+//    退回 npm 正是这次 ERESOLVE 的根源，静默降级只会把同一个错换个地方再报一次。
+function resolvePnpm(node) {
+  const key = (node && node.dir ? node.dir : '') + '\u0000' + String(process.env.PATH || '').length
+  if (state.pnpmCache.key === key) return state.pnpmCache.value
+  const found = findPnpm(node)
+  state.pnpmCache = { key: key, value: found }
+  return found
+}
+// → 可执行文件绝对路径，或 ''
+function findPnpm(node) {
+  const dirs = []
+  if (node && node.dir) dirs.push(node.dir)
+  for (const d of pathDirs()) dirs.push(d)
+  // npm 全局目录：pnpm 多半是 `npm i -g pnpm` 装的，落在全局 bin 里，而全局 bin 常常不在 PATH
+  if (process.env.APPDATA) dirs.push(path.join(process.env.APPDATA, 'npm'))
+  if (process.env.LOCALAPPDATA) dirs.push(path.join(process.env.LOCALAPPDATA, 'pnpm', 'bin'))
+  for (const d of commonDirs()) dirs.push(d)
+  for (const d of dirs) {
+    if (!d) continue
+    const p = findExe(d, 'pnpm')
+    if (p) return p
+  }
+  return ''
+}
+
 // 登录 shell 兜底：`$SHELL -i -c 'command -v node'`，解析出 node 所在目录后按常规布局补齐 npm/npx。
 // 取**最后一行**：`-i` 会加载用户 rc 文件，可能先打印欢迎语 / nvm 提示 / 版本横幅，
 // 真正的路径在末尾。整段拿去当路径必然失败，所以只认最后一行里像绝对路径的那条。
@@ -230,10 +265,18 @@ function nodeVersion(node) {
 // ──────────────────────────────────────────────
 // 子进程
 // ──────────────────────────────────────────────
-// Windows 下 npm/dsh 都是 .cmd，必须经 shell 执行；路径可能含空格，这里统一加引号
-function quote(s) {
+// ⚠️ cmd.exe 的引号规则与 POSIX 完全不同，**不能**沿用 POSIX 式引号：
+//    （2026-09-24 实测）`cmd /s /c` 会先把整条命令串**再包一层引号**，再按 /s 语义剥掉最外层那对。
+//    若我们自己已经在内层用 `"` 包了每个参数，外层补的那对会和它们错配 —— 实测命令名被吃成
+//    `dejs\npm.cmd\"`，报「不是内部或外部命令」（日志里那行 `'\"D:\nodejs\npm.cmd\"'` 就是这个）。
+//    另一种写法（内层改用 cmd 的 `""` 转义）实测同样失败，因为 /s 的剥离发生在转义解析之前。
+//    结论：这条线上**只对真正含空格的参数**加引号，且参数内的引号用 cmd 的 `""` 转义。
+//    纯裸参数（install / --prefix / dshmarket…）一律不加，让 cmd 原样吞下。
+function quoteCmdArg(s) {
   const v = String(s)
-  return WIN ? '"' + v.replace(/"/g, '\\"') + '"' : "'" + v.replace(/'/g, "'\\''") + "'"
+  // 不含空格与特殊字符就不包引号：包了反而会被 /s 的外层引号错配掉
+  if (!/[\s"&|<>^()]/.test(v)) return v
+  return '"' + v.replace(/"/g, '""') + '"'
 }
 function childEnv(node) {
   const extra = []
@@ -249,7 +292,16 @@ function childEnv(node) {
 }
 function spawnCmd(exe, args, node) {
   const options = { cwd: os.homedir(), env: childEnv(node), windowsHide: true }
-  if (WIN) return spawn(quote(exe) + ' ' + args.map(quote).join(' '), Object.assign(options, { shell: true }))
+  if (WIN) {
+    // npm/dsh 都是 .cmd，必须经 cmd.exe 执行；但**不能**用 shell:true。
+    // shell:true 会让 Node 走 `cmd.exe /d /s /c "..."` 且把读写管道挂在这个 cmd 上，
+    // 实测在 uTools（Electron，GUI 子系统、无控制台）下会闪出一个 cmd 黑窗口 ——
+    // windowsHide 挡不住它。改为自己起 cmd.exe 并把 stdio 显式设为管道，
+    // cmd 就没有可附加的控制台，窗口自然不出现，输出仍正常回到父进程。
+    // ⚠️ 用 quoteCmdArg 而不是 quote()：cmd /s /c 这条线上用 POSIX 式引号会错配（见上面注释）
+    return spawn(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', quoteCmdArg(exe) + ' ' + args.map(quoteCmdArg).join(' ')],
+      Object.assign(options, { stdio: ['ignore', 'pipe', 'pipe'] }))
+  }
   // POSIX 下独立进程组，结束时可整组杀掉（dsh 会有子进程）
   return spawn(exe, args, Object.assign(options, { detached: true }))
 }
@@ -735,6 +787,8 @@ function configure(cfg) {
   const registry = typeof c.dshRegistry === 'string' ? c.dshRegistry.trim() : ''
   const version = typeof c.dshVersion === 'string' ? c.dshVersion.trim() : ''
   if (nodeDir !== state.nodeDir) state.resolveCache = { key: '\u0000', value: null }
+  // pnpm 的候选目录里也有 node.dir，Node 目录一换就得重找
+  if (nodeDir !== state.nodeDir) state.pnpmCache = { key: '\u0000', value: '' }
   if (nodeDir !== state.nodeDir) log('[whale][dsh] 配置变更', { nodeDir: nodeDir || '(自动)' })
   state.nodeDir = nodeDir
   state.keepAlive = c.dshKeepAlive === true
@@ -747,8 +801,27 @@ function configure(cfg) {
 function syncConfig() {
   try { configure(readConfig()) } catch (err) { logErr('[whale][dsh] 读取配置失败', err && err.message) }
 }
-// 「要安装的版本」：配置固定了就用它，否则 latest（「更新」用这个）
-function installVersion() { return state.version || 'latest' }
+// 「要安装的版本」：配置固定了就用它；'newest' 取列表里最大的；否则 latest（「更新」用这个）
+function installVersion() {
+  if (state.version === NEWEST_VERSION) return maxVersion(state.versions && state.versions.list) || 'latest'
+  return state.version || 'latest'
+}
+// 已查到的版本列表里最大的那个（含 alpha / rc 等预发布）。
+// 不能拿 list[list.length-1] 顶替：list 是 npm 的发布顺序、不是版本序，
+// 后期补发的旧分支补丁会排在更后面，取末位会装到比 latest 还旧的版本。
+// 比较复用 isNewer；列表长 60 以内，O(n²) 足够。
+function maxVersion(list) {
+  const arr = Array.isArray(list) ? list : []
+  let best = ''
+  for (const v of arr) { if (!best || isNewer(v, best)) best = v }
+  return best
+}
+// 目标版本（未固定版本时）：'newest' 看列表最大值，否则看 latest 标签。
+// 供「更新」的幂等判断与「有新版本」提示共用，避免两处各写一套哨兵分支。
+function targetVersion() {
+  if (state.version === NEWEST_VERSION) return maxVersion(state.versions && state.versions.list)
+  return (state.versions && state.versions.latest) || ''
+}
 // 包名（@版本）
 function pkgSpec(v) { return DSH_PKG + '@' + (v || installVersion()) }
 function regArgs() { return state.registry ? ['--registry=' + state.registry] : [] }
@@ -979,9 +1052,12 @@ function update() {
     return snapshot()
   }
   state.error = ''
-  // 已经是所选版本就别白跑一次 npm（固定版本可以直接判断；「更新前重新下载」时除外）
+  // 已经是所选版本就别白跑一次 npm（固定版本可以直接判断；「更新前重新下载」时除外）。
+  // 'newest' 不是真实版本号、不能直接比，要先解析成列表最大值；列表还没查过就解析不出，
+  // 此时不拦（宁可白跑一次 npm，也不要误判成「已是最新」而什么都不装）。
   const cur = activeDsh()
-  if (state.version && cur && cur.version === state.version && !state.reinstall) {
+  const want = state.version === NEWEST_VERSION ? maxVersion(state.versions && state.versions.list) : state.version
+  if (state.version && want && cur && cur.version === want && !state.reinstall) {
     pushLog('已是最新：当前用 ' + cur.version + '，与所选版本一致，无需更新')
     return snapshot()
   }
@@ -1116,6 +1192,202 @@ function installDsh(done, busyKind) {
   })
   child.on('exit', (code) => finish(code))
   return snapshot()
+}
+
+// ──────────────────────────────────────────────
+// 插件市场要用的 npm 原语（装 / 卸单个第三方插件、列出装了哪些）
+//
+// ⚠️ 为什么不做成「一次装多个」：npm install a b c 里任何一个解析失败都会整批回滚，
+//    而插件市场是逐个点的动作，逐条装才好把失败精确归到某个包上。
+// ──────────────────────────────────────────────
+// 包名白名单：只可能是 npm 包名，绝不允许 `-` 开头（否则会被当 npm 参数）、
+// 也不允许带路径分隔符/空格/引号。目录是我们信任的来源，但它终究是远端数据 ——
+// 这里挡住的是「被篡改的目录把 `--prefix` 之类的开关当包名塞进来」。
+const PKG_NAME_RE = /^(@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/i
+function validPkgName(name) {
+  const n = String(name == null ? '' : name).trim()
+  if (!n || n.length > 214) return ''
+  return PKG_NAME_RE.test(n) ? n : ''
+}
+// ⚠️ install spec 白名单 —— 比包名宽，但**绝不是「放行任意字符串」**。
+//    市场目录里实测有 48.6% 的条目 install spec 不是裸包名（github: / 远端 tgz），
+//    只认包名等于把这近一半目录判死；但目录终究是远端数据，进命令行的关口必须收窄。
+//    三种形态：npm 包名 / `github:owner/repo` / 远端 https 地址。
+//    仍然禁止：`-` 开头（会被当开关）、空白与换行（拆成多个参数）、
+//    引号与 shell 元字符（&& | ; ` $ ( ) < > 等）、反斜杠。
+//    ⚠️ 不禁止 URL 里的 `?` 与 `=`（合法的 tgz 查询串），但用白名单字符集把它们限制在 URL 参数位置。
+const PKG_SPEC_RE = /^(github:[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*(#[a-z0-9._/-]+)?|https?:\/\/[a-z0-9.-]+(:\d+)?\/[a-z0-9._~/-]*(\.tgz|\.tar\.gz)?(\?[a-z0-9._~%&=+-]*)?|(@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*)$/i
+function validPkgSpec(spec) {
+  const s = String(spec == null ? '' : spec).trim()
+  if (!s || s.length > 214) return ''
+  return PKG_SPEC_RE.test(s) ? s : ''
+}
+// profile 与包名一样会进命令行，用同一条白名单（profile 名不允许 @ 与 /）
+const PROFILE_RE = /^[a-z0-9][a-z0-9._-]*$/i
+function validProfile(p) {
+  const n = String(p == null ? '' : p).trim()
+  return PROFILE_RE.test(n) ? n : ''
+}
+// profile 里的 package.json：npm 装进 profile 的结果就落在这里
+// ⚠️ $DSH_HOME 的定位口径必须与 dsh-backup / diagnostics / dsh-dump 一致
+// （env 优先 + 回退 ~/.dsh，且都要求目录实际存在）—— 不一致会出现
+// 「快照备的是这个目录、npm 装的是那个目录」这种静默错位
+function profileDir(profile) {
+  const home = homeDir({ env: 'DSH_HOME', fallback: '.dsh' })
+  const pf = validProfile(profile)
+  if (!home || !pf) return ''
+  return path.join(home, 'profiles', pf)
+}
+function profilePkgFile(profile) {
+  const dir = profileDir(profile)
+  return dir ? path.join(dir, 'package.json') : ''
+}
+// ⚠️ npm 装第三方包**不建快照也安全**：它只动 profile/package.json，
+//    而 dsh-backup 的 PROFILE_FILES 白名单里正好有这个文件（见 lib/dsh-backup.js）。
+// 已装映射：直接读 profile/package.json 的 dependencies。
+// 读不到（文件不存在 = 还没装过任何插件）返回空表，这是正常空态不是错误。
+function installedDeps(profile) {
+  const file = profilePkgFile(profile)
+  if (!file) return {}
+  try {
+    const j = JSON.parse(fs.readFileSync(file, 'utf8'))
+    const d = j && j.dependencies && typeof j.dependencies === 'object' ? j.dependencies : {}
+    const out = {}
+    for (const k of Object.keys(d)) out[String(k)] = String(d[k] == null ? '' : d[k])
+    return out
+  } catch (err) { return {} }
+}
+// 实装版本表：node_modules/<name>/package.json 的 version（**不是** package.json 里的声明范围）。
+//
+// ⚠️ 为什么要单独读：profile/package.json 的 dependencies 存的是**声明范围**（`^0.5.11`），
+//    拿它比「有没有新版」只能答「目录版本是否超出范围」——`^0.5.11` 装到 0.5.13 时
+//    目录出 0.5.13 明明该提示，却因为「范围允许」被判成已最新。要比就得比实装版本。
+//
+// ⚠️ 为什么可以直接拼路径（不处理软链、不用 pnpm 的 .pnpm 目录）：本机实测 dsh 底层虽是 pnpm，
+//    但 `node_modules/.modules.yaml` 里 `nodeLinker: hoisted`，包被**硬链接成实体目录**平铺在
+//    顶层 `node_modules/<name>/`（`.pnpm` 下只有一个 lock.yaml，没有包目录）。所以
+//    `<dir>/node_modules/<name>/package.json` 直读即可 —— 作用域包照写 `@scope/name`。
+//    若将来 dsh 改用默认的 isolated 模式（顶层是软链），这里仍能读通：软链解引用后照样是实体文件。
+//
+// 返回 { [目录名]: version }。读不到的包**不编造**：调用方拿不到就退回范围判定。
+function installedVersions(profile) {
+  const dir = profileDir(profile)
+  if (!dir) return {}
+  const root = path.join(dir, 'node_modules')
+  const out = {}
+  const readOne = (name) => {
+    const n = String(name == null ? '' : name).trim()
+    // 目录名同样进路径，用包名白名单挡掉 `../` 这类穿越（目录名来自我们自己的代码，但仍收口）
+    if (!n || !validPkgName(n)) return
+    if (out[n] !== undefined) return
+    try {
+      const j = JSON.parse(fs.readFileSync(path.join(root, n, 'package.json'), 'utf8'))
+      const v = j && j.version != null ? String(j.version).trim() : ''
+      if (v) out[n] = v
+    } catch (err) { /* 预期分支：包没装 / 没读权限，跳过即可 */ }
+  }
+  // 以 dependencies 的键为准（装了才有键），比遍历整个 node_modules 稳：
+  // node_modules 里还有几百个传递依赖，全读一遍纯属浪费
+  const deps = installedDeps(profile)
+  for (const k of Object.keys(deps)) readOne(k)
+  return out
+}
+// 跑一次 pnpm。返回 Promise<{ code, ok, out, err }>，**永不 reject**（调用方按 ok 判成败，
+// 不必再包一层 catch）。输出同时进 dsh 的日志流，用户能在「日志」卡里看到 pnpm 到底说了什么。
+//
+// ⚠️ 为什么是 pnpm 而不是 npm（2026-09-24 实测）：profile 的依赖树是 pnpm 建的，
+//    改动必须走同一条通道。用 npm 有两条死路：
+//    ① `npm error code ERESOLVE`：`@openviking/dsh-memory-plugin@0.3.2` 声明了 3 个 peer
+//       （dsh-llm / dsh-mcp-client / dsh-skill-filesystem），它们**由全局 dsh 提供**、不在
+//       profile 的 node_modules 里。npm 只认 profile 自己的 node_modules → 判定 peer 不满足 → 直接中止。
+//       报错信息具误导性（"Could not resolve dependency: @openviking/dsh-memory-plugin from the root project"），
+//       根因不在那个包本身。
+//    ② `--legacy-peer-deps` 能绕过①，但实测会**连带升/降 73 个无关包**（81 条变更行，
+//       含 undici 8.10.2→7.29.0 降级、@antfu/install-pkg 2.0.1→1.1.0 降级）—— 绝不能用。
+//    pnpm 走 `autoInstallPeers: false`（profile 的 pnpm-workspace.yaml 里写着），
+//    peer 不满足只报 `[WARN] Issues with peer dependencies found`，不中止；实测只动目标包，其余 9 条依赖原封不动。
+//
+// ⚠️ 装什么由 spec 决定，`--dir` 只管目录：`pnpm add --dir <profile> <spec>` 与
+//    `npm install --prefix <profile> <spec>` 语义一致，github: / tgz 两种形态 pnpm 同样原生支持。
+function runPnpm(args) {
+  return new Promise((resolve) => {
+    syncConfig()
+    const node = resolveNode(state.nodeDir)
+    if (!node) {
+      const why = '未找到 Node.js：请在设置页「DeepSeek Harness」里指定 Node.js 目录'
+      pushLog('pnpm 调用失败：' + why)
+      resolve({ code: -1, ok: false, out: '', err: why })
+      return
+    }
+    const pnpm = resolvePnpm(node)
+    if (!pnpm) {
+      const why = '未找到 pnpm：profile 的依赖树由 pnpm 维护，装插件必须用它。'
+        + '请先安装（npm i -g pnpm）或在设置页指定 Node.js 目录'
+      pushLog('pnpm 调用失败：' + why)
+      resolve({ code: -1, ok: false, out: '', err: why })
+      return
+    }
+    setCmd(pnpm + ' ' + args.join(' '))
+    let child = null
+    try { child = spawnCmd(pnpm, args, node) } catch (err) {
+      const why = (err && err.message) || String(err)
+      pushLog('pnpm 调用失败：' + why)
+      resolve({ code: -1, ok: false, out: '', err: why })
+      return
+    }
+    let out = ''
+    const grab = (d) => { out += String(d == null ? '' : d) }
+    try { child.stdout && child.stdout.on('data', grab) } catch (err) {}
+    try { child.stderr && child.stderr.on('data', grab) } catch (err) {}
+    // 复用 bindOutput 让 pnpm 的输出进同一份日志（含 ANSI 清理与滚动缓冲）
+    bindOutput(child)
+    child.on('error', (err) => {
+      const why = (err && err.message) || String(err)
+      pushLog('pnpm 调用失败：' + why)
+      resolve({ code: -1, ok: false, out: out, err: why })
+    })
+    child.on('exit', (code) => {
+      // ⚠️ pnpm 在 stderr 上打 warning 是常态（peer 提示、deprecated），不能把 stderr 有内容当失败。
+      // 唯一判据是退出码 —— dsh 主包安装那条链路也是这个口径
+      resolve({ code: code == null ? -1 : code, ok: code === 0, out: out, err: '' })
+    })
+  })
+}
+// pnpm add 的公共参数
+// ⚠️ `--reporter=append-only`：默认的默认 TTY 报告器会打满进度条与光标控制字符，在日志里刷屏
+//    （我们已经把 ANSI 清掉了，剩下的进度条残渣仍会把关键报错挤出视野）
+// ⚠️ 不加 `--ignore-scripts`：github / tgz 来源的插件靠 `prepare` 脚本在安装时构建，
+//    忽略脚本等于装出一个空壳。构建该不该跑由 pnpm 的 allowBuilds 白名单裁决（拦下时
+//    pnpm 会给出要写进 pnpm-workspace.yaml 的 key，由 settings.js 的 parseAllowBuilds 解读）
+function pnpmArgs(dir) {
+  return ['--dir', dir, '--reporter=append-only'].concat(regArgs())
+}
+// 装一个插件到 profile（pnpm add --dir <profile> <spec>）
+//
+// ⚠️ 这里接受的是「install spec」而不是裸包名：市场目录近半数条目的 spec 是
+//    `github:owner/repo` 或远端 tgz 地址，pnpm 原生就支持这两种形态（会自己去 clone / 下载）。
+//
+// ⚠️ github/tgz 来源多一道 pnpm 的坎：这类插件靠 `prepare` 脚本在安装时构建，
+//    **pnpm 默认拦截构建脚本**，失败信息里会给出一把带 commit hash 的 allowBuilds key。
+//    installPluginPkg 只负责把原始输出**如实**回传，怎么解读由 settings.js / 界面决定。
+function installPluginPkg(profile, spec) {
+  const pf = validProfile(profile)
+  const s = validPkgSpec(spec)
+  if (!pf) return Promise.resolve({ code: -1, ok: false, out: '', err: 'profile 名不合法：' + profile })
+  if (!s) return Promise.resolve({ code: -1, ok: false, out: '', err: '包名不合法：' + spec })
+  const dir = profileDir(pf)
+  return runPnpm(['add'].concat(pnpmArgs(dir), [s]))
+}
+// 从 profile 卸一个插件（pnpm remove --dir <profile> <pkg>）
+// ⚠️ 卸载仍只认**已装依赖的键名**（validPkgName），不用 spec：
+//    package.json 的 dependencies 键就是 pnpm 归一后的名字，用 spec 去 remove 反而匹配不上
+function uninstallPluginPkg(profile, pkg) {
+  const pf = validProfile(profile)
+  const p = validPkgName(pkg)
+  if (!pf) return Promise.resolve({ code: -1, ok: false, out: '', err: 'profile 名不合法：' + profile })
+  if (!p) return Promise.resolve({ code: -1, ok: false, out: '', err: '包名不合法：' + pkg })
+  const dir = profileDir(pf)
+  return runPnpm(['remove'].concat(pnpmArgs(dir), [p]))
 }
 
 // 版本列表落库缓存：重载插件后不用重新查询也能在下拉里选到具体版本
@@ -1324,8 +1596,9 @@ function snapshot() {
     registry: state.registry,
     version: state.version,
     resolved: act ? act.version : '',
-    // 已查询到 latest 且比当前用的新（界面提示「有新版本」）
-    hasUpdate: !!(act && state.versions && state.versions.latest && isNewer(state.versions.latest, act.version)),
+    // 已查询到目标版本且比当前用的新（界面提示「有新版本」）。
+    // 目标版本随所选版本变：固定版本时按原先只比 latest 的口径不变，'newest' 时改比列表最大值。
+    hasUpdate: !!(act && targetVersion() && isNewer(targetVersion(), act.version)),
     // 用哪一份：'global'（全局安装，优先）/ 'plugin'（插件目录）/ ''（都没有）
     source: act ? act.source : '',
     globalVersion: gv ? gv.version : '',
@@ -1371,6 +1644,20 @@ function snapshot() {
   }
 }
 
+// 轻量进度快照：只回「当前命令行 + 日志尾部」，专供安装/更新这类**长跑操作**做进度回显。
+//
+// ⚠️ 为什么不复用 snapshot()：那个函数会顺带跑 resolveNode / globalDsh / canWriteDir，
+//    还得靠 setCmd 之后的状态；更要紧的是**它不探端口**，但界面若走 dshStatus() 那条通道，
+//    每次调用都会触发一次 probePort（起一个 netstat 子进程）。安装期间前端要 1Hz 刷新，
+//    等于几分钟内白起几百次 netstat —— 与进度显示毫无关系。
+//    这里只读两块内存里的数据（state.lastCmd / state.log），零子进程、零磁盘。
+function progress() {
+  return {
+    lastCmd: state.lastCmd || '',
+    log: state.log.join('\n'),
+  }
+}
+
 module.exports = {
   DSH_PORT,
   DSH_URL,
@@ -1388,8 +1675,13 @@ module.exports = {
   stopOnQuit,
   probePort,
   snapshot,
+  // 轻量进度（安装/更新期间前端 1Hz 刷新用），只读内存、不起子进程
+  progress,
   onChange,
   resolveNode,
+  // 定位 pnpm 可执行文件（profile 的依赖树由 pnpm 维护，装/卸插件必须走它）。
+  // 导出：单测要验证「找不到 pnpm 时返回空串、不偷偷退回 npm」这条边界
+  resolvePnpm,
   // 提权用 powershell 绝对路径（hosts.js 的 UAC 写 hosts 复用）
   psExe,
   // 校验某个目录里是否有 node 可执行文件（设置页选择目录时用）
@@ -1398,8 +1690,24 @@ module.exports = {
   // 不是 dsh 的进程管理语义，单独复制一份只会造成 decodeOut/spawnCmd 两处漂移
   decodeOut,
   spawnCmd,
+  // cmd /s /c 这条线的参数引号规则（纯函数）。导出来单测：
+  // 2026-09-24 命令名被引号错配吃掉的 bug 就出在这里，必须有回归钉住
+  quoteCmdArg,
   // dsh CLI 入口与「实际用哪一份」的定位（dump 要拿 bin.js 绝对路径）
   activeDsh,
+  // 插件市场复用的 pnpm 原语（settings.js 编排安装/卸载）：
+  // 包名/profile 白名单是纯函数，单测直接喂样例 —— 它们挡的是「远端目录里的字符串进命令行」
+  validPkgName,
+  validPkgSpec,
+  validProfile,
+  profilePkgFile,
+  installedDeps,
+  // 实装版本表（node_modules 里的真实 version，与声明范围区分）——市场「检查更新」用它比对
+  installedVersions,
+  installPluginPkg,
+  uninstallPluginPkg,
+  // pnpm add 的公共参数（纯函数，单测钉住 --dir/--reporter 与 --registry 的拼装顺序）
+  pnpmArgs,
   // 登录 shell 输出的路径行提取（纯函数，单测直接喂样例）
   lastPathLine,
   // 命令行能否证明「这是 dsh」（纯函数，三态：true/false/null）。

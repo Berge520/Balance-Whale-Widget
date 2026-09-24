@@ -3,8 +3,8 @@
  *
  * 用法：
  *   npm run release                 # 发 package.json 里当前 version
- *   npm run release -- 1.6.3        # 先把版本号写成 1.6.3，再发
- *   npm run release -- 1.6.3 --dry-run   # 只跑前置检查与四关，不提交不推送
+ *   npm run release -- 1.7.0        # 先把版本号写成 1.7.0，再发
+ *   npm run release -- 1.7.0 --dry-run   # 只跑前置检查与四关，不提交不推送
  *
  * 做的事（严格按顺序，任一步失败即中止、不留下半成品）：
  *   1. 前置检查：版本号递增、工作区干净、README 有该版本章节、tag 未占用、gh 已登录
@@ -232,7 +232,7 @@ console.log('  ✓ CI 全绿')
 step(`打附注 tag v${nextVersion}`)
 // 正文含换行，不能拼进命令行：system shell（Windows 上是 cmd）拿到含换行的
 // 整条命令时只取第一行执行，后半段会被当成新命令 —— 实测只会得到
-// 「v1.6.3」这一行的 tag 消息，多行正文静默丢失。改用 -F 从文件读。
+// 「v1.7.0」这一行的 tag 消息，多行正文静默丢失。改用 -F 从文件读。
 const tagMsgPath = path.join(tmpDir, `TAG_MSG_V${nextVersion.replace(/\./g, '')}.txt`)
 writeFileSync(tagMsgPath, `v${nextVersion}\n\n${body}\n`, 'utf8')
 run('git', ['tag', '-a', `v${nextVersion}`, '-F', path.relative(root, tagMsgPath)])
