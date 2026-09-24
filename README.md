@@ -371,7 +371,7 @@ npm run release     # 一键发版（见下）
 
 **构建与测试**
 
-- **新增 `lib/dsh-market.js`**（插件市场）+ `test/dsh-market.test.mjs`、`test/settings-allowbuilds.test.mjs`；测试文件由 6 个增至 **14 个**、用例 **347 项**（原先 6 文件 / 约 60 项）。
+- **新增 `lib/dsh-market.js`**（插件市场）+ `test/dsh-market.test.mjs`、`test/settings-allowbuilds.test.mjs`；测试文件由 6 个增至 **14 个**、用例 **348 项**（原先 6 文件 / 约 60 项）。
 - **`check-shared.mjs` 新增两项校验**：`MAX_BATCH` 与 `NEWEST_VERSION` 的跨文件副本一致性。
 - **新增 `.gitattributes`**：全仓统一 LF，避免 Windows 换行在 diff 与构建产物里来回翻转。
 - **一键发版脚本**（`scripts/release.mjs`）：`npm run release` 一把跑完前置检查 → 写版本号 → 本地四关 → 建 release commit → push → 等 CI → 打附注 tag → 等 Release 工作流 → 核对 zip 资产；`--dry-run` 只检查不提交。
