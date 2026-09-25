@@ -11,7 +11,7 @@ const {
   pushInit, sendToWidget, applyScaleToWindow, applyOnTop, pushConfig,
   winAlive, getWindow, clearLiveScaleCtx, queueLiveScale, widgetOrigin,
   winOrigin, widgetSide, spaceAround, clampWidget, usableArea, snapRect, flippedOf,
-  syncTaskbarWatch, destroyWidget,
+  syncTaskbarWatch, destroyWidget, ensureSkipTaskbar,
 } = require('./widget')
 // 挂件菜单改配置后，通知已打开的设置窗口同步刷新开关（详见 settings.js 的 onConfigChange）
 const { emitConfigChange } = require('./settings')
@@ -169,6 +169,10 @@ function registerIpc() {
   // 光调 w.focus() 没用。focusable 虽说是创建期选项，但 Electron 的 setFocusable()
   // 可以在运行时改，所以打开菜单时置 true 并夺焦，关闭时置回 false 把焦点让出去。
   //
+  // 注意：切 focusable 会让 Windows 重新登记窗口样式，创建期靠 focusable:false「隐含」
+  // 的任务栏隐藏随之失效 —— 表现为打开菜单后挂件出现在任务栏（悬停可见缩略图）。
+  // 故两个分支都要在切换后重新声明 skipTaskbar。
+  //
   // 兜底顺序：setFocusable(true) → focus()（w.focus 不可用/抛错时退到 utools 侧）。
   // 关菜单时：setFocusable(false) 之后必须显式唤回 uTools 主窗，否则「设置窗」会
   // 因为刚被挂件抢过焦点而失焦，按 uTools 原生行为自动隐藏 —— 看起来就是设置窗莫名消失。
@@ -191,6 +195,10 @@ function registerIpc() {
           }
         } catch (err) {}
       }
+      ensureSkipTaskbar()
+      // 留痕：这条路径是「挂件冒进任务栏」的主因，出问题时靠它判断走没走到、
+      // 以及 setSkipTaskbar 到底可不可用（不可用时说明得换不切 focusable 的方案）
+      log('[whale][ipc] 菜单输入焦点', want ? '借出' : '交还', 'skipTaskbar 已重申')
     } catch (err) {
       logErr('[whale][ipc] 切换输入焦点失败', err && err.message)
     }

@@ -345,7 +345,7 @@ function normMenuGroupsRev(v) {
   return n
 }
 function defaultConfig() {
-  return { scale: 1.3, vol: 0.9, soundOn: true, soundSet: 'duck', usageMode: 'ledger', peakMode: 'default', peakRemindOn: true, bubbleOn: true, menuBtn: true, onTop: true, lowAlertOn: true, lowAlertAmount: LOW_ALERT_BY_CURRENCY.CNY, budgetOn: false, budgetAmount: 0, dropAlertOn: false, dropAlertAmount: 5, clickQueueOn: false, remindSec: 8, quietOn: false, quietFrom: '23:00', quietTo: '07:00', timeBubbleOn: true, updateCheckOn: false, dragLock: false, enterMode: 'both', timerNotifyOn: true, timerMailOn: true, timerPersistOn: true, timerMode: 'off', timerSec: 1500, timerAt: '07:30', timerNote: '', timerBreakMin: 5, timerRemindSec: 8, timerBubblePin: true, timerBubbleOnly: true, guideDone: false, dshNodeDir: '', dshKeepAlive: false, dshRegistry: '', dshVersion: '', dshReinstall: false, dshNoOpen: true, dshMarketUrl: '', dshMarketMirror: true, dshMarketRegistry: '', dshMarketOfficial: false, avoidTaskbar: true, edgeTop: 0, edgeRight: 0, edgeBottom: 0, edgeLeft: 0, scrollGapOn: false, scrollGapPx: SCROLL_GAP_DEFAULT, snapMode: 'ratio', snapRatio: SNAP_RATIO_DEFAULT, opacity: 100, passThrough: false, skin: 'DSniang1', theme: 'default', quotes: normQuotes(null), alerts: normAlerts(null), quotaTotal: 0, quotaReset: 'monthly', tokenPrice: normTokenPrice(null), historyKeepDays: HISTORY_KEEP_DEFAULT, models: [], mainModelId: DEFAULT_MAIN_MODEL, dshBackupKeep: DSB_KEEP_DEFAULT, menuGroups: normMenuGroups(null), menuGroupsRev: 0, ghAccelOn: false, ghAccelIps: normIps(null), ghAccelRefreshedAt: 0, notifySystemOn: true, notifyMailOn: false, mailFrom: '', mailTo: '', mailFromName: '小鲸鱼余额挂件', mailSubjectPrefix: '[小鲸鱼余额挂件]' }
+  return { scale: 1.3, vol: 0.9, soundOn: true, soundSet: 'duck', usageMode: 'ledger', peakMode: 'default', peakRemindOn: true, bubbleOn: true, menuBtn: true, onTop: true, lowAlertOn: true, lowAlertAmount: LOW_ALERT_BY_CURRENCY.CNY, budgetOn: false, budgetAmount: 0, dropAlertOn: false, dropAlertAmount: 5, clickQueueOn: false, remindSec: 8, quietOn: false, quietFrom: '23:00', quietTo: '07:00', timeBubbleOn: true, updateCheckOn: false, dragLock: false, enterMode: 'both', timerNotifyOn: true, timerMailOn: true, timerPersistOn: true, timerMode: 'off', timerSec: 1500, timerAt: '07:30', timerNote: '', timerBreakMin: 5, timerRemindSec: 8, timerBubblePin: true, timerBubbleOnly: true, guideDone: false, dshNodeDir: '', dshKeepAlive: false, dshRegistry: '', dshVersion: '', dshReinstall: false, dshNoOpen: true, dshMarketUrl: '', dshMarketMirror: true, dshMarketRegistry: '', dshMarketOfficial: false, dshExportCred: false, dshExportNoMod: true, avoidTaskbar: true, edgeTop: 0, edgeRight: 0, edgeBottom: 0, edgeLeft: 0, scrollGapOn: false, scrollGapPx: SCROLL_GAP_DEFAULT, snapMode: 'ratio', snapRatio: SNAP_RATIO_DEFAULT, opacity: 100, passThrough: false, skin: 'DSniang1', theme: 'default', quotes: normQuotes(null), alerts: normAlerts(null), quotaTotal: 0, quotaReset: 'monthly', tokenPrice: normTokenPrice(null), historyKeepDays: HISTORY_KEEP_DEFAULT, models: [], mainModelId: DEFAULT_MAIN_MODEL, dshBackupKeep: DSB_KEEP_DEFAULT, menuGroups: normMenuGroups(null), menuGroupsRev: 0, ghAccelOn: false, ghAccelIps: normIps(null), ghAccelRefreshedAt: 0, notifySystemOn: true, notifyMailOn: false, mailFrom: '', mailTo: '', mailFromName: '小鲸鱼余额挂件', mailSubjectPrefix: '[小鲸鱼余额挂件]' }
 }
 // dsh 注册源：只接受 http(s) 或空（默认官方源）
 function normRegistry(v) {
@@ -608,6 +608,14 @@ function readConfig() {
     dshMarketMirror: p.dshMarketMirror !== false,
     dshMarketRegistry: normRegistry(p.dshMarketRegistry),
     dshMarketOfficial: p.dshMarketOfficial === true,
+    // dsh 全量导出（lib/dsh-export.js）的两个勾选：是否带上凭据文件、是否跳过 node_modules。
+    // ⚠️ 默认值方向相反，各有理由：
+    //   dshExportCred  默认 **false**（不带凭据）—— 包里是明文，默认带上等于「用户拷给别人时
+    //                  顺带泄了凭据」。要迁移就自己勾，代价是多点一下，比默认泄露安全。
+    //   dshExportNoMod 默认 **true**（跳过 node_modules）—— 它可重建、且体积是几十倍，
+    //                  默认带上会让包大到没法用；真需要的人自己取消勾选。
+    dshExportCred: p.dshExportCred === true,
+    dshExportNoMod: p.dshExportNoMod !== false,
     avoidTaskbar: p.avoidTaskbar !== false,
     edgeTop: Math.round(clampNum(p.edgeTop, 0, 400, dft.edgeTop)),
     edgeRight: Math.round(clampNum(p.edgeRight, 0, 400, dft.edgeRight)),
@@ -706,6 +714,8 @@ function writeConfig(cfg) {
       dshMarketMirror: cfg.dshMarketMirror !== false,
       dshMarketRegistry: normRegistry(cfg.dshMarketRegistry),
       dshMarketOfficial: cfg.dshMarketOfficial === true,
+      dshExportCred: cfg.dshExportCred === true,
+      dshExportNoMod: cfg.dshExportNoMod !== false,
       avoidTaskbar: cfg.avoidTaskbar !== false,
       edgeTop: Math.round(clampNum(cfg.edgeTop, 0, 400, 0)),
       edgeRight: Math.round(clampNum(cfg.edgeRight, 0, 400, 0)),
@@ -819,6 +829,9 @@ function patchConfig(patch) {
   if (p.dshMarketMirror !== undefined) cfg.dshMarketMirror = p.dshMarketMirror !== false
   if (p.dshMarketRegistry !== undefined) cfg.dshMarketRegistry = normRegistry(p.dshMarketRegistry)
   if (p.dshMarketOfficial !== undefined) cfg.dshMarketOfficial = p.dshMarketOfficial === true
+  // dsh 全量导出的两个勾选（默认值方向见 readConfig 里的说明）
+  if (p.dshExportCred !== undefined) cfg.dshExportCred = p.dshExportCred === true
+  if (p.dshExportNoMod !== undefined) cfg.dshExportNoMod = p.dshExportNoMod !== false
   if (p.avoidTaskbar !== undefined) cfg.avoidTaskbar = !!p.avoidTaskbar
   // 贴边间距（上/右/下/左，px）：0 = 紧贴该边（以系统当前可用区为准）
   if (p.edgeTop !== undefined) cfg.edgeTop = Math.round(clampNum(p.edgeTop, 0, 400, cfg.edgeTop))

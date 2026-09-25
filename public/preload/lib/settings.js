@@ -32,9 +32,11 @@ const dshUsage = require('./dsh-usage')
 const diagnostics = require('./diagnostics')
 const dshDump = require('./dsh-dump')
 const dshBackup = require('./dsh-backup')
+const dshExport = require('./dsh-export')
 const { parsePatch, applyToggle, applyBatchDisable } = require('./dsh-patch')
 const dshIsolate = require('./dsh-isolate')
 const dshMarket = require('./dsh-market')
+const dshHostCompat = require('./dsh-host-compat')
 const { readTextSafe } = require('./util')
 
 // 镜像测速超时：只打元数据（几百字节），8s 足够；等不到就说明该源当下不可用
@@ -523,6 +525,26 @@ function marketCheckUpdates(opts) {
   return { ok: true, profile: profile, entries: out, updates: updates, unknown: unknown, checked: out.length }
 }
 
+// ⚠️ 回源 registry 查「官方最新版」——**会联网**，且只该在用户明确点击时调。
+//
+// 为什么要单独一个 API 而不是并进 marketCheckUpdates：目录是**每日快照**，里面那份 version
+// 只是快照值，不能代表「当前最新」。实测 2026-09-25：目录停在 2026.924.4355（9/24），
+// dshmarket 目录里写 1.61.0，而 registry 上已经是 1.65.1。所以「目录说已最新」这件事本身
+// 可能已经过时 —— 想确证就得问 registry。
+//
+// ⚠️ 但 marketCheckUpdates 是**同步 + 零网络**的（目录由界面传回，宿主不自己联网），
+//    把它改成联网会一举推翻「刷新目录不打上百个请求」的设计。所以另开一条**纯手动**的路。
+//
+// opts = { items: [{ pkg, key }], registry? } —— key 是关联键（界面用目录条目的 spec）。
+// 返回 { ok, results: { <key>: { pkg, version, error, cached } }, registry }
+function marketRegistryLatest(opts) {
+  const o = opts && typeof opts === 'object' ? opts : {}
+  const items = Array.isArray(o.items) ? o.items : []
+  const registry = String(o.registry || cfgRegistry() || dshMarket.MIRROR_REGISTRY)
+  return dshMarket.registryLatest(items, { registry: registry, concurrency: o.concurrency, fetchImpl: o.fetchImpl })
+    .then((r) => ({ ok: true, registry: registry, results: r.results }))
+}
+
 // ⚠️ pnpm 报「成功」不等于「真的升级了」—— 判据必须是**回读到的实装版本变了**。
 //
 // 2026-09-24 实测的真实假成功：profile 的 `pnpm-workspace.yaml` 里有 `minimumReleaseAgeExclude`
@@ -543,17 +565,182 @@ function blockedByPolicy(profile, from, to, out) {
   if (!to || to === from) {
     // 措辞里出现 minimumReleaseAge / supply-chain 时说明 pnpm 确实提到了这道策略，文案可以更笃定
     const s = String(out || '')
-    const hit = /minimumReleaseAgeExclude|supply-chain|minimumReleaseAge/i.test(s)
     const home = dshBackup.dshHome()
+    const policyFile = home ? path.join(home, 'profiles', profile, 'pnpm-workspace.yaml') : '<$DSH_HOME>/profiles/' + profile + '/pnpm-workspace.yaml'
+    // 白名单键的**直接证据**：pnpm 真的点名了 minimumReleaseAgeExclude，或打了 release-age 专用的错误码。
+    // 比 sawPolicyHint（连常规信息行都算）严得多：那行 `✓ Lockfile passes supply-chain policies` 里
+    // 有 supply-chain，会把「太新」误判成「白名单没放行」，给出让用户白改一次 yaml 的错误指引。
+    const keyHint = /minimumReleaseAgeExclude|ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION|ERR_PNPM_NO_MATURE_MATCHING_VERSION/i.test(s)
+    // 「太新」的直接证据：pnpm 明说了它认为版本太新、要等多少天（原生 CLI 与 pnpm 10/11 两种拼写都认）。
+    const ageHint = /minimum[\s-]?release[\s-]?age(?!Exclude)|\btoo new\b|newer than .{0,20}(?:minutes|hours|days)/i.test(s)
+    // ⚠️ 两个判定必须**先看太新**：太新时 pnpm 会顺带把白名单键名也打出来（「如要放行可改 X」），
+    //    若先判 keyHint 就会永远归到「白名单没放行」，派发到错误的引导。
+    const reason = ageHint ? 'release-age' : (keyHint ? 'allowlist' : 'unknown')
     return {
       blocked: true,
-      policyFile: home ? path.join(home, 'profiles', profile, 'pnpm-workspace.yaml') : '<$DSH_HOME>/profiles/' + profile + '/pnpm-workspace.yaml',
-      policyKey: 'minimumReleaseAgeExclude',
-      sawPolicyHint: hit,
+      staleReason: reason,
+      policyFile: policyFile,
+      policyKey: reason === 'release-age' ? 'minimumReleaseAge' : 'minimumReleaseAgeExclude',
+      sawPolicyHint: /minimumReleaseAgeExclude|supply-chain|minimumReleaseAge/i.test(s),
     }
   }
   return { blocked: false }
 }
+
+// 判断「回读到的实装版本比更新前**低**」—— 即静默降级。
+//
+// ⚠️ 为什么要单独判方向：`blockedByPolicy` 只能发现「版本没变」，但还有另一种更坏的失败 ——
+//    pnpm 报成功、版本确实**变了**，却变**低**了。触发条件与 dsh-market 官方文档警告的一致
+//    （UPDATE-API-V1.md 的 DOWNGRADE_DETECTED）：镜像滞后 / registry 把 `@latest` 解析成了
+//    旧版本 / 目录给的 spec 指向了回退的 tag。此时若按「版本变了」判成功，用户会看到
+//    「已更新 v1.48.0 → v1.40.0」这种荒谬结论，且旧版已经在磁盘上了。
+//    旧版比新版更容易有安全问题，所以必须当失败处理、引导回滚，而不是提示成功。
+//
+// 只在两边都能解析成版本号时才判 —— 拿不到实装版本时无从比较，不能猜（保守优先，同 updateState 口径）。
+function downgradedBy(from, to) {
+  const a = dshMarket.parseVer(from)
+  const b = dshMarket.parseVer(to)
+  if (!a || !b) return { downgraded: false }
+  // ⚠️ cmpVer(a, b) 的返回是「a 相对 b」：a>b 返 1。这里要判的是「to 比 from 低」，
+  //    故把 from 放第一个 —— 写成 cmpVer(to, from) 会把方向整个反过来，
+  //    结果是**真升级**被判成降级、真降级反而放行（单测当场抓到这个反向错误）。
+  if (dshMarket.cmpVer(from, to) <= 0) return { downgraded: false }
+  return { downgraded: true }
+}
+
+// 判断「装出来的版本与目录要的那个**不是同一个**」—— 即 RESOLVED_VERSION_MISMATCH。
+//
+// ⚠️ 为什么不并进 downgradedBy：那条管的方向是「相对**更新前**变低了」，这条管的是「相对**目录目标**
+//    不是它」。二者不等价，最典型的是「原地不动却以为升了」——`pnpm add` 时 registry 给了个比目录
+//    记录的更新的版本，pnpm 报成功、磁盘真的变成了 1.9.0，但它其实想要 1.8.0。
+//
+// ⚠️ **方向不对称，这是关键**：只有「实际 < 目标」才算失败。
+//    「实际 > 目标」是好的结果 —— 目录里的版本号是快照，registry 早已往前走，
+//    `pnpm add spec` 按 spec 解析出更高版本本来就正常。把它判成失败等于拦掉正常的安装。
+//    与 dsh-market 的 targetMismatch 判定同口径（它的注释原文：only BELOW the target counts）。
+//
+// 拿不到实际版本、或目标不是可解析的版本号（目录给的可能是 `latest` / 空 / range）时一律不判
+// —— 无从比较就不能猜，宁可漏报（同 updateState / downgradedBy 的保守优先口径）。
+function mismatchResolved(target, actual) {
+  const t = dshMarket.parseVer(target)
+  const a = dshMarket.parseVer(actual)
+  if (!t || !a) return { mismatch: false }
+  // cmpVer(actual, target) < 0 → 实际比目标低，才是不匹配
+  return { mismatch: dshMarket.cmpVer(actual, target) < 0 }
+}
+
+// ── DSH 宿主兼容性（见 lib/dsh-host-compat.js）──
+
+// 当前宿主的 DSH 版本。拿不到就返 ''，调用方必须**跳过联网**（无版本无从判定）。
+//
+// ⚠️ 复用 diagnostics.readEnv() 而不是自己读快照：那边已经把「resolved / installed /
+//    globalVersion」三级回退写好了，而且诊断卡显示的版本就是它 —— 两处各读一份必然
+//    出现「诊断说 0.1.6、兼容性按 0.1.7 判」这种自相矛盾。
+function hostDshVersion() {
+  try {
+    return String(diagnostics.readEnv().dshVersion || '').trim()
+  } catch (err) {
+    logErr('[whale][dsh-market] 读宿主 dsh 版本失败', (err && err.message) || '')
+    return ''
+  }
+}
+
+// 目录条目 → 可拉 manifest 的包名。
+//
+// ⚠️ 为什么不能用 entry.npm 兜底：github / tarball 来源的安装 spec（占目录 48.6%）
+//    npm 字段是 null，拿这些去 registry 查会 404 → 被判 unavailable → 满屏 unknown。
+//    只认能从 spec 里剥出**裸包名**的那些（`name@1.2.3` / `@scope/name@^1.0.0`），
+//    其余的明确返回 ''（= 这条判不了），不做无谓的联网。
+function marketPkgNameOf(entry) {
+  const e = entry && typeof entry === 'object' ? entry : {}
+  const spec = dshMarket.parseInstallSpec(e.spec)
+  if (dshMarket.specKindOf(spec) !== 'npm') return ''
+  // 剥掉 spec 里可能带的 `@版本`。⚠️ 必须按**最后一个 `@`** 切：scope 包本身带一个 @
+  //（`@scope/name@1.2.3`），按第一个切会切出空串
+  const at = spec.lastIndexOf('@')
+  const name = at > 0 ? spec.slice(0, at) : spec
+  return dsh.validPkgName(name) || ''
+}
+
+// A 层拦截：dryRun 阶段判定了 incompatible 就**别让用户点下去**。
+//
+// ⚠️ 只拦「确证不兼容」（status === 'incompatible'）：
+//    · unknown（没声明 / 拉不到）**照常放行** —— 目录里近一半条目没有 DSH 声明，
+//      拦掉它们等于把插件市场废掉；而且「我们没查到」不是「不兼容」的证据。
+//    · 联网失败也照常放行 —— 网络抖一下不能变成拦路虎。
+async function enforceHostCompat(entry, opts) {
+  // ⚠️ 两个形参是**历史残留**（2026-09-25 记录）：函数早先只收一个「目录条目」，加 force 时
+  //    又并进来一个 opts，但全部 4 个调用点都只传一个对象（把 spec/npm/version/force 一起塞在
+  //    第一个参数里）。于是 `o` 长期恒为 `{}`，force 永远读不到 —— 现象正是「点了强制安装、
+  //    看了警告、按了确认，依旧被拦在写入前」。所以下面统一从 `entry` 取值，
+  //    第二个形参只在显式传了对象时才作为补充（保持向后兼容，不再依赖它）。
+  const e = entry && typeof entry === 'object' ? entry : {}
+  const o = opts && typeof opts === 'object' ? Object.assign({}, e, opts) : e
+  const pkg = marketPkgNameOf(entry)
+  const host = hostDshVersion()
+  // 无宿主版本 / 非 npm 来源：判不了，直接放行（也不发请求）
+  if (!host || !pkg) return { blocked: false, status: 'unknown', reason: host ? 'undeclared' : 'no-host-version', requirement: '', package: pkg }
+  // ⚠️ force：用户在界面上看过后果、明确选择「强制安装」时的放行开关（2026-09-25 加）。
+  //    语义是「别拦了，但把结论照样算出来带回去」—— 判还是要判，界面要拿 requirement 显示
+  //    「你正在强行装一个要求 ^0.1.7-rc.1 的插件」。所以这里只把 blocked 压成 false，
+  //    不短路返回：后面照常联网取 facts，结论与不 force 时完全一致，只是不作为拦路依据。
+  const force = o.force === true
+  const registry = String(o.registry || cfgRegistry() || dshMarket.MIRROR_REGISTRY)
+  const res = await dshHostCompat.lookup([pkg], { registry: registry })
+  const facts = res && res.facts ? res.facts[pkg] : null
+  const verdict = dshHostCompat.deriveHostCompatibility(facts, host, dshMarket.rangeAllows)
+  if (verdict.status === 'incompatible') {
+    return { blocked: !force, forced: force, status: verdict.status, reason: verdict.reason, requirement: verdict.requirement, package: pkg, host: host }
+  }
+  return { blocked: false, forced: false, status: verdict.status, reason: verdict.reason, requirement: verdict.requirement, package: pkg, host: host }
+}
+
+// 用户在设置里选的 registry（与目录抓取同一来源）。空则回落到内置默认源
+function cfgRegistry() {
+  try {
+    return String(readConfig().dshMarketRegistry || '').trim()
+  } catch (err) {
+    return ''
+  }
+}
+
+// 把 enforceHostCompat 的判定压成界面要的三个字段（未知就不下发，省得前端判两遍）
+function hostCompatView(hc) {
+  const h = hc && typeof hc === 'object' ? hc : {}
+  return {
+    status: String(h.status || 'unknown'),
+    reason: String(h.reason || ''),
+    requirement: String(h.requirement || ''),
+    host: String(h.host || ''),
+  }
+}
+
+// 确证不兼容时的 dryRun 返回体。
+//
+// ⚠️ 形状刻意与 ENV_NOT_READY / 快照失败那类**前置失败**一致：`ok:false` + 明确错误文案，
+//    且 **不带 `changed:true`** —— 前端就是靠「changed 才给确认按钮」这条规则自动挡住，
+//    不必让前端再认一个专门的字段（少一处前后端口径不一致的机会）。
+// ⚠️ 附 `retryable: false`：原样重试必然再失败，唯一出路是换版本 / 换插件 / 升 DSH。
+function hostBlockedResult(hc, extra) {
+  const e = extra && typeof extra === 'object' ? extra : {}
+  const req = String(hc.requirement || '')
+  const host = String(hc.host || '')
+  logErr('[whale][dsh-market] 宿主不兼容，已拦在写入前', { spec: e.spec, host: host, requirement: req })
+  return Object.assign({
+    ok: false,
+    profile: e.profile,
+    spec: e.spec,
+    name: e.name,
+    action: e.action,
+    hostIncompatible: true,
+    retryable: false,
+    hostCompat: hostCompatView(hc),
+    error: '确证与当前 DSH 不兼容：该插件要求 DSH ' + (req || '（范围读不到）')
+      + '，而当前宿主是 ' + (host || '未知')
+      + '。装上也无法加载，已拦在写入前。',
+  }, e.version ? { to: String(e.version) } : {})
+}
+
 // 更新一个已装插件。opts = { profile?, spec, npm?, name?, dryRun? }
 //
 // ⚠️ 更新 = **按目录的 install spec 重装一次**，而不是 `pnpm update`：
@@ -574,32 +761,62 @@ function marketUpdate(opts) {
   const npm = dsh.validPkgName(o.npm) || ''
 
   if (o.dryRun === true) {
-    const deps = dsh.installedDeps(profile)
-    const hit = dshMarket.matchInstalledBySpec(deps, spec) || (npm ? dshMarket.matchDepByNpm(deps, npm) : null)
-    if (!hit) {
-      return { ok: true, dryRun: true, profile: profile, spec: spec, name: label, action: 'not-installed', changed: false, message: label + ' 不在 profile 依赖里，无需更新' }
-    }
-    // from 用**实装版本**：用户要看的是「我现在装的是哪个版本」，不是声明范围。
-    // ⚠️ 不退回 hit.depVersion（那是 `^0.5.11` 这类范围），拿不到就明确说未知
-    const from = realizedOf(profile, hit, spec)
-    return {
-      ok: true,
-      dryRun: true,
-      profile: profile,
-      spec: spec,
-      name: label,
-      action: 'update',
-      changed: true,
-      from: from,
-      // ⚠️ 把目录给的版本原样回传：真写时前端会再带回来，被策略挡下时才能拼出
-      //    「例如 `xxx@0.3.24`」这句可照抄的指引。不带回去就只能显示字面量「目标版本」（真实 bug）
-      to: String(o.version == null ? '' : o.version).trim(),
-      message: '将执行 pnpm add --dir <profiles/' + profile + '> ' + spec
-        + '\n当前版本：' + (from || '读不到实装版本（声明范围是 ' + (hit.depVersion || '无') + '）')
-        + ' —— 重装会把声明改写成目录给的版本',
-    }
+    return enforceHostCompat(o).then((hc) => {
+      if (hc.blocked) return hostBlockedResult(hc, { profile: profile, spec: spec, name: label, action: 'update' })
+      const deps = dsh.installedDeps(profile)
+      const hit = dshMarket.matchInstalledBySpec(deps, spec) || (npm ? dshMarket.matchDepByNpm(deps, npm) : null)
+      if (!hit) {
+        return { ok: true, dryRun: true, profile: profile, spec: spec, name: label, action: 'not-installed', changed: false, message: label + ' 不在 profile 依赖里，无需更新', hostCompat: hostCompatView(hc) }
+      }
+      // from 用**实装版本**：用户要看的是「我现在装的是哪个版本」，不是声明范围。
+      // ⚠️ 不退回 hit.depVersion（那是 `^0.5.11` 这类范围），拿不到就明确说未知
+      const from = realizedOf(profile, hit, spec)
+      return {
+        ok: true,
+        dryRun: true,
+        profile: profile,
+        spec: spec,
+        name: label,
+        action: 'update',
+        changed: true,
+        from: from,
+        // ⚠️ 把目录给的版本原样回传：真写时前端会再带回来，被策略挡下时才能拼出
+        //    「例如 `xxx@0.3.24`」这句可照抄的指引。不带回去就只能显示字面量「目标版本」（真实 bug）
+        to: String(o.version == null ? '' : o.version).trim(),
+        hostCompat: hostCompatView(hc),
+        // ⚠️ 与 marketInstall 的 dryRun 同一口径（2026-09-25 加）：force 只把 hc.blocked 压成 false，
+        //    「不兼容」这个结论本身还在。界面要靠它画警示条 —— 不然用户点了「强制安装」之后
+        //    看到的是一张普通确认单，完全看不出自己正在做一件「装上大概率加载不了」的事。
+        hostIncompatible: hc.status === 'incompatible',
+        hostForced: hc.forced === true,
+        message: '将执行 pnpm add --dir <profiles/' + profile + '> ' + spec
+          + '\n当前版本：' + (from || '读不到实装版本（声明范围是 ' + (hit.depVersion || '无') + '）')
+          + ' —— 重装会把声明改写成目录给的版本'
+          + (hc.status === 'incompatible'
+            ? '\n⚠️ 已忽略宿主兼容性检查（强制安装）：该插件要求 DSH ' + (hc.requirement || '（范围读不到）')
+              + '，当前宿主是 ' + (hc.host || '未知') + ' —— 装上很可能无法加载。'
+            : ''),
+      }
+    })
   }
 
+  // mirror of marketInstall: dryRun 过了不代表真写能过 —— 那是两次独立调用
+  return enforceHostCompat(o).then((hc) => {
+    if (hc.blocked) return hostBlockedResult(hc, { profile: profile, spec: spec, name: label, action: 'update', version: o.version })
+    return updateAfterCompat(o, {
+      profile: profile, spec: spec, label: label, npm: npm,
+      hostIncompatible: hc.status === 'incompatible', hostForced: hc.forced === true,
+    })
+  })
+}
+
+// marketUpdate 真写在过了兼容闸之后的全部动作。抽出来只为让上面那个 enforceHostCompat
+// 的 then 保持扁平 —— 逻辑本身与早先完全一致（快照 → installPluginPkg → 三道回读校验）。
+function updateAfterCompat(o, ctx) {
+  const profile = ctx.profile
+  const spec = ctx.spec
+  const label = ctx.label
+  const npm = ctx.npm
   const before = dshMarket.matchInstalledBySpec(dsh.installedDeps(profile), spec) || (npm ? dshMarket.matchDepByNpm(dsh.installedDeps(profile), npm) : null)
   // ⚠️ 只取**实装版本**，拿不到就留空 —— 绝不退回 `hit.depVersion`：那是声明范围（`^0.5.11`），
   //    界面会拼成 `v^0.5.11` 这种不成立的写法。空字符串时界面走不含 from 的那条文案分支。
@@ -613,7 +830,8 @@ function marketUpdate(opts) {
     if (!r.ok) {
       logErr('[whale][dsh-market] 更新失败', spec + ' 退出码 ' + r.code + ' ' + (r.err || ''))
       const build = o.needsBuild === true ? parseAllowBuilds(r.out || '') : null
-      return { ok: false, spec: spec, name: label, error: '更新失败（退出码 ' + r.code + '）：详见「日志」卡', snapshot: snap.dirName, allowBuilds: build }
+      // 需构建被拦时重试前必须先改 allowBuilds，原样重试必然再失败；其余 pnpm 失败多为网络/锁文件，可重试
+      return { ok: false, spec: spec, name: label, error: '更新失败（退出码 ' + r.code + '）：详见「日志」卡', tail: tailLines(r.out || r.err || ''), retryable: !build, snapshot: snap.dirName, allowBuilds: build }
     }
     const after = dsh.installedDeps(profile)
     const hit = dshMarket.matchInstalledBySpec(after, spec) || (npm ? dshMarket.matchDepByNpm(after, npm) : null)
@@ -623,30 +841,90 @@ function marketUpdate(opts) {
     }
     // ⚠️ 这里必须**重新读** node_modules：不重读会拿更新前的旧版本当新版本显示
     const to = realizedOf(profile, hit, spec) || hit.depVersion
+    // 目录要的那个版本（dryRun 回传 → 前端真写时带回）。拿不到就是空 —— 后面几处判定都靠它
+    const aim = String(o.version == null ? '' : o.version).trim()
+    const aimTxt = aim || '目标版本'
     // ⚠️ 退出码 0 还不够：pnpm 可能被 profile 的供应链策略挡下、原样没动却报成功。
     //    判据是「回读到的实装版本真的变了」，没变就不能说「已更新」—— 否则界面会显示
     //    「已更新 v1.48.0 → v1.48.0」这种荒谬结论，用户以为成功、其实一个字没改。
     const blk = blockedByPolicy(profile, fromBefore, to, r.out)
     if (blk.blocked) {
-      // 目录给的版本（dryRun 回传 → 前端真写时带回）。拿不到就退回「目标版本」这种含糊说法
-      const aim = String(o.version == null ? '' : o.version).trim()
-      const aimTxt = aim || '目标版本'
-      logErr('[whale][dsh-market] 更新被供应链策略拦截，版本未变', { spec: spec, version: to, aim: aim, sawPolicyHint: blk.sawPolicyHint })
+      logErr('[whale][dsh-market] 更新被供应链策略拦截，版本未变', { spec: spec, version: to, aim: aim, staleReason: blk.staleReason })
+      // ⚠️ 两种「版本没动」的成因与引导**完全不同**，必须分开派发，不能都让用户去改白名单：
+      //    · release-age：pnpm 认为版本太新、还在观察期 —— 正解是**等**，改白名单是绕过安全策略；
+      //    · allowlist  ：白名单只放行到旧版本 —— 正解才是把目标版本加进白名单。
+      //    合并成一档会让「太新」的用户照着改 yaml，改完发现没用（真实用户报过这类困惑）。
+      const isAge = blk.staleReason === 'release-age'
+      const heal = isAge
+        ? '\n这个版本发布还太新，pnpm 的 ' + blk.policyKey + ' 观察期还没过 —— 等它满期后重试即可，不必改配置。'
+          + '\n（确实要立刻装，可把 ' + aimTxt + ' 加进 ' + blk.policyFile + ' 的 minimumReleaseAgeExclude 强行放行。）'
+        : '\n如需放行，请把 ' + aimTxt + ' 加进 ' + blk.policyFile + ' 的 ' + blk.policyKey
+          + '（照抄这一行即可：`- ' + spec + '@' + aimTxt + '`），再重试。'
       return {
         ok: false,
         spec: spec,
         name: label,
         blocked: true,
+        staleReason: blk.staleReason,
+        // release-age 只需等，重试才有意义；白名单要用户先改配置，原样重试必然再失败
+        retryable: isAge,
         from: fromBefore,
         version: to,
         policyFile: blk.policyFile,
         policyKey: blk.policyKey,
         snapshot: snap.dirName,
         error: 'pnpm 报成功但版本没变（仍是 v' + (to || '未知') + '）：' + (aim ? '目录给的 v' + aim + ' ' : '')
-          + '没能装上，被 profile 的供应链策略挡下了。'
-          + (blk.sawPolicyHint ? '' : '（pnpm 没报错，只是认为当前版本已满足要求。）')
-          + '\n如需放行，请把 ' + aimTxt + ' 加进 ' + blk.policyFile + ' 的 ' + blk.policyKey
-          + '（照抄这一行即可：`- ' + spec + '@' + aimTxt + '`），再重试。'
+          + (isAge ? '因为发布太新，被 pnpm 的发布观察期挡下了。' : '没能装上，被 profile 的供应链策略挡下了。')
+          + heal
+          + '\n（profile 已建快照，可回滚）',
+      }
+    }
+    // ⚠️ 与 `blockedByPolicy` 是**两个方向**的失败：那条管「没变」，这条管「变了但变低了」。
+    //    必须在报成功**之前**判 —— 降级后旧版已经在磁盘上，说「已更新」是错的。
+    //    与 dsh-market 官方 DOWNGRADE_DETECTED 同语义：不可原样重试（重试还是同一个低版本）。
+    const dg = downgradedBy(fromBefore, to)
+    if (dg.downgraded) {
+      logErr('[whale][dsh-market] 更新后版本反而变低（疑似镜像滞后）', { spec: spec, from: fromBefore, to: to })
+      return {
+        ok: false,
+        spec: spec,
+        name: label,
+        downgraded: true,
+        // 原样重试还是同一个低版本，重试无用 —— 要等镜像同步
+        retryable: false,
+        from: fromBefore,
+        version: to,
+        profile: profile,
+        snapshot: snap.dirName,
+        error: '装上的版本比原来更低了（v' + fromBefore + ' → v' + to + '）：'
+          + 'pnpm 报成功，但 registry / 镜像把它解析成了旧版本。'
+          + '\n旧版本可能缺少安全修复，建议先回滚；等镜像同步后再重试。'
+          + '\n（profile 已建快照，可回滚到 v' + fromBefore + '）',
+      }
+    }
+    // ⚠️ 与上面两条都不同：这条管的是「相对**目录目标**不是它」，而不是「没变」或「相对更新前变低」。
+    //    典型场景是「原地不动却以为升了」（registry 给了比目录记录的更高的版本）——
+    //    此时 fromBefore < to 成立（不算降级），只靠上面两条会漏判、直接报「已更新」。
+    //    口径见 mismatchResolved 注释：**只有低于目标才算失败**，高于目标是正常的好结果。
+    const mm = mismatchResolved(aim, to)
+    if (mm.mismatch) {
+      logErr('[whale][dsh-market] 装出来的版本低于目录目标', { spec: spec, aim: aim, got: to })
+      return {
+        ok: false,
+        spec: spec,
+        name: label,
+        mismatch: true,
+        // 可能是镜像滞后（等同步后重试有用），也可能是目录太旧 —— 交由用户判断，故标可重试
+        retryable: true,
+        from: fromBefore,
+        version: to,
+        expected: aim,
+        profile: profile,
+        snapshot: snap.dirName,
+        error: '装出来的不是目录要的那个版本（目录要 v' + aim + '，实际 v' + to + '）：'
+          + 'pnpm 报成功，但 registry 解析出的版本低于目录记录的版本。'
+          + '\n可能是镜像还没同步到这个版本 —— 稍后重试通常能拿到；'
+          + '若一直如此，说明目录里的版本号已经过时（以 registry 实际发布的为准）。'
           + '\n（profile 已建快照，可回滚）',
       }
     }
@@ -660,6 +938,10 @@ function marketUpdate(opts) {
       version: to,
       profile: profile,
       snapshot: snap.dirName,
+      // ⚠️ 与 installWrite 同一口径（2026-09-25 加）：force 不拦，但结论要如实回传，
+      //    界面据此在结果卡上补一句「这是强行装的，加载失败先回滚快照」
+      hostIncompatible: ctx.hostIncompatible === true,
+      hostForced: ctx.hostForced === true,
       needsRestart: true,
     }
   })
@@ -671,6 +953,23 @@ function realizedOf(profile, hit, spec) {
   const versions = dsh.installedVersions(profile)
   if (hit && hit.key && versions[hit.key]) return String(versions[hit.key])
   return spec ? dshMarket.realizedVersionBySpec(versions, spec) : ''
+}
+
+// 把长输出**只留尾部**再回传给界面（与 dsh-market 的 message.slice(-1200) 同口径）。
+//
+// ⚠️ 为什么砍头不砍尾：pnpm 的关键诊断（错误码、`For example:` 段、到底是哪个包被判违规）
+//    一律在**末尾**，前面全是 `Progress: resolved … reused …` 这类进度噪声。整段回传会把
+//    真正有用的那几行淹掉，用户还得自己滚到底；而这里的用途正是「让用户一眼看到要照抄什么」。
+//    长度按**行**保留比按字符切更稳：按字符切可能把最后一行（往往就是错误码那行）切半。
+const OUT_TAIL_LINES = 40
+
+function tailLines(text, maxLines) {
+  const s = String(text == null ? '' : text)
+  if (!s) return ''
+  const max = Number.isFinite(maxLines) && maxLines > 0 ? Math.floor(maxLines) : OUT_TAIL_LINES
+  const lines = s.split(/\r?\n/)
+  if (lines.length <= max) return s
+  return '（省略前面 ' + (lines.length - max) + ' 行）\n' + lines.slice(-max).join('\n')
 }
 
 // 从 dsh / pnpm 的失败输出里把 allowBuilds 引导信息抠出来。
@@ -728,57 +1027,179 @@ function marketInstall(opts) {
   const needsBuild = o.needsBuild === true
   // 目录条目带的版本号（github / tarball 条目常为 null，那就不参与判定）
   const catalogVersion = String(o.version == null ? '' : o.version).trim()
+  // ⚠️ exact=true：「装到指定的这一版」而非「按原 spec 重装」（2026-09-25 新增）。
+  //
+  // 为什么必须单开一条路：按原 spec 重装对「升到最新」**根本无效** —— profile 的
+  // pnpm-lock.yaml 里锁着 `specifier: ^1.62.0 / version: 1.62.0`，`pnpm add dshmarket`
+  // 会命中锁文件、原样复用 1.62.0。而目录是每日快照，它记的版本还可能更旧。
+  // 所以只能把**确切版本**拼进 spec：`dshmarket@1.65.1`。pnpm 见到精确版本会改写
+  // lock（这正是「更新」做不到的事）。
+  //
+  // ⚠️ 只对 npm 来源开放：要用到「裸包名 + 版本」。github / tarball 的 spec 形态里
+  //    塞版本号没有意义（`github:a/b@1.0.0` 不是 pnpm 认的写法），所以这里直接拒绝，
+  //    而不是拼出一个必然失败的字符串。
+  const exact = o.exact === true
+  const targetVersion = String(o.targetVersion == null ? '' : o.targetVersion).trim()
+  let runSpec = spec
+  if (exact) {
+    // 裸包名从 npm 字段取（spec 可能是别名 / 子包路径，不能当包名用）
+    const pinName = dsh.validPkgName(o.npm) || dsh.validPkgName(spec)
+    const pinVer = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(targetVersion) ? targetVersion : ''
+    if (!pinName || !pinVer) {
+      return {
+        ok: false,
+        error: '安装指定版本需要「裸 npm 包名 + 确切版本号」（只在 npm 来源上可用）：'
+          + '包名 ' + (pinName || String(o.npm || spec) || '（空）') + '，版本 ' + (targetVersion || '（空）'),
+      }
+    }
+    runSpec = pinName + '@' + pinVer
+  }
 
   // dryRun：只说清「准备执行什么」，不跑 npm 也不建快照
   if (o.dryRun === true) {
-    const deps = dsh.installedDeps(profile)
-    const hit = dshMarket.matchInstalledBySpec(deps, spec) || (npm ? dshMarket.matchDepByNpm(deps, npm) : null)
-    // ⚠️ 光判「装没装」不够 —— 这正是本函数早先的一个真实 bug：声明范围 `^1.48.0` 是**容得下**
-    //    `1.49.0` 的，用户看着目录里有新版去点「安装」，却被告知「已装 …无需重复安装」。
-    //    所以这里还要比**实装版本**（读自 node_modules 的裸 x.y.z）：实装 < 目录版本 → 该走更新。
-    //    口径与 marketCheckUpdates 的 updateState 完全一致（那边也是「优先比实装，拿不到退回范围」），
-    //    两边不一致会出现「列表标着可更新、点进去却说已装」这种自相矛盾。
-    const realized = realizedOf(profile, hit, spec)
-    const st = hit ? dshMarket.updateState(hit.depVersion, catalogVersion, realized) : null
-    // changed 的语义是「这次点下去磁盘真的会变」：没装 → 变；装了但落后 → 也变
-    const changed = !hit || (st.state === 'update')
-    return {
-      ok: true,
-      dryRun: true,
-      profile: profile,
-      spec: spec,
-      npm: npm,
-      name: label,
-      needsBuild: needsBuild,
-      changed: changed,
-      action: changed ? 'install' : 'already',
-      // 已装且不比目录旧 → 才是真的不必重跑 pnpm（同一包重装是幂等的，但会白等一次网络）
-      message: changed
-        ? (!hit
-          ? '将执行 pnpm add --dir <profiles/' + profile + '> ' + spec
-          : '已装 ' + (realized || hit.depVersion || '') + '，目录提供 v' + catalogVersion
-            + ' —— 将重装覆盖到 v' + catalogVersion
-            + '（会改写 profile/package.json 里的版本范围）')
-        + (needsBuild ? '\n⚠️ 该来源靠 prepare 脚本构建，pnpm 默认拦截构建 —— 第一次大概率会失败并要求写入 allowBuilds，按提示再装一次即可' : '')
-        : '已装 ' + label + '（' + (realized || hit.depVersion || '') + '），'
-          // 实装版本与目录版本都拿得到才说得清「已是最新」；拿不到就别下这个结论
-          + (realized && catalogVersion ? '已是目录里的最新版 v' + catalogVersion : '无需重复安装'),
-    }
+    return enforceHostCompat(Object.assign({}, o, { spec: spec })).then((hc) => {
+      if (hc.blocked) {
+        return hostBlockedResult(hc, { profile: profile, spec: spec, name: label, action: 'install', version: catalogVersion })
+      }
+      const deps = dsh.installedDeps(profile)
+      const hit = dshMarket.matchInstalledBySpec(deps, spec) || (npm ? dshMarket.matchDepByNpm(deps, npm) : null)
+      // ⚠️ 光判「装没装」不够 —— 这正是本函数早先的一个真实 bug：声明范围 `^1.48.0` 是**容得下**
+      //    `1.49.0` 的，用户看着目录里有新版去点「安装」，却被告知「已装 …无需重复安装」。
+      //    所以这里还要比**实装版本**（读自 node_modules 的裸 x.y.z）：实装 < 目录版本 → 该走更新。
+      //    口径与 marketCheckUpdates 的 updateState 完全一致（那边也是「优先比实装，拿不到退回范围」），
+      //    两边不一致会出现「列表标着可更新、点进去却说已装」这种自相矛盾。
+      const realized = realizedOf(profile, hit, spec)
+      // ⚠️ **exact 的「要不要装」不能问目录，要问用户指定的那一版**（2026-09-25 修，真实 bug）：
+      //    用户点「装这一版」要的是 registry 的 v1.65.1，而目录快照记的可能是 v1.61.0。
+      //    若照旧拿 catalogVersion 去比，`1.62.0(实装) vs 1.61.0(目录)` 判成「已是最新」→
+      //    changed=false → 界面回「已装 dsh-market（1.62.0），无需重复安装」，按钮点了没反应。
+      //    这是把「目录这一维度」的结论错用到了「registry 那一维度」的问题上。
+      //    故这里单算：拿 realized / depVersion 与 **targetVersion** 比，相等才叫不必装。
+      let changed = false
+      if (!hit) {
+        changed = true
+      } else if (exact) {
+        const mine = String(realized || hit.depVersion || '')
+        // 版本读不出来 → 宁可真装一次（pnpm 装同一版本是幂等的，白等一次好过按钮点了没反应）
+        changed = !mine || dshMarket.cmpVer(mine, targetVersion) !== 0
+      } else {
+        const st = dshMarket.updateState(hit.depVersion, catalogVersion, realized)
+        changed = st.state === 'update'
+      }
+      return {
+        ok: true,
+        dryRun: true,
+        profile: profile,
+        spec: spec,
+        npm: npm,
+        name: label,
+        needsBuild: needsBuild,
+        changed: changed,
+        action: changed ? 'install' : 'already',
+        hostCompat: hostCompatView(hc),
+        // ⚠️ 强制安装时把「不兼容」这个结论**照样带出去**（2026-09-25 加）：
+        //    force 只让 hc.blocked 变 false，结论本身没变。界面要拿它画警示条与徽标 ——
+        //    否则用户点了「强制安装」后看到的是一张普普通通的确认单，
+        //    完全看不出自己正在做一件「装上大概率加载不了」的事。
+        hostIncompatible: hc.status === 'incompatible',
+        hostForced: hc.forced === true,
+        // 已装且不比目录旧 → 才是真的不必重跑 pnpm（同一包重装是幂等的，但会白等一次网络）
+        message: changed
+          ? (!hit
+            ? '将执行 pnpm add --dir <profiles/' + profile + '> ' + runSpec
+            : '已装 ' + (realized || hit.depVersion || '') + '，'
+              + (exact
+                // exact 分支的「目标」是用户查到的 registry 版本，不是目录版本 —— 说错会让人以为要看目录
+                ? '将精确重装到 v' + targetVersion + '（`' + runSpec + '`）'
+                : '目录提供 v' + catalogVersion + ' —— 将重装覆盖到 v' + catalogVersion)
+              + '（会改写 profile/package.json 里的版本范围）')
+          + (needsBuild ? '\n⚠️ 该来源靠 prepare 脚本构建，pnpm 默认拦截构建 —— 第一次大概率会失败并要求写入 allowBuilds，按提示再装一次即可' : '')
+          + (hc.status === 'incompatible'
+            ? '\n⚠️ 已忽略宿主兼容性检查（强制安装）：该插件要求 DSH ' + (hc.requirement || '（范围读不到）')
+              + '，当前宿主是 ' + (hc.host || '未知') + ' —— 装上很可能无法加载。'
+            : '')
+          // 走到这里必是命中已装：exact 说清「已经是这一版」，常规说清「已经是目录最新」
+          : '已装 ' + label + '（' + (realized || hit.depVersion || '') + '），'
+            + (exact
+              ? '已经是 v' + targetVersion + '，无需重复安装'
+              // 实装版本与目录版本都拿得到才说得清「已是最新」；拿不到就别下这个结论
+              : (realized && catalogVersion ? '已是目录里的最新版 v' + catalogVersion : '无需重复安装')),
+      }
+    })
   }
-  if (dsh.globalDsh()) {
-    // 与主安装链路同一取舍：有全局 dsh 时 pnpm 装插件的目标目录取决于 dsh 从哪加载，
-    // 这里只警告不阻断 —— 用户确实可能故意两个都装
-    log('[whale][dsh-market] 检测到全局 dsh，插件将装进 profile 目录', profile)
+  // ⚠️ dsh.globalDsh() 是**同步调用**，且发生在返回 Promise 之前。若宿主函数缺失
+  //    （实测 2026-09-25：界面报 `dsh.globalDsh is not a function`，因为 uTools 里还挂着
+  //    改动前的旧 preload），异常会直接冒到调用方，`.then` 链根本挂不上 ——
+  //    按钮永久卡在「正在安装…」、计时器永不停。这里只是一句告警日志，包起来即可。
+  try {
+    if (dsh.globalDsh()) {
+      // 与主安装链路同一取舍：有全局 dsh 时 pnpm 装插件的目标目录取决于 dsh 从哪加载，
+      // 这里只警告不阻断 —— 用户确实可能故意两个都装
+      log('[whale][dsh-market] 检测到全局 dsh，插件将装进 profile 目录', profile)
+    }
+  } catch (err) {
+    logErr('[whale][dsh-market] 检测全局 dsh 失败（不影响安装）', (err && err.message) || String(err))
   }
 
+  // ⚠️ 建快照期间 pnpm 还没起（`state.lastCmd` 要等 runPnpm 里的 setCmd 才写），
+  //    用户 2026-09-25 实测反馈「等了好久，不知道什么情况，也不知道有没有在安装」——
+  //    进度区那时只能显示一句静态提示，日志卡更是空白，看起来像卡死。所以每一步动手前
+  //    先往 dsh 的日志流里播一条阶段说明，让「运行详情」有东西可看。
+  //
+  // ⚠️ 用 safeNote 而不是直接 dsh.note：本函数是**同步返回 Promise** 的，若 note 抛异常
+  //    （最典型是 uTools 里还挂着旧 preload、dsh.note 尚不存在），异常会在返回 Promise
+  //    之前冒出来 —— 调用方 `.then` 链挂不上，界面永久卡在「正在安装…」。
+  //    阶段旁白只是观感增强，绝不能因为它把整条安装链路拽塌。
+  const safeNote = (t) => { try { return dsh.note(t) } catch (err) { logErr('[whale][dsh-market] 播阶段旁白失败（不影响安装）', (err && err.message) || String(err)) } }
+
+  // ⚠️ 真写**必须自己再过一遍兼容闸**（2026-09-25 加）：dryRun 与真写是宿主上的两次独立调用
+  //    （界面先 dryRun 拿单据、用户点头后再调一次真写），dryRun 放行过不代表这次也放行。
+  //    更要紧的是反向情形：用户点了「仍要强制安装」，界面把 force 带回来了 —— 若真写不读 force，
+  //    他看完成功单据点确认，却照样被拦在写入前，比一开始就不给这个按钮更糟。
+  //    放行之后的所有动作抽进 installWrite，与 updateAfterCompat 同一手法，只为让这条 then 保持扁平。
+  return enforceHostCompat(Object.assign({}, o, { spec: spec })).then((hc) => {
+    if (hc.blocked) {
+      return hostBlockedResult(hc, { profile: profile, spec: spec, name: label, action: 'install', version: catalogVersion })
+    }
+    return installWrite(o, {
+      profile: profile, spec: spec, label: label, npm: npm, needsBuild: needsBuild,
+      runSpec: runSpec, exact: exact, targetVersion: targetVersion,
+      safeNote: safeNote,
+      hostIncompatible: hc.status === 'incompatible', hostForced: hc.forced === true,
+    })
+  })
+}
+
+// marketInstall 真写在过了兼容闸之后的全部动作：快照 → installPluginPkg → 三道回读校验。
+// 逻辑本身与早先完全一致，只是从 marketInstall 里搬出来（兼容闸需要它成为被调用者）。
+function installWrite(o, ctx) {
+  const profile = ctx.profile
+  const spec = ctx.spec
+  const label = ctx.label
+  const npm = ctx.npm
+  const needsBuild = ctx.needsBuild
+  const runSpec = ctx.runSpec
+  const exact = ctx.exact
+  const targetVersion = ctx.targetVersion
+  const safeNote = ctx.safeNote
+  safeNote('开始安装 ' + runSpec + '：先建 profile 快照（备份 package.json 等，随后才起 pnpm）')
   const snap = dshBackup.createSnapshot({ profile: profile, reason: 'before-market-install' })
   if (!snap.ok) {
     logErr('[whale][dsh-market] 快照失败，已中止安装', snap.error || '')
+    safeNote('建快照失败，已中止安装：' + (snap.error || '未知错误'))
     return Promise.resolve({ ok: false, error: '建快照失败，已中止安装：' + (snap.error || '未知错误') })
   }
-  return dsh.installPluginPkg(profile, spec).then((r) => {
+  safeNote('快照已建（' + snap.dirName + '），开始起 pnpm 进程')
+  // 装之前的实装版本，供结果卡画 `旧 → 新`。必须在跑 pnpm **之前**读，
+  // 跑完再读就是新的了（见 return 里 from 的注释）
+  const fromBefore = (function () {
+    const before = dsh.installedDeps(profile)
+    const h = dshMarket.matchInstalledBySpec(before, spec) || (npm ? dshMarket.matchDepByNpm(before, npm) : null)
+    return realizedOf(profile, h, spec) || (h && h.depVersion) || ''
+  })()
+  return dsh.installPluginPkg(profile, runSpec).then((r) => {
     if (!r.ok) {
-      logErr('[whale][dsh-market] 安装失败', spec + ' 退出码 ' + r.code + ' ' + (r.err || ''))
+      logErr('[whale][dsh-market] 安装失败', runSpec + ' 退出码 ' + r.code + ' ' + (r.err || ''))
       // 「需构建」这一档把 dsh / pnpm 的 allowBuilds 原文交给界面 —— 用户照着写一遍
       // 再点一次即可，不必自己翻日志找那把带 commit hash 的 key
       const build = needsBuild ? parseAllowBuilds(r.out || '') : null
@@ -787,13 +1208,18 @@ function marketInstall(opts) {
         spec: spec,
         name: label,
         error: '安装失败（退出码 ' + r.code + '）：详见「日志」卡',
+        tail: tailLines(r.out || r.err || ''),
+        // 需构建被拦时先改 allowBuilds 才能重试成功，原样重试必然再失败
+        retryable: !build,
         snapshot: snap.dirName,
         allowBuilds: build,
       }
     }
     // ⚠️ 不信任「pnpm 退出码 0 = 装好了」：回读 profile/package.json 确认依赖真的出现了。
     // 与 dsh-patch 写后回读同一个理由 —— V2 已证明写坏的东西不会报错。
-    // 判定用 spec 反查（github/tarball 的键名由包管理器归一，对不上 npm 字段）
+    // ⚠️ 回读仍用**原 spec**（不是 runSpec）：`pkg@1.2.3` 这个带版本的串在 package.json 里
+    //    存的是**键名**，拿带版本的串去匹配键必然对不上（会误报「没装进去」）。
+    //    用 spec 反查，github/tarball 的键名也由它归一（npm 字段对不上那类来源）。
     const after = dsh.installedDeps(profile)
     const hit = dshMarket.matchInstalledBySpec(after, spec) || (npm ? dshMarket.matchDepByNpm(after, npm) : null)
     if (!hit) {
@@ -806,18 +1232,53 @@ function marketInstall(opts) {
         snapshot: snap.dirName,
       }
     }
-    log('[whale][dsh-market] 已安装插件', { spec: spec, version: hit.depVersion })
+    // ⚠️ exact 模式多一道校验：**实装版本必须等于要的那个版本**。
+    //    只凭上面「键名出现」不够 —— 键早就在了（本来已装），真正要确认的是「版本真的换了」。
+    //    而 pnpm 完全可能报成功却仍留着旧版本（供应链策略 / registry 解析），
+    //    不校验就会显示「已安装 @1.65.1」而磁盘上还是 1.62.0。
+    const got = realizedOf(profile, hit, spec)
+    if (exact && got !== targetVersion) {
+      logErr('[whale][dsh-market] 精确安装后版本不符', { spec: spec, want: targetVersion, got: got })
+      return {
+        ok: false,
+        spec: spec,
+        name: label,
+        version: got,
+        expected: targetVersion,
+        snapshot: snap.dirName,
+        error: '没装到指定的那个版本（要 v' + targetVersion + '，实装 ' + (got || '读不到') + '）：'
+          + 'pnpm 报成功但磁盘上的版本不是它 —— 可能是供应链策略挡下、或该版本已从 registry 撤下。'
+          + '\n（profile 已建快照，可回滚）',
+      }
+    }
+    // ⚠️ 回传的 version 必须是**实装版本**（`got`，读自 node_modules 的真实 version），
+    //    不能用 `hit.depVersion` —— 后者是 package.json 里的**声明范围**（`^1.65.1`），
+    //    界面拼出来就成了 `v^1.65.1`（2026-09-25 实测踩到：结果卡显示
+    //    「已安装 dsh-market（v1.62.0 → v^1.65.1）」，精确安装的卡上冒出 caret 自相矛盾）。
+    //    pnpm 把 `dshmarket@1.65.1` 写进 package.json 时会**保留成 `^1.65.1`**，所以这两个值
+    //    在这个场景下必然不等 —— 实测 `got=1.65.1`、`hit.depVersion=^1.65.1`。
+    //    `got` 读不到（node_modules 缺该包）才退回范围，至少给用户一个能看的串。
+    const shownVersion = got || hit.depVersion || ''
+    log('[whale][dsh-market] 已安装插件', { spec: spec, runSpec: runSpec, version: shownVersion, declared: hit.depVersion })
     return {
       ok: true,
       spec: spec,
       npm: npm,
       name: label,
-      version: hit.depVersion,
+      version: shownVersion,
+      // ⚠️ 带上「装之前是什么版本」（2026-09-25 加）：界面要在结果卡上画 `1.62.0 → 1.65.1`。
+      //    不给它前端只能自己猜 —— 而前端手上只有目录版本（正是滞后的那个），画出来必然是错的。
+      //    这里的 from 是**回读出来的实装版本**（`realizedOf`），不是 package.json 里的 range
+      from: fromBefore,
       profile: profile,
       snapshot: snap.dirName,
       // ⚠️ github / tarball 来源即使装成功也**不保证 dsh 能加载**：pnpm 仍会拦 prepare 构建。
       //    界面据此提示「若加载失败，按 allowBuilds 引导再试」
       needsBuild: needsBuild,
+      // ⚠️ 真写也照样把兼容结论带回去（2026-09-25 加）：force 只是不拦，结论没变。
+      //    界面用它把成功卡切成「强行装上了，若加载失败先回滚快照」的措辞
+      hostIncompatible: ctx.hostIncompatible === true,
+      hostForced: ctx.hostForced === true,
       // 装完必须让 dsh 重新加载才生效，但重启会掐掉正在跑的会话 —— 交给用户点按钮
       needsRestart: true,
     }
@@ -872,7 +1333,13 @@ function marketUninstall(opts) {
     return dsh.uninstallPluginPkg(profile, npm).then((r) => {
       if (!r.ok) {
         logErr('[whale][dsh-market] 卸载失败', npm + ' 退出码 ' + r.code + ' ' + (r.err || ''))
-        return { ok: false, error: '卸载失败（退出码 ' + r.code + '）：详见「日志」卡', snapshot: snap.dirName }
+        return {
+          ok: false,
+          error: '卸载失败（退出码 ' + r.code + '）：详见「日志」卡',
+          tail: tailLines(r.out || r.err || ''),
+          retryable: true,
+          snapshot: snap.dirName,
+        }
       }
       const after = dsh.installedDeps(profile)
       if (after[npm]) {
@@ -880,6 +1347,7 @@ function marketUninstall(opts) {
         return {
           ok: false,
           error: 'pnpm 报告成功，但 ' + npm + ' 仍在 profile/package.json 里（已保留快照，可回滚）',
+          retryable: true,
           snapshot: snap.dirName,
         }
       }
@@ -1304,6 +1772,16 @@ module.exports = {
   dshCleanNpxCache() {
     return dsh.cleanNpxCaches()
   },
+  // ── dsh profile 写锁：孤儿锁检测（只读）与清理（用户确认后调用）──
+  // 背景：dsh 的 <profile>/package.json.lock 在进程被强杀后会永久残留（上游不做回收），
+  // 之后该 profile 的装/卸/更新/market 全部死锁。检测侧只读，不清算；
+  // 清理侧会**重新校验**（详见 dsh.js 的 dshLockClear），不信任这里传来的旧结论。
+  dshLockStale(opts) {
+    return dsh.dshLockStale(opts && opts.profile)
+  },
+  dshLockClear(opts) {
+    return dsh.dshLockClear(opts && opts.profile)
+  },
   // ── dsh 插件开关（E2）：改的是用户层 profile patch（$DSH_HOME/profiles/<p>/cordis.patch.yml）──
   dshPatchList(opts) {
     return listDshPatchItems(opts)
@@ -1385,15 +1863,99 @@ module.exports = {
   dshMarketCheckUpdates(opts) {
     return marketCheckUpdates(opts)
   },
+  // ⚠️ 回源 registry 查**官方最新版**（**会联网**，纯手动，目录数据不作数）。
+  // 目录是每日快照，里面那份 version 可能已落后于 registry —— 界面每行给一个按钮，
+  // 用户点了才发请求。opts = { items: [{ pkg, key }], registry? }
+  dshMarketRegistryLatest(opts) {
+    return marketRegistryLatest(opts)
+  },
   // 更新一个已装插件：按目录 spec 重装（不是 pnpm update，见 marketUpdate 注释）。
   // dryRun 只算不写；真写与安装同链路：快照 → pnpm add → 回读核验
   dshMarketUpdate(opts) {
     return marketUpdate(opts)
   },
+  // 查一批目录条目与**当前宿主 DSH** 的兼容性（见 lib/dsh-host-compat.js）。
+  // opts = { entries?: {name, spec}[], packages?: string[], registry? }
+  //
+  // ⚠️ 只查能把 spec 剥出**裸 npm 包名**的条目（github / tarball 来源判不了，直接返 unknown 不发请求）：
+  //    目录里 48.6% 的条目 npm 字段是 null，硬查只会拿到 404 → 满屏错误的「不兼容」。
+  // ⚠️ 拿不到宿主版本时**整体短路**、不联网：没有宿主版本，任何兼容性结论都是编的。
+  // 返回 { ok, host, results: { <目录条目名>: {status, reason, requirement, package} } }
+  dshHostCompatCheck(opts) {
+    const o = opts && typeof opts === 'object' ? opts : {}
+    const host = hostDshVersion()
+    const entries = Array.isArray(o.entries) ? o.entries : []
+    const results = Object.create(null)
+    // 显式给了包名数组就照单全收（第四层「翻页自动拉」用这条路径）
+    const asked = Array.isArray(o.packages) ? o.packages.map((x) => String(x || '').trim()).filter(Boolean) : []
+    if (asked.length) {
+      if (!host) {
+        for (const p of asked) results[p] = { status: 'unknown', reason: 'no-host-version', requirement: '', package: p }
+        return { ok: true, host: '', results: results }
+      }
+      const registry = String(o.registry || cfgRegistry() || dshMarket.MIRROR_REGISTRY)
+      return dshHostCompat.lookup(asked, { registry: registry }).then((res) => {
+        for (const p of asked) {
+          // ⚠️ 缺键（理论上 lookup 每个包都给值，但防御一下）按「没拉到」记，
+          //    不能落成 null —— null 在判定层是「拉到了但没声明」，会把网络问题说成插件没要求
+          const facts = res && res.facts && p in res.facts ? res.facts[p] : dshHostCompat.UNAVAILABLE
+          const v = dshHostCompat.deriveHostCompatibility(facts, host, dshMarket.rangeAllows)
+          results[p] = { status: v.status, reason: v.reason, requirement: v.requirement, package: p }
+        }
+        return { ok: true, host: host, results: results }
+      })
+    }
+    // 没给包名：从目录条目里现算（能判的才发请求，判不了的当场给 unknown）
+    const byPkg = Object.create(null)
+    const todo = []
+    for (const e of entries) {
+      const entry = e && typeof e === 'object' ? e : {}
+      const key = String(entry.name || entry.spec || entry.npm || '')
+      if (!key) continue
+      const pkg = marketPkgNameOf(entry)
+      if (!pkg) { results[key] = { status: 'unknown', reason: host ? 'undeclared' : 'no-host-version', requirement: '', package: '' }; continue }
+      byPkg[pkg] = byPkg[pkg] || []
+      byPkg[pkg].push(key)
+      todo.push(pkg)
+    }
+    if (!host || !todo.length) {
+      for (const key of Object.keys(results)) results[key] = Object.assign({}, results[key], { status: 'unknown', reason: host ? results[key].reason : 'no-host-version' })
+      return Promise.resolve({ ok: true, host: host, results: results })
+    }
+    const registry = String(o.registry || cfgRegistry() || dshMarket.MIRROR_REGISTRY)
+    return dshHostCompat.lookup(todo, { registry: registry }).then((res) => {
+      for (const pkg of Object.keys(byPkg)) {
+        // 同上：缺键按「没拉到」记，别落成 null（null = 拉到了但没声明）
+        const facts = res && res.facts && pkg in res.facts ? res.facts[pkg] : dshHostCompat.UNAVAILABLE
+        const v = dshHostCompat.deriveHostCompatibility(facts, host, dshMarket.rangeAllows)
+        for (const key of byPkg[pkg]) results[key] = { status: v.status, reason: v.reason, requirement: v.requirement, package: pkg }
+      }
+      return { ok: true, host: host, results: results }
+    })
+  },
+  // 当前宿主的 DSH 版本（界面用来显示「按 vX 判定」以及决定要不要发请求）
+  dshHostVersion() {
+    return hostDshVersion()
+  },
   // allowBuilds 引导信息的解析（纯函数，单测直接喂 dsh 真实报错原文）：
   // 那把 key 带 commit hash、安装前拿不到，只能从失败输出里抠 —— 抠错会引导用户写错 key
   parseAllowBuilds(text) {
     return parseAllowBuilds(text)
+  },
+  // 版本降级判定（纯函数，单测直接喂 from/to 版本号）：
+  // 与 blockedByPolicy 是相反方向的两个静默失败，判错方向会让用户看到「已更新 v1.48.0 → v1.40.0」
+  downgradedBy(from, to) {
+    return downgradedBy(from, to).downgraded
+  },
+  // 装完的版本是否**低于**目录目标（纯函数）：
+  // 高于目标不算错（镜像源抢先发版是好事），只有低于才算「没装到位」
+  mismatchResolved(target, actual) {
+    return mismatchResolved(target, actual).mismatch
+  },
+  // 原生命令输出截尾（纯函数，单测直接喂长文本）：
+  // 按**行**保留而不是按字符，因为最后一行往往就是错误码那行，按字符切会把它切半
+  tailLines(text, maxLines) {
+    return tailLines(text, maxLines)
   },
   // 快照列表 / 还原（E1 的 dsh-backup 透传）
   dshBackupList() {
@@ -1468,6 +2030,119 @@ module.exports = {
     } catch (err) {
       logErr('[whale][dsh-backup] 保存保留份数失败', (err && err.message) || '')
       return { ok: false, error: '保存失败：' + ((err && err.message) || err) }
+    }
+  },
+  // ──────────────────────────────────────────────
+  // dsh 全量导出（lib/dsh-export.js）
+  //
+  // ⚠️ 与上面 dshBackup* 的分工：那组是**快照**（白名单 3 文件 / 为了回滚 patch）；
+  // 这组是**导出**（全量 / 为了打包带走）。两者并存，别互相替代。
+  // ──────────────────────────────────────────────
+  // 导出前预检：不写盘，只回报「会备多少 / 会排除什么」，尤其要让用户先看到凭据被排除
+  //
+  // running 字段：探测 3080 上有没有 dsh，供界面提示「先退出 dsh 再导出」。
+  // why 要提示：会话文件（JSONL）是**追加写**的，边跑边读可能读到半条记录；且导出前后
+  // 文件集在变，包内容不自洽。另外 dsh 若正在写 patch，导出的配置也可能是中间态。
+  //
+  // ⚠️ 为什么不新增 IPC 通道：本项目 3080 探测已有现成的 dsh.probePort + dsh.snapshot
+  //     （诊断 / 状态卡都在用），这里只是把结论顺带塞进预览结果 —— 符合 D14「不重复造能力」。
+  // ⚠️ 为什么不自己起 netstat：probePort 内部有全局单例 + busy 排队 + 6s 超时 + 父链归属
+  //     判定（Windows 下 spawn 有 cmd 中间层），自己再写一份必然与状态卡口径漂移。
+  // ⚠️ 探测是异步的（netstat 要 100–300ms），但 previewExport 是同步的纯文件统计 ——
+  //     所以**先给同步结果，探测完再回填**，不让用户为一句提示多等一次。返回 Promise，
+  //     调用方（设置页）本来就走 await/可选链，同步返回的结构照常可用。
+  dshExportPreview(opts) {
+    const o = opts && typeof opts === 'object' ? opts : {}
+    let base
+    try {
+      base = dshExport.previewExport({ includeCred: o.includeCred === true, skipModules: o.skipModules !== false })
+    } catch (err) {
+      logErr('[whale][dsh-export] 预检失败', (err && err.message) || '')
+      return { ok: false, error: '预检失败：' + ((err && err.message) || err) }
+    }
+    // 探测失败（拿不到端口信息）时不写 running 字段 —— 界面据此显示「无法确认」而不是
+    // 谎报「没在跑」。宁可少一句提示，也不能让用户以为可以放心导
+    return new Promise((resolve) => {
+      let settled = false
+      const finish = (info) => {
+        if (settled) return
+        settled = true
+        resolve(Object.assign({}, base, { running: info }))
+      }
+      // 探测自身的超时兜底：probePort 是 6s，这里再兜一层防它回调不回来（诊断模块同款做法）
+      const timer = setTimeout(() => finish(null), 8000)
+      try {
+        dsh.probePort(() => {
+          clearTimeout(timer)
+          try {
+            const snap = dsh.snapshot()
+            // 三种「在跑」都算：
+            //   · snap.running   —— 本插件启的那份在跑
+            //   · snap.external  —— 别的终端里跑的 dsh（externalPid 内部已做命令行判定）
+            //   · snap.ready     —— 本插件这份已开始监听（running 为真时一般也成立，兜底）
+            const running = !!(snap.running || snap.external || snap.ready)
+            finish({
+              running: running,
+              // pid / 名字只在「确定有」时才给：真 dsh 的判据由 dsh.js 统一持有，
+              // 这里不自己判一遍，避免两处口径漂移（诊断模块的教训）
+              pid: running ? (Number(snap.portPid) || Number(snap.externalPid) || Number(snap.pid) || 0) : 0,
+              name: String(snap.portName || snap.externalName || ''),
+              // 端口被**非 dsh** 程序占用：也有写文件风险，但性质不同（不是 dsh 在写），
+              // 所以单独给字段让界面用不同措辞，不与「dsh 在跑」混为一谈
+              other: String(snap.portOther || ''),
+              self: !!snap.running,
+            })
+          } catch (err) {
+            logErr('[whale][dsh-export] 读取 dsh 运行状态失败', (err && err.message) || '')
+            finish(null)
+          }
+        })
+      } catch (err) {
+        clearTimeout(timer)
+        logErr('[whale][dsh-export] dsh 运行探测调用失败', (err && err.message) || '')
+        finish(null)
+      }
+    })
+  },
+  // 导出全量包。outPath 为空时弹保存对话框（与 assets.exportAssets 同一套路）。
+  // includeCred 由界面勾选决定 —— 宿主不做「默认包含」这种隐式行为
+  dshExportCreate(opts) {
+    const o = opts && typeof opts === 'object' ? opts : {}
+    const includeCred = o.includeCred === true
+    let outPath = String(o.outPath || '').trim()
+    if (!outPath) {
+      const home = dshExport.dshHome()
+      if (!home) return { ok: false, error: '找不到 dsh 配置目录（$DSH_HOME 与 ~/.dsh 都不存在）' }
+      try {
+        outPath = utools.showSaveDialog({
+          title: '导出 dsh 全量备份',
+          defaultPath: path.join(String(utools.getPath('downloads') || ''), 'dsh-backup-' + dshExport.stampOf() + '.zip'),
+          filters: [{ name: 'Zip 压缩包', extensions: ['zip'] }],
+        })
+      } catch (err) {
+        return { ok: false, error: '无法打开保存对话框：' + ((err && err.message) || err) }
+      }
+      if (!outPath) return { ok: false, canceled: true, error: '' }
+    }
+    // 用户手输的名字可能没有 .zip 后缀，补上（保存对话框的 filters 只做过滤、不强制后缀）
+    if (!/\.zip$/i.test(outPath)) outPath += '.zip'
+    try {
+      return dshExport.exportAll({ outPath: outPath, includeCred: includeCred, skipModules: o.skipModules !== false })
+    } catch (err) {
+      logErr('[whale][dsh-export] 导出失败', (err && err.message) || '')
+      return { ok: false, error: '导出失败：' + ((err && err.message) || err) }
+    }
+  },
+  // 在文件管理器里定位导出包（导出成功后让用户一眼找到它）
+  dshExportReveal(outPath) {
+    const p = String(outPath || '').trim()
+    if (!p) return { ok: false, error: '未指定文件' }
+    try {
+      utools.shellShowItemInFolder(p)
+      return { ok: true }
+    } catch (err) {
+      logErr('[whale][dsh-export] 打开所在文件夹失败', (err && err.message) || '')
+      return { ok: false, error: '打开失败：' + ((err && err.message) || err) }
     }
   },
   // 选择 Node.js 安装目录并校验（目录里必须有 node 可执行文件）

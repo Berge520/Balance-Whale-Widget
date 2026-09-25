@@ -290,6 +290,21 @@ function listSnapshots() {
     if (!m || m.kind !== 'whale-dsh-backup') continue
     const files = Array.isArray(m.files) ? m.files : []
     const meta = readMeta(n)
+    // ⚠️ intact 不能硬编码 true —— 快照文件在磁盘上被删/被改是真实会发生的（磁盘清理、
+    // 手动动过备份目录），列出来却还原不了，用户点下去才报错等于白点一次。这里做与
+    // restoreSnapshot 同口径的 sha256 校验，**只读不写**，代价是几 KB 文件的哈希。
+    // 「建快照时就不存在」的文件（ok=false）不参与校验 —— 它们本就没内容，不是损坏。
+    let intact = true
+    let missing = 0
+    let corrupt = 0
+    for (const f of files) {
+      if (!f || !f.rel || !f.ok) continue
+      const flat = String(f.flat || String(f.rel).replace(/[\\/]/g, '__'))
+      const sr = readTextSafe(path.join(root, n, flat))
+      if (!sr.ok) { missing += 1; intact = false; continue }
+      if (f.sha256 && sha256(sr.text) !== f.sha256) { corrupt += 1; intact = false }
+    }
+    if (!intact) logErr('[whale][dsh-backup] 快照已损坏', n + '：缺 ' + missing + ' 个文件、校验不符 ' + corrupt + ' 个')
     // dirName 一律取**目录名**而不是 manifest 里的 m.dirName：manifest 是用户可手改的，
     // 而 dirName 到了 pruner 会被拼成路径去 rmSync —— 信 manifest 就等于让「手改一个
     // 字段」变成「删掉快照根之外的任意目录」（E4 复查实测：填 '../evil' 能越过根；
@@ -304,7 +319,8 @@ function listSnapshots() {
       name: meta.name,
       knownGood: meta.knownGood,
       // 空集合也算「完好」—— 没文件可备不叫损坏，叫这份快照没内容
-      intact: true,
+      intact: intact,
+      damaged: !intact,
     })
   }
   // 已知良好的排最前（回滚时第一眼要看到的就是它），其余按时间倒序
@@ -362,19 +378,51 @@ function restoreSnapshot(opts) {
     return { ok: true, dryRun: true, dirName: dirName, at: String(m.at || ''), plan: plan.map((p) => ({ rel: p.rel, action: p.action })) }
   }
 
+  // ⚠️ 为什么落笔前要先读一遍原文件：一个文件写失败就会留下**半还原状态** ——
+  // dsh 的 profile 里 package.json 与 cordis.patch.yml 必须**同时**回到同一时刻，
+  // 只回了一半会让 dsh 处于既不是新态也不是旧态的夹缝（V2 的教训：这种夹缝 dsh
+  // 不会报错，只会静默行为怪异）。所以每个文件写之前先把**当前内容**读下来留作回滚
+  // 底稿，任一失败就按**逆序**写回去，让目录回到「动手之前」的样子。
   const written = []
   const skipped = []
+  const undo = [] // { abs, prev } —— prev 为 null 表示还原前该文件不存在，回滚时要删掉
   for (const p of plan) {
     if (p.action === 'skip') { skipped.push(p.rel); continue }
+    let prev = null
+    try {
+      prev = fs.existsSync(p.abs) ? fs.readFileSync(p.abs, 'utf8') : null
+    } catch (err) {
+      logErr('[whale][dsh-backup] 还原前读取原文件失败', p.rel + ': ' + errMsg(err))
+      return { ok: false, error: '还原前读不到现有文件（' + p.rel + '）：' + errMsg(err), written: written }
+    }
     try {
       // 确保父目录在（profile 目录可能被用户删过；整文件覆盖的语义不该包含「创建目录树」，
       // 但目录都不在了还原必然失败，不如直接建好）
       fs.mkdirSync(path.dirname(p.abs), { recursive: true })
       fs.writeFileSync(p.abs, p.text, 'utf8')
+      undo.push({ abs: p.abs, prev: prev })
       written.push(p.rel)
     } catch (err) {
       logErr('[whale][dsh-backup] 还原写文件失败', p.rel + ': ' + errMsg(err))
-      return { ok: false, error: '还原失败（' + p.rel + '）：' + errMsg(err), written: written }
+      // 逆序回滚已写的文件，把目录拉回「动手之前」的样子，别让用户面对半还原
+      const undone = []
+      for (let i = undo.length - 1; i >= 0; i--) {
+        try {
+          if (undo[i].prev === null) fs.rmSync(undo[i].abs, { force: true })
+          else fs.writeFileSync(undo[i].abs, undo[i].prev, 'utf8')
+          undone.push(path.basename(undo[i].abs))
+        } catch (e2) {
+          // 回滚自己再失败就没救了，只留痕（不能再抛，否则连错误信息都被盖掉）
+          logErr('[whale][dsh-backup] 回滚也失败', path.basename(undo[i].abs) + ': ' + errMsg(e2))
+        }
+      }
+      logErr('[whale][dsh-backup] 还原中断，已回滚', { written: written, undone: undone })
+      return {
+        ok: false,
+        error: '还原失败（' + p.rel + '）：' + errMsg(err) + '（已回滚 ' + undone.length + ' 个文件）',
+        written: [],
+        rolledBack: undone,
+      }
     }
   }
   log('[whale][dsh-backup] 已还原快照', { dirName: dirName, written: written.length, skipped: skipped.length })

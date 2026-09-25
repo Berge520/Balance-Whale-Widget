@@ -111,6 +111,11 @@ export interface WhaleConfig {
   dshMarketMirror: boolean
   dshMarketRegistry: string
   dshMarketOfficial: boolean
+  // dsh 全量导出（见 preload/lib/dsh-export.js）：
+  //   cred = 是否把凭据文件（.credentials.yaml 等）打进包。默认 false —— 包里是明文
+  //   noMod = 是否跳过 node_modules。默认 true —— 可重建且体积是配置的几十倍
+  dshExportCred: boolean
+  dshExportNoMod: boolean
   // 多厂商模型（余额 / 额度）：注册表进配置（随备份与恢复走），运行时余额不在这里
   models: WhaleModel[]
   // 挂件主显示的模型 id（'deepseek' = 内置）
@@ -522,6 +527,10 @@ export interface DshBackupSnapshot {
   name: string
   // 用户指认的「已知良好」回滚目标（E4）。列表里这类排最前，且**不会被自动轮转删掉**
   knownGood: boolean
+  // 快照文件在磁盘上是否完好（sha256 校验通过）。false = 快照目录被删过/改过，还原必然失败
+  intact: boolean
+  // intact 的反面，给界面直接判 `v-if` 用（避免模板里写 !s.intact 时看反）
+  damaged: boolean
 }
 
 export interface DshBackupListResult {
@@ -545,6 +554,9 @@ export interface DshBackupRestoreResult {
   written?: string[]
   // 建快照时就不存在、故未还原的文件
   skipped?: string[]
+  // 写文件中断时已**逆序回滚**掉的文件（失败态下有值；written 此时为 []，
+  // 因为目录已回到「动手之前」，不存在「部分成功」这个状态）
+  rolledBack?: string[]
 }
 
 export interface DshBackupCreateResult {
@@ -576,6 +588,74 @@ export interface DshBackupPruneResult {
   keep?: number
   // 被删掉的快照目录名
   removed?: string[]
+}
+
+// ── dsh 全量导出（lib/dsh-export.js）──
+// 没进包的一项及原因（凭据未勾选 / 读取失败 / 超限 / node_modules）
+export interface DshExportSkipped {
+  // 相对 $DSH_HOME 的路径
+  rel: string
+  why: string
+}
+
+export interface DshExportPreviewResult {
+  ok: boolean
+  error?: string
+  // $DSH_HOME 实际解析到的绝对路径
+  dshHome?: string
+  // 会进包的条目数与原始总字节数
+  entries?: number
+  bytes?: number
+  // 文件数超过 20 万上限（此时导出会被拒绝，界面要提前提示用户清理）
+  truncated?: boolean
+  // 没进包的条目数
+  excluded?: number
+  // 未勾选「包含凭据」时被排除的凭据文件（界面用它做警示文案）
+  credFiles?: string[]
+  skipped?: DshExportSkipped[]
+  maxFileBytes?: number
+  maxEntries?: number
+  // 恒排除的目录名（.git / whale-dsh-backup 等）
+  excludeDirs?: string[]
+  // 3080 上有没有 dsh 在跑（异步探测回填）。**null = 探测失败/拿不到**，
+  // 与「确实没在跑」是两回事：界面据此分别显示「可以放心导」与「无法确认」
+  running?: DshExportRunning | null
+}
+
+// dsh 运行状态（导出前提示用）。判据全部来自 dsh.js 的 snapshot，本处只做搬运
+export interface DshExportRunning {
+  // 有 dsh 在跑（本插件启的 / 别的终端的，都算）
+  running: boolean
+  // 在跑的 dsh 的 pid，判不出来时为 0
+  pid?: number
+  name?: string
+  // 3080 被**非 dsh** 程序占用时的进程名（性质与「dsh 在跑」不同，措辞要分开）
+  other?: string
+  // 是否本插件自己启的那份
+  self?: boolean
+}
+
+export interface DshExportCreateResult {
+  ok: boolean
+  error?: string
+  // 用户在保存对话框点了取消（此时不算失败，不给用户看报错）
+  canceled?: boolean
+  // 产出包的绝对路径
+  outPath?: string
+  at?: string
+  // 包内条目数（含包内清单 whale-dsh-export.json）
+  entries?: number
+  // 包文件本身的字节数
+  bytes?: number
+  // 原始文件的总字节数（store 模式不压缩，所以与 bytes 接近）
+  sourceBytes?: number
+  // includeCred 是否带上了凭据文件
+  includeCred?: boolean
+  // 没进包的条目及原因 —— 界面必须展示，否则用户拿到一个「少了东西但看着正常」的包
+  skipped?: DshExportSkipped[]
+  skippedTotal?: number
+  // 遍历与读取之间消失的文件数（dsh 在跑时会话文件会变，属正常竞态）
+  missing?: number
 }
 
 // ── E3「我的一键隔离」 ──
@@ -755,7 +835,9 @@ export interface DshMarketInstallResult {
   action?: string
   message?: string
   snapshot?: string
-  // 更新时的「更新前声明版本 → 更新后实装版本」中的前一端（只有 update 会给）
+  // 更新时的「更新前声明版本 → 更新后实装版本」中的前一端。
+  // ⚠️ 2026-09-25 起**精确安装（exact）也回这个字段** —— 它同样是「按版本重装」，
+  //    结果卡要画 `1.62.0 → 1.65.1`，且这个值取自实装版本回读，比目录版本可信
   from?: string
   // 目录条目给的版本（dryRun 按 `to` 回传，前端存进 plan、真写时再带回）。
   // ⚠️ 被供应链策略挡下时靠它拼出可照抄的白名单行；缺了就只能写「目标版本」
@@ -770,9 +852,61 @@ export interface DshMarketInstallResult {
   // 更新时「pnpm 报成功但实装版本没变」（多为 profile 的供应链策略拦截）。
   // 这时 ok:false —— 不能让界面显示「已更新 v1.48.0 → v1.48.0」这种假成功
   blocked?: boolean
+  // 更新时「pnpm 报成功、版本确实变了但变得**更低**」（镜像滞后 / registry 把 @latest
+  // 解析成旧版本），与 blocked 是相反方向的两个静默失败。同样 ok:false，且建议回滚
+  downgraded?: boolean
   // 被挡时给出该改哪个文件的哪个键（pnpm-workspace.yaml 的 minimumReleaseAgeExclude）
   policyFile?: string
   policyKey?: string
+  // 「版本没动」到底是为什么挡的：'release-age' = 目标版本太新、还没满最小发布年龄；
+  // 'allowlist' = 白名单没放行这一条；'unknown' = 输出里找不到可识别的线索。
+  // 只有 release-age 才该劝用户「等它满期」—— 劝错了会让用户去改一个根本不起作用的配置
+  staleReason?: 'release-age' | 'allowlist' | 'unknown'
+  // 同一件事能不能靠「原样重试」解决。age 类要等时间；白名单类要改配置；构建类要先放行脚本。
+  // 界面据此决定是给「重试」按钮还是给「去改配置」引导，避免让用户白点
+  retryable?: boolean
+  // 「pnpm 报告成功，但实装版本**低于**目标」（RESOLVED_VERSION_MISMATCH 语义）。
+  // ⚠️ 高于目标**不算** mismatch —— 镜像抢先发版是好结果，别报成失败
+  mismatch?: boolean
+  // mismatch 时的目标版本（拼文案用），与 to 同源
+  expected?: string
+  // 原生命令输出的**尾部**若干行（pnpm 的关键报错在尾部，头部多是进度条噪音）
+  tail?: string
+  // 该插件声明的 DSH 版本范围容不下**当前宿主**（确证不兼容，dryRun 阶段就拦下，ok:false）。
+  // ⚠️ 只拦确证的 incompatible —— unknown（没声明 / manifest 拉不到）照常放行，
+  //    否则目录里近半没有 DSH 声明的条目会被整体拦死
+  // ⚠️ 带 force 时**照样回 true**（结论没变，只是不再作为拦路依据）——
+  //    界面靠它把单据卡切成「你正在强行装…」的措辞
+  hostIncompatible?: boolean
+  // 这次判定是在 force 放行下做的（用户在界面上看过后果、明确选择强装）。
+  // 用来把「宿主拦下了」与「宿主拦了但被用户放行」这两种完全不同的态分开
+  hostForced?: boolean
+  // 兼容性判定的完整结论（dryRun 回传，供列表/详情显示「要求 DSH x ∩ y，当前 z」）
+  hostCompat?: DshHostCompatVerdict
+}
+
+// 一个插件与当前宿主 DSH 的兼容性结论（三态，见 preload/lib/dsh-host-compat.js）
+export interface DshHostCompatVerdict {
+  // 'compatible' = 全部声明都容得下当前宿主；'incompatible' = 有任一条确证容不下；
+  // 'unknown' = 判不了（没声明 / manifest 拉不到 / 一条都解析不出）
+  status: 'compatible' | 'incompatible' | 'unknown' | string
+  // 'peer' = 按 peer/engines 声明判出来的；'no-host-version' = 读不到宿主版本；
+  // 'undeclared' = 插件没声明 DSH 要求；'unavailable' = manifest 拿不到
+  reason: string
+  // 声明原文（多条用 ∩ 连，表明是合取）
+  requirement: string
+  // 判定时用的宿主版本
+  host?: string
+  // 从目录条目的 spec 剥出的裸 npm 包名（判不了时为空串）
+  package?: string
+}
+
+export interface DshHostCompatCheckResult {
+  ok: boolean
+  // 当前宿主 DSH 版本；空串表示读不到（此时整体短路、未发任何请求）
+  host: string
+  // 键是目录条目的 name（与界面列表的 key 一致），值是判定结论
+  results: Record<string, DshHostCompatVerdict>
 }
 
 export interface DshMarketUninstallResult {
@@ -823,6 +957,28 @@ export interface DshMarketCheckUpdatesResult {
   updates: number
   unknown: number
   checked: number
+}
+
+// 回源 registry 查到的「官方最新版」结论（**会联网**，纯手动触发）。
+// ⚠️ 与 DshMarketUpdateEntry.latest 的区别：那个是**目录快照**里的 version（可能已落后），
+//    这个是 registry 上当前的真实 latest。两者不一致 = 目录快照滞后。
+export interface DshMarketRegistryLatestEntry {
+  // 查询用的裸 npm 包名
+  pkg: string
+  // registry 上的 latest 版本；拉失败时为空串（看 error）
+  version: string
+  // 拉失败的原因（网络 / 404）；成功时为空串
+  error: string
+  // true = 命中宿主内存缓存（5 分钟 TTL），本次没出站
+  cached: boolean
+}
+
+export interface DshMarketRegistryLatestResult {
+  ok: boolean
+  // 本次查询实际使用的 registry 地址
+  registry: string
+  // 键是调用方传的 key（界面用目录条目的 spec）
+  results: Record<string, DshMarketRegistryLatestEntry>
 }
 
 export interface ClearDataResult {
@@ -1156,6 +1312,38 @@ export interface DshDirPickResult {
   ok: boolean
   canceled?: boolean
   dir?: string
+  error?: string
+}
+// dsh profile 写锁（<profile>/package.json.lock）的孤儿检测结果。
+// 背景：dsh 的锁进程被强杀后会永久残留（上游不做回收），之后该 profile 的
+// 装/卸/更新/market 全部死锁 —— 表现为「操作失败」而真实原因是拿不到写锁。
+export interface DshLockStale {
+  ok: boolean
+  // 三重判据（文件存在 + 内容是纯数字 pid + 该 pid 确证不存在）全部满足才为 true
+  stale: boolean
+  // 判非孤儿的成因：absent（没有锁，正常态）/ bad-content（内容读不懂，保守不清理）
+  // / alive（锁被真进程持有）/ unknown（查不出存活，保守不清理）；另有错误态
+  // bad-profile / no-profile-dir / read-error
+  reason?: string
+  lockPath?: string
+  profile?: string
+  // 锁文件里记录的 pid（absent/bad-content 时为 0）
+  pid?: number
+  // 锁已存在多久（ms），仅 orphan 时有意义
+  age?: number
+  error?: string
+}
+// 清理孤儿锁的结果。cleared=true 才代表真的删了；
+// already=true 表示本来就没有锁（用户目标已达成，不是失败）
+export interface DshLockClearResult {
+  ok: boolean
+  cleared: boolean
+  already?: boolean
+  lockPath?: string
+  profile?: string
+  pid?: number
+  age?: number
+  reason?: string
   error?: string
 }
 
@@ -1546,6 +1734,19 @@ export interface WhaleServices {
   dshBackupPrune(opts?: { keep?: number }): DshBackupPruneResult
   // 改保留份数（1–200）。**只写配置、不立即删**，删除由 dshBackupPrune 或下次建快照触发
   dshBackupSetKeep(n: number): { ok: boolean; error?: string; keep?: number }
+  // ── dsh 全量导出（与上面的 dshBackup* 是两回事，别混）──
+  // dshBackup* 是**快照**：白名单 3 个文件、落在 $DSH_HOME/whale-dsh-backup/、为了回滚 patch；
+  // dshExport* 是**导出**：整个 $DSH_HOME 打成 zip、落用户选的路径、为了打包带走/存档。
+  // 挂件不解析包内容、不负责还原 —— 还原就是用户自己解压覆盖。
+  //
+  // 预检：不写盘，只回报「会备多少 / 会排除什么」，让用户先看到凭据被排除再决定。
+  // ⚠️ 返回 Promise：宿主内部异步探一次 3080，看 dsh 在不在跑（结果在 running 字段）
+  dshExportPreview(opts?: { includeCred?: boolean; skipModules?: boolean }): Promise<DshExportPreviewResult>
+  // 导出全量包。outPath 为空时宿主弹保存对话框（返回 canceled=true 表示用户取消）。
+  // includeCred 由界面勾选决定，宿主不做「默认包含」这种隐式行为
+  dshExportCreate(opts?: { outPath?: string; includeCred?: boolean; skipModules?: boolean }): DshExportCreateResult
+  // 在文件管理器里定位导出包
+  dshExportReveal(outPath: string): { ok: boolean; error?: string }
   // ── E3「我的一键隔离」：一次把勾选的条目全禁掉 ──
   // 候选清单必须 spawn `dsh --dump-config`，故返回 Promise（宿主侧有 20s 兜底闸门）。
   // 组装树读不到时**降级**：treeError 说明原因、items 只含 patch 里的条目，不算整体失败
@@ -1572,19 +1773,36 @@ export interface WhaleServices {
   // ⚠️ version 是**目录条目的版本号**（DshMarketPlugin.version），必须传：
   //    宿主只靠 profile/package.json 的声明范围判「装没装」，而 `^1.48.0` 是容得下 `1.49.0` 的，
   //    不传版本会让「已装但落后」的包被判成「无需重复安装」。传了才比实装版本、才判得出该更新
-  dshMarketInstall(opts: { profile?: string; spec: string; npm?: string; name?: string; version?: string; needsBuild?: boolean; dryRun?: boolean }): Promise<DshMarketInstallResult>
+  // ⚠️ exact=true + targetVersion：按「裸 npm 包名@确切版本」精确安装（只在 npm 来源可用）。
+  //    为什么需要：profile 的 pnpm-lock.yaml 会锁住旧版，`pnpm add <spec>` 会命中 lock、原样复用旧版；
+  //    只有把确切版本拼进 spec 才能装到用户查到的 registry 版本
+  // ⚠️ force = 用户在界面上看过「宿主不兼容」的后果、明确选择强装（2026-09-25 加）。
+  //    dryRun 与真写**都要带**：宿主那两道闸判的是同一件事，只给 dryRun 带的话，
+  //    用户点头之后仍会被拦在写入前。带上后宿主照样判定，只是不再以它作为拦路依据
+  dshMarketInstall(opts: { profile?: string; spec: string; npm?: string; name?: string; version?: string; needsBuild?: boolean; dryRun?: boolean; exact?: boolean; targetVersion?: string; force?: boolean }): Promise<DshMarketInstallResult>
   // 卸载：remove 缺省 = 只写 disabled: true 禁用（包留磁盘）；remove=true = npm uninstall 删包。
   // spec 可替代 npm 传入，宿主会自己反查 package.json 里真实的键名
   dshMarketUninstall(opts: { profile?: string; npm?: string; spec?: string; name?: string; remove?: boolean; dryRun?: boolean }): Promise<DshMarketUninstallResult>
   // 检查已装插件有没有新版。⚠️ **要目录数据**（catalog 由界面把已拿到的目录原样传回来，
   // 宿主不自己联网）—— 所以只在目录已加载后才调，否则就等于绕过「默认零网络请求」
   dshMarketCheckUpdates(opts?: { profile?: string; catalog?: DshMarketCatalogResult }): DshMarketCheckUpdatesResult
+  // ⚠️ 回源 registry 查**官方最新版**（**会联网** —— 所以纯手动，界面每行一个按钮）。
+  // 目录是每日快照，里面那份 version 可能已落后于 registry（实测目录停在 9/24 而包已发到 1.65.1），
+  // 「目录说已最新」本身可能过时。只在能剥出裸 npm 包名的条目上调（github / tarball 查了必然 404）。
+  dshMarketRegistryLatest(opts?: { items?: { pkg?: string; key?: string }[]; registry?: string }): Promise<DshMarketRegistryLatestResult>
   // 更新一个已装插件：按目录 spec **重装**（不是 npm update —— 后者只在声明范围内升，
   // 而「有更新」的定义正是超出范围）。dryRun 只算不写；真写与安装同链路：快照 → npm → 回读核验
   //
   // ⚠️ version = **目录条目给的版本**，dryRun 时传下去、真写时再带回来。没有它，更新被 profile 的
   // 供应链策略（minimumReleaseAgeExclude）挡下时，宿主只能说「目标版本」，用户不知道该往白名单写哪个号
-  dshMarketUpdate(opts: { profile?: string; spec: string; npm?: string; name?: string; version?: string; dryRun?: boolean }): Promise<DshMarketInstallResult>
+  dshMarketUpdate(opts: { profile?: string; spec: string; npm?: string; name?: string; version?: string; dryRun?: boolean; force?: boolean }): Promise<DshMarketInstallResult>
+  // 查一批插件与**当前宿主 DSH** 的兼容性（见 preload/lib/dsh-host-compat.js）。
+  // entries 走目录条目（宿主自己从 spec 剥包名，剥不出的当场返 unknown 且不发请求）；
+  // packages 走裸包名数组。两者都空则返空表。
+  // ⚠️ 读不到宿主版本时**整体不联网**，全部返 unknown —— 没有宿主版本，任何结论都是编的
+  dshHostCompatCheck(opts?: { entries?: { name?: string; spec?: string; npm?: string }[]; packages?: string[]; registry?: string }): Promise<DshHostCompatCheckResult>
+  // 当前宿主的 DSH 版本（与诊断卡同源）。空串 = 读不到，界面据此说「无法判定」而不是「兼容」
+  dshHostVersion(): string
   exportUsageCsv(days?: number): UsageCsvResult
   importUsageCsv(): UsageCsvImportResult
   // 按项清除本地数据：true 的项才会被清除
@@ -1622,6 +1840,10 @@ export interface WhaleServices {
   dshRemovePlugin(): DshStatus
   // 清理 npx 缓存里含 dsh 的历史副本
   dshCleanNpxCache(): DshStatus
+  // dsh profile 写锁的孤儿检测（只读，不清算）。profile 缺省时宿主按当前 profile 处理
+  dshLockStale(opts?: { profile?: string }): DshLockStale
+  // 清理孤儿写锁（用户确认后调用）。宿主会重新校验，非孤儿一律不删
+  dshLockClear(opts?: { profile?: string }): DshLockClearResult
   // 选择 Node.js 安装目录（文件夹选择器，校验目录里有 node）
   dshPickNodeDir(): DshDirPickResult
   // —— GitHub 加速（hosts 方案，纯设置页功能） ——

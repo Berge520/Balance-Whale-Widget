@@ -386,8 +386,17 @@ CHECKS.push({
         level: 'error',
         text: at ? 'patch 第 ' + at + ' 行的 id "' + id + '" 在组装树里找不到'
           : 'patch 的 id "' + id + '" 在组装树里找不到',
+        // ⚠️ 提示口径：**不能只让人去「核对拼写」**。实测这 8 个 `mnemon-*` 全是拼写正确的
+        // 合法 id，报 not found 的真因是「该 id 由 bundle 内部 insert 出来、而 bundle 没装 /
+        // 已改名 / 该条目已从树里移除」—— 照着「核对拼写」去改，改不出结果，反而容易把
+        // 本来正确的 patch 改坏。故按「id 与树对不上」的三种常见真因给方向，最后才提拼写
         hint: 'dsh 已明确报告：`patch: entry "' + id + '" not found`，这条 patch 不会生效。'
-          + '请核对拼写，或从「dsh 配置转储」里确认该条目实际叫什么',
+          + '该 id 是组装树里的注册 id，不在树里通常有几种原因：'
+          + '① 它由某个 bundle 内部 insert 出来，而那个 bundle 现在没装（如 `dsh.profile.bundles` 里已移除）；'
+          + '② 该条目已改名或被上游移除；'
+          + '③ 确实是拼写问题。'
+          + '先到「dsh 配置转储」对照用户层列表确认它是否还在 —— '
+          + '若这个 id 已无对应插件，直接删掉这条 patch 比改 id 更稳',
       })
     }
     return { ok: false, summary: findings.length + ' 个 patch 条目对不上', findings }

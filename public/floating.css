@@ -236,6 +236,10 @@
   /* —— 行 —— */
   .dshwv-menu-row {
     display: flex; align-items: center; gap: 8px;
+    /* 行本身也要 min-width:0（见 .dshwv-group 的说明）：行是 flex 容器，
+       默认 min-width:auto 会让它按内容的 min-content 撑开，nowrap 的长子项
+       （dsh 的三个按钮、长命令文本）把整行推出面板右缘 */
+    min-width: 0;
     margin: 1px 0; padding: 4px 6px; border-radius: 8px;
     color: #2b3a6b; white-space: nowrap;
     transition: background .15s ease;
@@ -267,7 +271,13 @@
   .dshwv-model-val.dshwv-model-err { color: #e0433f; }
 
   /* —— 分组：标题可点击折叠，组间用细分隔线区分 —— */
-  .dshwv-group { border-top: 1px solid rgba(32,49,112,.1); }
+  /* min-width:0 贯穿「组 → grid 体 → inner → 行」这一串：它们的默认 min-width 是 auto，
+     即「不小于内容的最小宽度」。dsh 那几行的内容最宽（启动/重启/结束 三个按钮 + 一长串
+     npm exec 命令），于是行会按内容的 min-content 撑开、整行越出 275px 的面板右缘
+     （面板 overflow-y:auto，横向却能溜出去，表现为「dsh 一启动，这组元素就超出菜单可视区」）。
+     逐个置 0 后行宽回到面板宽度，行内 .dshwv-dsh-state / .dshwv-dsh-cmd 的
+     text-overflow:ellipsis 才有机会生效 */
+  .dshwv-group { border-top: 1px solid rgba(32,49,112,.1); min-width: 0; }
   .dshwv-group:first-child { border-top: none; }
   .dshwv-group-head {
     display: flex; align-items: center; gap: 6px;
@@ -288,9 +298,11 @@
     grid-template-rows: 0fr;
     overflow: hidden;
     padding: 0;
+    /* 见 .dshwv-group 的 min-width:0 说明：这一串里少一处就会被里面的长行顶开 */
+    min-width: 0;
     transition: grid-template-rows .2s ease, padding .2s ease;
   }
-  .dshwv-group-inner { min-height: 0; }
+  .dshwv-group-inner { min-height: 0; min-width: 0; }
   .dshwv-group-open > .dshwv-group-body { grid-template-rows: 1fr; padding: 0 0 4px; }
   .dshwv-menu-foot { margin-top: 8px; padding: 8px 6px 2px; border-top: 1px solid rgba(32,49,112,.1); }
 

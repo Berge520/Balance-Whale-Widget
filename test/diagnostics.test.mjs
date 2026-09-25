@@ -493,6 +493,11 @@ test('C2：dsh 报 entry not found → error（采信 dsh 原话，行号从 pat
   assert.equal(f.findings.length, 1, 'dsh 只报了 1 个，就不能报第 2 个')
   assert.match(f.findings[0].text, /第 3 行的 id "config-manager"/, '行号要落到 patch 文件里真正那一行')
   assert.match(f.findings[0].hint, /entry "config-manager" not found/)
+  // 提示口径回归：真因常是「bundle 没装 / 条目改名」，不是拼写。
+  // 早先 hint 只写「请核对拼写」，实测这 8 个 mnemon-* 拼写全对却报 not found ——
+  // 照着「核对拼写」改不出结果，反而容易把正确的 patch 改坏。故钉住「拼写只是可能之一」
+  assert.match(f.findings[0].hint, /bundle/, '要提到「该 id 由 bundle insert、bundle 没装」这个真因')
+  assert.match(f.findings[0].hint, /配置转储/, '要给出「去转储对照确认该 id 是否还在」的下一步')
 })
 
 // 这是本机真实形状、也是本版判据的核心回归：patch 12 条里 11 条合法，dsh 只报 config-manager。

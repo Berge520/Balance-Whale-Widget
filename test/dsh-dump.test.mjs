@@ -495,6 +495,25 @@ test('validPkgSpec 放行三种形态：npm 包名 / github:owner/repo / 远端 
   assert.equal(dsh.validPkgSpec('  github:owner/repo  '), 'github:owner/repo')
 })
 
+// 回归（2026-09-25 真实 bug）：精确安装走的就是 `pkg@x.y.z`，而裸包名分支的字符集里
+// 原先没有 `@`，一律判非法 → installPluginPkg 静默返回 code -1（连日志都不打），
+// 界面只显示「安装失败（退出码 -1）：详见「日志」卡」而日志卡空白。
+test('validPkgSpec 放行 `包名@版本`（精确安装的唯一形态，不接受它等于精确安装永远失败）', () => {
+  assert.equal(dsh.validPkgSpec('dshmarket@1.65.1'), 'dshmarket@1.65.1')
+  assert.equal(dsh.validPkgSpec('@scope/dsh-demo@1.2.3'), '@scope/dsh-demo@1.2.3')
+  // 预发布 / 构建元数据（dsh 的 alpha / rc 版本是常态，必须能精确装）
+  assert.equal(dsh.validPkgSpec('dsh@0.1.7-alpha.2'), 'dsh@0.1.7-alpha.2')
+  assert.equal(dsh.validPkgSpec('dsh@0.1.5-rc.2+build.7'), 'dsh@0.1.5-rc.2+build.7')
+  // 尾部 `#` 片段（npm 别名 / registry 片段语法）
+  assert.equal(dsh.validPkgSpec('dsh@1.2.3#beta'), 'dsh@1.2.3#beta')
+  // ⚠️ 加了 `@版本` 也**不能**把注入面放大：版本段仍只吃字母数字与 . _ + -
+  assert.equal(dsh.validPkgSpec('dsh@'), '', '光一个 @ 没有版本号，应拒')
+  assert.equal(dsh.validPkgSpec('dsh@1.0.0;rm -rf /'), '', '版本段不许有 ;')
+  assert.equal(dsh.validPkgSpec('dsh@1.0.0&&whoami'), '', '版本段不许有 &&')
+  assert.equal(dsh.validPkgSpec('dsh@1.0.0 --prefix'), '', '版本段不许有空格')
+  assert.equal(dsh.validPkgSpec('dsh@1.0.0`id`'), '', '版本段不许有反引号')
+})
+
 test('validPkgSpec 挡住 shell 注入与参数走私（这是它的全部意义）', () => {
   // `-` 开头会被当 npm 开关
   assert.equal(dsh.validPkgSpec('--prefix'), '')

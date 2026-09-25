@@ -218,29 +218,47 @@ function normCatalog(raw) {
 // ── 纯函数：筛选与排序 ──
 
 // 排序轴。目录自带 stars / downloads / added 三个可比值，界面用哪个由用户定。
+//
+// ⚠️ 每个轴都是**升序**原语（数值用 a-b、文本用 a.localeCompare(b)），方向交给 SORTS_DESC；
+//    早先各轴自己写死成降序，界面就没法做「再点一次反向」—— 反向只能靠前端再排一遍。
 const SORTS = {
-  stars: (a, b) => b.stars - a.stars,
-  downloads: (a, b) => b.downloads - a.downloads,
-  // added / updated 都是 YYYY-MM-DD，字符串倒序即时间倒序（同格式下无需转日期）
-  added: (a, b) => String(b.added).localeCompare(String(a.added)),
+  stars: (a, b) => a.stars - b.stars,
+  downloads: (a, b) => a.downloads - b.downloads,
+  // added / updated 都是 YYYY-MM-DD，字符串比较即时间比较（同格式下无需转日期）
+  added: (a, b) => String(a.added).localeCompare(String(b.added)),
   name: (a, b) => a.name.localeCompare(b.name),
 }
+// 默认方向：数值 / 日期给人的直觉是「大的在前」，名称则是「A 在前」。
+// ⚠️ 放在表里而不是散在界面：界面只要写 `sort: 'name', desc: false` 就能表达「名称升序」，
+//    不必为「默认降序」这条规则在前端再维护一份 sort → desc 的映射（两处必然漂移）。
+const SORTS_DESC = { stars: true, downloads: true, added: true, name: false }
 
 // 关键词匹配：名字 / 所有者 / 双语描述里任意命中即可。
+//   · 空格分词 → **与**关系（每段都要命中），搜 `dsh usage` 能出 `dsh-usage`
+//   · `-词` → 排除（不得命中）
+//   · 只有排除词（如 `-plugin`）也成立：此时没有正向条件，等于「全目录减去命中的」
 // 大小写不敏感 —— 用户在搜索框里不会关心 `dsh-usage` 的大小写。
 function matchKeyword(p, kw) {
   const q = String(kw || '').trim().toLowerCase()
   if (!q) return true
-  return (
-    p.name.toLowerCase().indexOf(q) >= 0 ||
-    p.owner.toLowerCase().indexOf(q) >= 0 ||
-    p.descZh.toLowerCase().indexOf(q) >= 0 ||
-    p.descEn.toLowerCase().indexOf(q) >= 0
-  )
+  const hay = (p.name + ' ' + p.owner + ' ' + p.descZh + ' ' + p.descEn).toLowerCase()
+  const parts = q.split(/\s+/)
+  for (let i = 0; i < parts.length; i++) {
+    const part = parts[i]
+    if (!part) continue
+    if (part.charAt(0) === '-') {
+      const ex = part.slice(1)
+      // ⚠️ 光一个 `-` 不算排除词（用户可能只是想打个连字符）：跳过，否则会把整份目录清空
+      if (ex && hay.indexOf(ex) >= 0) return false
+      continue
+    }
+    if (hay.indexOf(part) < 0) return false
+  }
+  return true
 }
 
 // filterPlugins(list, opts) → 过滤 + 排序后的数组（不改原数组）
-//   opts = { keyword?, category?, state?: 'all'|'installed'|'notInstalled', sort?, installed? }
+//   opts = { keyword?, category?, state?: 'all'|'installed'|'notInstalled', sort?, desc?, installed? }
 //
 // ⚠️ 排序放在过滤之后而不是之前：过滤是 O(n) 一遍，排序是 O(n log n)；
 // 而「未安装」这类过滤常常能砍掉大半（实测 4183 条里已装的通常是个位数），
@@ -266,8 +284,13 @@ function filterPlugins(list, opts) {
     }
     out.push(p)
   }
-  const cmp = SORTS[o.sort] || SORTS.downloads
-  out.sort(cmp)
+  const key = SORTS[o.sort] ? o.sort : 'downloads'
+  // ⚠️ 方向：`desc` 没给（undefined）才用该轴的默认方向；显式传 false 得尊重，
+  //    否则界面永远无法表达「名称倒序 / 下载量升序」——`o.desc || SORTS_DESC[key]`
+  //    会把用户选的 false 顶掉（`false || true` → `true`），是个很容易写错的坑。
+  const desc = typeof o.desc === 'boolean' ? o.desc : SORTS_DESC[key]
+  const cmp = SORTS[key]
+  out.sort(desc ? (a, b) => -cmp(a, b) : cmp)
   return out
 }
 
@@ -411,7 +434,13 @@ function realizedVersionBySpec(versions, spec) {
 //
 // ⚠️ 为什么不引 semver：项目强制零依赖（单测跑 node --test，不装包）。
 //    而我们只需要「比大小」，不需要 semver 的完整语义 —— 实测目录里 2150 条带版本
-//    的条目**全是裸 x.y.z**（无非 semver 形态、无 prerelease），所以手写足够。
+//    的条目**全是裸 x.y.z**（无非 semver 形态），所以手写足够。
+//
+// ⚠️ prerelease 是后补的（2026-09-24，为 DSH 宿主兼容性检测）：dsh 生态的版本大量是
+//    `0.1.7-rc.1` 这种，而其声明范围（peerDependencies）是 `^0.1.7-rc.1`。原先的正则
+//    `^(\d+)(?:\.(\d+))?(?:\.(\d+))?` 会把 `-rc.1` 后缀**静默丢掉** → `0.1.7-rc.1` 与
+//    `0.1.7` 被判相等。后果不是「显示错」而是**判反**：装了 rc.1 的用户会被告知「已是最新」
+//    （其实 rc.2 已发布），而 `^0.1.7-rc.1` 这类范围的语义也整个失真。
 //
 // ⚠️ 比的是什么（2026-09-24 调整）：**优先比实装版本**（node_modules/<name>/package.json
 //    里的真实 version），拿不到才退回 package.json 的**声明范围**。
@@ -421,11 +450,41 @@ function realizedVersionBySpec(versions, spec) {
 //    升级是真实存在的、且确实是「有新版」，不该漏报。
 //    口径：实装版本 < 目录版本 → 有更新；相等或更高 → 已最新。
 //    退回范围判定时沿用旧的保守口径（宁少报不乱报）：目录版本超出范围才算更新。
+// 解析版本号。返回 [major, minor, patch, prerelease] 四元组，prerelease 为**数组**（无则 []）。
+// ⚠️ 第四位是数组而不是字符串：prerelease 必须按 semver 的「点分段逐一比较」比
+//    （`rc.10` > `rc.9`，按字符串比会得到 `rc.10` < `rc.9`），且纯数字段与字母段
+//    **优先级不同**（数字段比字母段小：`1.0.0-1 < 1.0.0-alpha`）。
 function parseVer(v) {
   const s = String(v == null ? '' : v).trim().replace(/^[v=\s]+/, '')
-  const m = s.match(/^(\d+)(?:\.(\d+))?(?:\.(\d+))?/)
+  const m = s.match(/^(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:-([0-9A-Za-z.-]+))?/)
   if (!m) return null
-  return [Number(m[1]), Number(m[2] || 0), Number(m[3] || 0)]
+  // build metadata（`+sha`）按 semver 规定**不参与比较**，故整体丢弃
+  const pre = m[4] ? m[4].split('.').filter((x) => x !== '') : []
+  return [Number(m[1]), Number(m[2] || 0), Number(m[3] || 0), pre]
+}
+// prerelease 段比较：a>b 返 1，a<b 返 -1，相等返 0（仅在 major.minor.patch 全等时才调）。
+// 规则（semver §11.4）：① 无 prerelease **大于**有 prerelease（`1.0.0` > `1.0.0-rc.1`）；
+//                      ② 逐段比：两段都是数字 → 按数值；都是字母 → 按 ASCII；
+//                         数字 vs 字母 → **数字更小**（`1.0.0-1 < 1.0.0-alpha`）；
+//                      ③ 前缀短的更小（`1.0.0-rc < 1.0.0-rc.1`）。
+function cmpPre(a, b) {
+  if (!a.length && !b.length) return 0
+  if (!a.length) return 1   // a 是正式版 → 更大
+  if (!b.length) return -1
+  const n = Math.min(a.length, b.length)
+  for (let i = 0; i < n; i++) {
+    const x = a[i], y = b[i]
+    const xn = /^\d+$/.test(x), yn = /^\d+$/.test(y)
+    if (xn && yn) {
+      const d = Number(x) - Number(y)
+      if (d !== 0) return d > 0 ? 1 : -1
+    } else if (xn !== yn) {
+      return xn ? -1 : 1   // 数字段比字母段小
+    } else if (x !== y) {
+      return x > y ? 1 : -1
+    }
+  }
+  return a.length === b.length ? 0 : (a.length < b.length ? -1 : 1)
 }
 // 比大小：a>b 返 1，a<b 返 -1，相等/无法比较返 0
 function cmpVer(a, b) {
@@ -434,9 +493,16 @@ function cmpVer(a, b) {
   for (let i = 0; i < 3; i++) {
     if (x[i] !== y[i]) return x[i] > y[i] ? 1 : -1
   }
-  return 0
+  return cmpPre(x[3], y[3])
 }
 // 判断「目录版本 target 是否还在已装声明范围 range 之内」。
+// 把 parseVer 的四元组还原成可比较的字符串（数字段 + prerelease 后缀）。
+// ⚠️ 不能再用 `lo.join('.')`：prerelease 是**数组**，join 会把 `['rc','1']` 拼成
+//    `0.1.7.rc,1` 这种 parseVer 认不出的垃圾 → cmpVer 返 0 → 下界/上界判定整个静默失效。
+function verStr(t) {
+  const base = t[0] + '.' + t[1] + '.' + t[2]
+  return t[3] && t[3].length ? base + '-' + t[3].join('.') : base
+}
 // range 支持：`^x.y.z` / `~x.y.z` / `x.y.z` / `>=x.y.z` / `*` / `latest` / 空。
 // 认不出的形态一律返回 true（= 落在范围内 = 不报更新）—— 保守优先，宁可漏报。
 function rangeAllows(range, target) {
@@ -450,12 +516,16 @@ function rangeAllows(range, target) {
   if (caret) {
     const lo = parseVer(r.slice(1))
     if (!lo) return true
-    if (cmpVer(target, lo.join('.')) < 0) return false
+    if (cmpVer(target, verStr(lo)) < 0) return false
     const hi = caret[1] === '0'
       ? (caret[2] === '0' || caret[2] === undefined
         ? [0, 0, Number(caret[3] || 0) + 1]      // ^0.0.x → [0.0.x, 0.0.x+1)
         : [0, Number(caret[2]) + 1, 0])          // ^0.5.x → [0.5.x, 0.6.0)
       : [Number(caret[1]) + 1, 0, 0]             // ^1.2.3 → [1.2.3, 2.0.0)
+    // ⚠️ 上界是**不含 prerelease 的正式版**：`^0.1.7-rc.1` 的上界是 `0.2.0`，而
+    //    `0.2.0-rc.1` 按 semver 也 < `0.2.0`，会被判「在范围内」。这与 npm 的
+    //    `includePrerelease: false` 默认口径一致（prerelease 版本只有显式写进范围才匹配），
+    //    对本项目是**安全的保守方向**：宁可判「在范围内」（不报更新）也不误报。
     return cmpVer(target, hi.join('.')) < 0
   }
   // tilde：~1.2.3 → [1.2.3, 1.3.0)；~1.2 → [1.2.0, 1.3.0)
@@ -466,7 +536,7 @@ function rangeAllows(range, target) {
   if (tilde) {
     const lo = parseVer(r.slice(1))
     if (!lo) return true
-    if (cmpVer(target, lo.join('.')) < 0) return false
+    if (cmpVer(target, verStr(lo)) < 0) return false
     const hi = tilde[2] === undefined
       ? [Number(tilde[1]) + 1, 0, 0]                                  // ~1 → [1.0.0, 2.0.0)
       : [Number(tilde[1]), Number(tilde[2]) + 1, 0]                   // ~1.2[.3] → […, 1.3.0)
@@ -483,11 +553,39 @@ function rangeAllows(range, target) {
   // 认不出的形态（`latest`、workspace:*、npm:xxx 之类）→ 保守判「在范围内」
   return true
 }
+// 取声明范围的**下界**（`^1.62.0` → `1.62.0`），取不到返 ''。
+//
+// ⚠️ 为什么需要它：rangeAllows 只能答「这个版本满不满足范围」，答不了「谁新谁旧」。
+//    而退回范围判定更新时恰恰需要方向 —— 目录版本低于下界 ≠ 有更新，那是目录快照
+//    比实装还旧（典型：目录每天才刷一次）。下界是「用户当初装到的版本」的最佳近似，
+//    拿它当方向基准即可判出这一档。见 updateState 里那段注释的真实事故。
+function lowerBoundOf(range) {
+  const r = String(range == null ? '' : range).trim()
+  if (!r) return ''
+  // caret / tilde：`^1.2.3` / `~1.2.3` → 剥掉前缀后的部分
+  const sig = r.match(/^[\^~]\s*(\S+)/)
+  if (sig) {
+    const v = parseVer(sig[1])
+    return v ? verStr(v) : ''
+  }
+  // >=x.y.z / >x.y.z
+  const ge = r.match(/^>=\s*(\S+)/)
+  if (ge) { const v = parseVer(ge[1]); return v ? verStr(v) : '' }
+  // ⚠️ `>x.y.z` 的下界严格来说不是 x.y.z，但作为「谁新谁旧」的基准足够 ——
+  //    目录版本连 x.y.z 都不超过时，绝无可能是更新
+  const gt = r.match(/^>\s*(\S+)/)
+  if (gt) { const v = parseVer(gt[1]); return v ? verStr(v) : '' }
+  // 裸版本（`1.2.3` / `1.2` / `1`）—— 范围即该点，下界就是它
+  const bare = parseVer(r)
+  if (bare) return verStr(bare)
+  // `*` / `latest` / 认不出的形态 → 没有可比的下界，调用方退回老口径
+  return ''
+}
 // 判定一条目录条目相对已装状态是否有更新。返回：
 //   { state: 'update' | 'current' | 'unknown', installed, range, latest, basis }
 //   · 'unknown' —— 目录没给 version（github / tgz 来源 2033 条），或已装侧两边都拿不到
-//   · 'current' —— 实装版本已 >= 目录版本（或退回范围判定时目录版本落在范围内）
-//   · 'update'  —— 实装版本 < 目录版本（或退回范围判定时目录版本超出范围）
+//   · 'current' —— 实装版本已 >= 目录版本（或退回范围判定时目录版本不比范围下界新）
+//   · 'update'  —— 实装版本 < 目录版本（或退回范围判定时目录版本高于下界且超出范围）
 //
 // ⚠️ 为什么用「实装版本」而不是只比范围：见本段开头的口径说明。
 //    第三个参数 realized 是**实装版本**（node_modules 里的裸 x.y.z，可能为空）。
@@ -512,6 +610,23 @@ function updateState(depVersion, catalogVersion, realized) {
   }
   // 退回范围判定：两边都没实装版本、也没声明范围 → 无从判断
   if (!range) return { state: 'unknown', installed: '', range: range, latest: latest, basis: 'none' }
+  // ⚠️ 这一档**只用下界比方向**，不能用 rangeAllows —— 那会两个方向都判错。
+  //    · 判反降级：`^1.62.0` 实装声明 + 目录给 `1.61.0`（目录快照滞后于实装）时，
+  //      rangeAllows 见 1.61.0 低于下界返 false → 被判「有更新」，
+  //      可 1.61.0 比实装旧，方向完全相反。真实事故：dshmarket 实装 1.62.0、
+  //      目录快照 1.61.0，界面显示「v1.62.0 → v1.61.0」并给出「更新」按钮 ——
+  //      点下去会把用户**降级**（正是 downgradedBy 要拦的那类事故）。
+  //    · 漏报真升级：范围是**已装时写下的**，`^1.62.0` 允许到 `<2.0.0`，
+  //      却不知道用户实际停在 1.62.0。拿它判「目录 1.65.1 在范围内 → 已最新」
+  //      会把 `^` 范围内的正常小版本升级全漏掉。
+  //    下界（`^1.62.0` → `1.62.0`）正是「用户当初装到的那个版本」的最佳近似，
+  //    拿它当方向基准两边都对：目录更高 → update，不高于 → current。
+  //    取不到下界（`*` / `latest` / 认不出的形态）才退回 rangeAllows 的保守口径。
+  const lo = lowerBoundOf(range)
+  if (lo) {
+    const state = cmpVer(latest, lo) > 0 ? 'update' : 'current'
+    return { state: state, installed: '', range: range, latest: latest, basis: 'range' }
+  }
   return {
     state: rangeAllows(range, latest) ? 'current' : 'update',
     installed: '',
@@ -726,9 +841,116 @@ async function loadCatalog(opts) {
   }
 }
 
+// ── 回源 registry 查「官方最新版」──
+//
+// ⚠️ 为什么需要它：目录（`dsh-plugin-catalog` / 官方 plugins.json）是**每日快照**，而插件
+//    发版随时在发生。实测 2026-09-25：目录停在 `2026.924.4355`（9/24 11:39），而 dshmarket
+//    已发到 1.65.1 —— 目录里那条还写着 1.61.0。用户于是看到「已是最新」，实际落后 4 个版本。
+//    目录里那份 version 只是**快照值**，不能当成「当前最新」。
+//
+// ⚠️ 所以这一档**必须出站**，且**只在用户明确点击时**才发请求（见界面每行的「查官方最新版」
+//    按钮）—— 它不进 dshMarketCatalog / dshMarketCheckUpdates 那条「默认零网络请求」的链路，
+//    否则「刷新目录」会连带打上百个 registry 请求。
+//
+// ⚠️ 只查**裸 npm 包名**：github / tarball 来源在 npm 上没有 manifest，查了必然 404
+//    （与 dsh-host-compat 同一口径）。scoped 包的 `/` 要编码成 `%2F`，否则换 registry 会 404。
+const LATEST_TIMEOUT_MS = 8000
+// registry 的 latest 比目录变得快（发版即可见），但也没必要每次点击都重发 —— 5 分钟足够
+const LATEST_TTL_MS = 5 * 60 * 1000
+// 失败冷却：拉不到时别让用户反复点反复等满超时
+const LATEST_FAIL_COOLDOWN_MS = 60 * 1000
+const LATEST_CONCURRENCY = 8
+
+// pkgName → { at, version }（version 为 '' 表示拉到了但元数据里没 version，属异常但按有效结论存）
+const latestCache = new Map()
+// pkgName → 下次可重试的时刻
+const latestFailures = new Map()
+
+function latestCacheGet(name, now) {
+  const hit = latestCache.get(name)
+  if (!hit) return undefined
+  if (now - hit.at > LATEST_TTL_MS) { latestCache.delete(name); return undefined }
+  return hit.version
+}
+
+// 拉一个包的 registry latest 版本。成功返回 { version }，失败返回 { error }。
+// 与 dsh-host-compat.fetchFacts 同套路（超时 + 失败冷却 + 缓存）。
+async function fetchRegistryLatest(name, opts) {
+  const o = opts && typeof opts === 'object' ? opts : {}
+  const now = Date.now()
+  const cached = latestCacheGet(name, now)
+  if (cached !== undefined) return { version: cached, cached: true }
+  const retryAt = latestFailures.get(name)
+  if (retryAt && now < retryAt) return { error: '刚拉取失败，稍后再试' }
+  const registry = String(o.registry || MIRROR_REGISTRY).replace(/\/+$/, '')
+  const fetchImpl = typeof o.fetchImpl === 'function' ? o.fetchImpl : fetch
+  const url = registry + '/' + name.replace(/\//g, '%2F') + '/latest'
+  try {
+    const res = await fetchImpl(url, { signal: AbortSignal.timeout(LATEST_TIMEOUT_MS) })
+    if (!res.ok) throw new Error('HTTP ' + res.status)
+    const meta = await res.json()
+    const version = String((meta && meta.version) || '').trim()
+    latestFailures.delete(name)
+    // ⚠️ 拉到了就落缓存（即便 version 为空）—— 否则元数据异常的包每次点击都要重拉一遍
+    latestCache.set(name, { at: Date.now(), version: version })
+    return { version: version }
+  } catch (err) {
+    const why = errMsg(err)
+    logErr('[whale][dsh-market] 查 registry latest 失败', name + ': ' + why)
+    latestFailures.set(name, Date.now() + LATEST_FAIL_COOLDOWN_MS)
+    return { error: why }
+  }
+}
+
+// 批量查 registry latest：收 `{ pkg, key }` 数组，返回 { 键 → { version, error, cached } }。
+//
+// `key` 是调用方给的关联键（界面上用目录条目的 spec），因为一个包名可能对应多条目录条目，
+// 用 pkg 当返回键会让它们互相覆盖。
+//
+// ⚠️ 与 dshHostCompat.lookup 一样做**有界并发**：列表一页 80 条，逐条 await 会把延迟叠成 80 倍。
+async function registryLatest(items, opts) {
+  const o = opts && typeof opts === 'object' ? opts : {}
+  const list = Array.isArray(items) ? items : []
+  // 同一个包名只查一次（多条目录条目可能指向同一个包），结果按各自 key 铺开
+  const byPkg = new Map()
+  for (const it of list) {
+    const item = it && typeof it === 'object' ? it : {}
+    const pkg = String(item.pkg == null ? '' : item.pkg).trim()
+    const key = String(item.key == null ? '' : item.key).trim()
+    if (!pkg || !key) continue
+    if (!byPkg.has(pkg)) byPkg.set(pkg, [])
+    byPkg.get(pkg).push(key)
+  }
+  const out = Object.create(null)
+  if (!byPkg.size) return { ok: true, results: out }
+  const pkgs = [...byPkg.keys()]
+  const concurrency = Number.isFinite(o.concurrency) && o.concurrency > 0 ? Math.floor(o.concurrency) : LATEST_CONCURRENCY
+  let idx = 0
+  const worker = async () => {
+    while (idx < pkgs.length) {
+      const pkg = pkgs[idx++]
+      const r = await fetchRegistryLatest(pkg, o)
+      for (const key of byPkg.get(pkg)) {
+        out[key] = {
+          pkg: pkg,
+          version: r.version || '',
+          error: r.error || '',
+          cached: !!r.cached,
+        }
+      }
+    }
+  }
+  const workers = []
+  for (let i = 0; i < Math.min(concurrency, pkgs.length); i++) workers.push(worker())
+  await Promise.all(workers)
+  return { ok: true, results: out }
+}
+
 // 清掉内存缓存（设置页改 URL 后调用，让下一次抓取真的重来）
 function clearCache() {
   mem = { at: 0, key: '', data: null, validators: {} }
+  latestCache.clear()
+  latestFailures.clear()
 }
 
 // 拿上一次成功抓到的目录（给「离线兜底」用：settings.js 会把它落 dbStorage）
@@ -743,7 +965,7 @@ module.exports = {
   MIRROR_REGISTRIES,
   CACHE_TTL_MS,
   FETCH_TIMEOUT_MS,
-  SORTS,
+  SORTS_DESC,
   parseInstallSpec,
   specKindOf,
   specNeedsBuild,
@@ -761,9 +983,12 @@ module.exports = {
   parseVer,
   cmpVer,
   rangeAllows,
+  lowerBoundOf,
   updateState,
   buildSources,
   loadCatalog,
+  // 回源 registry 查官方最新版（目录是每日快照，比它新；只在用户点击时调）
+  registryLatest,
   clearCache,
   peekCache,
   _untarOne: untarOne,

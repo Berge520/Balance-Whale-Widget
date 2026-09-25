@@ -22,6 +22,9 @@ const DSH_PORT = 3080
 const DSH_URL = 'http://127.0.0.1:' + DSH_PORT
 const DSH_PKG = '@deepseek-ai/dsh'
 const LOG_MAX = 160 // 内存里保留的日志行数
+// pnpm 子进程的硬超时：卡在锁等待 / 网络黑洞时它会永不退出，Promise 不 resolve
+// 界面就会永远停在「正在安装…」。到点强制结束并按失败上报（见 runPnpm 的注释）
+const PNPM_TIMEOUT_MS = 30 * 60 * 1000
 const WIN = process.platform === 'win32'
 
 const state = {
@@ -391,20 +394,38 @@ function elevateWhy(info) {
   return '：管理员权限下 npm 安装失败（原因见上方日志）'
 }
 // 以管理员权限跑一次 npm（UAC 弹窗）；用于全局安装目录只对管理员可写的情况
-// 提权进程会另开一个控制台窗口，它的输出不会回到父进程（npm 报错一闪而过，日志里只剩「提权未成功」），
-// 所以用临时 .cmd 包一层把输出重定向到文件，跑完读回来 —— 失败时才有据可查。
+// 提权进程的输出不会回到父进程（npm 报错一闪而过，日志里只剩「提权未成功」），
+// 所以用临时 .cmd 把输出重定向到文件，跑完读回来 —— 失败时才有据可查。
 // -Wait -PassThru 拿 npm 的退出码，避免「提权被取消」却被当成成功
+// ⚠️ 为什么走 wscript + VBS 这层「套娃」而不直接 Start-Process cmd.exe（2026-09-24 修）：
+//    `Start-Process -Verb RunAs` 创建的是**全新进程**，拿不到父进程的无窗口属性 ——
+//    powershell 自己的 windowsHide 管不到它派生的 cmd.exe，于是提权后必弹一个控制台黑窗。
+//    -WindowStyle Hidden 不够：它对控制台程序只是「启动后立刻隐藏」，
+//    conhost 仍会创建并闪一下（用户实测能看见）。
+//    可靠做法是让新进程**一开始就不带控制台**：经 VBS 的 WScript.Shell.Run，
+//    第 2 个参数直接指定窗口模式 0（隐藏），由它来拉起 cmd。
+//    实测（Windows 10/11 中文版、uTools 打包版）：UAC 弹窗照常，cmd 与 conhost 全程不可见，
+//    退出码经 VBS 的 WScript.Quit 透传给 powershell，再经 -Wait -PassThru 回到这里。
+//    ⚠️ 别退回 `cmd /c start /min`：/min 只是最小化，仍会在任务栏闪出一个窗口。
 function elevateInstall(npmExe, args, onDone) {
   const q = (s) => "'" + String(s).replace(/'/g, "''") + "'"
   const cq = (s) => '"' + String(s) + '"'
   const stamp = 'whale-elev-' + process.pid + '-' + Date.now()
   const bat = path.join(os.tmpdir(), stamp + '.cmd')
+  const vbs = path.join(os.tmpdir(), stamp + '.vbs')
   const outFile = path.join(os.tmpdir(), stamp + '.log')
   let ps = ''
   try {
     fs.writeFileSync(bat, '@echo off\r\n' + [npmExe].concat(args).map(cq).join(' ')
       + ' > ' + cq(outFile) + ' 2>&1\r\nexit /b %ERRORLEVEL%\r\n')
-    ps = '$p = Start-Process -FilePath "cmd.exe" -ArgumentList ' + q('/c') + ',' + q(bat)
+    // VBS 里的字符串字面量用双引号，路径里的双引号需成对转义；本文件路径由我们生成，
+    // 只可能含 os.tmpdir() 与固定片段，但转义仍照规矩做，免得用户改了 TEMP 到带引号的位置。
+    const vq = (s) => '"' + String(s).replace(/"/g, '""') + '"'
+    // 0 = 隐藏窗口；True = 等待 cmd 退出，退出码才能被 VBS 拿到
+    fs.writeFileSync(vbs, 'Set sh = CreateObject("WScript.Shell")\r\n'
+      + 'code = sh.Run("cmd.exe /d /s /c " & ' + vq(vq(bat)) + ', 0, True)\r\n'
+      + 'WScript.Quit code\r\n')
+    ps = '$p = Start-Process -FilePath "wscript.exe" -ArgumentList ' + q(vbs)
       + ' -Verb RunAs -Wait -PassThru; exit $p.ExitCode'
   } catch (err) {
     pushLog('提权安装未成功（无法创建临时脚本）：' + ((err && err.message) || err))
@@ -413,6 +434,7 @@ function elevateInstall(npmExe, args, onDone) {
   }
   const cleanup = () => {
     try { fs.rmSync(bat, { force: true }) } catch (err) {}
+    try { fs.rmSync(vbs, { force: true }) } catch (err) {}
     try { fs.rmSync(outFile, { force: true }) } catch (err) {}
   }
   execFile(psExe(), ['-NoProfile', '-Command', ps], { windowsHide: true, encoding: 'buffer' }, (err, so, se) => {
@@ -683,6 +705,15 @@ function readPkgVersion(p) {
     return j && j.version ? String(j.version) : ''
   } catch (err) { return '' }
 }
+// 读某个包目录的 package.json 全量字段（读不到返回 null）。
+// ⚠️ 为什么不能复用 readPkgVersion：那个函数把「读不到」和「没有 version 字段」都压成 ''，
+//    而这里要知道「目录里装的是哪个包」—— name 是判定改名换姓的唯一线索。
+function readPkgManifest(pkgDir) {
+  try {
+    const j = JSON.parse(fs.readFileSync(path.join(pkgDir, 'package.json'), 'utf8'))
+    return j && typeof j === 'object' ? j : null
+  } catch (err) { return null }
+}
 // 某个 dsh 包目录的 CLI 入口：package.json 的 bin 字段（字符串，或 { dsh: 'lib/bin.js' }）
 function cliEntryIn(pkgDir) {
   try {
@@ -761,6 +792,74 @@ function removeInstalled() {
   }
   state.installed = ''
   return true
+}
+// ──────────────────────────────────────────────
+// 安装结果的「后置判据」：退出码 0 不等于装成功。
+//
+// ⚠️ 踩坑结论（借鉴 dsh-market #676 / #694）：
+//    1. 命令退出码 0 只说明**这一步**没报错。宿主（dsh / 官方 manager）在后续阶段
+//       （写 manifest、enable、组装 profile）失败时，前面那步 npm/pnpm 的退出码**仍是 0**，
+//       整条链路都会把它读成成功 —— 所以成败必须由**磁盘上的现状**判定，不能由退出码判定。
+//    2. 上游包改名换姓时，`npm install <旧名>` 能成功退出、目录也在，但目录里装的是**另一个包**。
+//       下次启动按依赖名去 import 就炸，且现场（目录存在、版本号看着也对）极像成功。
+//       所以装完必须回读 `package.json` 的 `name` 与依赖键比对。
+//    返回 { ok, version, name, why }；why 是给用户看的短句（可照抄下一步）。
+function verifyInstalledPkg(pkgDir, expectedName) {
+  const man = readPkgManifest(pkgDir)
+  if (!man) {
+    return { ok: false, version: '', name: '', why: '：安装后在磁盘上读不到它的 package.json（安装未完成或目录被回滚）' }
+  }
+  const name = man.name ? String(man.name) : ''
+  const version = man.version ? String(man.version) : ''
+  if (!version) {
+    return { ok: false, version: '', name: name, why: '：磁盘上的 package.json 没有 version 字段（安装不完整）' }
+  }
+  // 目录名 = 依赖键。装进来的是别的包 → 上游改名了，这份装好也用不了
+  if (expectedName && name && name !== expectedName) {
+    return { ok: false, version: version, name: name, why: '：安装到 ' + expectedName + ' 下的实际是 ' + name + '（上游已改名），下次启动会加载失败' }
+  }
+  return { ok: true, version: version, name: name, why: '' }
+}
+// 安装/更新会同时改写 package.json 与 npm-shrinkwrap/package-lock：中途失败就留下
+// 「清单里写着、磁盘上没有」的幽灵依赖，下次启动组装失败（dsh-market #663 的 ghost dependency）。
+// 所以失败时把这两份持久状态**尽量**恢复原样。先快照、失败时写回。
+// ⚠️ 不抛错：这是在「已经出错」之后跑的补偿动作，它自己失败不该把主流程也带崩（#662 的教训）。
+function snapshotManifests(pkgDir) {
+  const out = []
+  for (const f of ['package.json', 'package-lock.json', 'npm-shrinkwrap.json']) {
+    const p = path.join(pkgDir, f)
+    try { out.push({ path: p, name: f, data: fs.readFileSync(p, 'utf8') }) } catch (err) { /* 本来就没有这份，跳过 */ }
+  }
+  return out
+}
+function restoreManifests(snaps) {
+  const restored = []
+  for (const s of snaps || []) {
+    try { fs.writeFileSync(s.path, s.data); restored.push(s.name) } catch (err) { logErr('[whale][dsh] 恢复清单失败', s.name + '：' + ((err && err.message) || err)) }
+  }
+  return restored
+}
+// 启动前自检插件目录：清单里声明了、磁盘上却没有的依赖 = 幽灵依赖（ghost dependency，dsh-market #663）。
+// ⚠️ 为什么安装期回滚还不够：installDsh 的回滚只管**本次**安装。历史上装到一半失败/被外力改过
+//    的目录不会自己好，一直躺到下次启动组装时才炸 —— 那时报错在 dsh 的输出里，用户看不出是缺依赖。
+//    所以在 start() 里提前扫一遍，用插件自己的话把「缺了什么、该点哪个按钮」说清楚。
+// 只查 dsh 包自身的 package.json（不含它的依赖），够用且开销小：真正的幽灵依赖就出在顶层这份清单。
+// 返回 { ok, missing: string[], why }；why 是给用户看的短句。
+function checkGhostDeps(pkgDir) {
+  const man = readPkgManifest(pkgDir)
+  if (!man) return { ok: false, missing: [], why: '：读不到 dsh 的 package.json（安装目录不完整）' }
+  const deps = Object.assign({}, man.dependencies, man.optionalDependencies)
+  const missing = []
+  for (const name of Object.keys(deps)) {
+    // 可选依赖（optionalDependencies）允许装不上，缺失不算异常；只有 dependencies 缺了才是幽灵依赖
+    if (man.optionalDependencies && man.optionalDependencies[name] && !(man.dependencies && man.dependencies[name])) continue
+    try { fs.statSync(path.join(pkgDir, 'node_modules', name)) } catch (err) { missing.push(name) }
+    if (missing.length >= 8) break // 缺到 8 个就没必要枚举完，报错只会更长
+  }
+  if (missing.length) {
+    return { ok: false, missing: missing, why: '：清单里声明了但磁盘上缺少 ' + missing.length + ' 个依赖（' + missing.slice(0, 3).join('、') + (missing.length > 3 ? ' 等' : '') + '）' }
+  }
+  return { ok: true, missing: [], why: '' }
 }
 // latest 是否比当前更新（数字段逐位比较；预发布后缀按「数字 > 字母」粗略处理，够用）
 function isNewer(a, b) {
@@ -912,6 +1011,16 @@ function start() {
     pushLog('还没有可用的 dsh，先安装：' + pkgSpec())
     installDsh(() => start(), 'install')
     return snapshot()
+  }
+  // 启动前自检：插件目录里若有幽灵依赖，这里就拦下并给出「怎么修」，不让它走到组装时才炸
+  if (act.source === 'plugin') {
+    const g = checkGhostDeps(act.pkgDir)
+    if (!g.ok) {
+      state.error = 'dsh 安装不完整' + g.why + '：点「更新」重新安装即可修复'
+      pushLog(state.error)
+      // 只读自检，不改磁盘：修不修由用户点「更新」决定（自动重装会在用户没预期时下载）
+      return snapshot()
+    }
   }
   const exe = node.node
   state.runVersion = act.version // 本次实际跑的版本（用于判断「更新后是否要重启」）
@@ -1122,7 +1231,13 @@ function installDsh(done, busyKind) {
   setCmd(node.npm + ' ' + args.join(' '))
   pushLog((state.busy === 'update' ? '开始更新：' : '开始安装：') + spec + '（' + (target === 'global' ? '全局安装' : '插件目录') + '）')
   let triedElevate = false
+  // 失败时要恢复的持久状态：装到插件目录时快照我们自己那份 prefix 的清单
+  const targetPkgDir = target === 'global' ? g.pkgDir : dshPkgDir()
+  const manifestSnaps = target === 'plugin' ? snapshotManifests(dshPrefix()) : []
+  // ⚠️ 成败判据 = 回读磁盘（verifyInstalledPkg），不是退出码。
+  //    「退出码 0 但盘上是别的包 / 读不到 package.json」这套失败形式，靠退出码看不出来（见函数头注释）。
   const afterVersion = () => (target === 'global' ? ((globalDsh() || {}).version || '') : installedVersion())
+  const verify = () => verifyInstalledPkg(targetPkgDir, DSH_PKG)
   const succeed = (after) => {
     state.busy = ''
     state.globalWritable = null // 装过之后重新判定可写性
@@ -1132,6 +1247,16 @@ function installDsh(done, busyKind) {
     if (done) done()
     broadcast()
   }
+  // 退出码 0 之后仍要回读校验；校验不过就按失败处理（并回滚），不报「安装完成」
+  const succeedIfVerified = (code, after) => {
+    const v = verify()
+    if (v.ok) { succeed(after || v.version); return true }
+    // 回读发现不完整：先恢复清单再报错，避免留下幽灵依赖让下次启动组装失败
+    const restored = restoreManifests(manifestSnaps)
+    if (restored.length) pushLog('已回滚清单到安装前：' + restored.join('、'))
+    failInstall(code || 0, v.why)
+    return false
+  }
   // 全局安装目录常只对管理员可写：先探测，不可写就直接提权，免得白跑一遍再抛 EPERM
   const globalBase = target === 'global' ? path.dirname(path.dirname(g.pkgDir)) : ''
   if (target === 'global' && WIN && !canWriteDir(globalBase)) {
@@ -1139,7 +1264,8 @@ function installDsh(done, busyKind) {
     pushLog('全局安装目录 ' + globalBase + ' 普通用户不可写（需要管理员权限），改用管理员权限安装：请在 UAC 弹窗点「是」')
     elevateInstall(node.npm, args, (elevErr, info) => {
       const v2 = afterVersion()
-      if (!elevErr && v2) succeed(v2)
+      // 提权分支同样不能只看「没报错 + 读得到版本」：必须回读校验（可能是别的包）
+      if (!elevErr && v2) succeedIfVerified(0, v2)
       else failInstall(info && info.code, elevateWhy(info))
     })
     return snapshot()
@@ -1156,7 +1282,8 @@ function installDsh(done, busyKind) {
   const fail = failInstall
   const finish = (code) => {
     const after = afterVersion()
-    if (code === 0 && after) { succeed(after); return }
+    // ⚠️ 退出码 0 不再是「成功」的充分条件：还要回读磁盘确认装的是对的包、且读得到版本
+    if (code === 0 && after) { succeedIfVerified(code, after); return }
     // npm 的 EPERM/EACCES：Windows 上多半是「目录只对管理员可写」或「文件正被占用」
     const denied = /EPERM|EACCES|operation not permitted|拒绝访问/i.test(state.log.slice(-30).join('\n'))
     if (target === 'global' && denied && !triedElevate && WIN) {
@@ -1165,11 +1292,14 @@ function installDsh(done, busyKind) {
       pushLog('全局安装目录 ' + globalBase + ' 普通用户不可写，改用管理员权限重试：请在 UAC 弹窗点「是」')
       elevateInstall(node.npm, args, (elevErr, info) => {
         const v2 = afterVersion()
-        if (!elevErr && v2) succeed(v2)
+        if (!elevErr && v2) succeedIfVerified(0, v2)
         else fail(info && info.code ? info.code : code, elevateWhy(info))
       })
       return
     }
+    // 非 0 退出：回滚清单，避免「清单里写着、磁盘上没有」的幽灵依赖害下次启动组装失败
+    const restored = restoreManifests(manifestSnaps)
+    if (restored.length) pushLog('已回滚清单到安装前：' + restored.join('、'))
     if (denied && target === 'global') {
       fail(code, '：全局安装目录需要管理员权限。可在 UAC 弹窗点「是」重试、以管理员身份运行 uTools，'
         + '或先卸载全局 dsh（npm uninstall -g ' + DSH_PKG + '）并删掉它，让插件装到插件数据目录')
@@ -1186,6 +1316,9 @@ function installDsh(done, busyKind) {
   }
   child.on('error', (err) => {
     state.busy = ''
+    // spawn 失败同样是「装了一半」：一并回滚清单，别留幽灵依赖
+    const restored = restoreManifests(manifestSnaps)
+    if (restored.length) pushLog('已回滚清单到安装前：' + restored.join('、'))
     state.error = '安装失败：' + ((err && err.message) || err)
     pushLog(state.error)
     broadcast()
@@ -1216,7 +1349,13 @@ function validPkgName(name) {
 //    仍然禁止：`-` 开头（会被当开关）、空白与换行（拆成多个参数）、
 //    引号与 shell 元字符（&& | ; ` $ ( ) < > 等）、反斜杠。
 //    ⚠️ 不禁止 URL 里的 `?` 与 `=`（合法的 tgz 查询串），但用白名单字符集把它们限制在 URL 参数位置。
-const PKG_SPEC_RE = /^(github:[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*(#[a-z0-9._/-]+)?|https?:\/\/[a-z0-9.-]+(:\d+)?\/[a-z0-9._~/-]*(\.tgz|\.tar\.gz)?(\?[a-z0-9._~%&=+-]*)?|(@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*)$/i
+//    ⚠️ 裸包名分支必须**带可选 `@版本`**（2026-09-25 修，真实 bug）：精确安装走的就是
+//       `dshmarket@1.65.1` 这种形式，而早先的写法的字符集里没有 `@`，一律判成非法 →
+//       installPluginPkg 静默返回 code -1（连日志都不打），界面只显示
+//       「安装失败（退出码 -1）：详见「日志」卡」而日志卡空白。
+//       版本段与 github 分支同款字符集（允许 `-` / `+` 的预发布与构建元数据），
+//       并允许尾部 `#` 片段（npm 别名与 registry 片段语法）。
+const PKG_SPEC_RE = /^(github:[a-z0-9][a-z0-9._-]*\/[a-z0-9][a-z0-9._-]*(#[a-z0-9._/-]+)?|https?:\/\/[a-z0-9.-]+(:\d+)?\/[a-z0-9._~/-]*(\.tgz|\.tar\.gz)?(\?[a-z0-9._~%&=+-]*)?|(@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*(@[a-z0-9][a-z0-9._+-]*(#[a-z0-9._/-]+)?)?)$/i
 function validPkgSpec(spec) {
   const s = String(spec == null ? '' : spec).trim()
   if (!s || s.length > 214) return ''
@@ -1241,6 +1380,121 @@ function profileDir(profile) {
 function profilePkgFile(profile) {
   const dir = profileDir(profile)
   return dir ? path.join(dir, 'package.json') : ''
+}
+// ──────────────────────────────────────────────
+// dsh 的 profile 写锁（孤儿锁检测与清理）
+// ──────────────────────────────────────────────
+//
+// ⚠️ 为什么需要这段（2026-09-24 实测，排查了一整轮才定位）：dsh 每次改 profile
+//    （装/卸/更新插件、改 patch、market 的多数操作）都要先拿一把写锁
+//    `<profile>/package.json.lock`，实现见 dsh-atomic-write 的 withFileLock。
+//    那把锁**把持有者的 pid 写进文件，却从不读它**，也没有任何过期/存活检查 ——
+//    上游注释明确写着「contender never removes an existing lock; orphan recovery is
+//    an operator action」（0.1.7-alpha.2 与 0.1.7-rc.1 逐字相同，26 个版本都没变）。
+//    于是进程被强杀 / 取消更新时 finally 里的释放不执行，锁就永久残留。
+//
+//    后果不是「慢」，是**整个 profile 死锁**：之后每条 dsh 命令都在 withFileLock 里
+//    空转到 deadline 才抛 timeout，用户看到的是「卸载失败（退出码 1）」「更新失败」
+//    「market 卡片一张都不渲染」，而真实报错只有那句 timed out waiting for the writer lock。
+//    （本机实锤：锁里 pid=22536 早已不存在，锁从 15:57 一直挂到人工删除为止。）
+//
+// ⚠️ 定位口径必须与本模块其它 profile 相关函数一致（都走 profileDir → homeDir），
+//    否则会出现「检测的是这个目录、dsh 锁的是那个目录」这种静默错位。
+function profileLockFile(profile) {
+  const dir = profileDir(profile)
+  return dir ? path.join(dir, 'package.json.lock') : ''
+}
+// 判断 pid 指向的进程是否还活着。
+// ⚠️ 用 `kill(pid, 0)`（信号 0 = 只做存在性/权限检查，不真发信号）而不是 tasklist/netstat：
+//    这是唯一的**同步**判据，不起子进程、不占端口探测，能直接用在只读检测里。
+//    返回三态而非布尔 —— 「进程在」与「查不了」必须分开：ESRCH 才是「确实不存在」，
+//    EPERM 表示进程存在但不归我们管，其它错误（参数非法等）属未知。只有确证不存在才允许清理，
+//    含糊时一律按「不清理」处理（宁可让用户看到提示，也不能误删活动锁）。
+function pidAliveState(pid) {
+  const n = Number(pid)
+  if (!isFinite(n) || n <= 0 || Math.floor(n) !== n) return 'unknown'
+  try {
+    process.kill(n, 0)
+    return 'alive'
+  } catch (err) {
+    const code = err && err.code
+    if (code === 'ESRCH') return 'dead'
+    if (code === 'EPERM') return 'alive'
+    return 'unknown'
+  }
+}
+// 只读检测某个 profile 的写锁是否已成孤儿。**不修改任何东西**，供界面先提示、用户再决定。
+//
+// 判据三重全部满足才算孤儿，任一条不满足都返回 stale:false：
+//   ① 锁文件存在   ② 内容是纯数字 pid   ③ 该 pid 确证不存在（ESRCH）
+// 第②条是保守收口：内容读不懂（空文件、被写坏、不是我们认识的格式）时**不猜**，
+// 因为「猜错」的代价是删掉一把可能有效的锁。
+//
+// 返回 { ok, stale, pid, lockPath, profile, reason }，reason 说明为何判 stale:false
+// （absent / bad-content / alive / unknown），界面据此给不同文案：
+// 「锁被其它进程持有」与「锁内容读不懂」对用户是两回事。
+function dshLockStale(profile) {
+  const pf = validProfile(profile)
+  if (!pf) return { ok: false, stale: false, reason: 'bad-profile', error: 'profile 名不合法：' + profile }
+  const lockPath = profileLockFile(pf)
+  if (!lockPath) {
+    return { ok: false, stale: false, reason: 'no-profile-dir', lockPath: '', profile: pf, error: '找不到 profile 目录（DSH_HOME 未配置或目录不存在）' }
+  }
+  let raw = ''
+  try {
+    raw = fs.readFileSync(lockPath, 'utf8')
+  } catch (err) {
+    // 预期分支：文件不存在 = 没有锁，这是最常见的正常态（不需要 logErr 留痕）
+    if (err && err.code === 'ENOENT') return { ok: true, stale: false, reason: 'absent', lockPath: lockPath, profile: pf, pid: 0 }
+    // 真故障：文件在但读不了（权限等），必须留痕
+    logErr('[whale][dsh] 读 profile 写锁失败', lockPath, err && err.message)
+    return { ok: false, stale: false, reason: 'read-error', lockPath: lockPath, profile: pf, error: (err && err.message) || String(err) }
+  }
+  // 上游写的是 `<pid>\n`，宽容掉首尾空白后再要求整串是数字
+  const txt = String(raw == null ? '' : raw).trim()
+  if (!/^\d+$/.test(txt)) {
+    return { ok: true, stale: false, reason: 'bad-content', lockPath: lockPath, profile: pf, pid: 0 }
+  }
+  const pid = Number(txt)
+  const state = pidAliveState(pid)
+  if (state === 'dead') {
+    let age = 0
+    try { age = Math.max(0, Date.now() - fs.statSync(lockPath).mtimeMs) } catch (err) { age = 0 }
+    return { ok: true, stale: true, reason: 'orphan', lockPath: lockPath, profile: pf, pid: pid, age: age }
+  }
+  // alive（锁被真进程持有）/ unknown（查不出存活）都算「不是孤儿」，交给界面区分文案
+  return { ok: true, stale: false, reason: state, lockPath: lockPath, profile: pf, pid: pid }
+}
+// 清理孤儿锁：**用户确认后**由界面调用的显式动作，不做任何后台静默清理。
+//
+// ⚠️ 这里必须**重新做一遍三重判据**，不能信任调用方传来的检测结果：
+//    从「检测」到「用户点确认」之间可能隔了几十秒，期间真进程完全可能重新拿到锁。
+//    直接按上次结论删 = 删掉一把活动锁，会把别人正在写的 profile 破坏掉。
+function dshLockClear(profile) {
+  const st = dshLockStale(profile)
+  // 只有确证是孤儿才删；absent 也报 ok（等价于「已经是干净的了」，用户目标已达成）
+  if (st.ok && st.stale) {
+    try {
+      fs.rmSync(st.lockPath, { force: true })
+      log('[whale][dsh] 已清理孤儿的 profile 写锁', st.lockPath, 'pid=' + st.pid)
+      return { ok: true, cleared: true, lockPath: st.lockPath, profile: st.profile, pid: st.pid, age: st.age }
+    } catch (err) {
+      logErr('[whale][dsh] 清理 profile 写锁失败', st.lockPath, err && err.message)
+      return { ok: false, cleared: false, lockPath: st.lockPath, profile: st.profile, pid: st.pid, error: (err && err.message) || String(err) }
+    }
+  }
+  if (st.reason === 'absent') {
+    return { ok: true, cleared: false, already: true, lockPath: st.lockPath, profile: st.profile, reason: 'absent' }
+  }
+  return {
+    ok: false,
+    cleared: false,
+    lockPath: st.lockPath,
+    profile: st.profile,
+    pid: st.pid,
+    reason: st.reason,
+    error: st.error || '锁当前不属于孤儿状态（原因：' + st.reason + '），未做删除',
+  }
 }
 // ⚠️ npm 装第三方包**不建快照也安全**：它只动 profile/package.json，
 //    而 dsh-backup 的 PROFILE_FILES 白名单里正好有这个文件（见 lib/dsh-backup.js）。
@@ -1341,15 +1595,29 @@ function runPnpm(args) {
     try { child.stderr && child.stderr.on('data', grab) } catch (err) {}
     // 复用 bindOutput 让 pnpm 的输出进同一份日志（含 ANSI 清理与滚动缓冲）
     bindOutput(child)
+    // ⚠️ 硬超时（2026-09-25 加）：pnpm 卡在锁等待 / 网络黑洞时会**永不退出**，
+    //    而 Promise 不 resolve 就意味着界面上的「正在安装…」和计时器永远不会结束
+    //    （实测出现 7 分 56 秒仍在「正在安装…」且日志空白）。到点先 taskkill 再按失败上报，
+    //    把「卡住」变成一个用户看得懂的结论，而不是无限等待。
+    //    30 分钟：github 来源要 clone + 装依赖 + 构建，正常慢路径也要十几分钟，不能扣太紧
+    let done = false
+    const finish = (r) => { if (done) return; done = true; clearTimeout(timer); resolve(r) }
+    const timer = setTimeout(() => {
+      pushLog('pnpm 超过 ' + Math.round(PNPM_TIMEOUT_MS / 60000) + ' 分钟未退出，已强制结束（可能是网络不通或 profile 锁被占用）')
+      try { child.kill() } catch (err) {}
+      // Windows 下 cmd 包了一层，child.kill() 未必连子进程一起收 —— 再按 pid 兜一次
+      if (WIN && child.pid) { try { execFile('taskkill', ['/pid', String(child.pid), '/T', '/F'], () => {}) } catch (err) {} }
+      finish({ code: -1, ok: false, out: out, err: 'pnpm 超时未退出' })
+    }, PNPM_TIMEOUT_MS)
     child.on('error', (err) => {
       const why = (err && err.message) || String(err)
       pushLog('pnpm 调用失败：' + why)
-      resolve({ code: -1, ok: false, out: out, err: why })
+      finish({ code: -1, ok: false, out: out, err: why })
     })
     child.on('exit', (code) => {
       // ⚠️ pnpm 在 stderr 上打 warning 是常态（peer 提示、deprecated），不能把 stderr 有内容当失败。
       // 唯一判据是退出码 —— dsh 主包安装那条链路也是这个口径
-      resolve({ code: code == null ? -1 : code, ok: code === 0, out: out, err: '' })
+      finish({ code: code == null ? -1 : code, ok: code === 0, out: out, err: '' })
     })
   })
 }
@@ -1373,8 +1641,20 @@ function pnpmArgs(dir) {
 function installPluginPkg(profile, spec) {
   const pf = validProfile(profile)
   const s = validPkgSpec(spec)
-  if (!pf) return Promise.resolve({ code: -1, ok: false, out: '', err: 'profile 名不合法：' + profile })
-  if (!s) return Promise.resolve({ code: -1, ok: false, out: '', err: '包名不合法：' + spec })
+  // ⚠️ 这两条早先是**静默返回**（不打日志），代价很实在：校验一失败，界面只显示
+  //    「安装失败（退出码 -1）：详见「日志」卡」，而日志卡里一行都没有 ——
+  //    用户照着提示去翻日志，只会看到空白（2026-09-25 实测踩到，根因是 PKG_SPEC_RE 不认 `pkg@版本`）。
+  //    校验失败也是失败，必须留痕，否则「详见日志」是句空话。
+  if (!pf) {
+    const why = 'profile 名不合法：' + profile
+    pushLog(why)
+    return Promise.resolve({ code: -1, ok: false, out: '', err: why })
+  }
+  if (!s) {
+    const why = '包名不合法：' + spec
+    pushLog(why)
+    return Promise.resolve({ code: -1, ok: false, out: '', err: why })
+  }
   const dir = profileDir(pf)
   return runPnpm(['add'].concat(pnpmArgs(dir), [s]))
 }
@@ -1384,8 +1664,17 @@ function installPluginPkg(profile, spec) {
 function uninstallPluginPkg(profile, pkg) {
   const pf = validProfile(profile)
   const p = validPkgName(pkg)
-  if (!pf) return Promise.resolve({ code: -1, ok: false, out: '', err: 'profile 名不合法：' + profile })
-  if (!p) return Promise.resolve({ code: -1, ok: false, out: '', err: '包名不合法：' + pkg })
+  // 与 installPluginPkg 同理：校验失败必须留痕，否则「详见日志」是空话
+  if (!pf) {
+    const why = 'profile 名不合法：' + profile
+    pushLog(why)
+    return Promise.resolve({ code: -1, ok: false, out: '', err: why })
+  }
+  if (!p) {
+    const why = '包名不合法：' + pkg
+    pushLog(why)
+    return Promise.resolve({ code: -1, ok: false, out: '', err: why })
+  }
   const dir = profileDir(pf)
   return runPnpm(['remove'].concat(pnpmArgs(dir), [p]))
 }
@@ -1658,6 +1947,20 @@ function progress() {
   }
 }
 
+// 播一条阶段说明进日志流（走 pushLog，与子进程输出同一份缓冲，便于按时间顺序观看）。
+//
+// ⚠️ 为什么需要它：日志流原先只由子进程输出喂养 —— 而「建快照」「起 pnpm」这两段
+//    根本没有子进程，用户看到的就是一片空白，误以为卡死（2026-09-25 实测反馈）。
+//    这条通道让调用方（插件市场的安装/更新链路）能把自己的阶段播进去。
+//    文案**不加** `$ 前缀**：那种行是「正在执行的命令」，这里只是旁白，混在一起会误导。
+function note(text) {
+  const s = String(text == null ? '' : text).trim()
+  if (!s) return ''
+  pushLog(s)
+  broadcast()
+  return s
+}
+
 module.exports = {
   DSH_PORT,
   DSH_URL,
@@ -1671,12 +1974,20 @@ module.exports = {
   clearLog,
   removePluginDsh,
   cleanNpxCaches,
+  // profile 写锁的孤儿检测与清理（2026-09-24 新增）。dsh 的锁在进程被强杀后会永久残留，
+  // 之后整个 profile 死锁；上游 26 个版本都不做回收，只能这边兜底。
+  // 导出：单测要钉住三重判据的边界（内容不是数字 → 不清理；pid 还活着 → 不清理）
+  dshLockStale,
+  dshLockClear,
   openWeb,
   stopOnQuit,
   probePort,
   snapshot,
   // 轻量进度（安装/更新期间前端 1Hz 刷新用），只读内存、不起子进程
   progress,
+  // 往 dsh 的日志流里播一条「阶段说明」。给插件市场的安装/更新链路用：
+  // 建快照、起 pnpm 这些阶段本身不产生子进程输出，没有这条用户就只看到一片空白
+  note,
   onChange,
   resolveNode,
   // 定位 pnpm 可执行文件（profile 的依赖树由 pnpm 维护，装/卸插件必须走它）。
@@ -1695,6 +2006,15 @@ module.exports = {
   quoteCmdArg,
   // dsh CLI 入口与「实际用哪一份」的定位（dump 要拿 bin.js 绝对路径）
   activeDsh,
+  // 安装结果的「后置判据」：退出码 0 不证明装成功（可能是别的包 / 读不到 package.json）。
+  // 导出：这是纯函数（只读磁盘上的 package.json），单测喂样例目录即可 —— 它挡的是
+  // 「npm 退出码 0 但其实装成了另一个包」这种假成功，必须有回归钉住
+  verifyInstalledPkg,
+  snapshotManifests,
+  restoreManifests,
+  // 启动前的幽灵依赖自检（清单声明 vs 磁盘实际）。导出：纯函数、只读磁盘，
+  // 单测喂样例目录即可 —— 它挡的是「历史上装了一半、启动时才炸在组装阶段」
+  checkGhostDeps,
   // 插件市场复用的 pnpm 原语（settings.js 编排安装/卸载）：
   // 包名/profile 白名单是纯函数，单测直接喂样例 —— 它们挡的是「远端目录里的字符串进命令行」
   validPkgName,

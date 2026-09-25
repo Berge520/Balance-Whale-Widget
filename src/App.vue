@@ -1,6 +1,6 @@
 <script lang="ts" setup>
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
-import type { AssetsApplyResult, AssetsExportResult, AssetsPreviewResult, BackupPreviewResult, BubbleMeta, CodexSummaryResult, CodexWindow, CodexWindows, DshBackupListResult, DshBackupSnapshot, DshDiagnoseFinding, DshDiagnoseItem, DshDiagnoseResult, DshDumpResult, DshIsolateCandidate, DshIsolateCandidatesResult, DshIsolatePlan, DshMarketCatalogResult, DshMarketInstallResult, DshMarketInstalledEntry, DshMarketPingEntry, DshMarketPlugin, DshMarketStatusResult, DshMarketUninstallResult, DshMarketUpdateEntry, DshPatchItem, DshPatchListResult, DshUsageResult, LedgerDetailDay, LedgerDetailEntry, ModelUsageRow, SkinGallery, SkinMeta, SoundMeta, SoundRole, WhaleMailSecrets, WhaleModel, WhaleModelRow, WhaleModelTemplate, WhalePriceModel, WhaleServices, WhaleTokenPrice } from './types/services'
+import type { AssetsApplyResult, AssetsExportResult, AssetsPreviewResult, BackupPreviewResult, BubbleMeta, CodexSummaryResult, CodexWindow, CodexWindows, DshBackupListResult, DshBackupSnapshot, DshDiagnoseFinding, DshDiagnoseItem, DshDiagnoseResult, DshDumpResult, DshExportPreviewResult, DshHostCompatCheckResult, DshHostCompatVerdict, DshIsolateCandidate, DshIsolateCandidatesResult, DshIsolatePlan, DshMarketCatalogResult, DshMarketInstallResult, DshMarketInstalledEntry, DshMarketPingEntry, DshMarketPlugin, DshMarketRegistryLatestEntry, DshMarketRegistryLatestResult, DshMarketStatusResult, DshMarketUninstallResult, DshMarketUpdateEntry, DshPatchItem, DshPatchListResult, DshUsageResult, LedgerDetailDay, LedgerDetailEntry, ModelUsageRow, SkinGallery, SkinMeta, SoundMeta, SoundRole, WhaleMailSecrets, WhaleModel, WhaleModelRow, WhaleModelTemplate, WhalePriceModel, WhaleServices, WhaleTokenPrice } from './types/services'
 import SkinCropper from './components/SkinCropper.vue'
 import SoundTrimmer from './components/SoundTrimmer.vue'
 import FirstRunGuide from './components/FirstRunGuide.vue'
@@ -66,7 +66,10 @@ const TABS = [
   { key: 'window', label: '窗口', desc: '显隐 · 位置 · 透明度 · 穿透' },
   { key: 'data', label: '数据', desc: '凭据设置 · 清除数据 · 备份与恢复' },
   { key: 'help', label: '帮助', desc: '使用说明 · 故障排查 · 关于与更新' },
-  { key: 'dev', label: '开发者', desc: 'DeepSeek Harness（dsh）· dsh 用量统计 · Codex 会话统计' },
+  // desc 是 Tab 栏下方的静态说明，得与卡片的实际数量对得上：
+  // 原先只列「dsh / dsh 用量 / Codex」三项，而这一页实际有 8 张卡，用户按描述找
+  // 「插件开关」「插件市场」会以为不在这里。按实际顺序列全，并把非 dsh 的 Codex 单独隔开
+  { key: 'dev', label: '开发者', desc: 'DeepSeek Harness（dsh）：主控 · 环境诊断 · 配置转储 · 用量统计 · 插件开关 · 插件市场 · 全量导出　｜　Codex 会话统计' },
 ] as const
 type TabKey = (typeof TABS)[number]['key']
 const activeTab = ref<TabKey>('look')
@@ -175,6 +178,9 @@ const cfg = reactive({
   dshMarketMirror: true,
   dshMarketRegistry: '',
   dshMarketOfficial: false,
+  // dsh 全量导出：两个勾选偏好。默认**不带凭据**（包里是明文）、**跳过 node_modules**
+  dshExportCred: false,
+  dshExportNoMod: true,
   // 台词库：可增删的随机组 + 两项不走抽签的固定文案（报时模板 / 动图降级）。
   // 组里的台词按「一行一条」编辑（保存时才拆行交给宿主清洗），这里存的是编辑用的文本
   quotes: { time: '', gifFail: '', groups: [] as QuoteGroupEdit[] },
@@ -256,6 +262,16 @@ const dsh = reactive({
 const dshFlash: Flash = useFlash()
 const dshLogOpen = ref(false)
 const dshLogEl = ref<HTMLElement | null>(null)
+// 异步动作（启动 / 重启 / 更新）的终态收尾令牌与状态机。
+// ⚠️ 为什么需要它：这三个动作都是「同步返回一个半成品快照 + 之后靠轮询拿结果」，
+//    早先点完只写一条「正在更新 dsh…」占位消息就没了下文 —— 成功只进折叠着的日志、
+//    失败只写进卡底的 dsh.error，用户看到占位消息一直挂着，**无从判断成功还是失败**。
+//    这里在轮询里盯 busy 落回空，再把占位消息替换成真正的结果（成功 / 失败都有话说）。
+// settled 为 true 才算收尾完成：busy 在更新途中会**短暂清零**
+// （update() 先置 'update'，installDsh() 开头把它重置，重试提权时又置回），
+// 所以必须连续两轮看到空才认定结束，否则会在「正在结束旧进程」的间隙就误报结果。
+const dshAsync = { active: false, token: 0, wasBusy: false, idleTicks: 0, action: '' as 'start' | 'restart' | 'update' | '', wasRunning: false, before: '', deadline: 0 }
+
 // 折叠区（默认收起，卡片更短）。
 // 主控卡里的实际顺序：运行详情 / dsh 故障排查 / 高级选项 / 使用说明 —— 运行详情与排查提到最前，
 // 它们是「出问题时才看」的，排在卡尾等于出事时滚不到；高级选项与使用说明是配置与说明，靠后无妨。
@@ -389,6 +405,66 @@ function dshStatus(deep = false) {
     // 宿主是异步探测端口的：顺手再读一次，才能拿到「外部 dsh 在不在」的真实结果
     if (deep) window.setTimeout(() => { try { dshApply(services.dshStatus?.()) } catch (err) {} }, 600)
   } catch (err) {}
+  dshSettle()
+}
+// 异步动作的终态判定：busy 从「有」落回「空」并稳定两轮，才算这次动作真的结束。
+// 注意 dshStatus 会在轮询与 dshApply 之后被各处调用，所以判定必须写成幂等 ——
+// 认定结束后立刻清 active，后续调用直接返回，不会重复播报。
+//
+// ⚠️ 判「启动成功」用 dsh.ready，**不能**用 dsh.running（借鉴 dsh-market #663 的实测结论：
+//    「端口有人在监听」不等于「起来了」—— 该项目的 activation-audit 失败时 web 端口其实
+//    **已经被 bind**，树挂载了、服务器监听了，**然后**才拒绝整个 composition 并退出）。
+//    本项目的 dsh.running 只表示「我们 spawn 的子进程还活着」，进程起来但组装失败、
+//    正准备退出时它同样是 true —— 拿它报「已启动」会报出一个下一秒就崩的假成功。
+//    dsh.ready 才是「3080 真正开始监听」（watchReady 观测到的结果），是唯一的成功判据。
+function dshSettle() {
+  if (!dshAsync.active) return
+  const busy = dsh.busy
+  if (busy) {
+    // 还在跑（查询版本是另一条独立链路，不参与本动作的结束判定）
+    if (busy !== 'versions') { dshAsync.wasBusy = true; dshAsync.idleTicks = 0 }
+    return
+  }
+  // 从未见过 busy：动作可能在两次轮询之间就跑完了（例如「已是最新」直接返回、
+  // 或第一次快照就是终态）。此时只累计轮次，避免 0 毫秒就宣布结束。
+  dshAsync.idleTicks++
+  // 见到过 busy 的，空闲一轮即可收尾；没见过的要两轮（防「安装还没开始」的假空闲）
+  if (dshAsync.idleTicks < (dshAsync.wasBusy ? 1 : 2)) return
+  // ⚠️ 进程类动作（启动 / 重启）在 busy 落空后往往还要等十几秒才真的监听上端口，
+  //    此时 dsh.ready 仍是 false。若就此收尾会把它误报成「启动未成功」，
+  //    所以要先给一段**宽限等待**：只要还显示着「启动中」就继续等，直到 ready 或超时。
+  if (!dsh.error && dshAsync.action !== 'update' && !dsh.ready && Date.now() < dshAsync.deadline) {
+    dshAsync.idleTicks = 0 // 重来一轮，等下一次轮询
+    return
+  }
+  dshAsync.active = false
+  const act = dshAsync.action
+  dshAsync.action = ''
+  if (dsh.error) {
+    // 失败：dsh.error 已在卡底单独成行，这里只把占位消息清掉，避免两句红字打架
+    dshFlash.err = true
+    dshFlash.msg = ''
+    dshLogOpen.value = true
+    return
+  }
+  if (act === 'update') {
+    // 更新成功 = 装到了新版本（回读磁盘的结论，见 preload 的 verifyInstalledPkg）。
+    // ⚠️ 这里**不**要求 dsh.ready：更新完的 dsh 未必被拉起来（也可能用户设了不自动启动），
+    //    用 ready 当判据会把「装成功了但没启动」误报成失败。
+    const now = dsh.installed || dsh.globalVersion || dsh.runVersion || dsh.resolved || ''
+    dshFlash.err = false
+    dshFlash.msg = (dshAsync.before && now && now !== dshAsync.before)
+      ? '更新完成：' + dshAsync.before + ' → ' + now
+      : (dsh.ready ? '更新完成，dsh 已用新版启动' : '更新完成（新版本已装好，下次启动生效）')
+  } else if (act === 'restart') {
+    dshFlash.err = !dsh.ready
+    dshFlash.msg = dsh.ready ? '已重启 dsh：' + dsh.port : '重启后 dsh 未就绪（详见日志）'
+  } else {
+    // 启动：首次会自动下载安装，ready（3080 真正监听）才是判据
+    dshFlash.err = !dsh.ready
+    dshFlash.msg = dsh.ready ? 'dsh 已启动' : '启动未成功：进程没能在限时内监听 ' + dsh.port + '，详见日志'
+  }
+  if (dshFlash.err) dshLogOpen.value = true
 }
 // 轮询统一管理：start 幂等（先停再起），stop 可重复调用；页面隐藏时跳过本轮，
 // 避免后台空跑（dsh 状态与任务栏状态两处共用，见下方 dshPolling / taskbarPolling）
@@ -421,15 +497,16 @@ watch(activeTab, (tab) => {
 // 两张统计卡默认收起，首次「展开」时才读取：宿主是同步扫文件（会话日志可能几十 MB），
 // 不看不读，避免每次进开发者 Tab 都无条件付一次扫描成本；展开后即读，也不用手动再点一下。
 // 收起时摘要只在「本会话已读过」之后才显示（否则露「点击展开查看」），保证折叠 = 不预读。
-const devFolds = reactive({ dshUsage: false, codex: false, diagnose: false, dshDump: false, dshIsolate: false, dshMarket: false })
-const devStatsLoaded = reactive({ dshUsage: false, codex: false, diagnose: false, dshDump: false, dshIsolate: false, dshMarket: false })
-function toggleDevCard(key: 'dshUsage' | 'codex' | 'diagnose' | 'dshDump' | 'dshIsolate' | 'dshMarket') {
+const devFolds = reactive({ dshUsage: false, codex: false, diagnose: false, dshDump: false, dshIsolate: false, dshMarket: false, dshExport: false })
+const devStatsLoaded = reactive({ dshUsage: false, codex: false, diagnose: false, dshDump: false, dshIsolate: false, dshMarket: false, dshExport: false })
+function toggleDevCard(key: 'dshUsage' | 'codex' | 'diagnose' | 'dshDump' | 'dshIsolate' | 'dshMarket' | 'dshExport') {
   devFolds[key] = !devFolds[key]
   if (!devFolds[key] || devStatsLoaded[key]) return
   devStatsLoaded[key] = true
   if (key === 'dshUsage') dshUsageRefresh()
   else if (key === 'codex') codexRefresh()
   else if (key === 'dshDump') dshDumpRefresh()
+  else if (key === 'dshExport') dshExportRefresh()
   else if (key === 'dshIsolate') { dshIsolateRefresh(); dshBackupRefresh() }
   // ⚠️ dshMarket **不在此处联网**：本 Tab 其余卡都是「展开即读本地文件」，
   // 唯独这张卡要发 HTTP。展开就自动抓等于「用户只是翻一眼 tab 就产生一次出站请求」，
@@ -451,10 +528,29 @@ function dshDo(action: 'start' | 'stop' | 'restart' | 'update') {
       : action === 'stop' ? '已结束 dsh'
         : action === 'restart' ? '正在重启 dsh…'
           : '正在更新 dsh（结束旧进程 → 重新安装 → 用新版启动）…'
-    // 结束外部 dsh 要等 700ms 复查端口；更新要重新下载（首次安装约几十秒），所以多刷新几次
-    const delays = action === 'restart' ? [2500, 6000] : action === 'update' ? [5000, 20000, 45000, 90000] : action === 'stop' ? [900, 2400] : [800]
-    for (const ms of delays) window.setTimeout(dshStatus, ms)
+    // 异步动作挂上终态收尾（stop 是同步语义、结果由下一次快照直接给出，不参与）
+    if (action !== 'stop') {
+      dshAsync.active = true
+      dshAsync.token++
+      dshAsync.wasBusy = false
+      dshAsync.idleTicks = 0
+      dshAsync.action = action
+      // 记录更替前的版本，更新完成时才能报出「v1.6.0 → v1.7.0」而不是一句干巴巴的「完成」
+      dshAsync.before = action === 'update' ? (dsh.resolved || dsh.runVersion || dsh.installed || dsh.globalVersion || '') : ''
+      // 启动/重启的宽限等待上限：busy 落空后还要等 dsh 真监听上端口。
+      // 90s 的取法：首次安装要下载（busy 期间已覆盖），这里只等「已装好、进程正在起」的那段，
+      // watchReady 自己给的是 3 分钟，取 90s 是为了让「起不来」能早点有结论，不至于让用户干等。
+      dshAsync.deadline = Date.now() + (action === 'update' ? 0 : 90000)
+      const token = dshAsync.token
+      // 结束外部 dsh 要等 700ms 复查端口；更新要重新下载（首次安装约几十秒），所以多刷新几次。
+      // ⚠️ 这些点位只负责「早点刷新界面」：更新可能要跑几分钟（github / tarball 来源要现场
+      //    clone + 构建），固定点位到点时它往往还没结束。真正的收尾交给 4s 常规轮询，
+      //    所以这里不再试图用点位覆盖到结束（早先最远只到 90s，超时就等于又把结果弄丢了）。
+      const delays = action === 'restart' ? [2500, 6000] : action === 'update' ? [5000, 20000, 45000] : [800]
+      for (const ms of delays) window.setTimeout(() => { if (token === dshAsync.token) dshStatus() }, ms)
+    }
   } catch (err: any) {
+    dshAsync.active = false
     dshFlash.err = true
     dshFlash.msg = '操作失败：' + String(err?.message || err)
   }
@@ -473,14 +569,67 @@ function dshClearLog() {
   }
 }
 // 维护类操作：点第一次变确认，点第二次执行（避免误删）
-function dshMaintain(kind: 'remove-plugin' | 'clean-npx') {
+function dshMaintain(kind: 'remove-plugin' | 'clean-npx' | 'clear-lock') {
   if (dshConfirm.value !== kind) { dshConfirm.value = kind; dshFlash.msg = ''; return }
   dshConfirm.value = ''
   try {
+    if (kind === 'clear-lock') { dshClearLock(); return }
     const s = kind === 'remove-plugin' ? services.dshRemovePlugin?.() : services.dshCleanNpxCache?.()
     dshApply(s)
     dshFlash.err = !!dsh.error
     dshFlash.msg = kind === 'remove-plugin' ? '已删除插件目录里的 dsh' : '已清理 npx 旧缓存（详见日志）'
+    dshLogOpen.value = true
+  } catch (err: any) {
+    dshFlash.err = true
+    dshFlash.msg = '操作失败：' + String(err?.message || err)
+  }
+}
+// 清理 dsh 的 profile 写锁（孤儿锁）。
+//
+// 为什么需要这个按钮：dsh 每次改 profile 都要先拿一把写锁 <profile>/package.json.lock，
+// 那把锁把持有者 pid 写进文件却从不读、也没有过期检查；进程被强杀或取消更新时，
+// finally 里的释放不执行，锁就永久残留 —— 之后该 profile 的装/卸/更新/市场全部死锁。
+// 上游把这些锁的回收明确定义为「人工操作」（0.1.7-alpha.2 与 rc.1 逐字相同），
+// 所以只能由这边提供一个人工入口。
+//
+// ⚠️ 判据完全交给宿主侧（dshLockStale 的三重校验），界面**不做**任何「看起来像就删」的判断：
+//    只有 pid 确证死亡才清；锁被真进程持有、或内容读不懂时一律拒删并如实回报原因。
+//    这里刻意不做「有 dsh 在跑就跳过」的前置 —— 实测中 dsh web 长期在跑，而锁里的 pid
+//    早已是别的死进程（本机 2026-09-24 实例：锁里 pid=22536 已死，dsh web 却一直活着），
+//    加这种前置会把唯一该清的情况挡在门外。
+function dshClearLock() {
+  try {
+    const st = services.dshLockStale?.()
+    if (!st || !st.ok) {
+      dshFlash.err = true
+      dshFlash.msg = '检测失败：' + String(st?.error || '无法读取 profile 写锁')
+      return
+    }
+    if (!st.stale) {
+      // 按成因给不同文案：「被别的进程持有」和「内容读不懂」对用户是两回事
+      const why: Record<string, string> = {
+        absent: '没有残留的写锁，无需清理',
+        alive: '写锁正被进程 ' + st.pid + ' 持有，未做清理',
+        'bad-content': '写锁内容无法识别，为安全起见未做清理',
+        unknown: '无法确认写锁持有者是否存活，为安全起见未做清理',
+      }
+      dshFlash.err = st.reason === 'alive' || st.reason === 'bad-content' || st.reason === 'unknown'
+      dshFlash.msg = why[st.reason || ''] || '写锁不属于可清理状态（' + (st.reason || '未知') + '）'
+      dshLogOpen.value = true
+      return
+    }
+    // 确认是孤儿锁后再走一次清理；宿主侧会重新校验一遍（检测到确认之间可能已过去数秒）
+    const done = services.dshLockClear?.()
+    if (done?.ok && done.cleared) {
+      dshFlash.err = false
+      dshFlash.msg = '已清理残留的 dsh 写锁（死进程 pid=' + st.pid + '），可以重试之前失败的操作了'
+    } else if (done?.already) {
+      dshFlash.err = false
+      dshFlash.msg = '写锁已不存在，无需清理'
+    } else {
+      dshFlash.err = true
+      dshFlash.msg = '清理失败：' + String(done?.error || '未知原因')
+    }
     dshLogOpen.value = true
   } catch (err: any) {
     dshFlash.err = true
@@ -1182,6 +1331,12 @@ const dshPatchFlash: Flash = useFlash()
 const dshPatchPending = ref<string>('')
 const dshPatchProfile = 'web'
 const dshBackups = ref<DshBackupListResult | null>(null)
+// 快照卡（还原 / 删除 / 命名 / 标记 / 保留份数）的**专属回执**，不与 dshPatchFlash 共用。
+// ⚠️ 为什么不复用 dshPatchFlash（同一个文件、同一套快照，看起来该合并）：
+//   ① 位置 —— 操作按钮在折起的列表里、dshPatchFlash 却画在整卡顶部，点完看不到（用户报的就是这个）；
+//   ② 内容 —— dshPatchRefresh 会往 dshPatchFlash 写「patch 里已有 N 条…」，那是「插件开关」那半张卡
+//      的结论，跟「这份快照还原成没成」是两件事，混在一行会互相顶掉。
+const dshBackupFlash: Flash = useFlash()
 const dshBackupFolds = reactive({ list: false })
 // 还原是破坏性操作且不可再撤销（会把文件整体覆盖回旧内容），做两步确认
 const dshRestoreConfirm = ref('')
@@ -1192,11 +1347,19 @@ const dshRenameText = ref('')
 const dshDeleteConfirm = ref('')
 const dshKeepDraft = ref<number | null>(null)
 const dshKeepBusy = ref(false)
-function dshPatchRefresh() {
+// silent = 只更新数据、不动回执。
+// ⚠️ 存在的理由（2026-09-24 用户报「快照点击恢复不知道成没成功」）：本函数一进来就清空
+//    dshPatchFlash 并写「patch 里已有 N 条…」，而快照还原 / 删除 / 命名 / 清理的 finally 都会
+//    调它 —— 刚写进去的「已还原 N 个文件」在同一次点击里就被这句话覆盖掉了，用户只看到
+//    「patch 里已有 N 条」，自然不知道还原到底成没成。凡是「操作完顺手刷新一下清单」的调用
+//    都要走 silent，回执由调用方自己负责。
+function dshPatchRefresh(silent = false) {
   if (dshPatchBusy.value) return
   dshPatchBusy.value = true
-  dshPatchFlash.msg = ''
-  dshPatchFlash.err = false
+  if (!silent) {
+    dshPatchFlash.msg = ''
+    dshPatchFlash.err = false
+  }
   try {
     const r = services.dshPatchList?.({ profile: dshPatchProfile })
     if (!r) {
@@ -1256,6 +1419,9 @@ function dshPatchToggle(item: DshPatchItem) {
   dshPatchFlash.msg = ''
   dshPatchFlash.err = false
   const want = !item.disabled
+  // 宿主的写前自动快照是否真的建了 —— 在 try 内赋值、在 finally 里用（`r` 是块级作用域，
+  // finally 看不到），只有真建了才去重读快照目录，避免每次点开关都白读一次
+  let backedUp = false
   window.setTimeout(() => {
     try {
       const r = services.dshPatchToggle?.({ profile: dshPatchProfile, id: item.id, disabled: want })
@@ -1264,6 +1430,7 @@ function dshPatchToggle(item: DshPatchItem) {
         dshPatchFlash.msg = '宿主 API 不可用'
         return
       }
+      backedUp = !!r.backedUp
       if (!r.ok) {
         dshPatchFlash.err = true
         dshPatchFlash.msg = r.error || '写入失败'
@@ -1285,6 +1452,11 @@ function dshPatchToggle(item: DshPatchItem) {
       dshPatchPending.value = ''
       // 刷新合并清单：状态徽章与行尾按钮都要按新的 disabled 重画
       dshIsolateRefresh()
+      // ⚠️ 快照列表也要重读（2026-09-25）：开关一条 patch 时宿主会**写前自动建快照**
+      //    （回执里的 `r.backedUp` / `r.snapshot` 就是它），而原先只刷了 patch 清单 ——
+      //    快照区若展开着，新那份不出现，与市场安装那条链路是同一个 bug。
+      //    只在真建了快照时刷，避免每次点开关都白读一次目录
+      if (backedUp) dshBackupRefresh()
     }
   }, 30)
 }
@@ -1292,44 +1464,45 @@ function dshPatchToggle(item: DshPatchItem) {
 function dshBackupRestore(dirName: string) {
   if (dshRestoreConfirm.value !== dirName) {
     dshRestoreConfirm.value = dirName
-    dshPatchFlash.err = false
-    dshPatchFlash.msg = `再点一次「确认还原」会用 ${dirName} 覆盖当前配置（整文件覆盖，会一并回退这份文件上的其他改动）。`
+    dshBackupFlash.err = false
+    dshBackupFlash.msg = `再点一次「确认还原」会用 ${dirName} 覆盖当前配置（整文件覆盖，会一并回退这份文件上的其他改动）。`
     return
   }
   dshRestoreConfirm.value = ''
-  dshPatchFlash.msg = ''
+  dshBackupFlash.msg = ''
   try {
     const r = services.dshBackupRestore?.({ dirName })
     if (!r || !r.ok) {
-      dshPatchFlash.err = true
-      dshPatchFlash.msg = (r && r.error) || '还原失败'
+      dshBackupFlash.err = true
+      dshBackupFlash.msg = (r && r.error) || '还原失败'
       return
     }
-    dshPatchFlash.err = false
-    dshPatchFlash.msg = `已还原 ${r.written?.length || 0} 个文件` +
+    dshBackupFlash.err = false
+    dshBackupFlash.msg = `已还原 ${r.written?.length || 0} 个文件` +
       (r.skipped?.length ? `（跳过 ${r.skipped.length} 个建快照时就不存在的文件）` : '') +
       '；dsh 侧需重启才完全生效。'
   } catch (err: any) {
-    dshPatchFlash.err = true
-    dshPatchFlash.msg = '还原失败：' + String(err?.message || err)
+    dshBackupFlash.err = true
+    dshBackupFlash.msg = '还原失败：' + String(err?.message || err)
   } finally {
-    dshPatchRefresh()
+    // silent：还原的回执必须留在屏幕上，不能被刷新清单的那句话顶掉
+    dshPatchRefresh(true)
   }
 }
 function dshBackupCreate() {
-  dshPatchFlash.msg = ''
+  dshBackupFlash.msg = ''
   try {
     const r = services.dshBackupCreate?.({ profile: dshPatchProfile })
     if (!r || !r.ok) {
-      dshPatchFlash.err = true
-      dshPatchFlash.msg = (r && r.error) || '备份失败'
+      dshBackupFlash.err = true
+      dshBackupFlash.msg = (r && r.error) || '备份失败'
       return
     }
-    dshPatchFlash.err = false
-    dshPatchFlash.msg = `已建快照 ${r.dirName}` + (r.missing ? `（${r.missing} 个文件当时不存在，未备）` : '')
+    dshBackupFlash.err = false
+    dshBackupFlash.msg = `已建快照 ${r.dirName}` + (r.missing ? `（${r.missing} 个文件当时不存在，未备）` : '')
   } catch (err: any) {
-    dshPatchFlash.err = true
-    dshPatchFlash.msg = '备份失败：' + String(err?.message || err)
+    dshBackupFlash.err = true
+    dshBackupFlash.msg = '备份失败：' + String(err?.message || err)
   } finally {
     dshBackupRefresh()
   }
@@ -1346,6 +1519,145 @@ function dshBackupTime(s: DshBackupSnapshot) {
 function dshBackupReasonText(r: string) {
   return r === 'before-disable' ? '禁用前' : r === 'before-enable' ? '启用前' : r === 'manual' ? '手动备份' : (r || '—')
 }
+
+// ── dsh 全量导出（与上面的「快照」是两件事，卡片也分开）──
+// 快照 = 白名单 3 文件、为了回滚 patch（撤销设施）；导出 = 全量 $DSH_HOME、为了打包带走（搬运工具）。
+// 两者受众与失败影响面都不同，所以不复用同一张卡、也不共用回执。
+//
+// 两个勾选项都存配置（dshExportCred / dshExportNoMod），存的是**用户偏好**：
+// 勾了「包含凭据」下次展开还是勾着的 —— 否则每次导出都要重勾，用户会以为设置没生效。
+// 开关状态直接读 cfg（与 dshMarket 那几个市场选项一样，进页面时由 loadCfg 归一化）
+// 预检结果（展开即读，不写盘）。null = 还没读过
+const dshExportInfo = ref<DshExportPreviewResult | null>(null)
+const dshExportBusy = ref(false)
+const dshExportFlash: Flash = useFlash()
+// 导出成功后记住产出路径，给「打开所在文件夹」用（包可能已被用户移走，所以只当一次性凭据）
+const dshExportLastPath = ref('')
+// 预检：只统计不写盘。失败不弹错，只把 error 放进 dshExportInfo 由模板显示 ——
+// 找不到 $DSH_HOME 是常见状态（没装 dsh 的人也会点进来），不该表现成「操作失败」
+//
+// ⚠️ 宿主这个 API 返回 Promise（它内部要异步探一次 3080 才知道 dsh 在不在跑），
+//    所以这里必须 await/`.then`，不能再当同步值直接用 —— 否则拿到的是 Promise 对象，
+//    模板里 `dshExportInfo.entries` 全是 undefined。
+// 竞态：连点「重新统计」或快速切勾选会有多个探测在飞，用 token 只认最后一次
+// （与 dshAsync 同一套思路），否则先发的慢探测回来会覆盖后发的快结果
+const dshExportToken = { n: 0 }
+function dshExportRefresh() {
+  const my = ++dshExportToken.n
+  dshExportInfo.value = null
+  let p: any
+  try {
+    p = services.dshExportPreview?.({
+      includeCred: cfg.dshExportCred === true,
+      skipModules: cfg.dshExportNoMod !== false,
+    })
+  } catch (err: any) {
+    dshExportInfo.value = { ok: false, error: String(err?.message || err) }
+    return
+  }
+  if (!p) {
+    dshExportInfo.value = { ok: false, error: '宿主 API 不可用' }
+    return
+  }
+  Promise.resolve(p).then(
+    (r: any) => { if (my === dshExportToken.n) dshExportInfo.value = r || { ok: false, error: '宿主 API 不可用' } },
+    (err: any) => { if (my === dshExportToken.n) dshExportInfo.value = { ok: false, error: String(err?.message || err) } },
+  )
+}
+// 勾选项变更：立刻重跑预检（条目数/体积会变），并把偏好写回配置。
+// 预检要的是「勾选后的结果」，所以先写配置再刷新（dshExportRefresh 从 cfg 读）
+function dshExportSetCred(v: boolean) {
+  cfg.dshExportCred = v
+  patchCfg({ dshExportCred: v })
+  dshExportFlash.msg = ''
+  dshExportRefresh()
+}
+function dshExportSetNoMod(v: boolean) {
+  cfg.dshExportNoMod = v
+  patchCfg({ dshExportNoMod: v })
+  dshExportFlash.msg = ''
+  dshExportRefresh()
+}
+function dshExportCreate() {
+  if (dshExportBusy.value) return
+  dshExportBusy.value = true
+  dshExportFlash.msg = ''
+  dshExportFlash.err = false
+  // 先让出一次事件循环，让「导出中…」的禁用态先画出来 —— 打包是同步的，
+  // 不这么做的话按钮会从头到尾保持可点，用户可能连点两次（第二次会撞上默认路径）
+  window.setTimeout(() => {
+    try {
+      const r = services.dshExportCreate?.({
+        includeCred: cfg.dshExportCred === true,
+        skipModules: cfg.dshExportNoMod !== false,
+      })
+      if (!r) {
+        dshExportFlash.err = true
+        dshExportFlash.msg = '宿主 API 不可用'
+        return
+      }
+      // 用户在保存对话框点了取消：不是失败，不给红字
+      if (r.canceled) {
+        dshExportFlash.err = false
+        dshExportFlash.msg = '已取消，未生成导出包。'
+        return
+      }
+      if (!r.ok) {
+        dshExportFlash.err = true
+        dshExportFlash.msg = r.error || '导出失败'
+        return
+      }
+      dshExportLastPath.value = r.outPath || ''
+      // 跳过的条目必须报出来。只说「导出成功」而实际少了几百个文件，
+      // 用户要到真去恢复时才发现 —— 这正是社区「空壳包」那类问题的形态
+      const skipTail = r.skippedTotal
+        ? `；跳过 ${r.skippedTotal} 项（${(r.skipped || []).slice(0, 2).map((s) => s.rel).join('、')}${r.skippedTotal > 2 ? ' 等' : ''}）`
+        : ''
+      const credTail = r.includeCred ? '，**含凭据明文**' : ''
+      dshExportFlash.err = false
+      dshExportFlash.msg = `已导出 ${r.entries} 个文件（${dshExportSize(r.bytes || 0)}）到 ${r.outPath}${credTail}${skipTail}`
+    } catch (err: any) {
+      dshExportFlash.err = true
+      dshExportFlash.msg = '导出失败：' + String(err?.message || err)
+    } finally {
+      dshExportBusy.value = false
+    }
+  }, 30)
+}
+function dshExportReveal() {
+  const p = dshExportLastPath.value
+  if (!p) return
+  try {
+    const r = services.dshExportReveal?.(p)
+    if (r && !r.ok) {
+      dshExportFlash.err = true
+      dshExportFlash.msg = r.error || '打开所在文件夹失败'
+    }
+  } catch (err: any) {
+    dshExportFlash.err = true
+    dshExportFlash.msg = '打开所在文件夹失败：' + String(err?.message || err)
+  }
+}
+// 字节数 → 人类可读。用 1024 进制（文件管理器口径），不是厂商那套 1000 进制
+function dshExportSize(n: number) {
+  if (!Number.isFinite(n) || n <= 0) return '0 B'
+  const u = ['B', 'KB', 'MB', 'GB']
+  let i = 0
+  let v = n
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++ }
+  return `${i === 0 ? v : v.toFixed(v >= 100 ? 0 : 1)} ${u[i]}`
+}
+// 收起态的摘要：让用户不用展开就知道「会备多少」。没读过时不写死数字（避免露一个假的 0）
+const dshExportSummary = computed(() => {
+  const r = dshExportInfo.value
+  if (!devStatsLoaded.dshExport) return ''
+  if (!r) return ''
+  if (!r.ok) return '— 读取失败'
+  if (!r.entries) return '— 没有可导出的文件'
+  const cred = cfg.dshExportCred === true ? '、含凭据' : ''
+  return `约 ${r.entries} 个文件 / ${dshExportSize(r.bytes || 0)}${cred}`
+})
+
 // ── E4：命名 / known-good 标记 / 保留份数 ──
 // 改名：就地开编辑框，内容预填当前名字
 function dshRenameStart(s: DshBackupSnapshot) {
@@ -1368,13 +1680,13 @@ function dshRenameSave() {
 // 切换 known-good：只有一份能是（宿主不强制，这里在前端把其他份取消掉，语义更清楚）
 function dshToggleKnownGood(s: DshBackupSnapshot) {
   const want = !s.knownGood
-  dshPatchFlash.msg = ''
-  dshPatchFlash.err = false
+  dshBackupFlash.msg = ''
+  dshBackupFlash.err = false
   try {
     const r = services.dshBackupSetMeta?.({ dirName: s.dirName, knownGood: want })
     if (!r || !r.ok) {
-      dshPatchFlash.err = true
-      dshPatchFlash.msg = (r && r.error) || '更新标记失败'
+      dshBackupFlash.err = true
+      dshBackupFlash.msg = (r && r.error) || '更新标记失败'
       return
     }
     // 打上时把其他份的标记摘掉 —— 回滚目标只该有一个，否则「一键回滚」指向哪份就不明确了
@@ -1383,36 +1695,36 @@ function dshToggleKnownGood(s: DshBackupSnapshot) {
       for (const o of others) {
         const rr = services.dshBackupSetMeta?.({ dirName: o.dirName, knownGood: false })
         if (!rr || !rr.ok) {
-          dshPatchFlash.err = true
-          dshPatchFlash.msg = `已标记本份，但取消 ${o.dirName} 的旧标记失败`
+          dshBackupFlash.err = true
+          dshBackupFlash.msg = `已标记本份，但取消 ${o.dirName} 的旧标记失败`
         }
       }
     }
-    dshPatchFlash.err = false
-    dshPatchFlash.msg = want
+    dshBackupFlash.err = false
+    dshBackupFlash.msg = want
       ? `已标记 ${s.dirName} 为「已知良好」—— 它不会被自动清理`
       : `已取消 ${s.dirName} 的「已知良好」标记`
   } catch (err: any) {
-    dshPatchFlash.err = true
-    dshPatchFlash.msg = '更新标记失败：' + String(err?.message || err)
+    dshBackupFlash.err = true
+    dshBackupFlash.msg = '更新标记失败：' + String(err?.message || err)
   } finally {
     dshBackupRefresh()
   }
 }
 function applyBackupMeta(opts: { dirName: string; name?: string; knownGood?: boolean }, okMsg: string) {
-  dshPatchFlash.msg = ''
-  dshPatchFlash.err = false
+  dshBackupFlash.msg = ''
+  dshBackupFlash.err = false
   try {
     const r = services.dshBackupSetMeta?.(opts)
     if (!r || !r.ok) {
-      dshPatchFlash.err = true
-      dshPatchFlash.msg = (r && r.error) || '更新标记失败'
+      dshBackupFlash.err = true
+      dshBackupFlash.msg = (r && r.error) || '更新标记失败'
       return
     }
-    dshPatchFlash.msg = okMsg
+    dshBackupFlash.msg = okMsg
   } catch (err: any) {
-    dshPatchFlash.err = true
-    dshPatchFlash.msg = '更新标记失败：' + String(err?.message || err)
+    dshBackupFlash.err = true
+    dshBackupFlash.msg = '更新标记失败：' + String(err?.message || err)
   } finally {
     dshBackupRefresh()
   }
@@ -1428,19 +1740,19 @@ function dshDeleteSnapshot(dirName: string) {
     return
   }
   dshDeleteConfirm.value = ''
-  dshPatchFlash.msg = ''
+  dshBackupFlash.msg = ''
   try {
     const r = services.dshBackupRemove?.(dirName)
     if (!r || !r.ok) {
-      dshPatchFlash.err = true
-      dshPatchFlash.msg = (r && r.error) || '删除失败'
+      dshBackupFlash.err = true
+      dshBackupFlash.msg = (r && r.error) || '删除失败'
       return
     }
-    dshPatchFlash.err = false
-    dshPatchFlash.msg = `已删除 ${dirName}`
+    dshBackupFlash.err = false
+    dshBackupFlash.msg = `已删除 ${dirName}`
   } catch (err: any) {
-    dshPatchFlash.err = true
-    dshPatchFlash.msg = '删除失败：' + String(err?.message || err)
+    dshBackupFlash.err = true
+    dshBackupFlash.msg = '删除失败：' + String(err?.message || err)
   } finally {
     dshBackupRefresh()
   }
@@ -1451,29 +1763,29 @@ function dshSaveKeep() {
   const n = Number(dshKeepDraft.value)
   if (!Number.isFinite(n)) return
   dshKeepBusy.value = true
-  dshPatchFlash.msg = ''
-  dshPatchFlash.err = false
+  dshBackupFlash.msg = ''
+  dshBackupFlash.err = false
   try {
     const r = services.dshBackupSetKeep?.(Math.round(n))
     if (!r || !r.ok) {
-      dshPatchFlash.err = true
-      dshPatchFlash.msg = (r && r.error) || '保存失败'
+      dshBackupFlash.err = true
+      dshBackupFlash.msg = (r && r.error) || '保存失败'
       return
     }
-    dshPatchFlash.err = false
-    dshPatchFlash.msg = `保留份数已设为 ${r.keep}（调小不会立刻删，点「立即清理」或下次备份时生效）`
+    dshBackupFlash.err = false
+    dshBackupFlash.msg = `保留份数已设为 ${r.keep}（调小不会立刻删，点「立即清理」或下次备份时生效）`
     dshKeepDraft.value = null
   } catch (err: any) {
-    dshPatchFlash.err = true
-    dshPatchFlash.msg = '保存失败：' + String(err?.message || err)
+    dshBackupFlash.err = true
+    dshBackupFlash.msg = '保存失败：' + String(err?.message || err)
   } finally {
     dshKeepBusy.value = false
     dshBackupRefresh()
   }
 }
 function dshPruneNow() {
-  dshPatchFlash.msg = ''
-  dshPatchFlash.err = false
+  dshBackupFlash.msg = ''
+  dshBackupFlash.err = false
   // ⚠️ 输入框里改了数字但没点「保存」时，「立即清理」要按**眼前的数字**清，不能用已保存的旧值。
   // 修的真实 bug（2026-09-24 用户报）：早先恒用配置里的 20，于是「改成 2 → 直接点清理」
   // 什么都不删还提示「没有超出保留份数」，看着就像按钮坏了。
@@ -1489,13 +1801,13 @@ function dshPruneNow() {
     const n = r.removed?.length || 0
     // 用了草稿值就说明「这个数还没保存」—— 顺带提醒，否则用户以为配置也改了
     const tail = useDraft ? `（用的是输入框里的 ${r.keep}，尚未保存为默认值）` : ''
-    dshPatchFlash.err = false
-    dshPatchFlash.msg = n
+    dshBackupFlash.err = false
+    dshBackupFlash.msg = n
       ? `已按保留 ${r.keep} 份清理，删掉 ${n} 份：${r.removed?.join('、')}${tail}`
       : `当前没有超出保留份数（${r.keep} 份）的快照，未删任何东西${tail}`
   } catch (err: any) {
-    dshPatchFlash.err = true
-    dshPatchFlash.msg = '清理失败：' + String(err?.message || err)
+    dshBackupFlash.err = true
+    dshBackupFlash.msg = '清理失败：' + String(err?.message || err)
   } finally {
     dshBackupRefresh()
   }
@@ -1792,13 +2104,42 @@ const dshMarketLoaded = ref(false)
 // 用一个显式开关把「打开卡片」与「进入市场」分开，保证**展开卡片本身零网络请求**。
 const dshMarketRevealed = ref(false)
 const dshMarketFolds = reactive({ help: false, filters: false, source: false, install: false })
+// 分类 chip 行是否展开全部。默认收起：24 类平铺会占三行，把「范围 / 排序」挤到首屏之外，
+// 而这 24 类里绝大多数人只看前几个；点 ⌄ 才铺开其余
+const dshMarketCatExpand = ref(false)
 // 浏览条件（纯前端，不必进宿主配置：它们是「本次找什么」，不是「这个插件怎么跑」）
 const dshMarketKeyword = ref('')
 const dshMarketCategory = ref('')
 const dshMarketState = ref<'all' | 'installed' | 'notInstalled'>('all')
-const dshMarketSort = ref<'stars' | 'downloads' | 'added' | 'name'>('downloads')
+type DshMarketSort = 'stars' | 'downloads' | 'added' | 'name'
+const dshMarketSort = ref<DshMarketSort>('downloads')
+// 排序方向。⚠️ 各轴的**默认方向跟着轴走**（数值 / 日期默认降序、名称默认升序，同宿主
+// dsh-market.js 的 SORTS_DESC），所以切换轴时要按新轴的默认方向复位 —— 否则从「名称升序」
+// 切到「下载量」会变成「下载量升序」，列表中垫底的全是没人用的插件
+const DSH_MARKET_SORT_DESC: Record<DshMarketSort, boolean> = { stars: true, downloads: true, added: true, name: false }
+const dshMarketSortDesc = ref(DSH_MARKET_SORT_DESC.downloads)
+function dshMarketPickSort(s: DshMarketSort) {
+  // 再点一次当前轴 = 反向；换轴 = 用新轴的默认方向
+  if (dshMarketSort.value === s) dshMarketSortDesc.value = !dshMarketSortDesc.value
+  else {
+    dshMarketSort.value = s
+    dshMarketSortDesc.value = DSH_MARKET_SORT_DESC[s]
+  }
+}
+// 悬停说明「点下去会发生什么」：方向无法只用箭头表达时不至于让人猜
+function dshMarketSortTip(label: string): string {
+  return `${label} · 点击${dshMarketSortDesc.value ? '升序' : '降序'}（再点一次反向）`
+}
+// 当前排序轴的中文名。列表底部的计数行要用（筛选区收起后只剩列表，得能看出按什么排的）。
+// 抽成 computed 而不是内联三元：模板里写三层三元读起来没法核对，这里改轴时只改一处
+const dshMarketSortLabel = computed(() => (
+  dshMarketSort.value === 'stars' ? '星标'
+    : dshMarketSort.value === 'added' ? '最新收录'
+      : dshMarketSort.value === 'name' ? '名称'
+        : '下载量'
+))
 // 安装/卸载的待确认计划：非空即处于「待确认」态（三段式的第二步）
-const dshMarketPlan = ref<{ action: 'install' | 'uninstall' | 'remove' | 'update'; npm: string; name: string; message: string; id?: string; needsBuild?: boolean; spec?: string; version?: string } | null>(null)
+const dshMarketPlan = ref<{ action: 'install' | 'uninstall' | 'remove' | 'update'; npm: string; name: string; message: string; id?: string; needsBuild?: boolean; spec?: string; version?: string; exact?: boolean; targetVersion?: string; npmName?: string; hostIncompatible?: boolean; hostForced?: boolean } | null>(null)
 // 行级操作中的包名（避免同一行被连点两次）
 const dshMarketPending = ref('')
 // ── 安装/卸载进行中的进度反馈 ──
@@ -1835,6 +2176,347 @@ const dshMarketUpdateBusy = ref(false)
 // 「只看可更新」——复用 dshMarketState 会让三选一变成四选一，语义也混（可更新必然已装），
 // 所以单开一个开关，与状态筛选是**与**关系
 const dshMarketOnlyUpdate = ref(false)
+// 「只看 DSH 兼容」：与「只看可更新」同性质（独立开关 + 与关系）。
+// ⚠️ 只有**已查到 compatible**的条目才算数 —— 没查过 / unknown 都不该被这个开关选中，
+//    否则「只看兼容」会列出我们其实什么都没验证过的条目（那是在替未知背书）
+const dshMarketOnlyCompat = ref(false)
+
+// ── DSH 宿主兼容性（B 层：单条懒加载）──
+//
+// ⚠️ 为什么是「点了才查」而不是一进列表就查：兼容性只能从 npm manifest 的
+//    peerDependencies / engines.dsh 读出来，而**目录条目本身不带这些字段**（实测近半数
+//    条目连 npm 都是 null）—— 要标兼容性就必须联网。列表一次在屏上百条，
+//    自动拉等于一开卡片就打上百个请求。所以 B 层只做「用户明确要看那一条」时才拉。
+// ⚠️ 结论按 **spec** 存（与 dshMarketUpdates 同口径：spec 全目录唯一，npm 可能为 null）。
+//    空 Map = 还没查过，此时**不显示任何标记** —— 不能默认画成「兼容」（那是编结论）。
+const dshMarketCompat = ref<Map<string, DshHostCompatVerdict>>(new Map())
+// 正在查的 spec 集合：同一行重复点不叠加请求，模板据此显示「检查中…」
+const dshMarketCompatBusy = ref<Set<string>>(new Set())
+// 拿不到宿主版本就不再逐个试：一条也判不出来，反复点只会反复空跑
+const dshMarketHostVersion = ref('')
+onMounted(() => {
+  try {
+    dshMarketHostVersion.value = String((services as any).dshHostVersion?.() || '')
+  } catch (err) {
+    dshMarketHostVersion.value = ''
+  }
+})
+
+// 该条目能不能查兼容性：只有能剥出**裸 npm 包名**的才谈得上（github / tarball 来源
+// 在 npm 上没有 manifest，查了必然 404 → 会渲染成满屏错误的「不兼容」）
+function dshMarketCompatable(p: DshMarketPlugin): boolean {
+  return !!p && String(p.specKind || '').toLowerCase() === 'npm'
+}
+function dshMarketCompatOf(p: DshMarketPlugin): DshHostCompatVerdict | null {
+  return dshMarketCompat.value.get(p.spec) || null
+}
+// 三态各自的文案与 tooltip。unknown **不渲染成警告色**：它只代表「没查到 / 没声明」，
+// 不是「不兼容」的证据（目录里近半条目没有 DSH 声明，全标红等于把市场变成红海）
+function dshMarketCompatTagText(v: DshHostCompatVerdict): string {
+  if (v.status === 'compatible') return 'DSH 兼容'
+  if (v.status === 'incompatible') return 'DSH 不兼容'
+  return '兼容性未知'
+}
+function dshMarketCompatTip(v: DshHostCompatVerdict): string {
+  const req = String(v.requirement || '')
+  if (v.status === 'compatible') return '该插件声明的 DSH 范围包含当前宿主' + (req ? '：' + req : '')
+  if (v.status === 'incompatible') return '确证与当前 DSH 不兼容：该插件要求 DSH ' + (req || '（范围读不到）') + '，而当前宿主是 ' + (dshMarketHostVersion.value || '未知')
+  if (v.reason === 'no-host-version') return '读不到当前宿主 DSH 版本，无法判定兼容性'
+  if (v.reason === 'unavailable') return '拉取该包的 manifest 失败（网络 / 镜像问题），无法判定 —— 不代表不兼容'
+  // 「拉到了，但包里一条 DSH 声明都没有」——**不是**网络问题，别让用户去修一个不存在的故障。
+  // 例：@deepseek-ai/dsh-invariants 只 peer 了 @deepseek-ai/cordis（框架，不是宿主版本）
+  return '该包没有声明 DSH 版本要求（manifest 里既没有 engines.dsh，也没有 @deepseek-ai/dsh* peer）'
+}
+function dshMarketCompatClass(v: DshHostCompatVerdict): string {
+  if (v.status === 'compatible') return 'tag-compat'
+  if (v.status === 'incompatible') return 'tag-incompat'
+  return 'tag-unknown'
+}
+function dshMarketCompatChecking(p: DshMarketPlugin): boolean {
+  return dshMarketCompatBusy.value.has(p.spec)
+}
+// 单条懒加载：点「检查兼容」才发请求（宿主内部还会去重 + 走 24h 缓存）
+function dshMarketCheckCompat(p: DshMarketPlugin) {
+  if (!p || dshMarketCompatChecking(p) || dshMarketCompat.value.has(p.spec)) return
+  const pkg = String(p.npm || '').trim()
+  if (!pkg) return
+  dshMarketCompatBusy.value = new Set(dshMarketCompatBusy.value).add(p.spec)
+  Promise.resolve((services as any).dshHostCompatCheck?.({ packages: [pkg] }))
+    .then((r: DshHostCompatCheckResult | undefined) => {
+      const v = r && r.results ? r.results[pkg] : null
+      const next = new Map(dshMarketCompat.value)
+      // ⚠️ 宿主 API 缺失 / 返回空也要落一条 unknown：否则按钮点了没反应，用户会以为坏了
+      next.set(p.spec, v || { status: 'unknown', reason: 'unavailable', requirement: '', package: pkg })
+      dshMarketCompat.value = next
+    })
+    .catch(() => {
+      const next = new Map(dshMarketCompat.value)
+      next.set(p.spec, { status: 'unknown', reason: 'unavailable', requirement: '', package: pkg })
+      dshMarketCompat.value = next
+    })
+    .then(() => {
+      const s = new Set(dshMarketCompatBusy.value)
+      s.delete(p.spec)
+      dshMarketCompatBusy.value = s
+    })
+}
+
+// ── 回源 registry 查「官方最新版」（**卡片顶部一个按钮，纯手动，会联网**）──
+//
+// ⚠️ 为什么需要它：目录（dsh-plugin-catalog / 官方 plugins.json）是**每日快照**。实测
+//    2026-09-25：目录停在 2026.924.4355（9/24），dshmarket 那条写着 1.61.0，而 registry 上
+//    早已是 1.65.1 —— 界面上「可更新」的判断全部基于目录，于是「目录说已是目录最新版」
+//    并不等于「你已是最新版」。要确证只能问 registry。
+// ⚠️ 但**不进自动链路**：自动查就是一开卡片打几十上百个请求（与「刷新目录默认零网络」
+//    同一考量）。所以做成一个按钮，用户点了才查。
+// ⚠️ 查询范围 = **当前分页展示的条目**（用户选的「当前列表」口径）：一页 80 条封顶，
+//    翻页后由 watch 清掉旧结论，避免「查了第 1 页、翻到第 3 页却看到第 1 页的数」。
+// 结论按 spec 存（与 dshMarketUpdates / dshMarketCompat 同口径）。
+const dshMarketLatest = ref<Map<string, DshMarketRegistryLatestEntry>>(new Map())
+const dshMarketLatestBusy = ref(false)
+// 本轮查询的元信息（按钮旁汇总展示用）。null = 还没查过
+const dshMarketLatestAt = ref(0)
+const dshMarketLatestFail = ref(0)
+
+// 能不能查：只有能剥出**裸 npm 包名**的条目才谈得上（github / tarball 来源在 npm 上没有
+// manifest，查了必然 404 —— 与 dshMarketCompatable 同一口径）
+function dshMarketLatestable(p: DshMarketPlugin): boolean {
+  return !!p && String(p.specKind || '').toLowerCase() === 'npm' && !!String(p.npm || '').trim()
+}
+// 能不能「装这一版」：比 dshMarketLatestable 更严 —— 额外要求**宿主剥出的 npm 字段就是裸包名**。
+//
+// ⚠️ 为什么两者要分开（2026-09-25 修）：`dsh-web#packages/dsh-web-all` 这种 subpath 形态
+//    过了 dshMarketLatestable（能查出官方版本），但它的 `npm` 字段并非可直接 add 的 npm 包名，
+//    「装这一版」点下去**必然失败** —— 宿主只对 npm 来源拼 `pkg@版本`，其余一律拒绝，
+//    且 `#` / 路径分隔符不可能出现在合法包名里（`validPkgName` 的正则拒掉）。
+//    故清单里这类条目**只告知、不给按钮**。
+function dshMarketExactable(p: DshMarketPlugin): boolean {
+  const name = String(p?.npm || '').trim()
+  // 裸包名（含 scoped）里不该出现 `#` / `/` 以外的路径痕迹；`#` 一并拒掉（subpath 的标记）
+  return dshMarketLatestable(p) && !!name && !name.includes('#') && !name.includes('\\')
+}
+function dshMarketLatestOf(p: DshMarketPlugin): DshMarketRegistryLatestEntry | null {
+  return dshMarketLatest.value.get(String(p.spec || '')) || null
+}
+
+// 滞后判据的基准版本 = **实装版本优先**，实装读不到才回落目录版本。
+//
+// ⚠️ 为什么基准必须是实装版本（2026-09-25 修）：目录是每日快照，实测会**落后于用户机器上
+//    已装的版本**（实装 1.62.0，目录还写 1.61.0）。此时若拿目录当基准，界面会显示
+//    「目录 v1.61.0 → 官方 v1.65.1」，读起来像「要从 1.61 升到 1.65」，而用户真实路径是
+//    「已装 1.62.0 → 官方 1.65.1」—— 基准错了，结论就不可信
+function dshMarketBaseVer(p: DshMarketPlugin): string {
+  const realized = String(dshMarketUpdateOf(p)?.installed || '')
+  if (realized) return realized
+  return String(dshMarketUpdateOf(p)?.latest || '')
+}
+
+// 「快照滞后」判据：查到的 registry 版本 **高于基准版本**（基准见上条）。
+// 取不到基准时不算滞后（宁可漏报也不误报 —— 与宿主 updateState 的保守口径一致）
+function dshMarketLatestStale(p: DshMarketPlugin): boolean {
+  const v = dshMarketLatestOf(p)
+  if (!v || v.error) return false
+  const reg = String(v.version || '')
+  const base = dshMarketBaseVer(p)
+  if (!reg || !base) return false
+  return cmpVerText(reg, base) > 0
+}
+
+// 本轮可查条目（当前分页 ∩ 能查的）。按钮的 disabled 与提示都看它
+const dshMarketLatestTargets = computed(() => dshMarketPageList.value.filter((p) => dshMarketLatestable(p)))
+
+// 查当前分页。重复点会重查（registry 的 latest 会变，这是合理诉求）；
+// 宿主侧 5 分钟缓存保证短时间内连点不出站
+function dshMarketCheckLatestPage() {
+  if (dshMarketLatestBusy.value) return
+  const targets = dshMarketLatestTargets.value
+  if (!targets.length) {
+    dshMarketFlash.err = true
+    dshMarketFlash.msg = '当前页没有可查的条目（只有 npm 来源的插件能回源查版本）。'
+    return
+  }
+  // 同一个包被多条条目引用时只查一次（宿主也会去重，这里先减一轮 payload）
+  const items: { pkg: string; key: string }[] = []
+  const seen = new Set<string>()
+  for (const p of targets) {
+    const spec = String(p.spec || '')
+    const pkg = String(p.npm || '').trim()
+    if (!spec || !pkg || seen.has(pkg)) continue
+    seen.add(pkg)
+    items.push({ pkg: pkg, key: spec })
+  }
+  dshMarketLatestBusy.value = true
+  Promise.resolve((services as any).dshMarketRegistryLatest?.({ items: items }))
+    .then((r: DshMarketRegistryLatestResult | undefined) => {
+      // ⚠️ 宿主 API 缺失也要落一条带 error 的结论：否则按钮点了毫无反应，用户会以为坏了
+      const results = (r && r.results) || {}
+      const next = new Map(dshMarketLatest.value)
+      let fail = 0
+      for (const p of targets) {
+        const spec = String(p.spec || '')
+        const pkg = String(p.npm || '').trim()
+        const v = results[spec]
+        // 同包多条目时宿主只回了其中一条（按去重后的 key），把结论补给其余同包条目
+        const shared = v || Object.values(results).find((x) => x && x.pkg === pkg)
+        const entry = shared || { pkg: pkg, version: '', error: '宿主未返回结果', cached: false }
+        if (entry.error || !entry.version) fail++
+        next.set(spec, entry)
+      }
+      dshMarketLatest.value = next
+      dshMarketLatestAt.value = Date.now()
+      dshMarketLatestFail.value = fail
+      dshMarketFlash.err = false
+      const stale = targets.filter((p) => dshMarketLatestStale(p)).length
+      dshMarketFlash.msg = stale
+        ? `查到 ${stale} 个插件的官方版本比你机器上的新（目录是每日快照，会滞后）—— 已按行标出。`
+        : `当前页 ${targets.length} 个插件都查到了，没有发现比你机器上更新的版本。`
+    })
+    .catch((err: any) => {
+      dshMarketFlash.err = true
+      dshMarketFlash.msg = '查官方最新版失败：' + String(err?.message || err)
+    })
+    .then(() => {
+      dshMarketLatestBusy.value = false
+    })
+}
+
+// 按钮旁的汇总文案。四种情况必须分清，尤其 ① —— 那正是查这个按钮的意义
+function dshMarketLatestSummary(): string {
+  if (!dshMarketLatestAt.value) return ''
+  const targets = dshMarketLatestTargets.value
+  if (!targets.length) return ''
+  const stale = targets.filter((p) => dshMarketLatestStale(p)).length
+  const fail = dshMarketLatestFail.value
+  const parts: string[] = []
+  if (stale) parts.push(`${stale} 个有新版本`)
+  else parts.push('未发现新版本')
+  if (fail) parts.push(`${fail} 个没查到`)
+  return parts.join(' · ')
+}
+// 本轮里「官方版本 > 基准版本」的条目 —— 顶部汇总区逐个列出。
+// 基准见 dshMarketBaseVer（实装优先），故文案说的是「已装 vX → 官方 vY」而不是目录版本
+const dshMarketLatestStales = computed(() => dshMarketLatestTargets.value.filter((p) => dshMarketLatestStale(p)))
+
+// 某一行的「官方最新 vX」短文案（在顶部汇总区里用）
+function dshMarketLatestText(p: DshMarketPlugin): string {
+  const v = dshMarketLatestOf(p)
+  if (!v) return ''
+  if (v.error || !v.version) return '未查到'
+  return 'v' + v.version
+}
+// 汇总区某一条的完整说明（title）
+function dshMarketLatestTip(p: DshMarketPlugin): string {
+  const v = dshMarketLatestOf(p)
+  if (!v) return ''
+  if (v.error) return '从 npm registry 拉该包最新版本失败：' + v.error + ' —— 不代表已是最新版'
+  const reg = String(v.version || '')
+  const up = dshMarketUpdateOf(p)
+  const realized = String(up?.installed || '')
+  const cat = String(up?.latest || '')
+  const base = 'npm registry 上的最新版本是 v' + reg
+    + (v.cached ? '（5 分钟内查过，直接用的缓存）' : '')
+  // 基准是「实装版本优先」，与 dshMarketBaseVer 同口径；有实装就只说实装，别拿更旧的目录版本搅混
+  const mine = realized || cat
+  if (!mine) return base
+  if (cmpVerText(reg, mine) > 0) {
+    return base + '，而你机器上是 v' + mine
+      + (realized ? '（实装）' : '（目录记录）')
+      + ' —— 目录（dsh-plugin-catalog）是每日快照，会落后于实际发版。'
+      + '此时以 registry 的 v' + reg + ' 为准'
+  }
+  return base + '，与你机器上的 v' + mine + ' 一致'
+}
+
+// 精确装到查到的这一版（`pkg@x.y.z`）。
+//
+// ⚠️ 为什么不复用 dshMarketPreviewUpdate / dshMarketConfirm 那条链路：那条按**目录 spec**
+//    重装，而 profile 的 pnpm-lock.yaml 锁着 `specifier: ^1.62.0 / version: 1.62.0` ——
+//    pnpm 会命中锁文件、原样复用旧版，等于白跑（这正是「更新」按钮装不到 1.65.1 的原因）。
+//    只有把确切版本拼进 spec（`dshmarket@1.65.1`）才会改写 lock。
+function dshMarketPreviewInstallExact(p: DshMarketPlugin, force = false) {
+  const v = dshMarketLatestOf(p)
+  if (dshMarketBusy.value || !v || v.error || !v.version) return
+  const pkg = String(p.npm || '').trim()
+  if (!pkg) return
+  dshMarketBusy.value = true
+  dshMarketFlash.msg = ''
+  dshMarketFlash.err = false
+  Promise.resolve(services.dshMarketInstall?.({
+    profile: dshPatchProfile,
+    spec: p.spec,
+    npm: pkg,
+    name: p.name,
+    exact: true,
+    targetVersion: v.version,
+    dryRun: true,
+    force,
+  }))
+    .then((r) => {
+      if (!r) {
+        dshMarketFlash.err = true
+        dshMarketFlash.msg = '宿主 API 不可用'
+      } else if (!r.ok) {
+        dshMarketFlash.err = true
+        dshMarketFlash.msg = r.error || '无法生成安装计划'
+        // 同 install 链路：拦下也给一条出路（点的还是「装这一版」，由 dshMarketForcePlan 按 exact 分派）
+        if (r.hostIncompatible) {
+          dshMarketPlan.value = {
+            action: 'install',
+            npm: p.spec,
+            name: p.name,
+            message: '',
+            spec: p.spec,
+            npmName: pkg,
+            targetVersion: v.version,
+            exact: true,
+            hostIncompatible: true,
+            hostForced: false,
+          }
+        }
+      } else if (!r.changed) {
+        dshMarketPlan.value = null
+        dshMarketFlash.msg = r.message || '已经是最新，无需安装。'
+      } else {
+        // ⚠️ 走 install 分支（不是 update）：宿主那边 exact 拼的是 `pkg@版本` 的 add 语义，
+        //    与「按 spec 覆盖重装」是两条路，用 install 才对得上宿主实际执行的命令
+        dshMarketPlan.value = {
+          action: 'install',
+          npm: p.spec,
+          name: p.name,
+          message: r.message || '',
+          spec: p.spec,
+          npmName: pkg,
+          targetVersion: v.version,
+          exact: true,
+          // ⚠️ 与另外两条入口同口径（2026-09-25）：dryRun 永远不带 force，所以这里拿到的
+          //    hostForced 必为 false —— 用户点了「仍要强制安装」之后**重新** dryRun 一次，
+          //    那次带了 force，卡片才会切到「你正在强行装…」的措辞
+          hostIncompatible: !!r.hostIncompatible,
+          hostForced: !!r.hostForced,
+        }
+      }
+    })
+    .catch((err: any) => {
+      dshMarketFlash.err = true
+      dshMarketFlash.msg = '生成安装计划失败：' + String(err?.message || err)
+    })
+    .then(() => {
+      dshMarketBusy.value = false
+    })
+}
+
+// 版本号比较只为「registry 是否比目录新」这一个判断服务。解析不出来时返回 0（不报滞后），
+// 宁可漏报也不误报 —— 与宿主 updateState 的保守口径一致
+function cmpVerText(a: string, b: string): number {
+  const pa = String(a || '').split('.').map((x) => parseInt(x, 10) || 0)
+  const pb = String(b || '').split('.').map((x) => parseInt(x, 10) || 0)
+  for (let i = 0; i < 3; i++) {
+    const x = pa[i] || 0
+    const y = pb[i] || 0
+    if (x !== y) return x > y ? 1 : -1
+  }
+  return 0
+}
 
 // 镜像源测速结果（按延迟升序，失败的排最后）。空数组 = 还没测过
 const dshMarketPing = ref<DshMarketPingEntry[]>([])
@@ -1850,6 +2532,89 @@ const dshMarketCategories = computed(() => {
   const cats = dshMarket.value?.categories || {}
   return Object.keys(cats).map((k) => ({ key: k, zh: cats[k]?.zh || '', en: cats[k]?.en || '' }))
 })
+
+// 每个分类下的条数。⚠️ 用来在分类 chip 上标数字，让用户点之前就知道哪类是空的
+// （有些分类目录里只挂了一两条，点进去看到空列表会以为坏了）。
+// 只统计**目录全量**，不随当前筛选变化 —— 数字若随筛选跳动，用户会误以为目录在变
+const dshMarketCategoryCount = computed(() => {
+  const map: Record<string, number> = {}
+  for (const p of dshMarket.value?.plugins || []) {
+    const c = String(p.category || '')
+    if (!c) continue
+    map[c] = (map[c] || 0) + 1
+  }
+  return map
+})
+
+// 分类 chip 的排布：精选出的几个常用类落位到前面，其余折在 ⌄ 后面。
+//
+// ⚠️ 三条约束，决定了这里是「排序 + 择优 + 折叠」而不是直接 slice：
+//   1. **选中的分类必须留在可见段**，哪怕它条数少。否则用户点开某个冷门分类后，
+//      折叠一收起，那颗高亮的 chip 连同「怎么取消」一起消失 —— 筛选还生效着，界面上却找不到出口。
+//   2. 择优依据是**条数**而不是位置。目录 categories 的键序是「目录自己排的」，
+//      跟常用度无关（可能按拼音/字母），直接 slice 会把没人用的类留在前排、把大类的挤走。
+//   3. 条数只是「有多大」的代理，不等于「多常用」—— 目录里 4000 多条压在某几类上时，
+//      光按条数排前 8 名仍是又长又杂。所以再加上**首屏名额**与**占比**两道闸，见下。
+//
+// 首屏只留 DSH_MARKET_CAT_TOP 个 —— 这个数别调大：chip 行在 .iso-axis 里是 flex-wrap，
+// 每多两个就多占一行，下面的「范围 / 排序」区域会被顶出可视区。
+// ⚠️ 名额是**每行凑齐**而不是齐头截断：按每行能放几个分组（见 dshMarketCatsPerRow），
+// 一行放得下就一行放完，放不下才断到下一行 —— 齐头截断会在首屏末尾留一小截孤零零的 chip。
+//
+// 返回 { top, rest, restCount }：top 常显，rest 只在展开时渲染。
+// 计数为 0 的分类无条件归入 rest（它们点了会得到空列表，模板里另有 :disabled 兜一层）
+const DSH_MARKET_CAT_TOP = 5
+// 占比闸：条数不到目录的 1% 就够不上「常用」（4000 条目录下约 40 条）。
+// 目录小的时候（比如不到 200 条）1% 会退化成个位数，所以下限固定 3 条，
+// 免得目录一变薄就一个分类都精选不出来
+const DSH_MARKET_CAT_MIN_RATIO = 0.01
+const DSH_MARKET_CAT_MIN_COUNT = 3
+// 首屏一行大概放得下的分类 chip 数（按「两字中文名（数字）」估宽度，见模板注释）。
+// 折叠开关要占一个位置，所以算行容量时先扣掉它
+const DSH_MARKET_CATS_PER_ROW = 6
+const dshMarketCategorySplit = computed(() => {
+  const count = dshMarketCategoryCount.value
+  const n = (k: string) => count[k] || 0
+  const total = dshMarket.value?.plugins?.length || 0
+  const floor = Math.max(DSH_MARKET_CAT_MIN_COUNT, Math.ceil(total * DSH_MARKET_CAT_MIN_RATIO))
+  // 三档：选中的（必留）→ 有计数的（择优竞争前 N 个）→ 空的（必折）
+  const selected = dshMarketCategories.value.filter((c) => c.key === dshMarketCategory.value)
+  const usable = dshMarketCategories.value.filter((c) => c.key !== dshMarketCategory.value && n(c.key) > 0)
+  const empty = dshMarketCategories.value.filter((c) => c.key !== dshMarketCategory.value && n(c.key) === 0)
+  // 同条数时按目录原序（sort 是稳定的，V8 / 各引擎均已保证）
+  usable.sort((a, b) => n(b.key) - n(a.key))
+  // 择优：先过占比闸（条数太少的直接出局），再取前几名
+  const pickable = usable.filter((c) => n(c.key) >= floor)
+  // ⚠️ 一个都够不上门槛时不能把首屏清空成只剩「全部」—— 那等于把分类筛选整个藏起来。
+  //    退回「按条数取前 N 名」，宁可甄别不准也不能没得选
+  if (!pickable.length) pickable.push(...usable)
+  const room = Math.max(0, DSH_MARKET_CAT_TOP - selected.length) // 选中项占掉的名额要扣掉
+  const chosen = pickable.slice(0, room)
+  // 行容量：选中项已占掉若干位置；若折叠开关会出现，再扣掉它的一个位置。
+  // 剩下放得下的名额用来从「够得上门槛但没进前 N 名」的里按条数补 —— 补进来的仍是常用类，
+  // 只是名次靠后；补不满一行就不补（宁少不挤）
+  const restTotal = usable.length - chosen.length + empty.length
+  const slots = DSH_MARKET_CATS_PER_ROW - selected.length - (restTotal > 0 ? 1 : 0)
+  const extra = Math.min(slots - chosen.length, pickable.length - chosen.length)
+  if (extra > 0) chosen.push(...pickable.slice(chosen.length, chosen.length + extra))
+  const top = selected.concat(chosen).sort((a, b) => n(b.key) - n(a.key))
+  return { top, rest: usable.slice(chosen.length).concat(empty), restCount: restTotal }
+})
+
+// 分类 key → 中文名。⚠️ 别在模板里写 dshMarketCategories.find(...)：
+// 每条都要对数组做一次线性查找，一页 80 条 × 每次重渲染就是 80 次（同 dshMarketHitMap
+// 那段注释讲的道理）。这里一次建成 Record，模板 O(1) 取
+const dshMarketCategoryZh = computed(() => {
+  const out: Record<string, string> = {}
+  for (const c of dshMarketCategories.value) out[c.key] = c.zh || c.en || c.key
+  return out
+})
+// 取分类显示名。空分类回落到「未分类」（目录没给 category 的条目）
+function dshMarketCategoryText(key: string): string {
+  const k = String(key || '')
+  if (!k) return '未分类'
+  return dshMarketCategoryZh.value[k] || k
+}
 
 // 每条的已装状态，按目录数组下标索引。
 // ⚠️ 别在模板里直接调 dshMarketHitOf：单个条目的模板要读它 7 次（已装 / 已禁用 / 未写 patch /
@@ -1902,6 +2667,23 @@ function dshMarketUpdateTip(p: DshMarketPlugin): string {
     return '读不到实装版本，按 package.json 的声明范围判断：' + u.range + '，目录提供 v' + u.latest
   }
   return '目录提供 v' + u.latest
+}
+
+// 单据卡要按动作找不同的入口（install / exact / update），而那几个预览函数收的是**目录条目**
+// （要 p.spec / p.npm / p.needsBuild），plan 里没存这些。这里按 plan 里记的 spec 反查回条目。
+//
+// ⚠️ 为什么要反查而不是把整个 p 存进 plan：plan 的每个字段都是「宿主真写要用到的入参」或
+//    「单据要展示的事实」，塞进去一个完整目录条目会让这个 ref 变成半个缓存，之后谁都能往里塞东西。
+//    反查的代价是 O(条目数)，只在点「仍要强制安装」时算一次，可以接受。
+// ⚠️ 只给 **handler** 用，不给模板用：模板里 `v-if` 挡不住 TS 的 null 窄化，
+//    在模板上直接传它会报 TS2345（computed 的可空类型跨不过模板的 v-if）。
+//    所以按钮只绑 handler，由 handler 自己判空并兜一句提示，用户不会遇到「点了没反应」。
+function dshMarketPlanPlugin(): DshMarketPlugin | null {
+  const plan = dshMarketPlan.value
+  if (!plan) return null
+  const key = String(plan.spec || plan.npm || '')
+  if (!key) return null
+  return dshMarketList.value.find((x) => String(x.spec || '') === key) || null
 }
 
 // 已装包名集合。⚠️ 目录条目的 npm 是完整包名（@scope/x），而宿主 installed 的键
@@ -1959,12 +2741,26 @@ const dshMarketList = computed(() => {
   const kw = dshMarketKeyword.value.trim().toLowerCase()
   const cat = dshMarketCategory.value
   const st = dshMarketState.value
+  // 空格分词 → 与关系（每段都要命中）；`-词` → 排除。⚠️ 只有排除词也成立，
+  // 此时没有正向条件，等于「全目录减去命中的」。与宿主 matchKeyword 同口径
+  const parts = kw ? kw.split(/\s+/) : []
   const out: DshMarketPlugin[] = []
   for (const p of all) {
     if (cat && p.category !== cat) continue
-    if (kw) {
+    if (parts.length) {
       const hay = (p.name + ' ' + p.owner + ' ' + p.descZh + ' ' + p.descEn).toLowerCase()
-      if (hay.indexOf(kw) < 0) continue
+      let hit = true
+      for (const part of parts) {
+        if (!part) continue
+        if (part.charAt(0) === '-') {
+          // 光一个 `-` 不算排除词（可能只是打个连字符），跳过，否则会把整份目录清空
+          const ex = part.slice(1)
+          if (ex && hay.indexOf(ex) >= 0) { hit = false; break }
+          continue
+        }
+        if (hay.indexOf(part) < 0) { hit = false; break }
+      }
+      if (!hit) continue
     }
     if (st !== 'all') {
       // ⚠️ 读不到已装状态时**不冒充未安装**：宁可全都列出来，也不把已装的标成「未安装」
@@ -1976,27 +2772,116 @@ const dshMarketList = computed(() => {
     }
     // 「只看可更新」与状态筛选是**与**关系（可更新必然已装，但它是一个独立开关）
     if (dshMarketOnlyUpdate.value && !dshMarketHasUpdate(p)) continue
+    // 「只看 DSH 兼容」同上，但**只认已查到的 compatible**：没查过（根本没有键）与
+    // unknown 都不算「兼容」。这不是吝啬，是口径 —— 我们没验证过的条目不能冒充已验证
+    if (dshMarketOnlyCompat.value && dshMarketCompat.value.get(p.spec)?.status !== 'compatible') continue
     out.push(p)
   }
-  out.sort(
-    dshMarketSort.value === 'stars' ? (a, b) => b.stars - a.stars
-      : dshMarketSort.value === 'added' ? (a, b) => String(b.added).localeCompare(String(a.added))
-        : dshMarketSort.value === 'name' ? (a, b) => a.name.localeCompare(b.name)
-          : (a, b) => b.downloads - a.downloads,
-  )
+  // ⚠️ 方向在比较函数外层取反，不写进每个轴：写进去就得为四轴 × 两方向维护八条箭头函数
+  const dir = dshMarketSortDesc.value ? -1 : 1
+  const cmp = dshMarketSort.value === 'stars' ? (a: DshMarketPlugin, b: DshMarketPlugin) => (a.stars - b.stars) * dir
+    : dshMarketSort.value === 'added' ? (a: DshMarketPlugin, b: DshMarketPlugin) => a.added.localeCompare(b.added) * dir
+      : dshMarketSort.value === 'name' ? (a: DshMarketPlugin, b: DshMarketPlugin) => a.name.localeCompare(b.name) * dir
+        : (a: DshMarketPlugin, b: DshMarketPlugin) => (a.downloads - b.downloads) * dir
+  // ⚠️ 只在这四个轴之间比才可比，不补「以名称兜底」的第二关键字：目录里同名条目确实存在，
+  //    但加一条全项目唯一的隐式排序规则，会让「名称」轴在两个名字相同时的表现变得无法解释
+  out.sort(cmp)
   return out
 })
 
-// 列表只渲染前 N 条：目录实测 4183 条，一次全渲染会卡住设置页（同 patch 候选卡的截断思路）。
-// 截断数由「再加载更多」按钮控制，且不做「按需隐藏」的花活 —— 用户能看见自己点了多少。
+// 列表分页：目录实测 4183 条，一次全渲染会卡住设置页（同 patch 候选卡的截断思路）。
+//
+// ⚠️ 从「再加载更多」改成**页码分页**（1/2/3…）的取舍：加载更多是累积式的，
+//    翻到后面列表里躺着几百条，滚动条长得离谱、回到顶部也找不到北，而且
+//    「我现在在第几屏」无从知晓。页码分页一次只渲染一页，位置明确、可以来回跳。
+//    代价是同一页来回翻会重渲染 —— 但每页只有 80 条，且兼容性结论有缓存，代价可控。
 const DSH_MARKET_PAGE = 80
-const dshMarketShown = ref(DSH_MARKET_PAGE)
-const dshMarketPageList = computed(() => dshMarketList.value.slice(0, dshMarketShown.value))
-const dshMarketRestCount = computed(() => Math.max(0, dshMarketList.value.length - dshMarketShown.value))
-// 条件一变就该从头看结果，停在「上次翻到的第 400 条」会让人以为筛选没生效
-watch([dshMarketKeyword, dshMarketCategory, dshMarketState, dshMarketSort], () => {
-  dshMarketShown.value = DSH_MARKET_PAGE
+const dshMarketPageNo = ref(1)
+const dshMarketPageCount = computed(() => Math.max(1, Math.ceil(dshMarketList.value.length / DSH_MARKET_PAGE)))
+const dshMarketPageList = computed(() => {
+  // ⚠️ 页码要先夹紧再切：筛选后总页数会变小，此时残留的旧页码（如从第 40 页筛到只剩 3 页）
+  //    会让 slice 切出空数组 —— 列表空白但计数说「有 200 条」，看起来就是坏了
+  const total = dshMarketPageCount.value
+  const no = Math.min(Math.max(1, dshMarketPageNo.value), total)
+  const start = (no - 1) * DSH_MARKET_PAGE
+  return dshMarketList.value.slice(start, start + DSH_MARKET_PAGE)
 })
+// 页码按钮：页数多时不能全列（4183 条 = 53 页），窗口化显示当前页附近 + 首末页
+const dshMarketPageItems = computed<(number | '...')[]>(() => {
+  const total = dshMarketPageCount.value
+  const cur = Math.min(Math.max(1, dshMarketPageNo.value), total)
+  const out: (number | '...')[] = []
+  const push = (n: number | '...') => { if (out[out.length - 1] !== n) out.push(n) }
+  // 首页、末页、当前页 ±2 必留，其余用省略号折叠
+  for (let n = 1; n <= total; n++) {
+    if (n === 1 || n === total || Math.abs(n - cur) <= 2) push(n)
+    else push('...')
+  }
+  return out
+})
+// 条件一变就该从头看结果，停在第 40 页会让人以为筛选没生效
+watch([dshMarketKeyword, dshMarketCategory, dshMarketState, dshMarketSort, dshMarketSortDesc, dshMarketOnlyUpdate, dshMarketOnlyCompat], () => {
+  dshMarketPageNo.value = 1
+})
+// ⚠️ 翻页 / 换筛选会换掉整批条目，「官方最新版」那批结论就过期了（结论是按 spec 存的，
+//    与新条目对不上）。不清的话顶部汇总会把「上一页的滞后结论」当成本页的结论显示出来。
+watch(dshMarketPageList, () => {
+  if (dshMarketLatestAt.value) {
+    dshMarketLatest.value = new Map()
+    dshMarketLatestAt.value = 0
+    dshMarketLatestFail.value = 0
+  }
+})
+
+// ── C 层：当前页自动标兼容性 ──
+//
+// ⚠️ 为什么只拉「当前已显示的条目」而不是整个目录：目录 4183 条，全量拉 manifest
+//    就是 4183 个 HTTP 请求 —— 一打开卡片就开始，用户还没想好要装什么。
+//    按页拉则是「你看到多少，我们就查多少」，翻到哪查到哪，且宿主侧 24h 缓存
+//    保证重复翻页不会重复请求。
+//
+// ⚠️ 为什么用 watch 而不是 computed：computed 里发请求会造成「每次重算都发一轮」，
+//    而重算频率由渲染决定，不受我们控制（改个关键词就是一次）。watch 只对
+//    「当前页条目集合」的变化做反应，且我们自己能保证同一批只发一次。
+// ⚠️ 但关键词变了会换一整批条目，所以依赖里必须带上它 —— 否则筛完不查。
+const dshMarketCompatPending = ref(false)
+async function dshMarketLoadCompatPage() {
+  if (dshMarketCompatPending.value) return
+  // 宿主版本读不到：一条都判不出来，别发请求（发了也只能得到一堆 no-host-version）
+  if (!dshMarketHostVersion.value) return
+  // 只查「能剥出裸 npm 包名」且**还没查过**的（查过的复用结论，不再请求）
+  const todo: { spec: string; pkg: string }[] = []
+  const seen = new Set<string>()
+  for (const p of dshMarketPageList.value) {
+    if (!dshMarketCompatable(p)) continue
+    if (dshMarketCompat.value.has(p.spec)) continue
+    const pkg = String(p.npm || '').trim()
+    if (!pkg || seen.has(pkg)) continue
+    seen.add(pkg)
+    todo.push({ spec: p.spec, pkg: pkg })
+  }
+  if (!todo.length) return
+  dshMarketCompatPending.value = true
+  try {
+    const r = await Promise.resolve((services as any).dshHostCompatCheck?.({
+      packages: todo.map((t) => t.pkg),
+    }))
+    const results = (r && r.results) || {}
+    const next = new Map(dshMarketCompat.value)
+    for (const t of todo) {
+      // ⚠️ 拉失败也要落一条 unknown：不落的话这批条目每翻一次页都重拉一遍，
+      //    而「拉不到」在有缓存冷却前会反复撞同一堵墙（宿主侧有 5min 冷却兜底）
+      next.set(t.spec, results[t.pkg] || { status: 'unknown', reason: 'unavailable', requirement: '', package: t.pkg })
+    }
+    dshMarketCompat.value = next
+  } catch (err) {
+    // 整体失败：什么都不落，下次翻页重试（宿主内部的失败冷却会挡住连打）
+  } finally {
+    dshMarketCompatPending.value = false
+  }
+}
+// 当前页 + 筛选条件一变就查（含「再加载更多」把新条目纳入显示范围时）
+watch([dshMarketPageList, dshMarketOnlyCompat], () => { dshMarketLoadCompatPage() }, { immediate: true })
 
 // 镜像源清单由宿主给（单一来源，避免两边各写一份常量对不上）
 const DSH_MARKET_REGISTRIES: { id: string; url: string; label: string }[] = services.dshMarketRegistries?.() || []
@@ -2041,6 +2926,17 @@ const dshMarketUpdateCount = computed(() => {
   let n = 0
   for (const e of dshMarketUpdates.value.values()) {
     if (e.state === 'update') n++
+  }
+  return n
+})
+
+// 已确证兼容的条数（只数 compatible，unknown / 没查过都不算）。
+// 用作「只看 DSH 兼容」开关的可用性与计数 —— 一条都没有时开关置灰，
+// 而不是给一个点了必然空屏的按钮
+const dshMarketCompatCount = computed(() => {
+  let n = 0
+  for (const v of dshMarketCompat.value.values()) {
+    if (v.status === 'compatible') n++
   }
   return n
 })
@@ -2206,7 +3102,11 @@ function dshMarketUseFastest() {
 // 第一段：dryRun。宿主只回「准备执行什么」，不跑 npm、不建快照。
 // ⚠️ 宿主返回 Promise（与 dshMarketStatus 的同步不同）：dryRun 分支虽不跑 npm 也走 Promise，
 // 形状必须按 Promise 处理，否则拿到的是一整个 thenable 而不是结果对象
-function dshMarketPreviewInstall(p: DshMarketPlugin) {
+// ⚠️ force（2026-09-25 加）：dryRun 一律**不带** —— 第一步先照常判，把「不兼容」如实摆出来；
+//    用户在单据卡上看过后果、点「仍要强制安装」，才带 force 重跑一次。所以这个入参只可能由
+//    那个按钮传进来。带了 force 之后宿主仍会判定，只是不再以它为拦路依据，返回体照样带
+//    hostIncompatible:true，界面据此把卡片切成「你正在强行装一个…」的措辞。
+function dshMarketPreviewInstall(p: DshMarketPlugin, force = false) {
   // specKind 为空说明目录给的 spec 形态我们认不出来 —— 不给按钮，避免点下去必然失败
   if (dshMarketBusy.value || !p.specKind) return
   dshMarketBusy.value = true
@@ -2215,14 +3115,30 @@ function dshMarketPreviewInstall(p: DshMarketPlugin) {
   // ⚠️ 必须把目录条目的 version 传下去：宿主只靠 profile/package.json 判「装没装」，
   //    而声明范围 `^1.48.0` 是**容得下** `1.49.0` 的 —— 不传版本，已装的包永远被判成
   //    「无需重复安装」，用户看着目录有新版本却点不动（真实 bug）。宿主拿到 version 才会比实装版本。
-  Promise.resolve(services.dshMarketInstall?.({ profile: dshPatchProfile, spec: p.spec, npm: p.npm, name: p.name, version: p.version, needsBuild: p.needsBuild, dryRun: true }))
+  Promise.resolve(services.dshMarketInstall?.({ profile: dshPatchProfile, spec: p.spec, npm: p.npm, name: p.name, version: p.version, needsBuild: p.needsBuild, dryRun: true, force }))
     .then((r) => {
       if (!r) {
         dshMarketFlash.err = true
         dshMarketFlash.msg = '宿主 API 不可用'
       } else if (!r.ok) {
+        // ⚠️ 宿主不兼容是**前置拦截**（宿主已判实证伪）：文案原文已说清「要求什么 / 当前是什么」，
+        //    照搬即可，不要再自己拼一遍（两处口径会漂）
         dshMarketFlash.err = true
         dshMarketFlash.msg = r.error || '无法生成安装计划'
+        // 拦下也留出路：单据卡据此长出「仍要强制安装」按钮（见 dshMarketForcePlan）。
+        // 其余失败（spec 认不出、dryRun 自己出错）不给 —— force 对它们无能为力
+        if (r.hostIncompatible) {
+          dshMarketPlan.value = {
+            action: 'install',
+            npm: p.spec,
+            name: p.name,
+            message: '',
+            spec: p.spec,
+            needsBuild: !!p.needsBuild,
+            hostIncompatible: true,
+            hostForced: false,
+          }
+        }
       } else if (!r.changed) {
         dshMarketPlan.value = null
         dshMarketFlash.msg = r.message || '已经装过这个包，无需重复安装。'
@@ -2234,9 +3150,9 @@ function dshMarketPreviewInstall(p: DshMarketPlugin) {
         dshMarketFlash.msg = r.message || ''
         // ⚠️ 带上目录版本：真写被供应链策略挡下时，宿主靠它拼出「`- xxx@0.3.24`」这句可照抄的指引；
         //    不带就只能显示字面量「目标版本」，用户不知道该往白名单里写哪个号（真实 bug）
-        dshMarketPlan.value = { action: 'update', npm: p.spec, name: p.name, message: r.message || '', spec: p.spec, version: r.to || p.version }
+        dshMarketPlan.value = { action: 'update', npm: p.spec, name: p.name, message: r.message || '', spec: p.spec, version: r.to || p.version, hostIncompatible: !!r.hostIncompatible, hostForced: !!r.hostForced }
       } else {
-        dshMarketPlan.value = { action: 'install', npm: p.spec, name: p.name, message: r.message || '', needsBuild: !!p.needsBuild }
+        dshMarketPlan.value = { action: 'install', npm: p.spec, name: p.name, message: r.message || '', needsBuild: !!p.needsBuild, hostIncompatible: !!r.hostIncompatible, hostForced: !!r.hostForced }
       }
     })
     .catch((err) => {
@@ -2246,6 +3162,28 @@ function dshMarketPreviewInstall(p: DshMarketPlugin) {
     .then(() => {
       dshMarketBusy.value = false
     })
+}
+
+// 单据卡上的「仍要强制安装」—— 带着 force 把 dryRun 重跑一遍。
+//
+// ⚠️ 为什么不直接 `dshMarketConfirm()` 收工：宿主那两道闸（dryRun 拦、真写再拦）判的是同一件事，
+//    界面第一次拿到的返回体**没有** message（hostBlockedResult 走的是 error 分支），直接确认会让
+//    单据卡上「将要执行什么」那一句空着 —— 用户等于盲签。所以这里重跑一次 dryRun，
+//    拿到「结论相同 + 不再拦」的完整单据（含那条 ⚠️ 强装警告）再交给他点头。
+function dshMarketForcePlan() {
+  if (dshMarketBusy.value) return
+  // 目录条目按 plan 里的 spec 反查（见 dshMarketPlanPlugin 的注释）。找不到说明列表被重筛过 ——
+  // 说一句再退场，不能静默 return（按钮点了没反应会被当成卡死）
+  const p = dshMarketPlanPlugin()
+  if (!p) {
+    dshMarketFlash.err = true
+    dshMarketFlash.msg = '找不到这条目录条目（列表可能已被筛选/重载改过），请退出市场重新进入后再试。'
+    return
+  }
+  // 精确安装走的是「用户查到的那一版」，不是目录 spec —— 有 targetVersion 就必须带回去，
+  // 否则重跑出来的单据会从「装 v1.65.1」悄悄变成「按目录重装」，用户点的和他看到的对不上
+  if (dshMarketPlan.value?.exact) return dshMarketPreviewInstallExact(p, true)
+  return dshMarketPreviewInstall(p, true)
 }
 
 // 第一段：dryRun（卸载）—— remove=false 走「只禁用」，remove=true 走「删磁盘包」。
@@ -2282,26 +3220,43 @@ function dshMarketPreviewUninstall(p: DshMarketPlugin, remove: boolean) {
 // 第一段：dryRun（更新）。与安装同链路，只是宿主那边按「重装覆盖」算。
 // 为什么更新不走「先卸载再安装」：卸载会先删包，一旦重装失败就留下一个**空的**环境，
 // 而 pnpm add 同一个包是幂等的覆盖，失败时旧版本还在。
-function dshMarketPreviewUpdate(p: DshMarketPlugin) {
+function dshMarketPreviewUpdate(p: DshMarketPlugin, force = false) {
   if (dshMarketBusy.value || !p.specKind) return
   dshMarketBusy.value = true
   dshMarketFlash.msg = ''
   dshMarketFlash.err = false
   // ⚠️ 与安装同款理由：必须把目录条目的 version 传下去 —— 宿主拿到它才知道「要升到哪一版」，
   //    被供应链策略挡下时才能拼出可照抄的白名单行（不传只能显示字面量「目标版本」）
-  Promise.resolve(services.dshMarketUpdate?.({ profile: dshPatchProfile, spec: p.spec, npm: p.npm, name: p.name, version: p.version, dryRun: true }))
+  Promise.resolve(services.dshMarketUpdate?.({ profile: dshPatchProfile, spec: p.spec, npm: p.npm, name: p.name, version: p.version, dryRun: true, force }))
     .then((r) => {
       if (!r) {
         dshMarketFlash.err = true
         dshMarketFlash.msg = '宿主 API 不可用'
       } else if (!r.ok) {
+        // 同上：宿主不兼容的文案由宿主给全（要求范围 + 当前宿主版本）
         dshMarketFlash.err = true
         dshMarketFlash.msg = r.error || '无法生成更新计划'
+        // ⚠️ 宿主不兼容（dryRun 拦下）时给用户留一条出路（2026-09-25 加）：拦是要拦的，
+        //    但不能只有「此路不通」—— 单据卡会拿这条 flag 长出一个「仍要强制更新」按钮，
+        //    点了就带 force 重跑 dryRun。换其它失败（spec 不认识、快照建不起来）不给这条路：
+        //    那些 force 也解决不了，给了等于骗用户去点一个必然再失败的东西
+        if (r.hostIncompatible) {
+          dshMarketPlan.value = {
+            action: 'update',
+            npm: p.spec,
+            name: p.name,
+            message: '',
+            spec: p.spec,
+            version: r.to || p.version,
+            hostIncompatible: true,
+            hostForced: false,
+          }
+        }
       } else if (!r.changed) {
         dshMarketPlan.value = null
         dshMarketFlash.msg = r.message || '这个包不在 profile 依赖里，无需更新。'
       } else {
-        dshMarketPlan.value = { action: 'update', npm: p.spec, name: p.name, message: r.message || '', spec: p.spec, version: r.to || p.version }
+        dshMarketPlan.value = { action: 'update', npm: p.spec, name: p.name, message: r.message || '', spec: p.spec, version: r.to || p.version, hostIncompatible: !!r.hostIncompatible, hostForced: !!r.hostForced }
       }
     })
     .catch((err) => {
@@ -2328,12 +3283,37 @@ function dshMarketConfirm() {
   // 安装与更新都走 spec（github/tarball 条目没有 npm 名）；卸载走 npm 键名（宿主自己也会反查兜底）。
   // ⚠️ 更新必须用 plan.spec：plan.npm 在 update 分支里存的也是 spec（目录给的安装原话），
   //    但显式读 spec 才不会在日后改动里被误会成「npm 包名」
-  const call = installing
-    ? services.dshMarketInstall?.({ profile: dshPatchProfile, spec: plan.npm, name: plan.name, needsBuild: plan.needsBuild })
-    : updating
-      ? services.dshMarketUpdate?.({ profile: dshPatchProfile, spec: plan.spec || plan.npm, name: plan.name, version: plan.version })
-      : services.dshMarketUninstall?.({ profile: dshPatchProfile, npm: plan.npm, name: plan.name, remove: plan.action === 'remove' })
-  Promise.resolve(call)
+  // ⚠️ 必须把「调用宿主」也包进 try：宿主 API 是**同步调用**（preload 与页面同一 window，
+  //    不是 ipcRenderer.invoke），它内部若在返回 Promise 之前抛错，异常会在这一行直接冒出来，
+  //    下面的 `.then` 链根本没机会挂上 —— 于是 dshMarketBusy 永远停在 true，按钮卡在
+  //    「正在安装…」、计时器也永远不停（2026-09-25 实测：7 分 56 秒仍在「正在安装…」，
+  //    日志里一条阶段旁白都没有，就是宿主在 note() 处抛了 TypeError）。
+  //    Promise.resolve(fn()) 这种写法挡不住同步 throw，必须显式收进 Promise。
+  const call = Promise.resolve().then(() => {
+    if (installing) {
+      return services.dshMarketInstall?.({
+        profile: dshPatchProfile,
+        spec: plan.npm,
+        name: plan.name,
+        needsBuild: plan.needsBuild,
+        // ⚠️ 「装到指定版本」走的也是 install 通道，但多带 exact + targetVersion —— 宿主据此
+        //    把 spec 拼成 `pkg@x.y.z`（见 dshMarketPreviewInstallExact 的注释）。
+        //    exact 为假时这两个字段不影响宿主行为（它有 `o.exact === true` 的硬判断）
+        exact: !!plan.exact,
+        targetVersion: plan.targetVersion,
+        npm: plan.npmName,
+        // ⚠️ 真写要**再带一次** force（2026-09-25）：宿主 dryRun 与真写是两次独立调用，
+        //    两次都各自过一遍兼容闸。只给 dryRun 带 force，用户点头之后照样被拦在写入前 ——
+        //    现象是「点了强制安装、也看到了单据，确认后却报不兼容」，比一开始就不给按钮更糟
+        force: !!plan.hostForced,
+      })
+    }
+    if (updating) {
+      return services.dshMarketUpdate?.({ profile: dshPatchProfile, spec: plan.spec || plan.npm, name: plan.name, version: plan.version, force: !!plan.hostForced })
+    }
+    return services.dshMarketUninstall?.({ profile: dshPatchProfile, npm: plan.npm, name: plan.name, remove: plan.action === 'remove' })
+  })
+  call
     .then((r) => {
       if (!r) {
         dshMarketFlash.err = true
@@ -2346,6 +3326,27 @@ function dshMarketConfirm() {
         // ⚠️ 「版本没变」也算失败：pnpm 退出码 0 但被 profile 的供应链策略（minimumReleaseAgeExclude）
         //    挡下、磁盘一个字没改。宿主回读发现后按失败上报，这里不再叠「已更新」的措辞。
         if ((r as DshMarketInstallResult).blocked) dshMarketFlash.msg = '未升级：' + dshMarketFlash.msg
+        // ⚠️ 「版本反而变低」是另一个方向的静默失败：pnpm 报成功、版本也确实变了，但变**低**了
+        //    （镜像滞后 / registry 把 @latest 解析成旧版本）。旧版可能缺安全修复，必须明确
+        //    告知「建议回滚」而不是笼统的「写入失败」—— 宿主已把方向判好，这里只加点明主语。
+        if ((r as DshMarketInstallResult).downgraded) dshMarketFlash.msg = '版本降级：' + dshMarketFlash.msg
+        // ⚠️ 「版本没动」有两种完全不同的成因，给的下一步动作也相反：
+        //    release-age = 目标版本太新、还没满最小发布年龄 → 等它满期，重试即可，**不必改配置**；
+        //    其余（白名单没放行）→ 必须往白名单里加一行。
+        //    宿主已按输出判断好方向，这里只负责把「该干什么」说清楚 —— 说反了用户会去改一个
+        //    根本不起作用的键，然后以为插件坏了
+        const sr = (r as DshMarketInstallResult).staleReason
+        if (sr === 'release-age') {
+          dshMarketFlash.msg += ' 原因是目标版本发布太新、还没到供应链策略要求的最小发布年龄 —— 等它满期后重试即可，不必改配置。'
+        } else if (sr === 'allowlist') {
+          dshMarketFlash.msg += ' 原因是供应链白名单没放行这一条 —— 见下方指引。'
+        }
+        // 「pnpm 报成功、版本也确实变了，但**低于**目标」：多半是镜像源滞后。
+        // 高于目标不报（镜像抢先是好事），宿主只在低于目标时才置位
+        const res0 = r as DshMarketInstallResult
+        if (res0.mismatch) {
+          dshMarketFlash.msg = `实装版本低于目标（期望 ${res0.expected || '?'}，实装 ${res0.version || '?'}）：` + dshMarketFlash.msg
+        }
         // ⚠️ 「需构建」的条目**注定要失败一次**：这类插件靠 prepare 脚本在安装时构建，
         //    pnpm 默认拦截构建脚本，失败信息里会给出那把带 commit hash 的 allowBuilds key。
         //    宿主已从输出里把它抠出来，这里直接展示给用户，省掉「去日志里自己找」这一步
@@ -2363,7 +3364,12 @@ function dshMarketConfirm() {
       dshMarketFlash.err = false
       if (plan.action === 'install') {
         const res = r as DshMarketInstallResult
-        dshMarketFlash.msg = `已安装 ${plan.name || plan.npm}${res.version ? ' @' + res.version : ''}${res.snapshot ? `（快照 ${res.snapshot}）` : ''}。`
+        // ⚠️ exact（精确装到用户查到的那一版）也是「按版本重装」，结果卡必须画 `旧 → 新`：
+        //    与 update 走同一个措辞，否则用户点了「装这一版」只看到「已安装 @1.65.1」，
+        //    不知道是从 1.62.0 换上来的。`from` 由宿主回读实装版本给出（目录版本是滞后的，不能拿来当基准）
+        dshMarketFlash.msg = res.from
+          ? `已安装 ${plan.name || plan.npm}（v${res.from} → ${res.version ? 'v' + res.version : '?'}）${res.snapshot ? `（快照 ${res.snapshot}）` : ''}。`
+          : `已安装 ${plan.name || plan.npm}${res.version ? ' @' + res.version : ''}${res.snapshot ? `（快照 ${res.snapshot}）` : ''}。`
       } else if (plan.action === 'update') {
         const res = r as DshMarketInstallResult
         dshMarketFlash.msg = `已更新 ${plan.name || plan.npm}${res.from ? `（v${res.from} → ${res.version ? 'v' + res.version : '?'}）` : (res.version ? ' @' + res.version : '')}${res.snapshot ? `（快照 ${res.snapshot}）` : ''}。`
@@ -2375,6 +3381,15 @@ function dshMarketConfirm() {
       }
       if (r.needsRestart) {
         dshMarketFlash.msg += 'dsh 需要重新加载才生效 —— 点上方「重启 dsh」，或稍后自行重启。'
+      }
+      // ⚠️ 强制安装**写进去了不等于能加载**（2026-09-25 加）：pnpm 只保证包装到磁盘，
+      //    dsh 起插件时才会去核 peer/engines，那一刻失败的话它多半只往自己的日志里写一行，
+      //    界面上什么都不显示 —— 用户会以为是这个插件本身坏了。
+      //    所以成功文案要把「刚才是强行装的」重新点一次，并**明确指派复核动作**，
+      //    不能让这句警告只活在动手前的单据上（那时用户正急着装，最不容易记住）。
+      if (plan.hostForced) {
+        dshMarketFlash.msg += '⚠️ 这是忽略宿主兼容性检查强行装的：若 dsh 加载它失败，先回滚快照，'
+          + '或把 DSH 升到插件要求的版本再装 —— 插件本身没问题，是当前宿主版本不满足它的声明。'
       }
     })
     .catch((err) => {
@@ -2389,6 +3404,13 @@ function dshMarketConfirm() {
       dshMarketPlan.value = null
       // 磁盘真的变了，本地已装状态必须重读，否则界面上那一行还停留在装之前
       dshMarketRefreshStatus()
+      // ⚠️ 快照列表也要重读（2026-09-25 用户报「展开后再次保存快照，列表没出现新的」）：
+      //    市场这条链路里，快照是**宿主侧**在 marketInstall 内部建的（写前自动快照），
+      //    前端事先根本不知道 —— 结果卡上写着「快照 20260925-093530 可回滚」，可快照区
+      //    展开着的那份列表还是旧数据，用户看不到刚建的那份，只能收起再展开（甚至以为没建）。
+      //    成功与失败**都要刷**：失败分支同样建了快照（失败文案里也带 `（快照 … 可回滚）`）。
+      //    放在这个收尾 then 里，两条路径共用一个出口。
+      dshBackupRefresh()
     })
 }
 
@@ -2414,6 +3436,15 @@ function dshMarketTick() {
       dshMarketLogTail.value = dshMarketTailOf(s.log)
       // lastCmd 在 npm 跑起来后才有值；没值时保留上一次，避免闪空
       if (s.lastCmd) dshMarketLastCmd.value = String(s.lastCmd)
+      // ⚠️ 同步喂给「运行详情」卡（2026-09-25 修，用户实测报的）：
+      //    那张卡的「最近命令 / dsh 日志」读的是 dshStatus() 快照，而 dshStatus 只在
+      //    打开 Tab、点「刷新状态」、以及 4s 轮询时才会被调用 —— 装插件的这几分钟里，
+      //    用户盯着「运行详情」看到的是**装之前**的旧快照（「最近命令：还没执行过」、
+      //    「这里没有日志」），而 npm 明明已经在跑了。用户的原话就是「不知道执行了什么
+      //    命令，日志，进度」。dshProgress() 回的是同一份 state（lastCmd / log），
+      //    这里把它并进 dsh 快照即可，不必再起一条 IPC。
+      if (s.lastCmd) dsh.lastCmd = String(s.lastCmd)
+      if (typeof s.log === 'string' && s.log) dsh.log = s.log
     }
   } catch (err) { /* 预期分支：宿主快照读不到就只走计时，不影响写入本身 */ }
 }
@@ -2422,12 +3453,16 @@ function dshMarketTick() {
 //    进响应式会让每次赋值都触发无谓的重渲染
 let dshMarketStartedAt = 0
 function dshMarketTickStart() {
+  // ⚠️ 起表前先清一次旧表：重复点确认（或上一次的 interval 没清干净）会让两个表叠着跑。
+  //    这里只清计时器、**不能**顺手把 ticking 置回 false —— 那会让紧接着的进度区
+  //    `v-if="dshMarketTicking"` 整块渲染不出来（2026-09-25 实测：按钮已显示「正在安装…」，
+  //    进度区却始终不出现），所以清表逻辑放在 TickStop 之外单独做。
+  if (dshMarketTickTimer) { window.clearInterval(dshMarketTickTimer); dshMarketTickTimer = 0 }
   dshMarketStartedAt = Date.now()
   dshMarketElapsed.value = 0
   dshMarketLogTail.value = ''
   dshMarketTicking.value = true
   dshMarketTick()
-  dshMarketTickStop()
   dshMarketTickTimer = window.setInterval(dshMarketTick, DSH_MARKET_TICK_MS)
 }
 function dshMarketTickStop() {
@@ -2463,20 +3498,32 @@ function dshMarketActionLabel(): string {
   return '禁用'
 }
 
-// 阶段的粗粒度提示：拿 lastCmd 结尾的 npm 子命令 + 有无输出，猜当前在哪一步。
+// 阶段的粗粒度提示：拿 lastCmd 结尾的 pnpm 子命令 + 有无输出，猜当前在哪一步。
 // ⚠️ 这是**猜测**，措辞必须留余地（「正在…」而不是「已完成…」）：
 //    宿主没有细粒度进度事件，只凭输出推断，说满会说错。
+// ⚠️ 空输出段（早先一律说「正在建快照并启动 pnpm」）在 2026-09-25 被用户实测打回：
+//    宿主日志流现在会播阶段旁白（dsh.note），有旁白就该照读，别再猜「在建快照」——
+//    否则 pnpm 明明已经在跑，界面还在说建快照，用户更糊涂。
 function dshMarketPhaseText(): string {
-  if (!dshMarketLogTail.value) {
-    // 还没拿到任何输出：多在建快照 / npm 刚启动这两个阶段
+  const tail = dshMarketLogTail.value
+  if (!tail) {
+    // 连旁白都还没到（IPC 刚发出、宿主还没进 marketInstall）：只能说最保守的话
     return dshMarketPlan.value?.needsBuild
-      ? '正在建快照并启动 npm（该来源要 clone 后构建，首次较慢）…'
-      : '正在建快照并启动 npm…'
+      ? '即将开始（该来源要 clone 后构建，首次较慢）…'
+      : '即将开始…'
   }
-  if (/clone|Cloning|git/i.test(dshMarketLogTail.value)) return '正在拉取源码…'
-  if (/prepare|build|Building|gyp|tsc|compile/i.test(dshMarketLogTail.value)) return '正在构建（prepare 脚本）…'
-  if (/progress|reify|resolving|Fetch|download/i.test(dshMarketLogTail.value)) return '正在下载依赖…'
-  return 'npm 正在执行…'
+  // 宿主播的阶段旁白：照读，最准
+  if (/快照已建|开始起 pnpm/i.test(tail)) return '快照已建，pnpm 正在跑…'
+  if (/建 profile 快照|建快照/i.test(tail)) return '正在建 profile 快照（还没起 pnpm）…'
+  // ⚠️ 尾部还是「结束 dsh」那几行（taskkill / 已结束外部启动的 dsh）时，说明安装链路
+  //    连旁白都还没插进来 —— 这时兜底说「pnpm 正在执行…」是**在骗人**：日志里根本没有 pnpm。
+  //    实测 2026-09-25：日志尾部只有 taskkill，阶段提示却说「pnpm 正在执行」，用户越看越糊涂。
+  //    遇到这种「只有结束动作、没有安装动作」的尾巴，如实说还在准备（或提示可能没走到）。
+  if (/taskkill|已结束外部启动的 dsh|kill -TERM/i.test(tail)) return '正在准备安装（日志尾部还是上一次「结束 dsh」的输出，即将进入建快照 / 起 pnpm）…'
+  if (/clone|Cloning|git/i.test(tail)) return '正在拉取源码…'
+  if (/prepare|build|Building|gyp|tsc|compile/i.test(tail)) return '正在构建（prepare 脚本）…'
+  if (/progress|reify|resolving|Fetch|download/i.test(tail)) return '正在下载依赖…'
+  return 'pnpm 正在执行…'
 }
 
 // 重启 dsh：**永远由用户显式点**（装完插件不会自动重启 —— 会掐掉正在跑的会话）。
@@ -4668,6 +5715,8 @@ function applyConfig(c: any) {
   cfg.dshMarketMirror = c.dshMarketMirror !== false
   cfg.dshMarketRegistry = typeof c.dshMarketRegistry === 'string' ? c.dshMarketRegistry : ''
   cfg.dshMarketOfficial = c.dshMarketOfficial === true
+  cfg.dshExportCred = c.dshExportCred === true
+  cfg.dshExportNoMod = c.dshExportNoMod !== false
   cfg.avoidTaskbar = c.avoidTaskbar !== false
   cfg.edgeTop = typeof c.edgeTop === 'number' ? c.edgeTop : 0
   cfg.edgeRight = typeof c.edgeRight === 'number' ? c.edgeRight : 0
@@ -6336,12 +7385,16 @@ onUnmounted(() => {
           <p class="guide-use"><strong>结束 / 重启：</strong>不只管本插件启动的进程 —— 只要 3080 上跑着 dsh（含在别的终端里启动的）都能被结束；非 dsh 占用端口时会拒绝执行，避免误杀。</p>
           <p class="guide-use"><strong>首次安装很慢：</strong>要下载约 500 个包，国内建议把「npm 注册源」改成淘宝镜像；等待期间状态行会显示「已等待 x 秒」。</p>
           <p class="guide-use"><strong>占用空间：</strong>「删除插件目录的 dsh」清掉插件装的那份（有全局安装时用不到它）；「清理 npx 旧缓存」清掉旧版本留在 npx 缓存里的副本。</p>
+          <p class="guide-use"><strong>装 / 卸 / 更新插件时报错、或市场卡片刷不出来：</strong>多半是 dsh 的 profile 写锁残留导致的。dsh 改 profile 前要先拿一把写锁，进程被强杀或取消更新时锁没被释放，之后所有操作都会卡在等锁上（真实报错是 <code>timed out waiting for the writer lock</code>）。点下面的按钮清理即可 —— 只有确认持有它的进程已经不存在时才会清理，锁正被别的进程持有时会拒绝并说明原因。</p>
           <div class="btn-row">
             <button class="secondary utils-btn utils-secondary" :disabled="!dsh.installed || dshBusy" @click="dshMaintain('remove-plugin')">
               {{ dshConfirm === 'remove-plugin' ? '确认删除插件目录的 dsh？' : '删除插件目录的 dsh' }}
             </button>
             <button class="secondary utils-btn utils-secondary" :disabled="dshBusy" @click="dshMaintain('clean-npx')">
               {{ dshConfirm === 'clean-npx' ? '确认清理 npx 旧缓存？' : '清理 npx 旧缓存' }}
+            </button>
+            <button class="secondary utils-btn utils-secondary" @click="dshMaintain('clear-lock')">
+              {{ dshConfirm === 'clear-lock' ? '确认清理残留写锁？' : '清理残留写锁' }}
             </button>
             <button v-if="dshConfirm" class="secondary utils-btn utils-secondary" @click="dshConfirm = ''">取消</button>
           </div>
@@ -6422,16 +7475,29 @@ onUnmounted(() => {
       <div class="btn-row">
         <button class="utils-btn utils-primary" :disabled="diagnoseBusy" @click="diagnoseRefresh()">{{ diagnoseBusy ? '诊断中…' : '重新诊断' }}</button>
         <button class="secondary utils-btn utils-secondary" :disabled="diagnoseBusy" @click="diagnoseRefresh(true)">强制重跑</button>
-        <button v-if="diagnose" class="secondary utils-btn utils-secondary" :disabled="diagnoseBusy" @click="diagnoseCopy">复制诊断信息</button>
+        <!-- 判据是「有结果**且没有整轮失败**」：只判 diagnose 存在的话，整轮失败时也有值
+             （results 为空、env 为 null），点了会复制出一份「0 项通过 · 0 项异常」的空报告 ——
+             比不给按钮更误导。转储卡那边判的是 !r.ok，这里对齐 -->
+        <button v-if="diagnose && !diagnose.error" class="secondary utils-btn utils-secondary" :disabled="diagnoseBusy" @click="diagnoseCopy">复制诊断信息</button>
       </div>
       <p v-if="diagnoseFlash.msg" class="msg" :class="msgCls(diagnoseFlash)">{{ diagnoseFlash.msg }}</p>
 
+      <!-- 整轮失败（环境信息都没读出来，env 为 null）：必须单独收尾。
+           否则下面两道分支（未安装 / 已安装）都不命中 —— 前者要 env 为真且 installed 假，
+           后者要 installed 真 —— 页面只剩一行 flash 红字与一张空卡，是最需要指引的时候反而没指引 -->
+      <template v-if="diagnose && !diagnose.env">
+        <p class="hint">
+          这一轮没能读到 dsh 的环境信息（<code>profile</code> 或 <code>node_modules</code> 读取失败、宿主进程异常等），
+          所以五项检查都没跑。<strong>上面的红字是具体原因</strong>；修掉后点「强制重跑」再试一次。
+        </p>
+      </template>
+
       <!-- dsh 未安装：给明确文案，不报错、不列检查项（D11） -->
-      <template v-if="diagnose && !diagnose.env?.installed">
+      <template v-else-if="diagnose && !diagnose.env?.installed">
         <p class="hint">未检测到已安装的 dsh，无需诊断。先在「dsh」卡片里启动一次（会自动下载安装），再回来点「重新诊断」。</p>
       </template>
 
-      <!-- 用 v-else-if 而非 v-if：两道分支各自收尾，否则会多出一个无主的 </template> -->
+      <!-- 用 v-else-if 而非 v-if：三道分支各自收尾，否则会多出一个无主的 </template> -->
       <template v-else-if="diagnose && diagnose.env?.installed">
         <div v-for="item in diagnose.results" :key="item.id" class="diag-item">
           <p class="diag-head">
@@ -6462,7 +7528,7 @@ onUnmounted(() => {
                  判据与改进办法在各自卡里只讲一遍，这里只留指引，避免三处说法随时间漂移。 -->
             <p class="guide-use"><strong>本卡只诊断，不动手：</strong>这里回答「哪里坏了」，不会改任何文件。要看清某个条目是被谁改的用「dsh 配置转储」，要真的禁掉某个插件用「dsh 插件开关」。</p>
             <p class="guide-use"><strong>重复模块：</strong>profile 的 <code>node_modules</code> 里装出了一份与全局 dsh 树<strong>同版本</strong>的 <code>@deepseek-ai/*</code>（比对包名 + 版本号判定，不看路径），会让 cordis 认成两份不同的包，报 <code>prompt section "deployment:persona" is already registered</code>，所有 preset 挂载失败。每次升级全局 dsh 都可能复现。</p>
-            <p class="guide-use"><strong>patch 条目：</strong><code>cordis.patch.yml</code> 里 <code>- id: X</code> 指向的条目必须真的存在于组装树中，否则 dsh 报 <code>patch: entry "X" not found</code> 直接起不来。这一项的判据由 dsh 自己打印的 not-found 行给出 —— 所以要先在「dsh 配置转储」里读一次，否则显示 <code>[!]</code>「无法判定」，不猜。</p>
+            <p class="guide-use"><strong>patch 条目：</strong><code>cordis.patch.yml</code> 里 <code>- id: X</code> 指向的条目必须真的存在于组装树中，否则 dsh 报 <code>patch: entry "X" not found</code>。报这个错<strong>不一定是拼错</strong>：这个 id 是组装树的注册 id，常见真因是该 id 由某个 bundle 内部 insert 出来、而那个 bundle 现在没装（或条目已改名 / 被上游移除）。先到「dsh 配置转储」的用户层列表对照，确认它是否还在，再决定改 id 还是删掉这条 patch —— 这一项的判据由 dsh 自己打印的 not-found 行给出，所以要先在转储卡里读一次，否则显示 <code>[!]</code>「无法判定」，不猜。</p>
             <p class="guide-use"><strong>3080 端口：</strong>被非 dsh 进程占用时 dsh 起不来；已有 dsh 在跑则不必再启。这一项要读进程名，个别系统上可能查不出归属 —— 那种情况显示 <code>[!]</code> 并附原因，属于「没查出来」，不是「查出来有问题」。</p>
             <p class="guide-use"><strong>只读与缓存：</strong>本诊断不修任何东西，也不写 dsh 的任何文件。结果缓存 60 秒：「重新诊断」在缓存有效时直接复用（省掉一次遍历 <code>node_modules</code>），需要抹掉缓存重跑就点「强制重跑」。</p>
           </div>
@@ -6722,9 +7788,9 @@ onUnmounted(() => {
              按钮看得见却点不到（点击落到邻座的「预览改动」上）。
              所以独立成 .fold 一行；位置放在整卡最后 —— 与本 Tab 其余 5 张卡统一（说明都在末尾），
              说明是补充信息，不该插在「候选 → 预览 → 确认」这条动作链中间。 -->
-        <!-- 两个回执各自一条：逐条开关（含快照还原/命名/清理）归 dshPatchFlash，
-             批量隔离归 dshIsolateFlash。合并成一张卡后仍不复用同一个 flash ——
-             否则点「禁用」会在同一条消息行里覆盖掉上一句「已隔离：改了 N 条」。 -->
+        <!-- 两个回执各自一条：逐条开关归 dshPatchFlash，批量隔离归 dshIsolateFlash，
+             快照（还原/删除/命名/清理）归列表内的 dshBackupFlash（见下方快照折叠区）—— 三件事
+             三行，否则点「禁用」会在同一条消息行里覆盖掉上一句「已隔离：改了 N 条」。 -->
         <p v-if="dshPatchFlash.msg" class="msg" :class="msgCls(dshPatchFlash)">{{ dshPatchFlash.msg }}</p>
         <p v-if="dshIsolateFlash.msg" class="msg" :class="msgCls(dshIsolateFlash)">{{ dshIsolateFlash.msg }}</p>
 
@@ -6897,10 +7963,19 @@ onUnmounted(() => {
               <p v-if="!dshBackups?.snapshots?.length" class="hint">还没有快照。</p>
               <template v-else>
                 <p class="hint" :title="dshBackups.root">存放在 <code>whale-dsh-backup/</code>（与 dsh 配置同目录，可自行删除）</p>
+                <!-- 快照卡自己的回执，**必须挨着列表**：还原 / 删除 / 命名的按钮都在列表里，
+                     回执却挂在整卡顶部（上面那条 dshPatchFlash）—— 点完按钮视线落在列表底部，
+                     颜色相近的 12px 小字在视野之外，等于没有回执（2026-09-24 用户报
+                     「快照点击恢复不知道成没成功」）。两条都画：恢复的是「有没有成功」，
+                     顶部那条是「patch 现在几条」。 -->
+                <p v-if="dshBackupFlash.msg" class="msg bak-flash" :class="msgCls(dshBackupFlash)">{{ dshBackupFlash.msg }}</p>
                 <div v-for="s in dshBackups.snapshots" :key="s.dirName" class="bak-item" :class="{ 'bak-known': s.knownGood }">
                   <div class="bak-line">
                     <span class="bak-time">{{ dshBackupTime(s) }}</span>
                     <span v-if="s.knownGood" class="bak-known-tag" title="不会被自动清理">已知良好</span>
+                    <!-- 快照文件被外部删过/改过时标出来，并把「还原」置灰 —— 让用户在这里就看到
+                         「这份还原不了」，而不是点下去等宿主报错（那次点击是白点的） -->
+                    <span v-if="s.damaged" class="bak-damaged-tag" title="快照文件已缺失或被修改，无法还原">已损坏</span>
                     <span v-if="s.name" class="bak-name" :title="s.name">{{ s.name }}</span>
                     <span class="bak-tag">{{ dshBackupReasonText(s.reason) }}</span>
                     <span class="bak-meta">{{ s.present }}/{{ s.total }} 个文件</span>
@@ -6909,6 +7984,8 @@ onUnmounted(() => {
                     <button
                       class="secondary patch-btn utils-btn utils-secondary"
                       :class="{ 'bak-confirm': dshRestoreConfirm === s.dirName }"
+                      :disabled="s.damaged"
+                      :title="s.damaged ? '快照文件已缺失或被修改，无法还原' : ''"
                       @click="dshBackupRestore(s.dirName)"
                     >{{ dshRestoreConfirm === s.dirName ? '确认还原' : '还原' }}</button>
                     <button class="secondary patch-btn utils-btn utils-secondary" @click="dshToggleKnownGood(s)">{{ s.knownGood ? '取消标记' : '标为已知良好' }}</button>
@@ -7106,15 +8183,66 @@ onUnmounted(() => {
           <div v-if="dshMarketFolds.filters" class="guide">
             <label class="field row">
               <span class="label">关键词</span>
-              <input v-model="dshMarketKeyword" type="text" maxlength="60" placeholder="插件名 / 作者 / 描述" />
+              <input v-model="dshMarketKeyword" type="text" maxlength="60" placeholder="空格分词，如「翻译 离线」；-词 排除，如「翻译 -离线」" />
             </label>
-            <label class="field row">
-              <span class="label">分类</span>
-              <select v-model="dshMarketCategory">
-                <option value="">全部（{{ dshMarketCategories.length }} 类）</option>
-                <option v-for="c in dshMarketCategories" :key="c.key" :value="c.key">{{ c.zh || c.en || c.key }}</option>
-              </select>
-            </label>
+            <!-- 分类：从 <select> 改成 chip 行。24 类的下拉框要展开才能看见有什么可选，
+                 而且看不出各类有多少条；chip 平铺后一眼扫完，带计数还能避开空分类。
+                 ⚠️ 平铺 24 个会占三行（.iso-axis 是 flex-wrap），把下面的「范围 / 排序」
+                 挤出首屏 —— 所以**只精选几个常用类常显、其余折叠**，点 ⌄ 才铺开。
+                 折叠段里的选中项会被提到常显段（防止「筛选项消失、找不到取消入口」），
+                 排布规则见 dshMarketCategorySplit -->
+            <div class="iso-axis">
+              <span class="iso-axis-label">分类</span>
+              <button
+                class="iso-axis-btn"
+                :class="{ 'iso-axis-on': dshMarketCategory === '' }"
+                @click="dshMarketCategory = ''"
+              >全部（{{ dshMarket.count || dshMarket.plugins?.length || 0 }}）</button>
+              <button
+                v-for="c in dshMarketCategorySplit.top"
+                :key="c.key"
+                class="iso-axis-btn"
+                :class="{ 'iso-axis-on': dshMarketCategory === c.key }"
+                :disabled="!(dshMarketCategoryCount[c.key] || 0) && dshMarketCategory !== c.key"
+                :title="dshMarketCategoryCount[c.key] ? c.key : c.key + '（目录里没有此类插件）'"
+                @click="dshMarketCategory = dshMarketCategory === c.key ? '' : c.key"
+              >{{ c.zh || c.en || c.key }}（{{ dshMarketCategoryCount[c.key] || 0 }}）</button>
+              <!-- 折叠开关：仅在真有折起来的分类时出现（分类本来就少于门槛时不该多一颗空按钮）。
+                   ⚠️ 计数用 restCount 而不是 rest.length —— rest 里含「选中项之外的有计数类」，
+                   展开后选中项已归到常显段（不再属于 rest），用它会让「N 个」在展开的一瞬间变样。
+                   restCount 是折叠前算好的常数，收起态与展开态读出同一个数 -->
+              <button
+                v-if="dshMarketCategorySplit.rest.length"
+                class="iso-axis-btn iso-cat-toggle"
+                :title="dshMarketCatExpand
+                  ? '收起不常用的分类'
+                  : '展开其余 ' + dshMarketCategorySplit.restCount + ' 个分类（按条数由多到少）'"
+                :aria-expanded="dshMarketCatExpand ? 'true' : 'false'"
+                @click="dshMarketCatExpand = !dshMarketCatExpand"
+              >
+                <span class="iso-cat-caret">{{ dshMarketCatExpand ? '▴' : '▾' }}</span>
+                {{ dshMarketCatExpand ? '收起' : dshMarketCategorySplit.restCount + ' 个' }}
+              </button>
+            </div>
+            <!-- 折起来的那一段单独一行：与常显段分开，展开时一眼能看出「多出来的部分」从哪开始。
+                 ⚠️ 这里【必须按条数重排一遍】，不能直接用 rest 的数组顺序：
+                 rest = usable.slice(补进来的名额) + empty，它的开头正好被常显段截走了一段，
+                 接着才是剩下的。若原样渲染，展开时这段会**跳到前面**（上一次被补进常显段的那几个
+                 名字出现在「其余」行的下半截），看起来就是「位置没跟着变」。
+                 常显段内部是条数降序，这里也按同一口径重排，展开后整块的次序才是连续的。
+                 v-if 而不是 v-show —— 收起时这些按钮不该留在 DOM 里被 Tab 键走到 -->
+            <div v-if="dshMarketCatExpand" class="iso-axis">
+              <span class="iso-axis-label">其余</span>
+              <button
+                v-for="c in [...dshMarketCategorySplit.rest].sort((a, b) => (dshMarketCategoryCount[b.key] || 0) - (dshMarketCategoryCount[a.key] || 0))"
+                :key="c.key"
+                class="iso-axis-btn"
+                :class="{ 'iso-axis-on': dshMarketCategory === c.key }"
+                :disabled="!(dshMarketCategoryCount[c.key] || 0) && dshMarketCategory !== c.key"
+                :title="dshMarketCategoryCount[c.key] ? c.key : c.key + '（目录里没有此类插件）'"
+                @click="dshMarketCategory = dshMarketCategory === c.key ? '' : c.key"
+              >{{ c.zh || c.en || c.key }}（{{ dshMarketCategoryCount[c.key] || 0 }}）</button>
+            </div>
             <div class="iso-axis">
               <span class="iso-axis-label">范围</span>
               <button class="iso-axis-btn" :class="{ 'iso-axis-on': dshMarketState === 'all' }" @click="dshMarketState = 'all'">全部</button>
@@ -7129,13 +8257,27 @@ onUnmounted(() => {
                 :title="dshMarketUpdateCount ? '只看已装且有新版的' : '当前没有可更新的插件'"
                 @click="dshMarketOnlyUpdate = !dshMarketOnlyUpdate"
               >只看可更新{{ dshMarketUpdateCount ? '（' + dshMarketUpdateCount + '）' : '' }}</button>
+              <!-- 「只看 DSH 兼容」：与上面同性质。⚠️ 与「只看可更新」并列而不并进「范围」三选一，
+                   同样是因为互斥关系不成立（兼容性与装没装无关） -->
+              <button
+                class="iso-axis-btn"
+                :class="{ 'iso-axis-on': dshMarketOnlyCompat }"
+                :disabled="!dshMarketCompatCount"
+                :title="dshMarketCompatCount ? '只看已确证与当前 DSH 兼容的' : '还没有已确证兼容的插件（当前页查完才计数）'"
+                @click="dshMarketOnlyCompat = !dshMarketOnlyCompat"
+              >只看 DSH 兼容{{ dshMarketCompatCount ? '（' + dshMarketCompatCount + '）' : '' }}</button>
             </div>
             <div class="iso-axis">
               <span class="iso-axis-label">排序</span>
-              <button class="iso-axis-btn" :class="{ 'iso-axis-on': dshMarketSort === 'downloads' }" @click="dshMarketSort = 'downloads'">下载量</button>
-              <button class="iso-axis-btn" :class="{ 'iso-axis-on': dshMarketSort === 'stars' }" @click="dshMarketSort = 'stars'">星标</button>
-              <button class="iso-axis-btn" :class="{ 'iso-axis-on': dshMarketSort === 'added' }" @click="dshMarketSort = 'added'">最新收录</button>
-              <button class="iso-axis-btn" :class="{ 'iso-axis-on': dshMarketSort === 'name' }" @click="dshMarketSort = 'name'">名称</button>
+              <!-- 排序轴是单选的，但**再点一次当前轴会反向**（方向见下方箭头）。
+                   所以这里不能用单选按钮的语义，而是「点当前项 = 切方向」的三态按钮 -->
+              <button class="iso-axis-btn" :class="{ 'iso-axis-on': dshMarketSort === 'downloads' }" :title="dshMarketSortTip('下载量')" @click="dshMarketPickSort('downloads')">下载量</button>
+              <button class="iso-axis-btn" :class="{ 'iso-axis-on': dshMarketSort === 'stars' }" :title="dshMarketSortTip('星标')" @click="dshMarketPickSort('stars')">星标</button>
+              <button class="iso-axis-btn" :class="{ 'iso-axis-on': dshMarketSort === 'added' }" :title="dshMarketSortTip('最新收录')" @click="dshMarketPickSort('added')">最新收录</button>
+              <button class="iso-axis-btn" :class="{ 'iso-axis-on': dshMarketSort === 'name' }" :title="dshMarketSortTip('名称')" @click="dshMarketPickSort('name')">名称</button>
+              <!-- 方向：读出「当前轴 + 方向」这个事实，切换一律走上面的按钮。
+                   不单独给一个方向开关 —— 那样会出现「方向：降序」但一个轴都没选中的空档状态 -->
+              <span class="iso-axis-label">方向：{{ dshMarketSortDesc ? '降序' : '升序' }}</span>
             </div>
             <p v-if="!dshMarketStatus" class="hint">还没读到本地已装状态，「已装 / 未装」两个筛选项暂时不会过滤（读不到就不冒充未安装）。</p>
           </div>
@@ -7149,6 +8291,57 @@ onUnmounted(() => {
         </p>
 
         <template v-else>
+          <!-- ── 回源查「官方最新版」（卡片顶部一个按钮，查**当前分页**）──
+               ⚠️ 为什么要有它：这张卡上所有版本号都出自**目录**，而目录是**每日快照** ——
+                  它说「已是最新」本身可能已经过时（实测目录停在 9/24 记 1.61.0，registry 上
+                  早已是 1.65.1）。要确证只能回源问一次。
+               ⚠️ 为什么是按钮而不是自动查：一页就 80 条，自动查等于一开卡片打 80 个请求，
+                  与「刷新目录默认零网络」同一考量。 -->
+          <div class="mkt-latest-bar">
+            <!-- ⚠️ 这一行的按钮与卡片顶部「刷新目录 / 强制重抓 / 刷新已装状态」用**同一套**
+                 `secondary utils-btn utils-secondary`，不是 link-btn：早先用 link-btn 是为了
+                 「不抢主按钮」，但它与同类辅助按钮并排时高宽、内边距都对不上，看起来像另一个
+                 层级的控件（用户实测反馈「样式和别的进行统一」）。统一到 secondary 后，
+                 层级语义仍由位置（单独一行、在列表上方）与文案承担。 -->
+            <button
+              class="secondary utils-btn utils-secondary"
+              :disabled="dshMarketLatestBusy || !dshMarketLatestTargets.length"
+              :title="dshMarketLatestTargets.length
+                ? '回源 npm registry 查当前页 ' + dshMarketLatestTargets.length + ' 个插件（会联网，几十个请求）'
+                : '当前页没有可查的条目（只有 npm 来源的插件能回源查版本）'"
+              @click="dshMarketCheckLatestPage"
+            >{{ dshMarketLatestBusy ? '查询中…' : '查官方最新版' }}</button>
+            <!-- ⚠️ 把「查的是谁」写死在文案里：用户实测问过「查的是已安装插件的还是目前列表
+                 显示的插件的」—— 这正是本按钮最容易误解的地方。查的是**当前分页展示的条目**
+                 （不是「已装清单」，也不是整个目录），故直接说「本页」。 -->
+            <span class="mkt-latest-scope">本页 {{ dshMarketLatestTargets.length }} 个可查（仅列出的 npm 来源）· 会联网</span>
+            <span v-if="dshMarketLatestSummary()" class="mkt-latest-sum">{{ dshMarketLatestSummary() }}</span>
+          </div>
+          <!-- 只列「官方版本比基准版本新」的那些（1.65.1 这种查出来才有意义）。
+               ⚠️ 基准是**实装版本优先**（见 dshMarketBaseVer）：显示「已装 vX → 官方 vY」，
+                  不显示目录版本 —— 目录会落后于用户已装的版本（实测实装 1.62.0 / 目录 1.61.0），
+                  拿目录当基准会让人以为「要从 1.61 升到 1.65」。
+               ⚠️ 「装这一版」只给 npm 来源（dshMarketExactable）：它按 `包名@确切版本` 装，
+                  这才是**真正能装上**的路径 —— 卡片原有「更新」按钮按目录 spec 重装，会被
+                  pnpm-lock 锁回旧版，装不到这一版。非 npm 来源（如 `dsh-web#packages/...`）
+                  给了按钮也必然失败，故只说版本差异、不给按钮。 -->
+          <div v-if="dshMarketLatestStales.length" class="mkt-latest-list">
+            <div v-for="p in dshMarketLatestStales" :key="'stale-' + p.spec" class="mkt-latest-row">
+              <span class="mkt-latest-name" :title="p.spec">{{ p.name }}</span>
+              <span class="mkt-latest-ver" :title="dshMarketLatestTip(p)">
+                已装 v{{ dshMarketBaseVer(p) || '?' }} → 官方 <b>{{ dshMarketLatestText(p) }}</b>
+              </span>
+              <span class="mkt-spacer"></span>
+              <button
+                v-if="dshMarketExactable(p)"
+                class="secondary utils-btn utils-secondary"
+                :disabled="dshMarketBusy"
+                :title="'按 ' + (p.npm || p.spec) + '@' + dshMarketLatestOf(p)?.version + ' 精确安装（会改写 pnpm-lock，与「更新」按钮不同）'"
+                @click="dshMarketPreviewInstallExact(p)"
+              >装这一版</button>
+              <span v-else class="mkt-latest-note" title="该条目不是纯 npm 来源（spec 里带子路径等），无法按 `包名@版本` 精确安装">非 npm 来源，请用「更新」</span>
+            </div>
+          </div>
           <!-- 外面这层只负责给滚动条留槽位（见 .mkt-scroll）：滚动发生在里面的 .mkt-list，
                槽位留在外面，条目就不会被滚动条压住 -->
           <div class="mkt-scroll">
@@ -7167,11 +8360,19 @@ onUnmounted(() => {
                      后者连按钮都不给（我们不知道拿什么去装，点了必然失败） -->
                 <span v-if="p.needsBuild" class="patch-tag" title="该来源靠 prepare 脚本在安装时构建，pnpm 默认拦截构建脚本">需构建</span>
                 <span v-if="!p.specKind" class="patch-tag">目录未给可识别的安装方式</span>
+                <!-- DSH 宿主兼容性：**只显示查过的结论**（v-if 三态 tag）。
+                     没查过时只给一个「检查兼容」按钮，不预置任何颜色 —— 见 dshMarketCompat 注释 -->
+                <span
+                  v-if="dshMarketCompatOf(p)"
+                  class="patch-tag"
+                  :class="dshMarketCompatClass(dshMarketCompatOf(p)!)"
+                  :title="dshMarketCompatTip(dshMarketCompatOf(p)!)"
+                >{{ dshMarketCompatTagText(dshMarketCompatOf(p)!) }}</span>
                 <span class="mkt-pin">{{ dshMarketPinText(p) }}</span>
               </div>
               <p v-if="p.descZh || p.descEn" class="mkt-desc">{{ p.descZh || p.descEn }}</p>
               <div class="mkt-foot">
-                <span class="mkt-cat">{{ dshMarketCategories.find((c) => c.key === p.category)?.zh || p.category || '未分类' }}</span>
+                <span class="mkt-cat">{{ dshMarketCategoryText(p.category) }}</span>
                 <span class="mkt-npm">{{ p.spec || p.npm || '（目录没给安装方式）' }}</span>
                 <!-- 已装版本 → 目录版本：只在**比得出来**时出（目录没给版本的条目 latest 是空，
                      写「? → ?」纯属噪音）。
@@ -7184,15 +8385,32 @@ onUnmounted(() => {
                   {{ dshMarketVersionText(p) }}
                 </span>
                 <span class="mkt-spacer"></span>
+                <!-- 「检查兼容」：只有能剥出裸 npm 包名的条目才给（github / tarball 来源在
+                     npm 上没有 manifest，查了必然 404）。查过一次就收起按钮 —— 结论已在上方 tag 上，
+                     留着按钮反而让人以为要反复点 -->
+                <button
+                  v-if="dshMarketCompatable(p) && !dshMarketCompatOf(p)"
+                  class="link-btn utils-btn utils-secondary"
+                  :disabled="dshMarketCompatChecking(p)"
+                  title="从 npm 拉这个包的 manifest，看它声明的 DSH 版本范围是否包含你当前的 DSH"
+                  @click="dshMarketCheckCompat(p)"
+                >{{ dshMarketCompatChecking(p) ? '检查中…' : '检查兼容' }}</button>
                 <!-- 认不出 spec 的条目**不给安装按钮**：不摆一个注定失败的按钮让用户点 -->
                 <button
-                  v-if="p.specKind && !dshMarketHitAt(pi)?.inDeps"
+                  v-if="p.specKind && !dshMarketHitAt(pi)?.inDeps && !dshMarketHitAt(pi)?.inPatch"
                   class="secondary patch-btn utils-btn utils-secondary"
                   :disabled="dshMarketBusy"
                   :title="p.needsBuild ? '该来源靠 prepare 脚本构建，pnpm 默认会拦一次；失败后按界面指引加 allowBuilds 再试' : ''"
                   @click="dshMarketPreviewInstall(p)"
                 >{{ dshMarketPending === p.spec ? '处理中…' : (p.needsBuild ? '安装（需构建）' : '安装') }}</button>
-                <template v-else-if="p.specKind && dshMarketHitAt(pi)?.inDeps">
+                <!-- ⚠️ 判据是 `inDeps || inPatch`，**不能只判 inDeps**：
+                     宿主 installedMap 里「只写在 patch、包不在 dependencies」的条目
+                     inDeps 恒为 false（见 dsh-market.js 的 installedMap）。只判 inDeps 会让这类
+                     条目走「安装」分支或什么都不出 —— 而上一行的「已装」徽章是**无条件**渲染的，
+                     于是卡片写着「已装」却一个按钮都没有。用户撞见的原始 bug 就是它在
+                     github/tarball 来源（目录名与 package.json 键名不同形）时的表现：
+                     装了，却找不到卸载入口。宿主 marketUninstall 本来就能按短名反查，能力是有的。 -->
+                <template v-else-if="p.specKind && (dshMarketHitAt(pi)?.inDeps || dshMarketHitAt(pi)?.inPatch)">
                   <!-- 「更新」只在**确定**有新版时出：放进已装分支里，因为没装的东西没有「更新」
                        这个概念（那是安装）。更新=按目录 spec 重装，会改写 package.json 里的范围 -->
                   <button
@@ -7207,61 +8425,174 @@ onUnmounted(() => {
                     :disabled="dshMarketBusy || dshMarketHitAt(pi)?.disabled"
                     @click="dshMarketPreviewUninstall(p, false)"
                   >{{ dshMarketHitAt(pi)?.disabled ? '已禁用' : '禁用（留包）' }}</button>
+                  <!-- 「彻底删除」**只在包真的在 dependencies 里**才给：包不在依赖里时没有东西可删，
+                       调 uninstall 只会白跑一趟（还可能撞上「反查不到就按无需卸载处理」而没有反馈）。
+                       这类条目仍能通过上面的「禁用」切换 patch 状态，路子没堵死 -->
                   <button
+                    v-if="dshMarketHitAt(pi)?.inDeps"
                     class="link-btn bak-del utils-btn utils-secondary"
                     :disabled="dshMarketBusy"
                     title="从 profile 里彻底删掉这个包（npm uninstall），只删这一个包名，不做依赖反查"
                     @click="dshMarketPreviewUninstall(p, true)"
                   >彻底删除</button>
                 </template>
-                <a v-if="p.page || p.url" class="link-btn utils-btn utils-secondary" :href="p.page || p.url" target="_blank" rel="noreferrer">主页</a>
+                <a v-if="p.page || p.url" class="link-btn utils-btn utils-secondary" href="#" @click.prevent="openDoc(p.page || p.url)">主页</a>
               </div>
             </div>
-            <!-- 「再加载」条**放进滚动区内部**：原先放在列表外面，用户得先滚到底才知道
-                 还有未显示条目；放进列表末尾后，滚到底自然就看到它，按钮不再与列表脱节。
-                 做成一条占满宽度的行（而不是 .btn-row 里的按钮），视觉上像列表的「续页尾巴」。 -->
-            <button
-              v-if="dshMarketRestCount"
-              class="mkt-more utils-btn utils-secondary"
-              @click="dshMarketShown += DSH_MARKET_PAGE"
-            >再加载 {{ Math.min(DSH_MARKET_PAGE, dshMarketRestCount) }} 条（还有 {{ dshMarketRestCount }} 条未显示）</button>
           </div>
           </div>
 
-          <!-- 截断计数另在列表外说一句：滚动区内的话，没滚到底的人永远不知道被截断了 -->
-          <p v-if="dshMarketRestCount" class="hint mkt-rest">
-            共 {{ dshMarketList.length }} 条符合条件，已显示前 {{ dshMarketPageList.length }} 条。
+          <!-- 页码分页：放在滚动区**外面** —— 放进列表末尾会被长列表推走，
+               翻页要滚到底才能点，来回跳页的体验就没了 -->
+          <div v-if="dshMarketPageCount > 1" class="mkt-pager">
+            <button
+              class="mkt-page-btn utils-btn utils-secondary"
+              :disabled="dshMarketPageNo <= 1"
+              @click="dshMarketPageNo = Math.max(1, dshMarketPageNo - 1)"
+            >上一页</button>
+            <!-- 省略号是不可点的占位（'...'），与页码共用一个按钮样式表 -->
+            <template v-for="(it, idx) in dshMarketPageItems" :key="it + '-' + idx">
+              <span v-if="it === '...'" class="mkt-page-gap">…</span>
+              <button
+                v-else
+                class="mkt-page-btn utils-btn"
+                :class="it === dshMarketPageNo ? 'mkt-page-on' : 'utils-secondary'"
+                @click="dshMarketPageNo = it"
+              >{{ it }}</button>
+            </template>
+            <button
+              class="mkt-page-btn utils-btn utils-secondary"
+              :disabled="dshMarketPageNo >= dshMarketPageCount"
+              @click="dshMarketPageNo = Math.min(dshMarketPageCount, dshMarketPageNo + 1)"
+            >下一页</button>
+          </div>
+
+          <!-- 计数与「当前在第几页」说清楚：只给页码不给总数，用户不知道后面还有多远。
+               顺带把**当前排序轴与方向**写在这里（如「下载量 降序」）—— 筛选区收起后
+               只剩列表，顺序看起来就是随机的，而方向切换只靠按钮悬停是看不见的 -->
+          <p class="hint mkt-rest">
+            共 {{ dshMarketList.length }} 条符合条件，第 {{ dshMarketPageNo }} / {{ dshMarketPageCount }} 页（每页 {{ DSH_MARKET_PAGE }} 条）。
+            排序：{{ dshMarketSortLabel }} {{ dshMarketSortDesc ? '降序' : '升序' }}。
           </p>
         </template>
 
-        <!-- 待确认的安装/卸载计划：与「插件开关」卡同一套手势 —— 先摆出来再写 -->
+        <!-- 待确认的安装/卸载计划：与「插件开关」卡同一套手势 —— 先摆出来再写。
+             ⚠️ 整块是一张「有名字、有版本、有后果、有动作」的单据，不是一行提示语（2026-09-25 改版）：
+                原先是两行 `hint`（「将安装 <强>`包名`</强>（显示名）：」+ 整句 message 塞进 `<code>`），
+                后果与动作全挤在等宽字体的长句里。用户反馈「继续优化或者美化」——
+                现在包名/显示名/版本各自成块（.mkt-plan-*），后果单独成列表，「会改哪些文件」列出来，
+                动作按钮贴着单据底部。确认按钮与取消同排（原先是 danger 在左、取消在右，
+                一眼看去分不清哪个是主操作）。 -->
         <template v-if="dshMarketPlan">
-          <p class="hint">
-            {{ dshMarketPlan.action === 'install' ? '将安装' : dshMarketPlan.action === 'remove' ? '将彻底删除' : '将禁用' }}
-            <strong>{{ dshMarketPlan.npm }}</strong>（{{ dshMarketPlan.name }}）：
-          </p>
-          <p class="hint"><code>{{ dshMarketPlan.message }}</code></p>
-          <!-- 进行中的进度区：npm 要跑完才返回，github/tarball 来源还要 clone + 构建，
-               等待可能长达几分钟。这里给出「在做什么 + 已等多久 + 实时输出」，
-               让等待可见 —— 此前只有一个静止的「写入中…」，用户不知道到底动没动。 -->
-          <div v-if="dshMarketTicking" class="mkt-progress">
-            <p class="mkt-progress-head">
-              <span class="mkt-spin" aria-hidden="true"></span>
-              正在{{ dshMarketActionLabel() }}…已等 {{ dshMarketElapsedText() }}
+          <div class="mkt-plan" :class="{ err: dshMarketPlan.action === 'remove' }">
+            <p class="mkt-plan-head">
+              <span class="mkt-plan-badge">{{ dshMarketPlan.action === 'install' ? '安装' : dshMarketPlan.action === 'remove' ? '彻底删除' : '禁用' }}</span>
+              <strong class="mkt-plan-name">{{ dshMarketPlan.npm }}</strong>
             </p>
-            <p class="hint mkt-progress-phase">{{ dshMarketPhaseText() }}</p>
-            <p v-if="dshMarketLastCmd" class="hint mkt-progress-cmd"><code>{{ dshMarketLastCmd }}</code></p>
-            <pre v-if="dshMarketLogTail" ref="dshMarketLogEl" class="mkt-progress-log">{{ dshMarketLogTail }}</pre>
-            <p v-else class="hint">还没有输出 —— 正在建快照、准备 npm 进程。带构建的来源首次会更慢。</p>
-            <p class="hint">请不要关掉本页：npm 由宿主进程托管，关页不会中断，但也看不到结果。</p>
-          </div>
-          <div class="btn-row">
-            <button
-              class="danger utils-btn utils-danger"
-              :disabled="dshMarketBusy"
-              @click="dshMarketConfirm()"
-            >{{ dshMarketBusy ? `正在${dshMarketActionLabel()}…` : '确认（先建快照）' }}</button>
-            <button class="secondary utils-btn utils-secondary" @click="dshMarketPlan = null">取消</button>
+            <p class="mkt-plan-sub">
+              {{ dshMarketPlan.name || '（未提供显示名）' }}
+              <!-- exact：把「从哪一版到哪一版」摆在最显眼处 —— 这是用户点「装这一版」最关心的一条 -->
+              <template v-if="dshMarketPlan.exact && dshMarketPlan.targetVersion">
+                · 精确到
+                <b>v{{ dshMarketPlan.targetVersion }}</b>
+                <span class="mkt-plan-arrow" aria-hidden="true">·</span>
+                <span class="mkt-plan-note">不改别的包</span>
+              </template>
+              <span v-else class="mkt-plan-note">· 按目录提供的版本重装</span>
+            </p>
+            <!-- ⚠️ 宿主不兼容警示条（2026-09-25 加）：这是**唯一**一处能让用户看见
+                 「我要装的这个东西要求 DSH x，我宿主是 y」的地方 —— 宿主给的 error 文案在
+                 flash 消息里，会被下一次操作刷掉；而这张单据会一直摆到用户点头或取消。
+                 两种状态必须分开写：还没强装的（下面给按钮）vs 已经决定强装的（只剩后果提醒），
+                 混成一句会让用户分不清自己到底按没按过。 -->
+            <div v-if="dshMarketPlan.hostIncompatible" class="mkt-plan-warn">
+              <p class="mkt-plan-warn-head">
+                <span aria-hidden="true">⚠️</span>
+                {{ dshMarketPlan.hostForced ? '你正在强行安装一个宿主不兼容的插件' : '这个插件与当前 DSH 不兼容' }}
+              </p>
+              <p v-if="dshMarketPlan.hostIncompatible && !dshMarketPlan.hostForced" class="mkt-plan-warn-body">
+                它声明的 DSH 版本范围容不下当前宿主（要求见上方提示）。装上 pnpm 不会报错，
+                但 dsh 起插件时才会去核这条声明 —— 那一步失败通常只写进 dsh 自己的日志，
+                界面上不显示，看起来就像插件本身坏了。
+              </p>
+              <p v-else class="mkt-plan-warn-body">
+                写入会照常完成。若之后 dsh 加载它失败或行为异常，<strong>先回滚快照</strong>；
+                想真正用上它，需要把 DSH 升到它要求的版本再装。
+              </p>
+              <p class="mkt-plan-warn-body">
+                动手前会自动建快照，失败仍可回滚 —— 但「装上用不了」这件事本身，快照救不了。
+              </p>
+            </div>
+            <!-- ⚠️ 用 `white-space: pre-line` 保留宿主 message 里的换行：message 尾部会挂一段
+                 `⚠️ 该来源靠 prepare 脚本构建…` 的警告，那是**独立一段**，跟主句挤成一行会读丢 -->
+            <p v-if="dshMarketPlan.message" class="mkt-plan-msg">{{ dshMarketPlan.message }}</p>
+            <!-- 「会改什么」列出来：profile 的 package.json 是用户真正会被改动的东西，
+                 而 `dsh plugin add` 还会连带改 lock —— 说清楚才敢点确认。
+                 ⚠️ 每条都必须**按动作分支**，不能一股脑列全：把「包仍留在磁盘上」写给安装看、
+                 或把「会改写版本范围」写给禁用看，都是误导 —— 而这张单子的全部价值就在于说准。 -->
+            <ul class="mkt-plan-effects">
+              <template v-if="dshMarketPlan.action === 'install'">
+                <li>改写 profile <code>{{ dshPatchProfile }}</code> 的 <code>package.json</code> 里的版本范围</li>
+                <li>连带更新 <code>pnpm-lock.yaml</code>（旧版本会从 lock 里被替换掉）</li>
+                <li v-if="dshMarketPlan.needsBuild">该来源靠 <code>prepare</code> 脚本构建，pnpm 默认会拦一次</li>
+                <li>动手前自动建快照，失败可回滚</li>
+              </template>
+              <template v-else-if="dshMarketPlan.action === 'remove'">
+                <li>从 profile <code>{{ dshPatchProfile }}</code> 的 <code>package.json</code> 里删掉这个依赖</li>
+                <li>连带从 <code>pnpm-lock.yaml</code> 与磁盘上移除包本体</li>
+                <li>动手前自动建快照，失败可回滚</li>
+              </template>
+              <template v-else>
+                <li>只往 patch 里写一条 <code>disabled: true</code></li>
+                <li>包与依赖原样留在磁盘上，不碰 <code>package.json</code> / <code>pnpm-lock.yaml</code></li>
+                <li>动手前自动建快照，失败可回滚</li>
+              </template>
+            </ul>
+            <!-- 进行中的进度区：npm 要跑完才返回，github/tarball 来源还要 clone + 构建，
+                 等待可能长达几分钟。这里给出「在做什么 + 已等多久 + 执行的命令 + 实时输出」，
+                 让等待可见 —— 此前只有一个静止的「写入中…」，用户不知道到底动没动。
+                 ⚠️ 命令与输出**始终占位**（没有就打一句说明），不整块 v-if 掉：用户实测反馈
+                    「不知道执行了什么命令、日志、进度」—— 元素时有时无会让区块高度反复跳，
+                    也让人怀疑是不是没在跑。 -->
+            <div v-if="dshMarketTicking" class="mkt-progress">
+              <p class="mkt-progress-head">
+                <span class="mkt-spin" aria-hidden="true"></span>
+                正在{{ dshMarketActionLabel() }}…已等 {{ dshMarketElapsedText() }}
+              </p>
+              <p class="hint mkt-progress-phase">{{ dshMarketPhaseText() }}</p>
+              <p class="mkt-progress-cmd">
+                <span class="mkt-progress-k">执行的命令</span>
+                <code v-if="dshMarketLastCmd">{{ dshMarketLastCmd }}</code>
+                <span v-else class="hint">尚未产生 —— 宿主还没进到起 pnpm 那一步（见下方「实时输出」的阶段说明）</span>
+              </p>
+              <p class="mkt-progress-k">实时输出</p>
+              <pre v-if="dshMarketLogTail" ref="dshMarketLogEl" class="mkt-progress-log">{{ dshMarketLogTail }}</pre>
+              <pre v-else class="mkt-progress-log mkt-progress-log-empty">（还没有输出。若进程已起来却长时间没动静，带构建的来源要先 clone 再 prepare，首次会比较慢）</pre>
+              <p class="hint">
+                完整日志见上方「运行详情」→「查看 dsh 日志」（本区块只显示最后 {{ DSH_MARKET_TAIL_LINES }} 行）。
+                请不要关掉本页：pnpm 由宿主进程托管，关页不会中断，但也看不到结果。
+              </p>
+            </div>
+            <div class="btn-row mkt-plan-actions">
+              <!-- ⚠️ 宿主不兼容时，确认键原样保留（用户可能正是想强装），只在它**前面**加一个
+                   把话说明白的入口。刻意不把确认键换成「强制安装」：那样点下去就像普通安装，
+                   而这件事的后果（装上大概率加载不了）需要一个明确说出口的动作。
+                   ⚠️ 强装态（hostForced）下这个按钮消失 —— 已经强装过了，再点只是再跑一遍 dryRun -->
+              <button
+                v-if="dshMarketPlan.hostIncompatible && !dshMarketPlan.hostForced"
+                class="secondary utils-btn utils-secondary"
+                :disabled="dshMarketBusy"
+                @click="dshMarketForcePlan()"
+              >仍要强制{{ dshMarketPlan.action === 'update' ? '更新' : '安装' }}…</button>
+              <!-- ⚠️ 确认用 primary 而不是 danger（2026-09-25 改）：dsh 装插件是**常规操作**，
+                   整张卡标红会让人以为要删东西；真正的不可逆操作是「彻底删除」，那个仍走 danger -->
+              <button
+                class="utils-btn utils-primary"
+                :disabled="dshMarketBusy"
+                @click="dshMarketConfirm()"
+              >{{ dshMarketBusy ? `正在${dshMarketActionLabel()}…` : (dshMarketPlan.action === 'install' ? '确认安装（先建快照）' : '确认执行（先建快照）') }}</button>
+              <button class="secondary utils-btn utils-secondary" :disabled="dshMarketBusy" @click="dshMarketPlan = null">取消</button>
+            </div>
           </div>
         </template>
 
@@ -7280,6 +8611,114 @@ onUnmounted(() => {
       </template>
 
       </template>
+      </template>
+    </section>
+    <!-- [dsh] 全量导出：把整个 $DSH_HOME 压成一个 zip 交给用户，用于「换台机器接着用 / 存档」。
+         与上面「dsh 插件开关」里的**快照**卡是两件事：那张卡白名单备 3 个文件、为了回滚 patch，
+         这张卡全量、为了搬运。所以不复用那张卡，也不共用回执。 -->
+    <section v-if="activeTab === 'dev'" class="card dsh-card">
+      <div class="card-head">
+        <h2 class="card-toggle" @click="toggleDevCard('dshExport')">
+          <span class="caret">{{ devFolds.dshExport ? '▾' : '▸' }}</span>dsh 全量导出
+          <!-- 收起态摘要：只在「本会话已展开读过」后才显示，否则不预读、直接提示点开 -->
+          <span v-if="!devFolds.dshExport" class="card-sum">
+            <template v-if="dshExportSummary">{{ dshExportSummary }}</template>
+            <template v-else>点击展开查看</template>
+          </span>
+        </h2>
+      </div>
+      <template v-if="devFolds.dshExport">
+        <p class="hint">
+          把整个 <code>$DSH_HOME</code> 打包成一个 <code>.zip</code>（含 <code>profiles/</code> 下的
+          patch、插件、会话记录），用于<strong>换台机器接着用</strong>或长期存档。
+          包内会附一份 <code>whale-dsh-export.json</code> 清单，写明导出时间、来源目录与跳过了什么。
+        </p>
+        <p class="hint">
+          与上面「dsh 插件开关」里的<strong>快照</strong>不是一回事：快照只备 3 个文件、由挂件管、
+          用来把 patch 还原回去；这里是全量搬运，<strong>挂件不解析包内容、也不负责还原</strong>。
+        </p>
+
+        <p v-if="dshExportInfo && !dshExportInfo.ok" class="hint">
+          {{ dshExportInfo.error || '读取失败，请稍后重试。' }}
+        </p>
+
+        <template v-else-if="dshExportInfo">
+          <label class="field row">
+            <span class="label">来源目录</span>
+            <span class="ver" :title="dshExportInfo.dshHome">{{ dshExportInfo.dshHome }}</span>
+          </label>
+          <label class="field row">
+            <span class="label">预计导出</span>
+            <span class="ver">
+              {{ dshExportInfo.entries || 0 }} 个文件 / {{ dshExportSize(dshExportInfo.bytes || 0) }}
+              <template v-if="dshExportInfo.excluded">（另有 {{ dshExportInfo.excluded }} 项不进包）</template>
+            </span>
+          </label>
+
+          <!-- dsh 运行中提示：会话文件是追加写的，边跑边导可能拿到半条记录。
+               放在「预计导出」正下方 —— 用户看完条目数就会往下扫，这里是必读位置。
+               三种状态分开说：在跑（黄）/ 端口被别的程序占（灰，性质不同）/ 判不出来（灰） -->
+          <p v-if="dshExportInfo.running && dshExportInfo.running.running" class="hint hint-warn">
+            ⚠️ 检测到 dsh <strong>正在运行</strong><template v-if="dshExportInfo.running.pid">（pid {{ dshExportInfo.running.pid }}）</template>。
+            建议先退出 dsh 再导出：会话记录是<strong>边写边存</strong>的，运行中导出可能取到写了一半的记录，
+            配置也可能正处在修改中间态。<strong>不退出也能导，但包不保证是某一时刻的完整快照。</strong>
+          </p>
+          <p v-else-if="dshExportInfo.running && dshExportInfo.running.other" class="hint">
+            端口 {{ dshExportInfo.running.other }} 被其他程序占用（不是 dsh，不影响导出）。
+          </p>
+          <!-- running 为 null = 探测没拿到结果。不谎报「没在跑」，明说判不出来 -->
+          <p v-else-if="dshExportInfo.running === null" class="hint">
+            未能确认 dsh 是否在运行。若你正开着 dsh，建议先退出再导出。
+          </p>
+
+          <label class="field row">
+            <span class="label">包含凭据</span>
+            <input type="checkbox" :checked="cfg.dshExportCred" @change="dshExportSetCred(($event.target as HTMLInputElement).checked)" />
+            <span class="hint">
+              默认不带。<code>.credentials.yaml</code> 等在包里是<strong>明文</strong> ——
+              要迁移登录态才勾，勾了别把包拷给别人或传网盘。
+            </span>
+          </label>
+          <label class="field row">
+            <span class="label">跳过依赖</span>
+            <input type="checkbox" :checked="cfg.dshExportNoMod" @change="dshExportSetNoMod(($event.target as HTMLInputElement).checked)" />
+            <span class="hint">
+              默认跳过 <code>node_modules</code>（可重装、体积是配置的几十倍）。
+              取消勾选会显著增大包体积与耗时。
+            </span>
+          </label>
+
+          <!-- 未勾凭据但目录里确实有凭据文件时给出具体名字，
+               泛泛说「会排除凭据」用户不知道指的是哪个文件 -->
+          <p v-if="!cfg.dshExportCred && dshExportInfo.credFiles?.length" class="hint">
+            将排除 {{ dshExportInfo.credFiles.length }} 个凭据文件：
+            <code>{{ dshExportInfo.credFiles.slice(0, 3).join('、') }}</code>
+            <template v-if="dshExportInfo.credFiles.length > 3">等</template>
+          </p>
+
+          <p v-if="dshExportInfo.truncated" class="hint">
+            ⚠️ 文件数超过上限（{{ dshExportInfo.maxEntries }}），<strong>导出会被拒绝</strong>。
+            请先清理 <code>$DSH_HOME</code> 下的会话记录再试。
+          </p>
+
+          <div class="btn-row">
+            <button
+              class="utils-btn utils-primary"
+              :disabled="dshExportBusy || !dshExportInfo.entries || dshExportInfo.truncated"
+              @click="dshExportCreate()"
+            >{{ dshExportBusy ? '导出中…' : '导出为 zip…' }}</button>
+            <button class="secondary utils-btn utils-secondary" :disabled="dshExportBusy" @click="dshExportRefresh()">重新统计</button>
+          </div>
+
+          <p v-if="dshExportFlash.msg" class="msg" :class="msgCls(dshExportFlash)">{{ dshExportFlash.msg }}</p>
+          <!-- 导出成功才给「打开所在文件夹」：路径只在本次导出后有效，
+               刷新/重进页面就该消失，避免指向一个早被移走的文件 -->
+          <div v-if="dshExportLastPath" class="fold">
+            <button class="link-btn utils-btn utils-secondary" :title="dshExportLastPath" @click="dshExportReveal()">
+              打开所在文件夹
+            </button>
+          </div>
+        </template>
       </template>
     </section>
     <!-- [dsh] Codex 本地会话统计：读 ~/.codex/sessions 的 rollout JSONL，纯本地、不联网。
@@ -7318,19 +8757,41 @@ onUnmounted(() => {
           <span class="label">会话文件</span>
           <span class="ver">{{ codex.sessions }} 个</span>
         </label>
-        <label class="field row">
-          <span class="label">今日</span>
-          <span class="ver"><strong>{{ fmtTokens(codex.todayTokens) }}</strong> tokens · {{ codex.turns || 0 }} 轮</span>
-        </label>
-        <label class="field row">
-          <span class="label">本月</span>
-          <span class="ver">{{ fmtTokens(codex.monthTokens) }} tokens</span>
-        </label>
-        <label class="field row">
-          <span class="label">累计</span>
-          <span class="ver">{{ fmtTokens(codex.totalTokens) }} tokens（输出 {{ fmtTokens(codex.outTokens) }} · 推理 {{ fmtTokens(codex.reasonTokens) }} · 缓存命中 {{ fmtTokens(codex.cachedTokens) }}）</span>
-        </label>
-        <!-- 订阅窗口：只有日志里带 rate_limits（ChatGPT 订阅）时才有内容，没有就整行不渲染 -->
+
+        <!-- 与 dsh 用量卡保持同一套指标格：原先「今日」「累计」各占一行、数值与单位混排，
+             「累计」的括号里还塞了三个分项、长度逼近两行。改成等宽格后横向可比，
+             分项另起一行小格（见下方 .stat-break）。
+             Codex 无金额口径（showCost=false），故 .stat-sub 不放成本：
+             今日那格改放轮次，其余留空不渲染（空 span 会让该格多占一行高度）。 -->
+        <div class="stat-grid">
+          <div class="stat-cell" title="今日消耗的 token 数（含输出 / 推理 / 缓存命中）">
+            <span class="stat-num">{{ fmtTokens(codex.todayTokens) }}</span>
+            <span class="stat-label">今日</span>
+            <span class="stat-sub">{{ codex.turns || 0 }} 轮</span>
+          </div>
+          <div class="stat-cell" title="本月消耗的 token 数">
+            <span class="stat-num">{{ fmtTokens(codex.monthTokens) }}</span>
+            <span class="stat-label">本月</span>
+          </div>
+          <div class="stat-cell" title="有记录以来的累计 token 数">
+            <span class="stat-num">{{ fmtTokens(codex.totalTokens) }}</span>
+            <span class="stat-label">累计</span>
+          </div>
+          <div class="stat-cell" title="会话文件个数（~/.codex/sessions 下的 rollout-*.jsonl）">
+            <span class="stat-num">{{ codex.sessions || 0 }}</span>
+            <span class="stat-label">会话</span>
+          </div>
+        </div>
+
+        <!-- 累计的 token 构成：三项本来塞在「累计」那一行的括号里，与总数混排 -->
+        <div class="stat-break">
+          <span class="stat-chip"><em>输出</em>{{ fmtTokens(codex.outTokens) }}</span>
+          <span class="stat-chip"><em>推理</em>{{ fmtTokens(codex.reasonTokens) }}</span>
+          <span class="stat-chip"><em>缓存命中</em>{{ fmtTokens(codex.cachedTokens) }}</span>
+        </div>
+
+        <!-- 订阅窗口：只有日志里带 rate_limits（ChatGPT 订阅）时才有内容，没有就整行不渲染。
+             是相对倒计时的整句文本，与上面的短数值不同形，仍留 .field row。 -->
         <label v-if="codexWindowsText" class="field row">
           <span class="label">订阅窗口</span>
           <span class="ver">{{ codexWindowsText }}</span>
@@ -8064,6 +9525,24 @@ select:focus,
   background: rgba(127, 127, 127, 0.16);
   border: 1px solid rgba(127, 127, 127, 0.28);
 }
+/* DSH 宿主兼容性三态：兼容=蓝、不兼容=红、未知=灰。
+   配色沿用既有语义变量（--err）—— 项目里没有 --danger，别再写不存在的变量名。
+   ⚠️ 未知**不能**用红色：它只表示「没查到 / 没声明」，不是「不兼容」的证据 */
+.tag-compat {
+  color: #2f7bd0;
+  background: rgba(74, 144, 217, 0.14);
+  border: 1px solid rgba(74, 144, 217, 0.35);
+}
+.tag-incompat {
+  color: var(--err);
+  background: rgba(214, 76, 76, 0.12);
+  border: 1px solid var(--err);
+}
+.tag-unknown {
+  color: var(--fg-dim);
+  background: rgba(127, 127, 127, 0.12);
+  border: 1px solid rgba(127, 127, 127, 0.28);
+}
 /* 状态未知：用警示色而不是「启用中」的蓝 —— 宿主没读到 dump 状态时，
    把它画成启用中就是在替一条未知状态背书的谎报 */
 .state-unknown {
@@ -8129,11 +9608,15 @@ select:focus,
 .iso-axis {
   display: flex;
   align-items: center;
+  /* 分类 chip 有 24 类，必须能换行 —— 单行会把后面的 chip 挤出可视区（且没有横向滚动条，
+     等于直接消失）。旧版「范围 / 排序」各只有 3-4 颗按钮，换行不影响它们 */
+  flex-wrap: wrap;
   gap: 8px;
   margin-bottom: 8px;
   font-size: 12px;
   color: var(--fg-dim);
 }
+/* 标签在换行后不该独自占一行，所以不让它收缩 */
 .iso-axis-label {
   flex: none;
 }
@@ -8148,6 +9631,29 @@ select:focus,
 }
 .iso-axis-btn:hover {
   color: var(--fg);
+}
+/* 计数为 0 的分类：点进去只会看到空列表，所以置灰且不可点。
+   ⚠️ :hover 要一起掐掉，否则灰着的按钮仍会变亮，看着像能点。
+   用 :not([disabled]) 限定，避免选中态（不会 disabled）也被这股力量压住 */
+.iso-axis-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.iso-axis-btn:disabled:hover {
+  color: var(--fg-dim);
+}
+/* 分类折叠开关：虚线边框与实心的分类 chip 区分开 —— 它是个动作，不是一个分类。
+   ⚠️ 万一将来某个分类真叫「收起 / 展开」，虚线也能把两者分清 */
+.iso-cat-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  border-style: dashed;
+}
+/* ▴/▾ 用等宽（同 fold 系列的 caret 处理）：两个字形宽度不同，切换时整行会抖 */
+.iso-cat-caret {
+  width: 1em;
+  text-align: center;
 }
 /* 「全选 / 只选启用中的」这一行：复用 .iso-axis 的横向排列，但去掉它的下边距 ——
    那 8px 是给「分组轴 → 候选列表」留的，这两颗按钮下面紧跟的是超限警告，
@@ -8201,6 +9707,15 @@ select:focus,
   color: var(--accent);
   border: 1px solid var(--accent);
 }
+/* 损坏标记用告警色而不是强调色：它和「已知良好」是完全相反的两件事，同色会被一眼看混 */
+.bak-damaged-tag {
+  flex: none;
+  padding: 0 5px;
+  border-radius: 4px;
+  font-size: 11px;
+  color: var(--err);
+  border: 1px solid var(--err);
+}
 .bak-name {
   flex: none;
   max-width: 220px;
@@ -8251,6 +9766,15 @@ select:focus,
   font-size: 12px;
   color: var(--fg-dim);
 }
+/* 快照卡的回执：`.msg` 默认 margin-top: 10px，挨着列表时要收一点，
+   并加背景块把它从「跟下面的条目长得一样」里拎出来 —— 这是结果，不是可点的行 */
+.bak-flash {
+  margin: 8px 0 0;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--card-border);
+  background: rgba(127, 127, 127, 0.08);
+}
 /* ===== dsh 插件市场（.mkt-*）=====
    列表可能一次渲染 80 条（见 App.vue 的 DSH_MARKET_PAGE），条目因此压到两行：
    head（名称 + 状态徽章 + 附加说明）与 foot（分类 + 包名 + 操作），描述单独一行。
@@ -8282,18 +9806,37 @@ select:focus,
 .mkt-scroll {
   scrollbar-gutter: stable;
 }
-/* 列表末尾的「再加载」条：占满整行、虚线框，读起来像「续页尾巴」而不是一个普通按钮。
-   宽度 100% + box-sizing 必须显式写 —— .utils-btn 基类带 padding，
-   默认 content-box 下会溢出滚动区、又催生一条横向滚动条。 */
-.mkt-more {
-  display: block;
-  width: 100%;
-  box-sizing: border-box;
-  margin-top: 8px;
-  border-style: dashed;
+/* 列表末尾的「再加载」条已改为页码分页（见 .mkt-pager）。这里保留 .iso-axis 的换行能力 */
+/* 页码分页条：放在滚动区外，横向排列、居中。
+   24 类分类 chip 行会很长，所以这行必须能换行 —— 否则窄窗口下「下一页」被挤出可视区 */
+.mkt-pager {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+}
+.mkt-page-btn {
+  min-width: 30px;
+  padding: 2px 8px;
   text-align: center;
 }
-/* 列表外的截断提示：右侧对齐、字号压小，只作补充不作正文 */
+/* 当前页：用主色描边 + 加粗，而不是实心填充 —— 实心块在深色主题下过重，
+   与周围一圈淡边框按钮不成比例 */
+.mkt-page-on {
+  border-color: var(--accent, #4a90d9);
+  color: var(--accent, #4a90d9);
+  font-weight: 600;
+}
+/* 省略号占位：与页码等宽对齐，且不可点（不是按钮，没有 hover） */
+.mkt-page-gap {
+  min-width: 18px;
+  text-align: center;
+  color: var(--fg-dim);
+  font-size: 12px;
+  user-select: none;
+}
+/* 列表外的分页计数：右侧对齐、字号压小，只作补充不作正文 */
 .mkt-rest {
   margin-top: 6px;
   text-align: right;
@@ -8302,6 +9845,123 @@ select:focus,
 /* ── 安装/卸载进行中的进度区 ──
    目的只有一个：让「要等几分钟」这件事可见。所以不追求好看，追求**一眼看出在动**：
    转圈 + 秒表 + 实时输出尾部。 */
+/* ── 待确认单据（安装 / 禁用 / 彻底删除） ──
+   骨架用「左边一条竖向色带 + 淡背景」把这块从卡片里拎出来，表示「这是待你点头才动的事」，
+   比原先两行 hint 更像一张单据。色带随动作变（默认主色、彻底删除走 --err），
+   靠模板上的 `:class="msgCls({ err: ... })"` 拿到 `.err` 类，与 `.msg.err` 同一套变量。 */
+.mkt-plan {
+  position: relative;
+  margin: 10px 0 0;
+  padding: 10px 12px 10px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--card-border);
+  background: rgba(127, 127, 127, 0.07);
+  overflow: hidden;
+}
+.mkt-plan::before {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: var(--accent, currentColor);
+  opacity: 0.7;
+}
+.mkt-plan.err::before {
+  background: var(--err);
+  opacity: 0.9;
+}
+/* 头行：动作徽标 + 包名。徽标是「动词」，包名是「宾语」，两者并排让人一秒看懂要干什么 */
+.mkt-plan-head {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.mkt-plan-badge {
+  flex: 0 0 auto;
+  padding: 1px 7px;
+  border-radius: 999px;
+  background: rgba(127, 127, 127, 0.2);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+}
+.mkt-plan.err .mkt-plan-badge {
+  background: rgba(220, 80, 80, 0.18);
+  color: var(--err);
+}
+/* ⚠️ 包名用等宽：`dshmarket` / `@linxin666/dsh-web-all` 这类串里，等宽字体才分得清
+   `-` 与 `_`、`/` 与 `\`，比例字体下极易看错 */
+.mkt-plan-name {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  word-break: break-all;
+}
+.mkt-plan-sub {
+  margin: 4px 0 0;
+  font-size: 12px;
+  opacity: 0.8;
+}
+.mkt-plan-note {
+  opacity: 0.7;
+}
+/* 从哪一版到哪一版：用户点「装这一版」时最关心的一条，故加粗 + 稍大 */
+.mkt-plan-sub b {
+  font-size: 13px;
+}
+.mkt-plan-arrow {
+  margin: 0 2px;
+  opacity: 0.6;
+}
+/* 宿主给的 message：动词落在等宽字体上（命令原文就是命令原文），但正文保持比例字体，
+   否则一整段中文说明用等宽看着很累 */
+.mkt-plan-msg {
+  margin: 6px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
+  /* ⚠️ 保留换行：message 里 `\n⚠️ 该来源靠 prepare 脚本构建…` 是独立一段，
+     与主句挤在一条线上会被读丢 */
+  white-space: pre-line;
+}
+/* ── 宿主不兼容警示条（单据卡里） ──
+   ⚠️ 用独立的告警配色而不是复用 `.err` 红：这张单子里「不兼容」**不阻止**用户继续
+   （下面有「仍要强制安装」），标成与「彻底删除」同款的红会让整件事看起来像已被否决。
+   琥珀色表达的是「风险已知、你仍可继续」—— 与这条链路真正的语义对齐。 */
+.mkt-plan-warn {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(214, 158, 46, 0.45);
+  background: rgba(214, 158, 46, 0.1);
+}
+.mkt-plan-warn-head {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+}
+.mkt-plan-warn-body {
+  margin: 4px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
+  opacity: 0.85;
+}
+/* 「会改什么」清单：用户真正在权衡的是这个，故不用 hint 敷衍，给足行距 */
+.mkt-plan-effects {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  font-size: 12px;
+  line-height: 1.7;
+  opacity: 0.78;
+}
+.mkt-plan-effects code {
+  font-size: 11px;
+}
+/* 动作行贴在单据底部，与上面的说明拉开一拍 */
+.mkt-plan-actions {
+  margin-top: 10px;
+}
+
 .mkt-progress {
   margin-top: 8px;
   padding: 8px 10px;
@@ -8339,6 +9999,22 @@ select:focus,
   margin: 4px 0 0;
   overflow-x: auto;
   white-space: nowrap;
+}
+/* 「执行的命令」「实时输出」这两个小节标签：次要色 + 稍小字号，用来把标签与内容分开。
+   ⚠️ 用块级 margin 而不是紧跟冒号，是为让 `<code>` / `<pre>` 各自成行（长命令换行时不挤在一起） */
+.mkt-progress-k {
+  display: block;
+  margin: 8px 0 0;
+  font-size: 11px;
+  font-weight: 600;
+  opacity: 0.65;
+}
+/* 空态日志：与 `.mkt-progress-log` 同一块骨架，但内容是说明文字而非命令输出，
+   故去掉等宽字体（中文说明用等宽很难看），并去掉背景让它更像提示而不是输出 */
+.mkt-progress-log-empty {
+  font-family: inherit;
+  background: transparent;
+  border: 1px dashed rgba(127, 127, 127, 0.35);
 }
 /* 实时输出尾部：等宽 + 限高 + 内部滚动。
    ⚠️ `overscroll-behavior: contain` 防止滚到底后把滚动传给外层页面 */
@@ -8435,6 +10111,68 @@ select:focus,
   color: var(--fg);
   opacity: 0.75;
   white-space: nowrap;
+}
+/* ── 回源查「官方最新版」：卡片顶部一行（按钮 + 范围说明 + 汇总）──
+   与卡片内其它「辅助动作」（刷新目录 / 测速）同一视觉层级，不抢主按钮的注意力 */
+.mkt-latest-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 8px 0 6px;
+}
+.mkt-latest-scope {
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+/* 汇总结论：本次查到几个滞后。⚠️ 有滞后时用橙黄**加粗**——它是要被看见的警告，
+   不是背景信息（与 .mkt-latest-row 的配色同源，见下） */
+.mkt-latest-sum {
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+/* 滞后清单：只列「官方版本 > 目录版本」的条目，每行带「装这一版」。
+   整块用橙黄浅底 + 左边框，与普通条目拉开 —— 这是本次查询的**结论区**，
+   混在列表里会被当成又一个普通条目 */
+.mkt-latest-list {
+  margin: 0 0 8px;
+  padding: 6px 8px;
+  border-left: 3px solid rgba(184, 134, 11, 0.55);
+  border-radius: 4px;
+  background: rgba(184, 134, 11, 0.10);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.mkt-latest-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.mkt-latest-name {
+  flex: none;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 12px;
+  color: var(--fg);
+  font-weight: 500;
+}
+.mkt-latest-ver {
+  flex: none;
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 11px;
+  color: #b8860b;
+}
+.mkt-latest-ver b {
+  font-weight: 600;
+}
+/* 非 npm 来源条目（如 `dsh-web#packages/...`）的替位说明：这类条目查得出官方版本，
+   却无法按 `包名@版本` 精确安装，故不给按钮、只留一句为什么。
+   压暗 + 常规字重，避免被误当成可点的按钮 */
+.mkt-latest-note {
+  flex: none;
+  font-size: 11px;
+  color: var(--fg-dim);
 }
 /* 把右侧的操作按钮组推到行尾（对应 .mkt-foot 里 <span class="mkt-spacer">）。
    .btn-row button 的 flex: 1 不适用于这里 —— .mkt-foot 不是 .btn-row。 */
@@ -8742,6 +10480,11 @@ input[type='checkbox'] {
   font-size: 12px;
   color: var(--fg-faint);
   line-height: 1.6;
+}
+/* 需要用户动手的提示（如「dsh 正在运行」）：只用颜色提级，不换图标不换字号 ——
+   这类提示是「建议」不是「错误」，做成红色警告框会与真失败（.msg.err）混淆 */
+.hint-warn {
+  color: var(--warn);
 }
 /* 本月汇总：紧跟在图表下面，数字提亮一档便于扫读 */
 .month-sum {

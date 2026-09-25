@@ -5,7 +5,8 @@
  *   · 归一（normPlugin / normCatalog）—— 目录是唯一数据源，字段漏了会静默少条目
  *   · 安装 spec（parseInstallSpec / specKindOf / specNeedsBuild）—— install 字段才是权威安装命令，
  *     目录里 48.6% 的条目 npm 为 null 但 install 是 github:/tarball，按 npm 判可用会砍掉近半目录
- *   · 筛选排序（filterPlugins / matchKeyword）—— 先筛后排，且读不到已装状态时不冒充未安装
+ *   · 筛选排序（filterPlugins / matchKeyword）—— 先筛后排、读不到已装状态时不冒充未安装；
+ *     关键词空格分词（与关系）与 `-词` 排除；排序方向 desc 不传走各轴默认（SORTS_DESC）
  *   · 已装映射（installedMap / matchInstalled / matchInstalledBySpec）—— 完整名优先、短名兜底、
  *     spec 反查（github/tarball 装完的键名由 npm 归一，对不上 npm 字段），判法与宿主/界面必须一致
  *   · 来源链（buildSources / loadCatalog）—— 自定义最优先、镜像可关、逐源重试、全挂才 ok:false
@@ -19,11 +20,12 @@ import zlib from 'node:zlib'
 import dshMarket from '../public/preload/lib/dsh-market.js'
 
 const {
-  normPlugin, normCatalog, filterPlugins, matchKeyword,
+  normPlugin, normCatalog, filterPlugins, matchKeyword, SORTS_DESC,
   installedMap, matchInstalled, matchInstalledBySpec, matchDepByNpm, buildSources, loadCatalog,
   parseInstallSpec, specKindOf, specNeedsBuild,
   realizedVersionBySpec,
-  parseVer, cmpVer, rangeAllows, updateState,
+  parseVer, cmpVer, rangeAllows, lowerBoundOf, updateState,
+  registryLatest,
   clearCache, OFFICIAL_URL, MIRROR_PKG, MIRROR_REGISTRY,
 } = dshMarket
 
@@ -61,12 +63,15 @@ function catalogJson(plugins, extras) {
 // over = { ok, status, statusText, headers }，会盖掉默认值
 function res(body, over) {
   const o = over || {}
+  const text = String(body == null ? '' : body)
   return Object.assign({
     ok: true,
     status: 200,
     statusText: '',
-    text: async () => String(body == null ? '' : body),
-    arrayBuffer: async () => Buffer.from(String(body == null ? '' : body), 'utf8'),
+    text: async () => text,
+    // registryLatest 走 res.json()（目录链路走 res.text()），两者都要有
+    json: async () => JSON.parse(text),
+    arrayBuffer: async () => Buffer.from(text, 'utf8'),
     headers: Object.assign({ get: () => '' }, o.headers || {}),
   }, o.ok === undefined ? {} : { ok: o.ok }, o.status === undefined ? {} : { status: o.status },
   o.statusText === undefined ? {} : { statusText: o.statusText })
@@ -204,13 +209,50 @@ test('matchInstalledBySpec：裸包名走完整名，且大小写不敏感、返
 // 而本机实测 9 条依赖里 8 条的实装版本恰好都等于范围下界，这类升级是真实的、不该漏报。
 
 test('parseVer：容忍 v 前缀 / = / 前后空白，缺位的段补 0', () => {
-  assert.deepEqual(parseVer('1.2.3'), [1, 2, 3])
-  assert.deepEqual(parseVer('v0.5.11'), [0, 5, 11])
-  assert.deepEqual(parseVer('= 1.2'), [1, 2, 0])
-  assert.deepEqual(parseVer('1'), [1, 0, 0])
+  // ⚠️ 返回的是**四元组** [major, minor, patch, prerelease[]]，第四位是数组
+  //    （2026-09-24 为 DSH 宿主兼容性检测补的 prerelease 支持）
+  assert.deepEqual(parseVer('1.2.3'), [1, 2, 3, []])
+  assert.deepEqual(parseVer('v0.5.11'), [0, 5, 11, []])
+  assert.deepEqual(parseVer('= 1.2'), [1, 2, 0, []])
+  assert.deepEqual(parseVer('1'), [1, 0, 0, []])
   assert.equal(parseVer('latest'), null)
   assert.equal(parseVer(''), null)
   assert.equal(parseVer(null), null)
+})
+
+test('parseVer：带 prerelease 的版本号不再把后缀丢掉（丢掉会让 rc.1 与正式版判相等）', () => {
+  assert.deepEqual(parseVer('0.1.7-rc.1'), [0, 1, 7, ['rc', '1']])
+  assert.deepEqual(parseVer('1.0.0-alpha.beta'), [1, 0, 0, ['alpha', 'beta']])
+  assert.deepEqual(parseVer('v2.0.0-rc.10'), [2, 0, 0, ['rc', '10']])
+  // build metadata 按 semver 规定不参与比较，整体丢弃
+  assert.deepEqual(parseVer('1.2.3+build.9'), [1, 2, 3, []])
+  assert.deepEqual(parseVer('1.2.3-rc.1+build.9'), [1, 2, 3, ['rc', '1']])
+})
+
+test('cmpVer：prerelease —— 正式版更大，rc.10 > rc.9（字符串比会判反）', () => {
+  assert.equal(cmpVer('1.0.0', '1.0.0-rc.1'), 1)
+  assert.equal(cmpVer('1.0.0-rc.1', '1.0.0'), -1)
+  // ⚠️ 这条是「必须按数值而非字符串比」的钉子：'rc.10' < 'rc.9' 是字符串的结论
+  assert.equal(cmpVer('0.1.7-rc.10', '0.1.7-rc.9'), 1)
+  assert.equal(cmpVer('0.1.7-rc.1', '0.1.7-rc.2'), -1)
+  assert.equal(cmpVer('0.1.7-rc.1', '0.1.7-rc.1'), 0)
+  // 数字段 < 字母段（semver §11.4）
+  assert.equal(cmpVer('1.0.0-1', '1.0.0-alpha'), -1)
+  // 前缀短的更小
+  assert.equal(cmpVer('1.0.0-rc', '1.0.0-rc.1'), -1)
+  // 主版本不同时 prerelease 不参与（数字段优先）
+  assert.equal(cmpVer('0.1.8-rc.1', '0.1.7'), 1)
+})
+
+test('rangeAllows：caret 下界带 prerelease 时不能拼出 parseVer 认不出的垃圾', () => {
+  // ⚠️ 回归：lo 是四元组，`lo.join('.')` 会把 ['rc','1'] 拼成 `0.1.7.rc,1`
+  //    → cmpVer 返 0 → 下界判定静默失效（低于下界的也会被放行）
+  assert.equal(rangeAllows('^0.1.7-rc.1', '0.1.7-rc.1'), true)
+  assert.equal(rangeAllows('^0.1.7-rc.1', '0.1.7-rc.2'), true)
+  assert.equal(rangeAllows('^0.1.7-rc.1', '0.1.7'), true)
+  // 低于下界必须判 false —— 这正是 join 脏串会漏掉的那条
+  assert.equal(rangeAllows('^0.1.7-rc.1', '0.1.6'), false)
+  assert.equal(rangeAllows('~0.1.7-rc.1', '0.1.6'), false)
 })
 
 test('cmpVer：逐段比大小，右边多处算大；无法解析时返 0（不冒充「有新」）', () => {
@@ -268,6 +310,19 @@ test('rangeAllows：认不出的形态一律判「在范围内」（保守，宁
   assert.equal(rangeAllows('npm:other@^1.0.0', '9.9.9'), true)
 })
 
+test('lowerBoundOf：取范围下界，用于「目录版本 vs 声明下界」判方向', () => {
+  // caret / tilde / >= / 裸版本都要给出可比的裸版本号
+  assert.equal(lowerBoundOf('^0.5.11'), '0.5.11')
+  assert.equal(lowerBoundOf('~1.2.3'), '1.2.3')
+  assert.equal(lowerBoundOf('>=1.2.0'), '1.2.0')
+  assert.equal(lowerBoundOf('1.2.3'), '1.2.3')
+  // 通配 / 空 / 认不出的形态没有下界，返回空串（调用方据此退回 unknown）
+  assert.equal(lowerBoundOf(''), '')
+  assert.equal(lowerBoundOf('*'), '')
+  assert.equal(lowerBoundOf('latest'), '')
+  assert.equal(lowerBoundOf('workspace:*'), '')
+})
+
 test('updateState：实装版本低于目录版本 → update（主路径，比实装版本）', () => {
   // 本机实测形态：声明 `^0.5.11`、实装 `0.5.11`，目录出 `0.5.13`
   // —— 按老口径「目录版本落在 ^0.5.11 范围内」会判成 current（漏报），
@@ -294,16 +349,52 @@ test('updateState：实装版本高于目录版本 → current（目录反而旧
 
 test('updateState：拿不到实装版本 → 退回声明范围判定（basis=range）', () => {
   // node_modules 里读不到（包在 profile/package.json 里但没落盘）时不能瞎猜，
-  // 退回旧的保守口径：目录版本超出范围才算更新
+  // 退回「目录版本 vs 声明范围下界」判方向
   const a = updateState('^0.5.11', '0.6.0', '')
   assert.equal(a.state, 'update')
   assert.equal(a.basis, 'range')
   assert.equal(a.installed, '')
   assert.equal(a.range, '^0.5.11')
-  // 落在范围内 → current（这一档就是老口径的保守代价：同 minor 内小版本不报）
+  // 目录版本高于下界 0.5.11 → 是真升级。口径 2026-09-24 修正：旧实现拿
+  // rangeAllows 判「是否超出范围」，会把 `^` 范围内的正常小版本升级判成 current（漏报）
   const b = updateState('^0.5.11', '0.5.13', '')
-  assert.equal(b.state, 'current')
+  assert.equal(b.state, 'update')
   assert.equal(b.basis, 'range')
+  // 目录版本 == 下界 → 不比已装的新，不是更新
+  assert.equal(updateState('^0.5.11', '0.5.11', '').state, 'current')
+})
+
+test('updateState：退回范围判定时，目录版本低于下界不能报 update（真实降级误报）', () => {
+  // 用户真实事故（2026-09-24）：dshmarket 实装 1.62.0、声明 `^1.62.0`，
+  // 而目录快照滞留在 1.61.0。旧实现用 rangeAllows('^1.62.0','1.61.0') 判「超出范围」
+  // → 返 false → 报 update，界面显示「v1.62.0 → v1.61.0」并给出「更新」按钮，
+  // 点下去会把用户**降级**到 1.61.0。方向完全判反。
+  const s = updateState('^1.62.0', '1.61.0', '')
+  assert.equal(s.state, 'current')
+  assert.equal(s.basis, 'range')
+  assert.equal(s.latest, '1.61.0')
+  // 跨大版本回落同样不能报更新
+  assert.equal(updateState('^1.62.0', '0.9.0', '').state, 'current')
+  // 裸版本声明：目录比它旧 → current
+  assert.equal(updateState('1.62.0', '1.61.0', '').state, 'current')
+})
+
+test('updateState：退回范围判定时，目录版本高于下界即报 update（含 ^ 范围内的小版本）', () => {
+  // 与上一条配对：下界 1.62.0，目录 1.63.0 虽仍在 `^1.62.0` 范围内，
+  // 也高于用户装到的 1.62.0，应报 update（旧实现会漏报）
+  assert.equal(updateState('^1.62.0', '1.63.0', '').state, 'update')
+  assert.equal(updateState('^1.62.0', '1.65.1', '').state, 'update')
+  // tilde / >= / 裸版本三种形态一致
+  assert.equal(updateState('~1.2.3', '1.2.9', '').state, 'update')
+  assert.equal(updateState('>=1.2.3', '1.3.0', '').state, 'update')
+  assert.equal(updateState('1.2.3', '1.2.4', '').state, 'update')
+})
+
+test('updateState：prerelease 声明退回范围判定时按 semver 比方向', () => {
+  // dsh 生态大量 `0.1.7-rc.1` 形态；rc.2 应被认成比 rc.1 新
+  assert.equal(updateState('^0.1.7-rc.1', '0.1.7-rc.2', '').state, 'update')
+  assert.equal(updateState('^0.1.7-rc.1', '0.1.7-rc.1', '').state, 'current')
+  assert.equal(updateState('^0.1.7-rc.1', '0.1.6', '').state, 'current')
 })
 
 test('updateState：目录没给 version → unknown（不冒充结论）', () => {
@@ -315,14 +406,19 @@ test('updateState：目录没给 version → unknown（不冒充结论）', () =
   assert.equal(updateState('^1.0.0', 'latest', '1.0.0').basis, 'none')
 })
 
-test('updateState：已装侧两边都拿不到 → unknown；只有范围 → 按范围判（保守不报）', () => {
+test('updateState：已装侧两边都拿不到 → unknown；只有范围 → 按下界判方向', () => {
   assert.equal(updateState('', '1.0.0', '').state, 'unknown')
   assert.equal(updateState(null, '1.0.0', '').state, 'unknown')
   // ⚠️ 已装侧是**声明范围**，不是裸版本号 —— caret 必须能正常比出 update，
   //    否则本机实测那批 `^0.5.11` 的包会全掉进 unknown，功能等于没做
   assert.equal(updateState('^0.5.11', '0.6.0', '').state, 'update')
-  assert.equal(updateState('^0.5.11', '0.5.13', '').state, 'current')
-  // 认不出的范围（workspace:* 之类）落到 current，不报更新
+  // ⚠️ `0.5.13` 虽落在 `^0.5.11` 范围内，但比下界 `0.5.11` 新 —— 必须报 update。
+  //    不能拿 rangeAllows 判（它会因「落在范围内」返 true 而判成 current），
+  //    那正是旧口径的漏报：同 minor 内的小版本升级真实存在，算「有新版」。
+  assert.equal(updateState('^0.5.11', '0.5.13', '').state, 'update')
+  // ⚠️ 反向：目录版本 == 下界（快照不比当初装到的新）→ current，不能报
+  assert.equal(updateState('^0.5.11', '0.5.11', '').state, 'current')
+  // 认不出的范围（workspace:* 之类）取不到下界，退回 rangeAllows 落到 current，不报更新
   assert.equal(updateState('workspace:*', '9.9.9', '').state, 'current')
 })
 
@@ -457,6 +553,26 @@ test('matchKeyword：命中 name / owner / 双语描述，且大小写不敏感'
   assert.equal(matchKeyword(p, '   '), true)
 })
 
+test('matchKeyword：空格分词是与关系（每段都要命中，且可跨字段）', () => {
+  // name=dsh-demo / owner=someone / descZh=示例插件 / descEn=Demo plugin
+  const p = normPlugin(raw())
+  assert.equal(matchKeyword(p, 'demo plugin'), true)   // name + descEn，跨字段
+  assert.equal(matchKeyword(p, 'someone 示例'), true)   // owner + descZh
+  assert.equal(matchKeyword(p, 'demo zzz'), false)     // 第二段没命中 → 整条落选
+  assert.equal(matchKeyword(p, '  demo   plugin  '), true) // 连续空格 / 首尾空格不产生空段
+})
+
+test('matchKeyword：`-词` 排除，且只有排除词时视为「全目录减去命中的」', () => {
+  const p = normPlugin(raw())
+  assert.equal(matchKeyword(p, 'demo -zzz'), true)      // 排除词没命中 → 保留
+  assert.equal(matchKeyword(p, 'demo -plugin'), false)  // 排除词命中 descEn → 剔除
+  assert.equal(matchKeyword(p, '-plugin'), false)       // 只有排除词：全目录减去命中的
+  assert.equal(matchKeyword(p, '-zzz'), true)           // 只有排除词且没命中 → 全都要
+  // ⚠️ 光一个 `-` 不是排除词（用户可能只是打个连字符）：跳过，不能把整份目录清空
+  assert.equal(matchKeyword(p, '-'), true)
+  assert.equal(matchKeyword(p, 'demo -'), true)
+})
+
 test('filterPlugins：分类 + 关键词 + 排序', () => {
   const list = [
     normPlugin(raw({ name: 'alpha', downloads: 5, category: 'tool' })),
@@ -470,6 +586,30 @@ test('filterPlugins：分类 + 关键词 + 排序', () => {
   assert.deepEqual(byKw.map((p) => p.name), ['gamma'])
 
   assert.deepEqual(filterPlugins(list, { sort: 'name' }).map((p) => p.name), ['alpha', 'beta', 'gamma'])
+})
+
+test('filterPlugins：desc 不传走各轴默认方向，显式传 false 必须被尊重', () => {
+  const list = [
+    normPlugin(raw({ name: 'alpha', downloads: 5, stars: 1, added: '2026-01-03' })),
+    normPlugin(raw({ name: 'beta', downloads: 90, stars: 9, added: '2026-01-01' })),
+    normPlugin(raw({ name: 'gamma', downloads: 50, stars: 5, added: '2026-01-02' })),
+  ]
+  const names = (o) => filterPlugins(list, o).map((p) => p.name)
+  // 不传 desc：数值 / 日期降序、名称升序（= SORTS_DESC）
+  assert.deepEqual(names({ sort: 'downloads' }), ['beta', 'gamma', 'alpha'])
+  assert.deepEqual(names({ sort: 'stars' }), ['beta', 'gamma', 'alpha'])
+  assert.deepEqual(names({ sort: 'added' }), ['alpha', 'gamma', 'beta'])
+  assert.deepEqual(names({ sort: 'name' }), ['alpha', 'beta', 'gamma'])
+  // 显式反向
+  assert.deepEqual(names({ sort: 'downloads', desc: false }), ['alpha', 'gamma', 'beta'])
+  assert.deepEqual(names({ sort: 'name', desc: true }), ['gamma', 'beta', 'alpha'])
+  assert.deepEqual(names({ sort: 'added', desc: false }), ['beta', 'gamma', 'alpha'])
+  // ⚠️ 关键回归：`desc: false` 不能被 `false || 默认方向` 顶掉（写错就永远升不了序）
+  assert.notDeepEqual(names({ sort: 'downolads', desc: false }), names({ sort: 'downloads' }))
+  // 未知轴回落 downloads，方向仍按 downloads 的默认（降序）
+  assert.deepEqual(names({ sort: 'nope' }), ['beta', 'gamma', 'alpha'])
+  // 每个轴都必须在 SORTS_DESC 里有默认方向，否则 desc 不传时方向是 undefined（= 升序）
+  assert.deepEqual(Object.keys(SORTS_DESC).sort(), ['added', 'downloads', 'name', 'stars'])
 })
 
 test('filterPlugins：读不到已装状态时 state 过滤把条目全跳过（不冒充未安装）', () => {
@@ -564,10 +704,13 @@ test('matchDepByNpm：与 updateState 串起来，npm 分支不再丢掉声明�
   const deps = { 'dsh-mnemon': '^0.5.11' }
   const hit = matchDepByNpm(deps, 'dsh-mnemon')
   // 拿不到实装版本 → 退回范围判定，range 必须是 ^0.5.11（而不是空）
+  // 目录 0.5.13 比下界 0.5.11 新 → update（旧口径会因「落在范围内」漏报成 current）
   const byRange = updateState(hit.depVersion, '0.5.13', '')
   assert.equal(byRange.range, '^0.5.11')
   assert.equal(byRange.basis, 'range')
-  assert.equal(byRange.state, 'current')
+  assert.equal(byRange.state, 'update')
+  // 目录版本不高于下界 → current，两个方向都不能判错
+  assert.equal(updateState(hit.depVersion, '0.5.11', '').state, 'current')
   // 有实装版本 → 主路径判出 update
   const byReal = updateState(hit.depVersion, '0.5.13', '0.5.11')
   assert.equal(byReal.basis, 'realized')
@@ -885,4 +1028,164 @@ test('loadCatalog：304 的来源记下的仍是它原来的校验器（没被�
   // 第三次：若 304 把校验器覆盖成空，这里就发不出 if-none-match 了
   await loadCatalog({ official: true, mirror: false, force: true, fetchImpl: f })
   assert.deepEqual(seen, ['', '"abc"', '"abc"'])
+})
+
+// ── registryLatest（回源查官方最新版；纯手动触发，不参与目录链路）──
+
+test('registryLatest：按包名查 latest 并回填到 key 上', async () => {
+  clearCache()
+  const calls = []
+  const f = fakeFetch({
+    [MIRROR_REGISTRY + '/dshmarket/latest']: JSON.stringify({ version: '1.65.1' }),
+  }, calls)
+  const r = await registryLatest([{ pkg: 'dshmarket', key: 'dshmarket' }], { fetchImpl: f })
+  assert.equal(r.ok, true)
+  assert.equal(r.results['dshmarket'].version, '1.65.1')
+  assert.equal(r.results['dshmarket'].error, '')
+  assert.equal(r.results['dshmarket'].pkg, 'dshmarket')
+  assert.equal(r.results['dshmarket'].cached, false)
+  assert.deepEqual(calls, [MIRROR_REGISTRY + '/dshmarket/latest'])
+})
+
+test('registryLatest：scoped 包名的 `/` 必须编码成 %2F（否则 registry 认不出）', async () => {
+  clearCache()
+  const calls = []
+  const f = fakeFetch({
+    [MIRROR_REGISTRY + '/@scope%2Fdsh-demo/latest']: JSON.stringify({ version: '0.5.11' }),
+  }, calls)
+  const r = await registryLatest([{ pkg: '@scope/dsh-demo', key: 'k' }], { fetchImpl: f })
+  assert.equal(r.results['k'].version, '0.5.11')
+  // 未编码的形态会 404，绝不能出现
+  assert.equal(calls.includes(MIRROR_REGISTRY + '/@scope/dsh-demo/latest'), false)
+})
+
+test('registryLatest：同一个包被多条条目引用只查一次，结果回填给每个 key', async () => {
+  clearCache()
+  const calls = []
+  const f = fakeFetch({ [MIRROR_REGISTRY + '/dshmarket/latest']: JSON.stringify({ version: '1.65.1' }) }, calls)
+  const r = await registryLatest([
+    { pkg: 'dshmarket', key: 'a' },
+    { pkg: 'dshmarket', key: 'b' },
+  ], { fetchImpl: f })
+  assert.equal(calls.length, 1)
+  assert.equal(r.results['a'].version, '1.65.1')
+  assert.equal(r.results['b'].version, '1.65.1')
+})
+
+test('registryLatest：5 分钟 TTL 内命中内存缓存，不出站', async () => {
+  clearCache()
+  const calls = []
+  const f = fakeFetch({ [MIRROR_REGISTRY + '/dshmarket/latest']: JSON.stringify({ version: '1.65.1' }) }, calls)
+  await registryLatest([{ pkg: 'dshmarket', key: 'a' }], { fetchImpl: f })
+  const again = await registryLatest([{ pkg: 'dshmarket', key: 'a' }], { fetchImpl: f })
+  assert.equal(calls.length, 1)
+  assert.equal(again.results['a'].cached, true)
+  assert.equal(again.results['a'].version, '1.65.1')
+})
+
+test('registryLatest：拉失败记入冷却，冷却期内不再发请求且给出原因', async () => {
+  clearCache()
+  const calls = []
+  const f = fakeFetch({
+    [MIRROR_REGISTRY + '/dshmarket/latest']: () => res('', { ok: false, status: 500, statusText: 'boom' }),
+  }, calls)
+  const first = await registryLatest([{ pkg: 'dshmarket', key: 'a' }], { fetchImpl: f })
+  assert.equal(first.results['a'].version, '')
+  assert.ok(first.results['a'].error.length > 0)
+  assert.equal(calls.length, 1)
+  // 冷却期内再查：直接返回错误，不再出站
+  const second = await registryLatest([{ pkg: 'dshmarket', key: 'b' }], { fetchImpl: f })
+  assert.equal(second.results['b'].version, '')
+  assert.ok(second.results['b'].error.length > 0)
+  assert.equal(calls.length, 1)
+})
+
+test('registryLatest：条目缺 pkg / key 的跳过，不产生空请求', async () => {
+  clearCache()
+  const calls = []
+  const f = fakeFetch({}, calls)
+  const r = await registryLatest([
+    { pkg: '', key: 'a' },
+    { pkg: 'dshmarket', key: '' },
+    null,
+    { pkg: 'dshmarket', key: 'ok' },
+  ], { fetchImpl: f })
+  assert.equal(calls.length, 1)
+  assert.equal(Object.keys(r.results).length, 1)
+  assert.ok(r.results['ok'])
+})
+
+test('registryLatest：空列表直接返回，不打任何请求', async () => {
+  clearCache()
+  const calls = []
+  const r = await registryLatest([], { fetchImpl: fakeFetch({}, calls) })
+  assert.equal(r.ok, true)
+  // results 是 null 原型对象（宿主刻意的，避免 key 撞 Object.prototype），所以断言键数不 deepEqual {}
+  assert.equal(Object.keys(r.results).length, 0)
+  assert.equal(calls.length, 0)
+  // 非数组也要能兜住
+  assert.equal(Object.keys((await registryLatest(null, { fetchImpl: fakeFetch({}, calls) })).results).length, 0)
+})
+
+test('registryLatest：并发上限生效 —— 请求不会一次全发出去', async () => {
+  clearCache()
+  let inflight = 0
+  let peak = 0
+  const f = async (url) => {
+    inflight++
+    peak = Math.max(peak, inflight)
+    await new Promise((r) => setTimeout(r, 5))
+    inflight--
+    const name = url.slice(url.lastIndexOf('/') + 1)
+    return res(JSON.stringify({ version: '1.0.0' + '-' + name }))
+  }
+  const items = []
+  for (let i = 0; i < 24; i++) items.push({ pkg: 'pkg-' + i, key: 'k' + i })
+  const r = await registryLatest(items, { fetchImpl: f, concurrency: 4 })
+  assert.equal(Object.keys(r.results).length, 24)
+  assert.ok(peak <= 4, '并发峰值应不超过 4，实际 ' + peak)
+})
+
+test('registryLatest：一个包拉失败不拖垮其它包（各自独立落结果）', async () => {
+  clearCache()
+  const f = async (url) => {
+    if (url.indexOf('bad') >= 0) return res('', { ok: false, status: 404 })
+    return res(JSON.stringify({ version: '2.0.0' }))
+  }
+  const r = await registryLatest([
+    { pkg: 'bad-pkg', key: 'bad' },
+    { pkg: 'good-pkg', key: 'good' },
+  ], { fetchImpl: f })
+  assert.equal(r.results['bad'].version, '')
+  assert.ok(r.results['bad'].error.length > 0)
+  assert.equal(r.results['good'].version, '2.0.0')
+  assert.equal(r.results['good'].error, '')
+})
+
+test('registryLatest：换 registry 不拿上一家的缓存冒充（地址进 URL，不进缓存键）', async () => {
+  clearCache()
+  const other = 'https://mirrors.cloud.tencent.com/npm'
+  const calls = []
+  const f = fakeFetch({
+    [MIRROR_REGISTRY + '/dshmarket/latest']: JSON.stringify({ version: '1.65.1' }),
+    [other + '/dshmarket/latest']: JSON.stringify({ version: '9.9.9' }),
+  }, calls)
+  await registryLatest([{ pkg: 'dshmarket', key: 'a' }], { fetchImpl: f })
+  // ⚠️ 缓存只按包名存，不按 registry —— 这是有意的（多镜像同源，latest 应一致）。
+  //    这里断言的是「第二次没出站」，不是「拿到了 9.9.9」：换源也复用，因为语义相同
+  const again = await registryLatest([{ pkg: 'dshmarket', key: 'a' }], { registry: other, fetchImpl: f })
+  assert.equal(again.results['a'].cached, true)
+  assert.equal(again.results['a'].version, '1.65.1')
+  assert.equal(calls.length, 1)
+})
+
+test('clearCache：一并清掉 latest 的缓存与失败冷却', async () => {
+  clearCache()
+  const calls = []
+  const f = fakeFetch({ [MIRROR_REGISTRY + '/dshmarket/latest']: JSON.stringify({ version: '1.65.1' }) }, calls)
+  await registryLatest([{ pkg: 'dshmarket', key: 'a' }], { fetchImpl: f })
+  clearCache()
+  const again = await registryLatest([{ pkg: 'dshmarket', key: 'a' }], { fetchImpl: f })
+  assert.equal(calls.length, 2)         // 缓存被清了 → 重新出站
+  assert.equal(again.results['a'].cached, false)
 })

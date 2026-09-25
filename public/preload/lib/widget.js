@@ -391,6 +391,29 @@ function applyOnTop(onTop) {
   try { if (onTop && win.moveTop) win.moveTop() } catch (err) {}
 }
 
+// 重新声明「不在任务栏显示」。
+// 为什么必须补：skipTaskbar 虽是创建期选项，但窗口以 focusable:false 建时，Windows 下
+// 任务栏隐藏有一半靠这个状态的「隐含效果」；运行时一旦 setFocusable(true)（菜单借焦点，
+// 见 ipc.js 的 whale:input-focus）或 show()/moveTop() 让 Windows 重新登记窗口样式，
+// 任务栏图标就会冒出来（表现为悬停可见挂件缩略图），此后也不会自动消失。
+// 故凡是「切换可聚焦性」「重新显示」的路径，都要再安一次。
+function ensureSkipTaskbar() {
+  if (!winAlive()) return
+  // 方法不可用是预期分支（uTools 未透传原生方法），但有返值可查才能在用户取证时
+  // 一眼区分「没生效」与「压根没这个方法」——前者是 uTools 的锅，后者要换方案。
+  if (typeof win.setSkipTaskbar !== 'function') {
+    log('[whale][widget] setSkipTaskbar 不可用，任务栏图标由 uTools 层控制')
+    return false
+  }
+  try {
+    win.setSkipTaskbar(true)
+    return true
+  } catch (err) {
+    logErr('[whale][widget] setSkipTaskbar 调用失败', err && err.message)
+    return false
+  }
+}
+
 // 注意：窗口级 win.setOpacity() 在 Windows 上不能用于本挂件——本窗口是
 // transparent:true 的分层透明窗，调用 setOpacity 会让渲染层失效（整窗不显示，
 // 即使再设回 1.0 也不恢复，只能销毁重建）。透明度改为页面根元素 CSS opacity，
@@ -445,12 +468,14 @@ function ensureWidgetInner(opts) {
       // 已可见：默认仅置顶（避免抢走设置窗口焦点）；focus 模式或无法探知时补 show()
       if (wantFocus || visible === null) { try { win.show() } catch (err) {} }
       try { if (win.moveTop) win.moveTop() } catch (err) {}
+      ensureSkipTaskbar() // show()/moveTop() 会重新登记窗口样式，任务栏图标可能在此冒出来
       return win
     }
     // 刚创建不久：可能仍在显示过程中，先 show() 一次，避免误判为「被隐藏」而重建
     if (Date.now() - winCreatedAt < 300) {
       try { win.show() } catch (err) {}
       try { if (win.moveTop) win.moveTop() } catch (err) {}
+      ensureSkipTaskbar()
       return win
     }
     log('[whale][widget] 挂件引用存活但不可见，销毁重建')
@@ -519,6 +544,7 @@ function createWidget(focusable) {
       try { applySizeBounds() } catch (err) {}
       try { win.show() } catch (err) {}
       try { applyOnTop(readConfig().onTop !== false) } catch (err) {}
+      ensureSkipTaskbar() // show() 之后补一次，防止 uTools 在显示阶段重置窗口样式
       // 兜底：即使子窗 ready 消息丢失，加载完成后也推一次初始数据
       setTimeout(function () { try { pushInit() } catch (err) {} }, 300)
     })
@@ -527,6 +553,7 @@ function createWidget(focusable) {
     try { applySizeBounds() } catch (err) {}
     try { win.show() } catch (err) {}
     try { applyOnTop(onTop) } catch (err) {}
+    ensureSkipTaskbar() // 创建参数里的 skipTaskbar 未必被 uTools 透传，这里显式再声明一次
     setWidgetError('')
     syncTaskbarWatch() // 挂件就位后开始跟随任务栏显隐（「自动避让任务栏」关掉则不轮询）
     // 注意：uTools 返回的定制窗口「不包含 BrowserWindow / webContents 实例事件」，
@@ -680,6 +707,7 @@ function applyScaleToWindow(scale, persist) {
       win.setPosition(rx, ry)
     }
     try { if (typeof win.setResizable === 'function') win.setResizable(false) } catch (err) {}
+    ensureSkipTaskbar() // setResizable 也会让 Windows 重新登记窗口样式，一并补声明
     // 读回校验：尺寸未按预期变化时报警（历史上曾因 setBounds 参数 NaN 静默失败）
     try {
       const after = win.getBounds()
@@ -728,6 +756,7 @@ module.exports = {
   winAlive,
   getWindow,
   applyOnTop,
+  ensureSkipTaskbar,
   applySizeBounds,
   getWidgetError,
   ensureWidget,
