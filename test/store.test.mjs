@@ -12,7 +12,7 @@ import assert from 'node:assert/strict'
 import store from '../public/preload/lib/store.js'
 import constants from '../public/preload/lib/constants.js'
 
-const { normTokenPrice, normQuotes } = store
+const { normTokenPrice, normQuotes, QUOTE_GROUP_MAX } = store
 const { TOKEN_PRICE_DEFAULT, TOKEN_PRICE_MAX, TOKEN_RATE_MAX } = constants
 
 test('normTokenPrice 缺字段回落默认值，开关只认 true', () => {
@@ -100,10 +100,13 @@ test('normQuotes 组列表为空 / 一组不剩都回内置默认（全空会让
   assert.equal(normQuotes({ groups: [{ kind: 'text', w: 1 }] }).groups.length, 6)
 })
 
-test('normQuotes 组数超上限截到 12 组', () => {
+test('normQuotes 组数超上限截到上限（用实现导出的常量比较，写死数字会与实现脱钩）', () => {
   const many = []
-  for (let i = 0; i < 20; i++) many.push({ kind: 'image', w: 1 })
-  assert.equal(normQuotes({ groups: many }).groups.length, 12)
+  for (let i = 0; i < QUOTE_GROUP_MAX + 8; i++) many.push({ kind: 'image', w: 1 })
+  assert.equal(normQuotes({ groups: many }).groups.length, QUOTE_GROUP_MAX)
+  // 恰好等于上限时不截断（边界另一侧：off-by-one 会让用户配满的一组凭空消失）
+  const exact = many.slice(0, QUOTE_GROUP_MAX)
+  assert.equal(normQuotes({ groups: exact }).groups.length, QUOTE_GROUP_MAX)
 })
 
 test('normQuotes 只带部分键时其余沿用现值（不是回默认）', () => {

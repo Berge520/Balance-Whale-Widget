@@ -681,7 +681,14 @@ async function refreshIps(current, op, srcOrder, order, customSources) {
         : why + '，且当前表也没有此域名，未写入',
     }
   })
-  patchConfig({ ghAccelRefreshedAt: Date.now() }) // 表龄提醒的依据：成功刷新即更新，失败不动
+  // 表龄提醒的依据：成功刷新即更新，失败不动。
+  // 单独 try/catch：patchConfig 写失败会抛错（见 store.js），但「表龄记不上」远轻于「刷新结果丢掉」——
+  // 这次已经探到的可达 IP 必须照样返回，否则用户点一次刷新却拿到异常，白等一轮探测
+  try {
+    patchConfig({ ghAccelRefreshedAt: Date.now() })
+  } catch (e) {
+    logErr('[whale][ghaccel] 记录 IP 表龄失败（不影响本次刷新结果）', (e && e.message) || '')
+  }
   const untouched = GH_DOMAINS.length - freshCount
   opStep(op, '按来源优先级合并为新的 IP 表', 'done', '候选链覆盖 ' + freshCount + ' 个域名（DoH 命中 ' + dohHit
     + ' 个，可用社区源 ' + okCount + ' 个）'

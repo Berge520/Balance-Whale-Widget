@@ -11,7 +11,7 @@
  *   3. preload 关键文件在位（preload 不参与 Vite 打包，原样复制，缺了插件起不来）
  */
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import path from 'node:path'
 
@@ -38,6 +38,18 @@ if (dl.status !== 0) {
 
 const zipPath = path.join(zipDir, zipName)
 
+// -p '*.zip' 会把 Release 上的**所有** zip 都拉下来；多出一个（发错资产 / 遗留旧包）时，
+// 只按 zipName 取用会静默通过，而用户下到的可能是错的包。这里把实际拉到的 zip 列清楚比对。
+const strayZips = readdirSync(zipDir).filter((f) => f.toLowerCase().endsWith('.zip') && f !== zipName)
+if (strayZips.length) {
+  console.error(`[verify-release-zip] ✗ Release 里除 ${zipName} 外还有其它 zip：${strayZips.join(', ')}；请确认资产是否正确`)
+  process.exit(1)
+}
+if (!existsSync(zipPath)) {
+  console.error(`[verify-release-zip] ✗ 下载目录里没有 ${zipName}`)
+  process.exit(1)
+}
+
 // 解压优先 unzip，Windows 上没有就退回 tar（Win10+ 自带 bsdtar，能解 zip）。
 // 两条都失败才报错 —— 单独试一条会在缺工具时打印刺眼的「不是内部或外部命令」。
 const outDir = path.join(zipDir, 'extracted')
@@ -60,7 +72,20 @@ if (!extracted) {
 }
 
 const require = createRequire(import.meta.url)
-const plugin = require(path.join(outDir, 'plugin.json'))
+const pluginPath = path.join(outDir, 'plugin.json')
+// 缺文件 / JSON 坏时给出可操作的诊断，而不是裸的「Cannot find module」——
+// 这条校验本身就是为了在产物不对时把话说清楚，报错本身先说清才有意义
+if (!existsSync(pluginPath)) {
+  console.error(`[verify-release-zip] ✗ 解压目录里没有 plugin.json（${pluginPath}）；zip 结构不对或解压不完整`)
+  process.exit(1)
+}
+let plugin
+try {
+  plugin = require(pluginPath)
+} catch (e) {
+  console.error(`[verify-release-zip] ✗ plugin.json 无法解析：${(e && e.message) || e}`)
+  process.exit(1)
+}
 const errors = []
 
 if (plugin.version !== expectVersion) {

@@ -354,7 +354,9 @@ npm run release     # 一键发版（见下）
 
 **构建与测试**
 
-- **新增 `lib/dsh-export.js`** + `test/dsh-export.test.mjs`、`test/dsh-lock.test.mjs`、`test/dsh-verify.test.mjs`、`test/dsh-host-compat.test.mjs`、`test/log.test.mjs`；测试文件由 14 个增至 **19 个**、用例 **478 项**。
+- **新增 `lib/dsh-export.js`** + `test/dsh-export.test.mjs`、`test/dsh-lock.test.mjs`、`test/dsh-verify.test.mjs`、`test/dsh-host-compat.test.mjs`、`test/log.test.mjs`、`test/config.test.mjs`；测试文件由 14 个增至 **20 个**、用例 **486 项**。
+- **新增配置契约测试 `test/config.test.mjs`**（8 项）：把 `defaultConfig` / `readConfig` / `writeConfig` / `patchConfig` 四份平行键表用机器钉死 —— 键集不一致、`patchConfig` 分支漏键、非法值写入都直接失败（这几处漏掉是**静默**的：加进 `defaultConfig` 忘 `patchConfig`，保存后永远是默认值）。顺带修掉一个真实缺陷：`timerAt` 原先只判格式不判范围，`99:99` 能一路写进配置，挂件把它塞进 `<input type="time">` 时会被清空导致定时刻静默失效，现三处调用点统一改用带范围校验的 `normHm`。
+- **`check-shared.mjs` 新增五项校验**：气泡字号 `BUBBLE_FONT`、气泡默认配色 `THEMES.default`、气泡字号单位除数 `--dshw-u`，以及补上原先遗漏的 `TIMER_NOTE_MAX`、`QUOTE_GROUP_MAX`；`CHECKS` 由 22 项增至 **27 项**。同时修掉一处门禁绕过：某一份副本读不到时不再静默放行，改为独立计数并判定失败。
 - **新增配置字段 `dshExportCred` / `dshExportNoMod`**（存于 `whale:config`）：分别记住导出时「是否含凭据」（默认 `false`）与「是否跳过 `node_modules`」（默认 `true`）。
 
 ### 1.7.0

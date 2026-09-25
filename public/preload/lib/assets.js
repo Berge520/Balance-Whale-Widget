@@ -50,6 +50,7 @@ function exportAssets() {
       filters: [{ name: '小鲸鱼素材包', extensions: [EXT] }],
     })
   } catch (err) {
+    logErr('[whale][assets] 打开导出保存框失败', err && err.message)
     return { ok: false, error: '无法打开保存对话框：' + errMsg(err) }
   }
   if (!filePath) return { ok: false, canceled: true, error: '' }
@@ -173,6 +174,7 @@ function pickAssets() {
       properties: ['openFile'],
     })
   } catch (err) {
+    logErr('[whale][assets] 打开导入文件框失败', err && err.message)
     return { ok: false, error: '无法打开文件对话框：' + errMsg(err) }
   }
   const filePath = Array.isArray(picked) ? picked[0] : picked
@@ -181,6 +183,7 @@ function pickAssets() {
   try {
     buf = fs.readFileSync(filePath)
   } catch (err) {
+    logErr('[whale][assets] 读取素材包失败', filePath, err && err.message)
     return { ok: false, error: '读取素材包失败：' + errMsg(err) }
   }
   const parsed = parsePack(buf)

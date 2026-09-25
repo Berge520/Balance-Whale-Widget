@@ -244,6 +244,21 @@ test('candidatesOf：去重、容忍空值', () => {
   assert.deepEqual(items.map((i) => i.id), ['foo'])
 })
 
+// 修 B10：上游给 parsePatch 的原样结果时字段名是 lineIndex（0 基），
+// 早先只认 line → 行号静默变 0，界面显示成「这一条没有行号」
+test('candidatesOf：兼容 lineIndex（0 基 → 界面 1 基），两种字段名都不丢行号', () => {
+  const items = I.candidatesOf({
+    patchItems: [{ id: 'a', lineIndex: 14 }, { id: 'b', line: 7 }],
+    pluginIds: [],
+  })
+  const byId = {}
+  for (const it of items) byId[it.id] = it
+  assert.equal(byId.a.line, 15, 'lineIndex 是 0 基，显示要 +1')
+  assert.equal(byId.b.line, 7, 'line 已是 1 基，原样透传')
+  // 两个都没有 → 0（界面据此显示「追加到末尾」）
+  assert.equal(I.candidatesOf({ patchItems: [{ id: 'c' }] })[0].line, 0)
+})
+
 test('candidatesOf：候选顺序稳定（先 patch 后 dump，各自按输入顺序）', () => {
   const items = I.candidatesOf({ patchItems: [{ id: 'b' }, { id: 'a' }], pluginIds: ['d', 'c'] })
   assert.deepEqual(items.map((i) => i.id), ['b', 'a', 'd', 'c'])

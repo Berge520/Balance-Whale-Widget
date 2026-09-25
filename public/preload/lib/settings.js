@@ -2155,6 +2155,7 @@ module.exports = {
         properties: ['openDirectory'],
       })
     } catch (err) {
+      logErr('[whale][dsh] 打开 Node 目录选择框失败', (err && err.message) || '')
       return { ok: false, error: '无法打开目录选择框：' + ((err && err.message) || err) }
     }
     const dir = Array.isArray(picked) ? picked[0] : picked

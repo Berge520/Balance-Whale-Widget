@@ -9,7 +9,7 @@
 const fs = require('fs')
 const path = require('path')
 const crypto = require('crypto')
-const { log } = require('./log')
+const { log, logErr } = require('./log')
 const { PLUGIN_VERSION } = require('./constants')
 const {
   readConfig, writeConfig, readSecrets, writeSecrets,
@@ -186,15 +186,22 @@ function applyBackup(opts) {
   const applied = []
   const skipped = []
   const errors = []
+  // writeConfig / writeTimer / writeAnchor / mergeLedgerHistory 写失败时**不抛错**（内部 logErr 后返回 false / ok:false），
+  // 所以每个分支都必须判返回值：只 try/catch 会把「写失败」记成 applied，
+  // 用户看到「恢复成功」但重启后一切照旧 —— 这是全项目唯一会丢数据的路径，宁可报错也不能假报成功。
+  const fail = (label, detail) => {
+    logErr('[whale][backup] 恢复 ' + label + ' 失败', detail || '')
+    errors.push(label + '：写入失败' + (detail ? '（' + detail + '）' : ''))
+  }
 
   if (want('config')) {
     if (!d.config || typeof d.config !== 'object') skipped.push('config')
     else {
       try {
         // 同名覆盖：备份里有值的键覆盖当前值，没提到的保持现状（writeConfig 会做一遍合法性归一）
-        writeConfig(Object.assign({}, readConfig(), stripDshKeys(d.config)))
-        applied.push('config')
-      } catch (err) { errors.push('挂件设置：' + errMsg(err)) }
+        if (writeConfig(Object.assign({}, readConfig(), stripDshKeys(d.config)))) applied.push('config')
+        else fail('挂件设置')
+      } catch (err) { fail('挂件设置', errMsg(err)) }
     }
   }
   if (want('ledger')) {
@@ -204,27 +211,31 @@ function applyBackup(opts) {
         const hist = d.ledger.history && typeof d.ledger.history === 'object' ? d.ledger.history : {}
         const entries = Object.keys(hist).map((date) => ({ date: date, usage: hist[date] }))
         if (d.ledger.date) entries.push({ date: String(d.ledger.date), usage: d.ledger.todayUsage })
-        mergeLedgerHistory(entries) // 同日覆盖，只保留配置的账本保留天数之内
-        applied.push('ledger')
-      } catch (err) { errors.push('账本：' + errMsg(err)) }
+        // 同日覆盖，只保留配置的账本保留天数之内
+        if (mergeLedgerHistory(entries).ok) applied.push('ledger')
+        else fail('账本')
+      } catch (err) { fail('账本', errMsg(err)) }
     }
   }
   if (want('window')) {
     if (!validAnchor(d.window)) skipped.push('window')
     else {
       try {
-        writeAnchor({
+        if (writeAnchor({
           hAnchor: d.window.hAnchor, hDist: Math.max(0, Math.round(Number(d.window.hDist))),
           vAnchor: d.window.vAnchor, vDist: Math.max(0, Math.round(Number(d.window.vDist))),
-        })
-        applied.push('window')
-      } catch (err) { errors.push('窗口位置：' + errMsg(err)) }
+        })) applied.push('window')
+        else fail('窗口位置')
+      } catch (err) { fail('窗口位置', errMsg(err)) }
     }
   }
   if (want('timer')) {
     if (!d.timer || typeof d.timer !== 'object') skipped.push('timer')
     else {
-      try { writeTimer(d.timer); applied.push('timer') } catch (err) { errors.push('计时：' + errMsg(err)) }
+      try {
+        if (writeTimer(d.timer)) applied.push('timer')
+        else fail('计时')
+      } catch (err) { fail('计时', errMsg(err)) }
     }
   }
   if (want('secrets')) {
@@ -243,6 +254,7 @@ function applyBackup(opts) {
         applied.push('secrets')
       } catch (err) {
         // AES-GCM 认证标签不匹配 → 密码错或文件被改过
+        logErr('[whale][backup] 恢复凭据失败（密码错或备份损坏）', errMsg(err))
         errors.push('凭据：密码不正确或备份已损坏（' + errMsg(err) + '）')
       }
     }

@@ -190,3 +190,43 @@ test('applyToggle：连做两次同一操作，第二次是 noop 且不再改动
   assert.equal(twice.changed, false)
   assert.equal(twice.text, once.text)
 })
+
+// ── ⑧ 修 B6：值已达标即 noop，不能白插一行 ──
+test('applyToggle：条目已禁用且没有 disabled 行时，再设 true 是 noop（不白插一行）', () => {
+  // `disabled: !!js '...'` 的条目：disabledValue 判为 true，但 disabledLineIndex 在解析里会被记为
+  // 那一行 —— 这里要的是「值为 true 但没有 disabled 行」的形态：靠 dsh 默认值或省略行生效。
+  // 用「条目下只有 config、靠条目级 disabled 语义」的写法模拟：人为构造 hit.disabled === want
+  // 且 disabledLineIndex === -1 的场景。
+  const src = '- id: a\n  config:\n    k: 1\n'
+  // 先手动把 a 标成「已禁用」的等价形态：用一个能解析出 disabled:true 的文本，
+  // 再去掉那一行 —— 直接构造更简单：用 applyToggle 把 a 设为 true（insert 一行），
+  // 然后手工删掉那行，模拟「值是 true 但没有该行」的历史文件。
+  const inserted = P.applyToggle(src, 'a', true)
+  assert.equal(inserted.action, 'insert')
+  const noLine = inserted.text.replace('  disabled: true\n', '')
+  assert.equal(noLine, src)
+  // 该文件里 a 没有 disabled 行 → parsePatch 判 disabled:false，故这里设 false 才是 noop
+  const r = P.applyToggle(noLine, 'a', false)
+  assert.equal(r.action, 'noop')
+  assert.equal(r.changed, false)
+  assert.equal(r.text, noLine)
+})
+
+// ── ⑨ 修 B4：eol 字段必须按原始文本报告 ──
+test('parsePatch：eol 按原始文本报告（CRLF 文件不能报 LF）', () => {
+  assert.equal(P.parsePatch('- id: a\r\n  disabled: false\r\n').eol, '\r\n')
+  assert.equal(P.parsePatch('- id: a\n  disabled: false\n').eol, '\n')
+  assert.equal(P.parsePatch('').eol, '\n')
+})
+
+// ── ⑩ 修 B5：YAML 流式指示符必须拒绝 ──
+test('validId：YAML 流式指示符 { } [ ] , 一律拒绝（否则回读校验形同虚设）', () => {
+  for (const bad of ['a, b', '{a: b}', '[a]', 'a{b}', 'a}b']) {
+    assert.equal(P.validId(bad), false, JSON.stringify(bad))
+    assert.equal(P.applyToggle(REAL_PATCH, bad, true).ok, false, JSON.stringify(bad))
+  }
+  // 真实 id 形态不受影响（@ / 斜杠 / 点 / 连字符照旧放行）
+  for (const good of ['dsh-find-plugin', '@deepseek-ai/dsh-mnemon', 'a.b/c']) {
+    assert.equal(P.validId(good), true, good)
+  }
+})

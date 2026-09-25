@@ -157,6 +157,84 @@ function quoteGroupShape(marker) {
   }
 }
 
+// 气泡三行字号（label / amount / period）外加 hint：CSS 里是**未缩小时的默认值**（字号写在
+// .dshwv-xxx 规则里），floating-page.js 的 BUBBLE_FONT 是**超框缩小时的基准**。两份值必须相等，
+// 否则「内容超框」前后字号会跳变（页面写行内 calc(var(--dshw-u) * N) 覆盖 CSS，基准不一样就断层）。
+// 两边形态不同：JS 是对象字面量、CSS 是四条独立规则，统一抽成「label,amount,period,hint」再比对。
+function bubbleFontFromJs(marker) {
+  return (src, file) => {
+    const at = src.indexOf(marker)
+    if (at < 0) throw new Error(`${file} 里找不到「${marker}」`)
+    // 取到本行结尾即可：BUBBLE_FONT 是单行对象字面量
+    const line = src.slice(at, src.indexOf('\n', at))
+    const one = (key) => {
+      const m = line.match(new RegExp("'" + key + "'\\s*:\\s*(\\d+)"))
+      if (!m) throw new Error(`${file} 里「${marker}」没有 ${key}`)
+      return m[1]
+    }
+    return [one('dshwv-label'), one('dshwv-amount'), one('dshwv-period'), one('dshwv-hint')].join(',')
+  }
+}
+function bubbleFontFromCss(src, file) {
+  const one = (cls) => {
+    const m = src.match(new RegExp(
+      '\\.' + cls + "\\s*\\{[^}]*font-size\\s*:\\s*calc\\(var\\(--dshw-u\\)\\s*\\*\\s*(\\d+)\\)"
+    ))
+    if (!m) throw new Error(`${file} 里 .${cls} 没有 calc(var(--dshw-u) * N) 字号`)
+    return m[1]
+  }
+  return [one('dshwv-label'), one('dshwv-amount'), one('dshwv-period'), one('dshwv-hint')].join(',')
+}
+
+// 气泡配色的**默认主题**：floating-page.js 的 THEMES.default 是换主题时**会写**的值，
+// floating.css 里 var(--dshwv-xxx, #兜底) 的兜底色是「JS 没来得及写变量」时的显示值。
+// 两者必须一致，否则首帧（主题未应用）与常态颜色不同。取 THEMES.default 与 CSS 四个兜底色比对。
+function themeDefaultFromJs(marker) {
+  return (src, file) => {
+    const at = src.indexOf(marker)
+    if (at < 0) throw new Error(`${file} 里找不到「${marker}」`)
+    const m = src.slice(at).match(/default\s*:\s*\{([^}]*)\}/)
+    if (!m) throw new Error(`${file} 里「${marker}」没有 default 主题`)
+    const one = (key) => {
+      const x = m[1].match(new RegExp(key + "\\s*:\\s*'([^']+)'"))
+      if (!x) throw new Error(`${file} 里 default 主题没有 ${key}`)
+      return x[1].toUpperCase()
+    }
+    return [one('text'), one('hint'), one('fill'), one('stroke')].join(',')
+  }
+}
+function themeDefaultFromCss(src, file) {
+  const one = (v) => {
+    const m = src.match(new RegExp('var\\(--' + v + "\\s*,\\s*(#[0-9A-Fa-f]{6})\\)"))
+    if (!m) throw new Error(`${file} 里 var(--${v}, #...) 没有兜底色`)
+    return m[1].toUpperCase()
+  }
+  return [one('dshwv-text'), one('dshwv-hint'), one('dshwv-fill'), one('dshwv-stroke')].join(',')
+}
+
+// 气泡字号单位 u = 挂件基准 / 1026：除数在 CSS 的 --dshw-u 定义里，floating-page.js 只在
+// BUBBLE_FONT **上方的注释块**里记了同一个 1026（注释在声明前一行，不是同一行）。
+// 这是「注释 vs 代码」的比对 —— 看着弱，但除数一改（如 /1024）而不动另一边，
+// 字号基准就整体错位且**无任何报错**，故值得钉住。
+function uDivisorFromCss(src, file) {
+  const m = src.match(/--dshw-u\s*:\s*calc\(var\(--dshw-base\)\s*\/\s*(\d+)\)/)
+  if (!m) throw new Error(`${file} 里 --dshw-u 不是 calc(var(--dshw-base) / N)`)
+  return m[1]
+}
+// 取 marker **之前**最近的一段连续行注释里出现的「/ N」，即「单位 u = 挂件基准 / 1026」那句
+function uDivisorFromJsComment(marker) {
+  return (src, file) => {
+    const at = src.indexOf(marker)
+    if (at < 0) throw new Error(`${file} 里找不到「${marker}」`)
+    const before = src.slice(0, at)
+    const start = before.lastIndexOf('\n\n')
+    const block = before.slice(start < 0 ? 0 : start)
+    const m = block.match(/\/\s*(\d{3,5})\s*[,，；;）)]?\s*(?:与|$|\n)/)
+    if (!m) throw new Error(`${file} 里「${marker}」上方注释没有「单位 u = 挂件基准 / N」`)
+    return m[1]
+  }
+}
+
 // 从 openAt 处的括号起取配平整段（字符串 / 行注释跳过），压掉空白便于比对
 function balanced(src, openAt, file, marker) {
   const open = src[openAt]
@@ -358,6 +436,52 @@ const CHECKS = [
       { file: APP_VUE, pick: jsString('const NEWEST_VERSION') },
     ],
   },
+  // 气泡字号基准：CSS 的四条 font-size 是未缩小时默认值，floating-page.js 的 BUBBLE_FONT 是
+  // 超框缩小时的基准。两边不等会让「内容超框」前后字号跳变。
+  {
+    name: '气泡字号基准 BUBBLE_FONT',
+    parts: [
+      { file: FLOATING_PAGE, pick: bubbleFontFromJs('var BUBBLE_FONT =') },
+      { file: FLOATING_CSS, pick: bubbleFontFromCss },
+    ],
+  },
+  // 气泡配色默认主题：JS 的 THEMES.default（会写入）与 CSS 的 var(--dshwv-xxx, #兜底)（首帧兜底）
+  // 必须一致，否则主题应用前后的颜色不同。
+  {
+    name: '气泡默认配色 THEMES.default',
+    parts: [
+      { file: FLOATING_PAGE, pick: themeDefaultFromJs('var THEMES =') },
+      { file: FLOATING_CSS, pick: themeDefaultFromCss },
+    ],
+  },
+  // 气泡字号单位 u 的除数：CSS 的 --dshw-u 定义 vs floating-page.js BUBBLE_FONT 上方的注释。
+  // 除数改动而不动另一边会让字号基准整体错位且无任何报错。
+  {
+    name: '气泡字号单位除数 --dshw-u',
+    parts: [
+      { file: FLOATING_CSS, pick: uDivisorFromCss },
+      { file: FLOATING_PAGE, pick: uDivisorFromJsComment('var BUBBLE_FONT =') },
+    ],
+  },
+  // 到点留言长度上限三处副本：宿主 constants（清洗用）、挂件页（菜单输入框取用）、
+  // 设置页（输入框 maxLength）。改一处忘另一处会出现「界面能敲进去、宿主悄悄截掉」。
+  {
+    name: '到点留言长度上限 TIMER_NOTE_MAX',
+    parts: [
+      { file: CONSTANTS, pick: jsNumber('const TIMER_NOTE_MAX') },
+      { file: FLOATING_PAGE, pick: jsNumber('var TIMER_NOTE_MAX') },
+      { file: APP_VUE, pick: jsNumber('const TIMER_NOTE_MAX') },
+    ],
+  },
+  // 随机台词组条目数上限两处副本：宿主 store.js 的 normQuoteGroups（超出的截掉）
+  // 与设置页的「+ 添加组」按钮（达上限禁用）。不一致会出现「按钮让加、宿主却截掉」。
+  {
+    name: '随机台词组上限 QUOTE_GROUP_MAX',
+    parts: [
+      { file: STORE, pick: jsNumber('const QUOTE_GROUP_MAX') },
+      { file: APP_VUE, pick: jsNumber('const QUOTE_GROUP_MAX') },
+    ],
+  },
 ]
 
 let bad = 0
@@ -366,9 +490,19 @@ for (const c of CHECKS) {
     try {
       return { file: p.file, v: p.pick(read(p.file), p.file) }
     } catch (err) {
-      return { file: p.file, v: '读取失败：' + err.message }
+      // ⚠️ 读失败必须**独立计为坏**，不能混进下面那套「取值是否全等」的比较：
+      //    两侧都读失败时错误串完全相同，`new Set(...).size === 1` 会把它判成「一致」，
+      //    构建门禁就被绕过了（marker 写错 → 两处都抛同一条 → 静默放行）。
+      return { file: p.file, v: null, err: err.message }
     }
   })
+  const failed = vals.filter((x) => x.err)
+  if (failed.length) {
+    bad++
+    console.error(`[check-shared] ${c.name} 读取失败：`)
+    for (const x of failed) console.error(`  ${x.file}\n    读取失败：${x.err}`)
+    continue
+  }
   if (new Set(vals.map((x) => x.v)).size === 1) {
     console.log(`[check-shared] ${c.name} 一致`)
     continue

@@ -357,7 +357,11 @@ function normMarketUrl(v) {
   const s = String(v == null ? '' : v).trim()
   return /^https?:\/\//i.test(s) ? s.slice(0, 300) : ''
 }
-// 免打扰起止时刻：'HH:MM'（24 小时制），非法值回默认
+// 免打扰起止时刻 / 计时定时刻：'HH:MM'（24 小时制），非法值回默认。
+// ⚠️ 必须校验**时与分的取值范围**，不能只靠 `/^\d{1,2}:\d{2}$/` 判格式：
+//    那个正则放得过 '99:99'，而挂件侧是把它塞进 `<input type="time">` 的 —— 非法值会让
+//    浏览器把 .value 清成空串，定时刻静默失效（用户看到的是「没到点」，不是报错）。
+//    timerAt 以前只判格式，故 '99:99' 能一路写进配置；此处统一走范围校验（2026-09-25 补）
 function normHm(v, dft) {
   const s = String(v == null ? '' : v).trim()
   if (!/^\d{1,2}:\d{2}$/.test(s)) return dft
@@ -589,7 +593,7 @@ function readConfig() {
     timerPersistOn: p.timerPersistOn !== false,
     timerMode: p.timerMode === 'up' || p.timerMode === 'down' || p.timerMode === 'at' ? p.timerMode : 'off',
     timerSec: Math.round(clampNum(p.timerSec, 1, 86399, dft.timerSec)),
-    timerAt: /^\d{1,2}:\d{2}$/.test(String(p.timerAt || '')) ? String(p.timerAt) : dft.timerAt,
+    timerAt: normHm(p.timerAt, dft.timerAt),
     timerNote: normTimerNote(p.timerNote),
     timerBreakMin: Math.round(clampNum(p.timerBreakMin, 0, 120, dft.timerBreakMin)),
     timerRemindSec: p.timerRemindSec === 0 || p.timerRemindSec === 5 || p.timerRemindSec === 8 || p.timerRemindSec === 15 ? p.timerRemindSec : dft.timerRemindSec,
@@ -697,7 +701,7 @@ function writeConfig(cfg) {
       timerPersistOn: cfg.timerPersistOn !== false,
       timerMode: cfg.timerMode === 'up' || cfg.timerMode === 'down' || cfg.timerMode === 'at' ? cfg.timerMode : 'off',
       timerSec: Math.round(clampNum(cfg.timerSec, 1, 86399, 1500)),
-      timerAt: /^\d{1,2}:\d{2}$/.test(String(cfg.timerAt || '')) ? String(cfg.timerAt) : '07:30',
+      timerAt: normHm(cfg.timerAt, '07:30'),
       timerNote: normTimerNote(cfg.timerNote),
       timerBreakMin: Math.round(clampNum(cfg.timerBreakMin, 0, 120, 5)),
       timerRemindSec: cfg.timerRemindSec === 0 || cfg.timerRemindSec === 5 || cfg.timerRemindSec === 8 || cfg.timerRemindSec === 15 ? cfg.timerRemindSec : 8,
@@ -801,10 +805,7 @@ function patchConfig(patch) {
   if (p.timerSec !== undefined) cfg.timerSec = Math.round(clampNum(p.timerSec, 1, 86399, cfg.timerSec))
   if (p.timerNote !== undefined) cfg.timerNote = normTimerNote(p.timerNote)
   if (p.timerBreakMin !== undefined) cfg.timerBreakMin = Math.round(clampNum(p.timerBreakMin, 0, 120, cfg.timerBreakMin))
-  if (p.timerAt !== undefined) {
-    const s = String(p.timerAt)
-    if (/^\d{1,2}:\d{2}$/.test(s)) cfg.timerAt = s
-  }
+  if (p.timerAt !== undefined) cfg.timerAt = normHm(p.timerAt, cfg.timerAt)
   if (p.timerRemindSec !== undefined) {
     const n = Number(p.timerRemindSec)
     if (n === 0 || n === 5 || n === 8 || n === 15) cfg.timerRemindSec = n
@@ -1160,9 +1161,13 @@ function mergeLedgerHistory(entries) {
   const keep = historyKeepDays()
   for (let i = 0; i < all.length - keep; i++) delete hist[all[i]]
   led.history = hist
-  try { utools.dbStorage.setItem(K.ledger, led) } catch (err) { logErr('[whale][ledger] 导入写账本失败', err && err.message) }
+  let ok = true
+  try { utools.dbStorage.setItem(K.ledger, led) } catch (err) {
+    logErr('[whale][ledger] 导入写账本失败', err && err.message)
+    ok = false
+  }
   const kept = Object.keys(hist).sort()
-  return { imported, kept: kept.length, from: kept[0] || '', to: kept[kept.length - 1] || '' }
+  return { imported, kept: kept.length, from: kept[0] || '', to: kept[kept.length - 1] || '', ok }
 }
 
 // 令牌模式：平台返回的今日总量是权威值，直接写入账本当天用量。
@@ -1199,7 +1204,10 @@ function readTimer() {
   return dft
 }
 function writeTimer(state) {
-  try { utools.dbStorage.setItem(K.timer, state) } catch (err) { logErr('[whale][timer] 写计时状态失败', err && err.message) }
+  try { utools.dbStorage.setItem(K.timer, state); return true } catch (err) {
+    logErr('[whale][timer] 写计时状态失败', err && err.message)
+    return false
+  }
 }
 function clearTimer() {
   try { utools.dbStorage.removeItem(K.timer) } catch (err) {}
@@ -1259,7 +1267,10 @@ function readAnchor() {
 }
 function writeAnchor(a) {
   anchorCache = a
-  try { utools.dbStorage.setItem(K.win, a) } catch (err) { logErr('[whale][anchor] 写窗口锚点失败', err && err.message) }
+  try { utools.dbStorage.setItem(K.win, a); return true } catch (err) {
+    logErr('[whale][anchor] 写窗口锚点失败', err && err.message)
+    return false
+  }
 }
 // 清除锚点内存缓存（clearAllData 后重新从存储读取）
 function resetAnchorCache() { anchorCache = null }
@@ -1306,4 +1317,6 @@ module.exports = {
   DSB_KEEP_DEFAULT,
   DSB_KEEP_MIN,
   DSB_KEEP_MAX,
+  // 随机台词组的数量上限（仅导出给单测：测试里写死 12 会与实现脱钩，改上限时测试照样"通过"）
+  QUOTE_GROUP_MAX,
 }

@@ -107,6 +107,15 @@ function idListOf(v) {
   return Array.isArray(v) ? v : []
 }
 
+// 条目行号归一（供界面显示，1 基）。
+// 上游有两种写法：dsh-patch.js 的 `lineIndex`（0 基）与调用方自己带的 `line`（1 基）。
+// 只认后者会让前者静默变 0（B10）。两个都没有时返回 0，界面据此显示「追加到末尾」。
+function lineNoOf(it) {
+  if (Number.isFinite(it.lineIndex)) return it.lineIndex + 1
+  if (Number.isFinite(it.line)) return it.line
+  return 0
+}
+
 // 选出一批**独立**的候选项，每个自带冻结的「当前状态」。
 //
 // 冻结的意义：界面上用户可能先看到一份清单、过一会儿才点「执行」，
@@ -175,7 +184,10 @@ function candidatesOf(opts) {
       id: id,
       disabled: !!it.disabled,
       inPatch: true,
-      line: Number.isFinite(it.line) ? it.line : 0,
+      // 行号兼容两种字段名（修 B10）：dsh-patch.js 的 parsePatch 给的是 `lineIndex`（0 基），
+      // 早先这里只认 `line` → 上游直接把 parsePatch 的结果传进来时行号静默变 0，
+      // 界面上表现为「这一条没有行号」。界面上显示的是 1 基行号，故 lineIndex 要 +1。
+      line: lineNoOf(it),
       hasConfig: !!it.hasConfig,
       source: 'patch',
       // 已在用户 patch 里的条目**无条件**归 'patched'：它是用户自己写进去或本插件写进去的，

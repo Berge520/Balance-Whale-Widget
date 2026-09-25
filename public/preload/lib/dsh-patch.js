@@ -70,7 +70,13 @@ function disabledValue(raw) {
 // 归属规则：`disabled:` 行归给**它上方最近的** `- id:` 条目（YAML 的块结构就是这个语义）。
 // 所以顺序扫一遍、记住「当前条目」即可，不需要栈。
 function parsePatch(text) {
-  const src = String(text == null ? '' : text).replace(/\r\n?/g, '\n')
+  const raw = String(text == null ? '' : text)
+  // eol 必须从**原始**文本检测（修 B4）：早先写成 `src.includes('\r\n')`，而 src 在上一行
+  // 已被归一成 `\n`，这个字段于是恒为 false —— 谁信它谁就会把 CRLF 文件按 LF 重写。
+  // 目前没出错只是因为落笔处（applyToggle / applyBatchDisable）各自另判了一次，
+  // 这个字段本身一直是坏的，留着就是给后来人一个坑。
+  const eol = raw.includes('\r\n') ? '\r\n' : '\n'
+  const src = raw.replace(/\r\n?/g, '\n')
   const lines = src.split('\n')
   const items = []
   let cur = null
@@ -102,12 +108,18 @@ function parsePatch(text) {
     // 条目下除 disabled 之外还有内容（config / 嵌套块 …）
     cur.hasConfig = true
   }
-  return { items, lines, eol: src.includes('\r\n') }
+  return { items, lines, eol }
 }
 
 // 条目 id 是否合法（要写进 YAML 的值）。
 // 只挡「会破坏文件结构」的字符：换行 / 冒号后接空格 / #（YAML 注释起点）——
 // 不挡 `@` `/` `.`，因为真实 id 就是 `@deepseek-ai/dsh-mnemon` 这种形态。
+//
+// ⚠️ 也必须挡 YAML 的**流式指示符** `{ } [ ] ,`（修 B5）：真实 id 里一个都不会出现，
+// 而它们混进值里会让解析器改变整行的读法（`- id: a, b` 被读成流式序列 / 映射）。
+// 更关键的是回读校验的可靠性：apparentItemIndex 用**同一套 ITEM_RE** 回读我们刚写的行，
+// 它宽松到什么都能认，于是「自己写的、自己认得出」—— 闸门在非法 id 下形同虚设。
+// 收紧入口后，写坏的行至少会在回读时被认成「不合法」而不是被当成合法条目。
 function validId(id) {
   const s = String(id == null ? '' : id).trim()
   if (!s || s.length > 200) return false
@@ -115,6 +127,7 @@ function validId(id) {
   if (/:\s/.test(s)) return false
   if (s.includes('#')) return false
   if (s.startsWith('-')) return false
+  if (/[{}[\],]/.test(s)) return false
   return true
 }
 
@@ -151,7 +164,13 @@ function applyToggle(text, id, disabled) {
     const next = appendItem(String(text == null ? '' : text), target, want)
     return { ok: true, text: next, changed: true, action: 'append' }
   }
-  if (hit.disabled === want && hit.disabledLineIndex >= 0) {
+  if (hit.disabled === want) {
+    // 值已达标即 noop（修 B6）：早先这里多一个 `&& hit.disabledLineIndex >= 0`，
+    // 于是「条目已被禁用、要设的也是禁用、但文件里没有 disabled 行」（值靠 `!!js` 表达式
+    // 或 dsh 默认值生效）会掉到下面的 insert 分支**白插一行** —— 一次实际无作用的写入，
+    // 却会在文件里留下 diff、在界面上报成 changed。
+    // 注意只在 disabledLineIndex >= 0 时才谈「原文本原样返回」：没有该行时也无需写，
+    // 返回值本就是原文，故这里合并不影响文本与 changed 的语义。
     return { ok: true, text: String(text == null ? '' : text), changed: false, action: 'noop' }
   }
   if (hit.disabledLineIndex >= 0) {

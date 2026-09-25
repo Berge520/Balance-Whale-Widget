@@ -103,6 +103,9 @@ const cleanup = () => {
   }
 }
 
+// --dry-run 时用于还原版本号；在 try 外声明，finally 里才可见（否则作用域对不上）
+const versionBackup = new Map()
+
 try {
 step('前置检查')
 
@@ -164,6 +167,18 @@ if (dryRun) {
 
 // ── 2. 写版本号 ──
 step(`写版本号 ${nextVersion}`)
+// 三处版本号都要能原样恢复：--dry-run 承诺「只检查不提交」，若真的留下改动，
+// 用户以为什么都没发生、实际工作区已经脏了（且 package-lock 不含在内会更不一致）。
+// 所以先把原始内容存下来，四关跑完（无论成败）在 finally 里还原。
+const versionFiles = ['package.json', 'package-lock.json', 'public/plugin.json', 'public/preload/lib/constants.js']
+if (dryRun) {
+  for (const rel of versionFiles) {
+    try { versionBackup.set(rel, readFileSync(path.join(root, rel), 'utf8')) } catch (e) {
+      // 文件可能不存在（如某些检出方式下的 package-lock），记 null 表示「本来就没有」，还原时删掉即可
+      versionBackup.set(rel, null)
+    }
+  }
+}
 const pkgRaw = readFileSync(pkgPath, 'utf8')
 // 锚定行首两个空格的顶层字段：不加锚点会改到「第一个出现的 version 键」，
 // 万一将来 package.json 里先出现别的（如某个嵌套配置的 version）就会改错地方。
@@ -249,10 +264,16 @@ step(`打附注 tag v${nextVersion}`)
 const tagMsgPath = path.join(tmpDir, `TAG_MSG_V${nextVersion.replace(/\./g, '')}.txt`)
 writeFileSync(tagMsgPath, `v${nextVersion}\n\n${body}\n`, 'utf8')
 run('git', ['tag', '-a', `v${nextVersion}`, '-F', path.relative(root, tagMsgPath)])
-// 回读校验：正文丢失是静默的（tag 照样建成功），只能建完再看一眼
+// 回读校验：正文丢失是静默的（tag 照样建成功），只能建完再看一眼。
+// 必须比**整段正文**而不是首行：脚本注释里记录过的事故形态正是「第一行在、多行正文丢」——
+// 只比 body.split('\n')[0] 时这种事故照样通过，校验形同虚设。
+// git cat-file 的原始对象里，头部与正文之间是空行；正文里的换行原样保留。
 const tagMsg = capture('git', ['cat-file', 'tag', `v${nextVersion}`], { allowFail: true })
-if (tagMsg.status !== 0 || !tagMsg.out.includes(body.split('\n')[0])) {
-  fail('tag 消息与预期不符（正文可能没写进去）；先 git tag -d v' + nextVersion + ' 删掉再重试')
+const tagBody = tagMsg.out.includes('\n\n') ? tagMsg.out.slice(tagMsg.out.indexOf('\n\n') + 2) : ''
+// 归一化行尾再比：body 已在上面归一成 LF，但 cat-file 输出在 Windows 上可能带 CRLF
+const normEol = (s) => s.replace(/\r\n?/g, '\n').trim()
+if (tagMsg.status !== 0 || normEol(tagBody) !== normEol(body)) {
+  fail('tag 消息与预期不符（正文可能没写全）；先 git tag -d v' + nextVersion + ' 删掉再重试')
 }
 run('git', ['push', 'origin', `v${nextVersion}`])
 
@@ -291,6 +312,20 @@ console.log(`
 `)
 } finally {
   cleanup()
+  // --dry-run 还原版本号：放 finally 才会在「四关失败 / 中途 fail()」时也还原，
+  // 否则一次失败的 dry-run 会把工作区留成「版本号已改」的状态，比不改还糟。
+  if (dryRun && versionBackup.size) {
+    for (const [rel, orig] of versionBackup) {
+      const abs = path.join(root, rel)
+      try {
+        if (orig === null) rmSync(abs, { force: true })
+        else writeFileSync(abs, orig, 'utf8')
+      } catch (e) {
+        console.log(`  [release] 警告：还原 ${rel} 失败（${(e && e.message) || e}），请手动检查`)
+      }
+    }
+    console.log('\n[release] --dry-run：版本号改动已还原，工作区恢复原状\n')
+  }
 }
 }
 

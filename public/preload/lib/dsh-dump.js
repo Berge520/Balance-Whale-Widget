@@ -372,24 +372,26 @@ function parseDshWarnings(text) {
 // ──────────────────────────────────────────────
 // 子进程：跑一次 dump
 // ──────────────────────────────────────────────
-// run(args, cb)：cb(err, text)。永不抛错、永不 cb 两次。
+// run(args, cb)：cb(err, stdout, stderr)。永不抛错、永不 cb 两次。
 // 超时用 kill 而不是撒手不管 —— 短命进程卡住通常是 rc 文件或网络 hang，
-// 留着它会一直占着句柄
+// 留着它会一直占着句柄。
+// ⚠️ stdout 与 stderr **分开回传**（修 B7）：早先两路混成一份，调用方无法区分
+// 「正文」与「警告」，parseDshWarnings 只能在混流里碰运气；现在各归各的。
 function run(args, cb, timeoutMs) {
   const act = activeDsh()
   const node = resolveNode('')
-  if (!act) return cb(new Error('未找到可用的 dsh（全局或插件目录都没有安装）'), '')
-  if (!node) return cb(new Error('未找到 Node.js 可执行文件'), '')
+  if (!act) return cb(new Error('未找到可用的 dsh（全局或插件目录都没有安装）'), '', '')
+  if (!node) return cb(new Error('未找到 Node.js 可执行文件'), '', '')
   const limit = Number.isFinite(timeoutMs) ? timeoutMs : DUMP_TIMEOUT_MS
   let child = null
   let done = false
   let out = ''
-  let overflow = false
+  let errOut = ''
   const finish = (err, text) => {
     if (done) return
     done = true
     clearTimeout(timer)
-    cb(err, text)
+    cb(err, text, err ? '' : errOut)
   }
   const timer = setTimeout(() => {
     try { if (child) child.kill() } catch (err) {}
@@ -402,30 +404,47 @@ function run(args, cb, timeoutMs) {
     logErr('[whale][dsh-dump] 启动失败', (err && err.message) || '')
     return finish(new Error('启动 dsh 失败：' + ((err && err.message) || err)), '')
   }
-  const onData = (d) => {
-    if (done) return
-    if (overflow) return
-    out += decodeOut(d)
+  // stdout 进正文、stderr 单独留一份（修 B7）：
+  // 早先两路都往同一个 out 里拼，而成功路径 `finish(null, out)` 把 stderr 当成正常输出——
+  // dsh 的 `patch: entry X not found` 警告当时**只在 stderr**（见下方 parseDshWarnings 的说明），
+  // 混流后既污染了正文解析，也让「警告」和「dump 正文」在缓存里失去边界。
+  // 现在正文只收 stdout，stderr 单独累积并只用于告警提示（仍要收：这些线索只此一份）。
+  const collect = (d) => {
+    const t = decodeOut(d)
+    out += t
     if (out.length > DUMP_MAX_BYTES) {
-      overflow = true
       try { child.kill() } catch (err) {}
       logErr('[whale][dsh-dump] dump 输出超限', String(out.length) + ' 字符')
       finish(new Error('dump 输出异常大（超过 ' + Math.round(DUMP_MAX_BYTES / 1024 / 1024) + 'MB），已中止'), '')
     }
   }
+  const collectErr = (d) => {
+    // stderr 同样要限量：警告刷屏时不能让它把内存吃光（正文超限的本意就在这里）
+    if (errOut.length > DUMP_MAX_BYTES) return
+    errOut += decodeOut(d)
+  }
   const onErr = (err) => {
     logErr('[whale][dsh-dump] 进程错误', (err && err.message) || '')
+    // 收摊（修 B8）：早先这里只 logErr 就返回，既没 finish 也没 kill ——
+    // 于是超时器随后触发，把「进程真的崩了」归因成「dump 超时」，用户按提示重试还是崩；
+    // 监听器也一直挂着（close 之后可能又被 error 叫一次）。
+    // 现在先 kill 再 finish：finish 有 done 闸门，晚到的 close/error/超时都会被挡掉。
+    try { if (child) child.kill() } catch (e) {}
     finish(new Error('dump 进程错误：' + ((err && err.message) || err)), '')
   }
+  const onData = (d) => { collect(d) }
+  const onErrData = (d) => { collectErr(d) }
   try { child.stdout && child.stdout.on('data', onData) } catch (err) {}
   // stderr 也要收：dsh 的 `patch: entry X not found` 之类提示走 stderr，
   // 而且实测在 dump 正文之前就打印了 —— 只看 stdout 会丢掉这些线索
-  try { child.stderr && child.stderr.on('data', onData) } catch (err) {}
+  try { child.stderr && child.stderr.on('data', onErrData) } catch (err) {}
   try { child.on('error', onErr) } catch (err) {}
   try {
     child.on('close', (code) => {
       if (done) return
-      if (code !== 0 && !stripAnsi(out).trim()) {
+      // 退出码非 0 且两路输出全空才算失败。判据必须看**两路之和**：
+      // dsh 的失败信息可能只出现在 stderr，只看正文会把「有错误说明的失败」误报成「无输出」
+      if (code !== 0 && !stripAnsi(out + errOut).trim()) {
         return finish(new Error('dsh 退出码 ' + code + '（无输出）'), '')
       }
       finish(null, out)
@@ -459,7 +478,7 @@ function collectDshDump(opts, cb) {
   const o = opts && typeof opts === 'object' ? opts : {}
   const profile = String(o.profile || 'web')
   const at = Date.now()
-  dumpEffective(profile, (eErr, eText) => {
+  dumpEffective(profile, (eErr, eOut, eErrOut) => {
     if (eErr) {
       // 生效树是主数据源，它失败就没有可展示的东西
       logErr('[whale][dsh-dump] 读生效树失败', (eErr && eErr.message) || '')
@@ -476,9 +495,10 @@ function collectDshDump(opts, cb) {
           : ((eErr && eErr.message) || String(eErr)),
       })
     }
-    const effective = parseDump(eText)
-    // dsh 自己报告的 patch not-found（C2 的唯一权威判据）：在正文之前就打了，从同一份输出里抽
-    const warnings = parseDshWarnings(eText)
+    const effective = parseDump(eOut)
+    // dsh 自己报告的 patch not-found（C2 的唯一权威判据）：实测打在**正文之前**、且走 stderr，
+    // 故从两路输出里一起抽（stdout 里也保底兜一遍，dsh 版本变化时多一路不算错）
+    const warnings = parseDshWarnings(eOut + '\n' + eErrOut)
     if (warnings.length) {
       logErr('[whale][dsh-dump] dsh 报告 patch 条目不存在', warnings.map((w) => w.id).join(', '))
     }
@@ -495,13 +515,13 @@ function collectDshDump(opts, cb) {
       diffError: '',
     }
     // 默认树失败不影响主结果：分层可视化仍然有用，只是少了 diff（降级，同 D26 的思路）
-    dumpDefault(profile, (dErr, dText) => {
+    dumpDefault(profile, (dErr, dOut) => {
       if (dErr) {
         result.diffError = (dErr && dErr.message) || String(dErr)
         logErr('[whale][dsh-dump] 读默认树失败（diff 降级）', result.diffError)
         return cb(null, result)
       }
-      const defaults = parseDump(dText)
+      const defaults = parseDump(dOut)
       const d = diffTrees(effective, defaults)
       result.diff = {
         changed: d.changed.slice(0, 200),
