@@ -702,19 +702,28 @@ test('marketUpdate：pnpm 报成功但回读版本更低，必须判失败并引
 //    「仍要强制安装」、看了警告、按了确认，照样被拦在写入前 —— 比一开始就不给按钮更糟。
 //    所以这里 force 与不 force 两条路、dryRun 与真写两段都要盖到。
 //
-// ⚠️ 打桩说明：宿主版本走 diagnostics.readEnv() → dsh.snapshot() 的 resolved/installed，
-//    这里替换 dsh.snapshot 钉住「宿主是 0.1.7-alpha.2」。兼容性结论走 dshHostCompat.lookup
-//    （联网拉 manifest），替换它让 dshmarket 声明 `^0.1.7-rc.1` —— 而 0.1.7-alpha.2 < 0.1.7-rc.1
-//    （alpha < rc），故必判 incompatible。这两处都是**模块级**替换，必须 finally 还原。
+// ⚠️ 打桩说明：宿主版本的**真接缝**是 settings.js 里的 `diagnostics.readEnv().dshVersion`
+//    （见 lib/settings.js 的 hostDshVersion），而 diagnostics.readEnv 内部调的是**它自己
+//    顶层解构出来的** `snapshot`（`const { probePort, snapshot } = require('./dsh')`）。
+//    所以「替换 dshMod.snapshot」根本透不进去 —— 解构早已把原函数钉死在 diagnostics 的闭包里，
+//    重指 dsh.js 导出的 snapshot 对它无效。
+//    这在本地能侥幸通过：本地真跑 dsh.snapshot() 读得到版本 → host 非空 → 兼容性检查照跑、
+//    再用 lookup 桩判 incompatible。可 CI 上临时目录里没有 dsh，snapshot().resolved 为空 →
+//    hostDshVersion() 返回 '' → enforceHostCompat 见 !host 直接提前返回 unknown，永不拦，
+//    6 个断言全垮（2026-09-25 CI 首次暴露）。故这里直接替换 diagnostics.readEnv。
+//    兼容性结论走 dshHostCompat.lookup（联网拉 manifest），替换它让 dshmarket 声明
+//    `^0.1.7-rc.1` —— 而 0.1.7-alpha.2 < 0.1.7-rc.1（alpha < rc），故必判 incompatible。
+//    这两处都是**模块级**替换，必须 finally 还原。
+const diagnosticsMod = require('../public/preload/lib/diagnostics.js')
 const dshHostCompatMod = require('../public/preload/lib/dsh-host-compat.js')
 
 // 一次「声明要求 ^0.1.7-rc.1」的 lookup 桩：facts 结构照 deriveHostCompatibility 的入参造
 const INCOMPAT_FACTS = { engine: '', peers: [{ name: '@deepseek-ai/dsh', range: '^0.1.7-rc.1' }] }
 
 function withIncompatibleHost(fn) {
-  const savedSnap = dshMod.snapshot
+  const savedReadEnv = diagnosticsMod.readEnv
   const savedLookup = dshHostCompatMod.lookup
-  dshMod.snapshot = () => ({ resolved: '0.1.7-alpha.2', installed: '', globalVersion: '' })
+  diagnosticsMod.readEnv = () => ({ home: '', nodeVersion: '', dshVersion: '0.1.7-alpha.2', dshSource: '', profile: 'web', installed: true })
   dshHostCompatMod.lookup = () => Promise.resolve({ ok: true, facts: { dshmarket: INCOMPAT_FACTS } })
   // ⚠️ 必须等 Promise **落地**后再还原（2026-09-25 修）：早先这里在 finally 里同步还原，
   //    而调用方是 async —— fn() 一返回 Promise，finally 就立刻把桩换回真实现，于是
@@ -722,11 +731,11 @@ function withIncompatibleHost(fn) {
   //    真写却判 compatible（拉到了 registry 上的真 manifest），force 结论随之丢失。
   try {
     return Promise.resolve(fn()).finally(() => {
-      dshMod.snapshot = savedSnap
+      diagnosticsMod.readEnv = savedReadEnv
       dshHostCompatMod.lookup = savedLookup
     })
   } catch (err) {
-    dshMod.snapshot = savedSnap
+    diagnosticsMod.readEnv = savedReadEnv
     dshHostCompatMod.lookup = savedLookup
     throw err
   }
