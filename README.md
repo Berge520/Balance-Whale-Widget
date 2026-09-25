@@ -341,17 +341,21 @@ npm run release     # 一键发版（见下）
 - **Codex 卡指标格统一**：Codex 卡字段区跟进 dsh 用量卡的等宽指标格（`.stat-grid`），同一 Tab 观感一致。
 - **挂件任务栏避让重申**：非 dsh 配置下也确保不占用任务栏（`ensureSkipTaskbar`）。
 - **菜单长文本不再撑破面板**：菜单「组 → grid 体 → inner → 行」四层补 `min-width:0`，dsh 命令文本这类长行不再越出面板右缘，行内省略号才真正生效。
+- **诊断日志改为轮转 + 重复抑制**：日志超 1MB 不再「截断只留末尾」（那会把出错前的第一现场一起冲掉），改为整份改名成 `whale-debug.log.1` 保住上下文；同一处代码在 5 秒内反复失败只落首条，窗口过去后补一行重复计数，既不刷爆日志也不丢线索。诊断卡「复制日志」在主文件只剩轮转头时自动改读 `.1`。
+- **悬浮页错误写入宿主日志**：新增 `whale:page-log` 通道，页面侧 `logErr` 除控制台外转交宿主落盘（`%TEMP%\whale-debug.log`），打包版没有 DevTools 时用户也能取证。
 
 **修复**
 
 - **市场卡按钮失效**：市场卡片按钮判据修正，未安装 / 已安装 / 可更新各状态按钮正确可用。
 - **诊断卡空态**：诊断卡在无数据时不再渲染空卡与空报告。
 - **Codex 卡空指标格错位**：无金额口径时留空的指标格不再多占一行导致错位。
+- **挂件菜单贴错边**：宿主主动挪窗（任务栏避让、改贴边间距、复位位置）与缩放提交后，新增 `whale:snapped` 回推，页面据此重算菜单贴边方向 —— 菜单不再按旧位置摆到屏幕外或贴错边。
+- **关闭鼠标穿透时菜单未收起**：关闭穿透与开启穿透现在对称收菜单，避免菜单留在屏上、窗口却已 `ignoreMouse=true` 导致点击穿透到下层应用。
 
 **构建与测试**
 
-- **新增 `lib/dsh-export.js`** + `test/dsh-export.test.mjs`、`test/dsh-lock.test.mjs`、`test/dsh-verify.test.mjs`、`test/dsh-host-compat.test.mjs`；测试文件由 14 个增至 **18 个**、用例 **468 项**。
-- **新增存储键 `whale:dshExportCred` / `whale:dshExportNoMod`**：分别记住导出时的凭据包含选项与「不再提示」标记。
+- **新增 `lib/dsh-export.js`** + `test/dsh-export.test.mjs`、`test/dsh-lock.test.mjs`、`test/dsh-verify.test.mjs`、`test/dsh-host-compat.test.mjs`、`test/log.test.mjs`；测试文件由 14 个增至 **19 个**、用例 **478 项**。
+- **新增配置字段 `dshExportCred` / `dshExportNoMod`**（存于 `whale:config`）：分别记住导出时「是否含凭据」（默认 `false`）与「是否跳过 `node_modules`」（默认 `true`）。
 
 ### 1.7.0
 

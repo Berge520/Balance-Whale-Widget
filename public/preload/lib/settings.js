@@ -2751,15 +2751,15 @@ module.exports = {
     }
     // 音效被清除后把「无自定义音效」推给挂件，正在用「自定义」的音色会立刻回退内置音
     if (o.sounds) {
-      try { sendToWidget('whale:sounds', sounds.getSoundData()) } catch (err) {}
+      try { sendToWidget('whale:sounds', sounds.getSoundData()) } catch (err) { logErr('[whale][settings] 重置后推送音效失败', err && err.message) }
     }
     // 同理：自定义形象被清除后推空串，挂件立刻回退内置形象
     if (o.skins) {
-      try { sendToWidget('whale:skin', skins.getSkinData()) } catch (err) {}
+      try { sendToWidget('whale:skin', skins.getSkinData()) } catch (err) { logErr('[whale][settings] 重置后推送形象失败', err && err.message) }
     }
     // 同理：气泡图被清除后推空数组，挂件立刻回退内置 rua.gif
     if (o.bubbles) {
-      try { sendToWidget('whale:bubbles', bubbles.getBubbleData()) } catch (err) {}
+      try { sendToWidget('whale:bubbles', bubbles.getBubbleData()) } catch (err) { logErr('[whale][settings] 重置后推送气泡失败', err && err.message) }
     }
     return {
       ok: true,
@@ -2842,10 +2842,21 @@ module.exports = {
   },
   // 诊断日志（同步落盘 %TEMP%\whale-debug.log，进程被 uTools 结束也不丢）。
   // 返回末尾部分即可，避免整份日志撑爆剪贴板/界面。
+  // 日志超 1MB 会轮转：主文件被清空重建、真内容进了 .1。此时若只读主文件，
+  // 用户报问题时拿到的是一份几乎空的日志 —— 故主文件若只剩轮转头，改读 .1
   getDebugLog() {
     if (!LOG_FILE) return { path: '', text: '' }
     let text = ''
-    try { text = fs.readFileSync(LOG_FILE, 'utf8') } catch (err) { text = '' }
+    try {
+      text = fs.readFileSync(LOG_FILE, 'utf8')
+      // 轮转刚发生时主文件只有『已轮转』头一行；把上一份取回来更有诊断价值
+      if (text.split('\n').length <= 2) {
+        try {
+          const prev = fs.readFileSync(LOG_FILE + '.1', 'utf8')
+          if (prev) return { path: LOG_FILE + '.1', text: prev.slice(-20000) }
+        } catch (err) {}
+      }
+    } catch (err) { text = '' }
     return { path: LOG_FILE, text: text.slice(-20000) }
   },
   // 用系统默认程序打开日志文件（便于人工查看/另存）

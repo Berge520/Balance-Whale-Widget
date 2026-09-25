@@ -101,6 +101,10 @@ const api = {
   openSettings() { send('whale:open-settings') },
   // 请求宿主隐藏挂件（销毁悬浮窗；下次「显示挂件」重新创建，加载最新页面）
   hideWidget() { send('whale:hide-widget') },
+  // 把页面错误转交宿主落盘：页面侧只能打 console，此处让它进 %TEMP%\whale-debug.log
+  reportError(msg, detail) {
+    send('whale:page-log', { msg: String(msg || ''), detail: String(detail == null ? '' : detail) })
+  },
 
   // 标记真实桥接已加载（页面据此区分空实现）
   __bridge: true,

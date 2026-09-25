@@ -60,13 +60,24 @@
     dragMove: function () {}, dragEnd: function () {}, setIgnoreMouse: function () {}, setInputFocus: function () {},
     openSettings: function () {}, dsh: function () {}, onDsh: function () {},
     refreshModels: function () {}, setMainModel: function () {}, hideWidget: function () {},
+    reportError: function () {},
   };
   // 是否有真实宿主桥接（没有时 dsh 等需要宿主的操作要给提示，而不是一直转圈）
   var HAS_BRIDGE = !!(window.whale && window.whale.__bridge);
   // 调试日志门控：宿主 preload 把 uTools 开发者模式标志透传为 window.whale.dev
   var DEV = !!(window.whale && window.whale.dev);
   function log() { if (DEV) console.log.apply(console, arguments); }
-  function logErr() { if (DEV) console.error.apply(console, arguments); }
+  function logErr() {
+    if (DEV) console.error.apply(console, arguments);
+    // 打包版没有 DevTools，console 里的错误用户取不到；转交宿主写进 %TEMP%\whale-debug.log。
+    // 宿主侧已对 msg/detail 截断，这里只做拼接
+    try {
+      if (window.whale && window.whale.reportError) {
+        var args = Array.prototype.slice.call(arguments);
+        window.whale.reportError(String(args[0] || ''), args.slice(1).join(' '));
+      }
+    } catch (e) {}
+  }
   if (window.whale && window.whale.__bridge) log('[whale][page] 已连接宿主桥接 window.whale');
   // 桥接缺失是严重异常，保留常显警告：生产环境也要留下用户侧线索
   else console.warn('[whale][page] 未检测到宿主桥接（preload 未加载？），余额/拖拽将不可用');
@@ -451,7 +462,8 @@
     }
     resetHideBtn();
     closeMenu();
-    try { whaleApi.hideWidget(); } catch (err) {}
+    // 唯一动作，失败必须留痕：否则用户点了「隐藏」没反应却查不到原因
+    try { whaleApi.hideWidget(); } catch (err) { logErr('[whale][floating] 隐藏挂件失败', err && err.message); }
   });
   row9.appendChild(hideBtn);
   row9.classList.add('dshwv-menu-foot');
@@ -1433,7 +1445,8 @@
   }
   function saveTimerState() {
     if (!timerPersistOn) return;
-    try { whaleApi.saveTimer(currentTimerState()); } catch (err) {}
+    // 保存失败要留痕：否则用户开了「计时保存」，重载后计时没了却查不到任何线索
+    try { whaleApi.saveTimer(currentTimerState()); } catch (err) { logErr('[whale][floating] 保存计时状态失败', err && err.message); }
   }
   // 重建挂件后恢复计时（仅在「计时保存」开启时宿主才会回推 timer）
   function restoreTimer(t) {
@@ -2181,6 +2194,9 @@
         if (passNoticeReady) showPassNotice(true);
       } else {
         // 关闭穿透：先按安全默认忽略鼠标，指针移到鲸鱼上时悬停逻辑会重新判定
+        // 菜单此刻若开着要一并收起：开启分支已 closeMenu，这里必须对称，
+        // 否则菜单留在屏上、窗口却已 ignoreMouse=true，点了会穿透到下层应用
+        if (menuOpen) closeMenu();
         sendIgnoreMouse(true);
         menuBtn.classList.remove('dshwv-menu-btn-visible');
         if (passNoticeReady) showPassNotice(false);
@@ -2581,7 +2597,11 @@
         menuBox.style.top = 'auto';
         menuBox.style.maxHeight = Math.max(0, up - 8) + 'px';
       }
-    } catch (err) {}
+    } catch (err) {
+      // 定位失败会让菜单画到错位置甚至看不见，属于业务失败必须留痕：
+      // 打包版没有 DevTools，经 logErr 转交宿主写进 %TEMP%\whale-debug.log
+      logErr('[whale][page] 菜单定位失败', err && err.message);
+    }
   }
 
   // —— 像素命中测试（透明区域不响应/可穿透） ——

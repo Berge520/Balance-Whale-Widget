@@ -22,7 +22,8 @@ function registerIpc() {
   // 一直停在「启动中…（3080 未就绪）」「正在结束…」，要点一下「打开页面」触发快照才刷新
   try {
     dsh.onChange((s) => {
-      try { sendToWidget('whale:dsh', s) } catch (err) {}
+      // sendToWidget 内部已对「窗口不存在」留痕，这里能捕获到的是它的意外异常
+      try { sendToWidget('whale:dsh', s) } catch (err) { logErr('[whale][ipc] 推送 dsh 状态失败', err && err.message) }
     })
   } catch (err) { logErr('[whale][ipc] 订阅 dsh 状态失败', err && err.message) }
 
@@ -53,7 +54,7 @@ function registerIpc() {
         const payload = getModelsPayload()
         if (done) payload.refreshDone = true
         sendToWidget('whale:models', payload)
-      } catch (err) {}
+      } catch (err) { logErr('[whale][ipc] 推送模型快照失败', err && err.message) }
     }
     push(false)
     refreshModels(ids, force).then(() => push(true)).catch((err) => {
@@ -244,10 +245,21 @@ function registerIpc() {
     notify(text, readConfig())
   })
 
+  // 悬浮页把自身错误转交宿主落盘：页面侧的 logErr 只能打 console，
+  // 打包版没有 DevTools 时用户无从取证，故经此通道写进 %TEMP%\whale-debug.log
+  ipcRenderer.on('whale:page-log', (event, data) => {
+    const msg = String((data && data.msg) || '').slice(0, 500)
+    if (!msg) return
+    const detail = String((data && data.detail) || '').slice(0, 500)
+    logErr('[whale][page]', msg, detail || '')
+  })
+
   // DeepSeek Harness（dsh）控制：挂件菜单 → 宿主执行 → 回推状态快照。
   // 每次先探测 3080（识别「别的终端里跑的 dsh」），再执行/回报状态
   ipcRenderer.on('whale:dsh', (event, data) => {
     const action = String((data && data.action) || 'status')
+    // 此处失败不必留痕：act() 的 catch 已 logErr「dsh 操作失败」再走 reply 上报，
+    // 这里再加一条只会把同一次失败记两遍
     const reply = (payload) => { try { sendToWidget('whale:dsh', payload) } catch (err) {} }
     const act = () => {
       try {

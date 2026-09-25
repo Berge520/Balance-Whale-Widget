@@ -1,15 +1,15 @@
 /*
  * dsh 配置转储（dump-config）读取与解析（CommonJS）。
  *
- * 设计依据：docs/plan-dsh-diagnostics.md 阶段二（§4）。核心约束：
+ * 设计依据：docs/whale-widget-spec.md §5 / §11（dsh 配置转储卡）。核心约束：
  *   1. **一次性 CLI 读取** —— `node <bin.js> --profile <n> --dump-config` 是短命进程，
- *      **8s 超时**（§4.3），超时按失败处理并留痕，绝不阻塞设置页。
- *   2. **只读缓存** —— 同 §3.5 的 fingerprint + memo 模式，纯派生数据、不进备份。
+ *      **8s 超时**，超时按失败处理并留痕，绝不阻塞设置页。
+ *   2. **只读缓存** —— 同 fingerprint + memo 模式，纯派生数据、不进备份。
  *   3. **只解析到条目级** —— dump 实测本机 767 行，整篇回传前端会撑爆消息通道，
- *      这里只抽出「层 → 条目（id/name/disabled/config 行数）」的骨架（§4.3）。
+ *      这里只抽出「层 → 条目（id/name/disabled/config 行数）」的骨架。
  *   4. **`!!js` 原样保留不求值** —— `disabled: !!js '!ctx.get(...)'` 是运行期表达式，
- *      求值需要 cordis 上下文，静态解析做不到也不该做（§4.3）。
- *   5. **显式 `--profile <n>`** —— 不依赖 bin.js 的位置参数补全（§4.3 参数顺序踩坑）。
+ *      求值需要 cordis 上下文，静态解析做不到也不该做。
+ *   5. **显式 `--profile <n>`** —— 不依赖 bin.js 的位置参数补全（参数顺序踩坑）。
  *
  * 依赖 dsh.js 已导出的 decodeOut / spawnCmd / activeDsh（通用底层能力），
  * 不复制实现，避免两处漂移。本模块不 require utools。

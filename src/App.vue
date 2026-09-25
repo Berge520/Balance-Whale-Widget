@@ -57,19 +57,22 @@ const lookFolds = reactive({ bubble: false, sound: false })
 const assetFolds = reactive({ builtin: false })
 // —— 设置页顶部 Tab ——
 // 原先 12 张卡片竖排一屏到底（模板近千行），找一项要滚很久；按主题分 6 组，一次只看一组。
-// 每张卡片用 v-if="activeTab === 'xxx'" 归到组里（不额外套容器层，源码顺序即组内顺序）。
-// desc 是分组说明：凭据、备份这类「不常用但找不到会着急」的项靠它暴露位置。
+// 每张卡片用 v-if="activeTab === 'xxx'" 归到组里（不额外套容器层）。组内顺序 = 卡片在模板里的先后；
+// 但不同组的卡片是交错排布的（如「数据」的凭据卡在模板最前、「帮助」的关于卡在最后），
+// 所以看模板不要以为同一组的卡挨在一起 —— 渲染顺序由下面 TABS 的 key 决定，与源码位置无关。
+// desc 是分组说明：凭据、备份这类「不常用但找不到会着急」的项靠它暴露位置；
+// 它得与卡片实际**顺序和数量**对得上（按错顺序写、漏掉某张卡，用户按描述找就会找不到）。
 const TABS = [
   { key: 'look', label: '外观', desc: '大小 · 形象与音色 · 文案' },
-  { key: 'assets', label: '资源', desc: '素材总览 · 形象画廊 · 音效 · 素材包' },
-  { key: 'usage', label: '用量', desc: '趋势与账本 · 模型余额 · 提醒与通知' },
+  { key: 'assets', label: '资源', desc: '素材总览 · 形象画廊 · 气泡图 · 音效 · 素材包' },
+  { key: 'usage', label: '用量', desc: '趋势与账本 · 提醒与通知 · 模型余额' },
   { key: 'window', label: '窗口', desc: '显隐 · 位置 · 透明度 · 穿透' },
   { key: 'data', label: '数据', desc: '凭据设置 · 清除数据 · 备份与恢复' },
   { key: 'help', label: '帮助', desc: '使用说明 · 故障排查 · 关于与更新' },
-  // desc 是 Tab 栏下方的静态说明，得与卡片的实际数量对得上：
+  // desc 是 Tab 栏下方的静态说明，得与卡片的实际顺序、数量对得上：
   // 原先只列「dsh / dsh 用量 / Codex」三项，而这一页实际有 8 张卡，用户按描述找
   // 「插件开关」「插件市场」会以为不在这里。按实际顺序列全，并把非 dsh 的 Codex 单独隔开
-  { key: 'dev', label: '开发者', desc: 'DeepSeek Harness（dsh）：主控 · 环境诊断 · 配置转储 · 用量统计 · 插件开关 · 插件市场 · 全量导出　｜　Codex 会话统计' },
+  { key: 'dev', label: '开发者', desc: 'DeepSeek Harness（dsh）：主控 · 环境诊断 · 配置转储 · 全量导出 · 用量统计 · 插件开关 · 插件市场　｜　Codex 会话统计' },
 ] as const
 type TabKey = (typeof TABS)[number]['key']
 const activeTab = ref<TabKey>('look')
@@ -282,8 +285,10 @@ function dshToggleTrouble() {
   dshFolds.trouble = !dshFolds.trouble
   if (!dshFolds.trouble) dshConfirm.value = ''
 }
-// 主控卡整体折叠：与其他 5 张卡保持一致（都带 caret + 收起态摘要）。默认展开 ——
+// 主控卡整体折叠：与其他卡保持一致（都带 caret + 收起态摘要）。默认展开 ——
 // 启动/重启/结束是本 tab 最高频的动作，默认收起等于每次进来都要多点一下。
+// 不并入 devFolds：其余卡是「展开才懒加载」，这张状态在启动时已自动查好，
+// 用独立 ref 表达「默认展开」比给 devFolds 加默认值特例更直白
 const dshMainFold = ref(true)
 // 诊断折叠展开时顺手查一次「最新版本」：版本明细都是只读诊断，展开本身就是「我想核对版本」的信号，
 // 此时查一次比让用户再点一次「查询可用版本」更省事。npm view 要联网、较慢，失败也不打断（dshQueryVersions 内部已兜底）
@@ -2083,7 +2088,7 @@ function dshIsolateActionText(action: string) {
 
 // ── dsh 插件市场 ──
 //
-// 与其余 6 张 dev 卡的**唯一不同点：这张卡会联网**。其余卡都在 hint 里写明「不发网络请求」，
+// 与其余 7 张 dev 卡的**唯一不同点：这张卡会联网**。其余卡都在 hint 里写明「不发网络请求」，
 // 所以这里反过来必须显式声明「本卡会联网」—— 不能靠用户自己猜。
 //
 // 三段式（预览 → 确认 → 写入）与 dshIsolate 同构，但**不共用** flash/busy/plan：
@@ -2943,8 +2948,15 @@ const dshMarketCompatCount = computed(() => {
 
 const dshMarketSummary = computed(() => {
   const r = dshMarket.value
-  if (!dshMarketLoaded.value) return '点击展开浏览'
-  if (!r) return '还没加载目录'
+  // 与其余 7 张卡同构：摘要的可用性看「本会话是否展开读过」，而不是「有没有联网抓过目录」。
+  // 市场卡展开只读本地已装状态（不联网），所以未抓目录时也能报出已装包数 ——
+  // 这里若改用 dshMarketLoaded 当闸门，摘要会一直停在「点击展开浏览」，
+  // 即便用户已经展开读过、profile 里有多少已装包早已拿到。
+  if (!devStatsLoaded.dshMarket) return '点击展开浏览'
+  if (!r) {
+    const instLocal = dshMarketStatus.value?.count
+    return instLocal ? `profile 里 ${instLocal} 个已装包 · 点击进入市场` : '点击进入市场'
+  }
   if (!r.ok) return '目录加载失败'
   const n = r.count || r.plugins?.length || 0
   const inst = dshMarketStatus.value?.count || 0
@@ -7638,6 +7650,116 @@ onUnmounted(() => {
       </template>
       </template>
     </section>
+    <!-- [dsh] 全量导出：把整个 $DSH_HOME 压成一个 zip 交给用户，用于「换台机器接着用 / 存档」。
+         与下面「dsh 插件开关」里的**快照**卡是两件事：那张卡白名单备 3 个文件、为了回滚 patch，
+         这张卡全量、为了搬运。所以不复用那张卡，也不共用回执。
+         位置紧邻「诊断 / 转储」：这三张同属「只读、不改 dsh 任何状态」的取证族，
+         而下面的开关 / 市场会写配置或装插件 —— 把只读族与写入族分开，翻页时更好找。 -->
+    <section v-if="activeTab === 'dev'" class="card dsh-card">
+      <div class="card-head">
+        <h2 class="card-toggle" @click="toggleDevCard('dshExport')">
+          <span class="caret">{{ devFolds.dshExport ? '▾' : '▸' }}</span>dsh 全量导出
+          <!-- 收起态摘要：只在「本会话已展开读过」后才显示，否则不预读、直接提示点开 -->
+          <span v-if="!devFolds.dshExport" class="card-sum">
+            <template v-if="dshExportSummary">{{ dshExportSummary }}</template>
+            <template v-else>点击展开查看</template>
+          </span>
+        </h2>
+      </div>
+      <template v-if="devFolds.dshExport">
+        <p class="hint">
+          把整个 <code>$DSH_HOME</code> 打包成一个 <code>.zip</code>（含 <code>profiles/</code> 下的
+          patch、插件、会话记录），用于<strong>换台机器接着用</strong>或长期存档。
+          包内会附一份 <code>whale-dsh-export.json</code> 清单，写明导出时间、来源目录与跳过了什么。
+        </p>
+        <p class="hint">
+          与下面「dsh 插件开关」里的<strong>快照</strong>不是一回事：快照只备 3 个文件、由挂件管、
+          用来把 patch 还原回去；这里是全量搬运，<strong>挂件不解析包内容、也不负责还原</strong>。
+        </p>
+
+        <p v-if="dshExportInfo && !dshExportInfo.ok" class="hint">
+          {{ dshExportInfo.error || '读取失败，请稍后重试。' }}
+        </p>
+
+        <template v-else-if="dshExportInfo">
+          <label class="field row">
+            <span class="label">来源目录</span>
+            <span class="ver" :title="dshExportInfo.dshHome">{{ dshExportInfo.dshHome }}</span>
+          </label>
+          <label class="field row">
+            <span class="label">预计导出</span>
+            <span class="ver">
+              {{ dshExportInfo.entries || 0 }} 个文件 / {{ dshExportSize(dshExportInfo.bytes || 0) }}
+              <template v-if="dshExportInfo.excluded">（另有 {{ dshExportInfo.excluded }} 项不进包）</template>
+            </span>
+          </label>
+
+          <!-- dsh 运行中提示：会话文件是追加写的，边跑边导可能拿到半条记录。
+               放在「预计导出」正下方 —— 用户看完条目数就会往下扫，这里是必读位置。
+               三种状态分开说：在跑（黄）/ 端口被别的程序占（灰，性质不同）/ 判不出来（灰） -->
+          <p v-if="dshExportInfo.running && dshExportInfo.running.running" class="hint hint-warn">
+            ⚠️ 检测到 dsh <strong>正在运行</strong><template v-if="dshExportInfo.running.pid">（pid {{ dshExportInfo.running.pid }}）</template>。
+            建议先退出 dsh 再导出：会话记录是<strong>边写边存</strong>的，运行中导出可能取到写了一半的记录，
+            配置也可能正处在修改中间态。<strong>不退出也能导，但包不保证是某一时刻的完整快照。</strong>
+          </p>
+          <p v-else-if="dshExportInfo.running && dshExportInfo.running.other" class="hint">
+            端口 {{ dshExportInfo.running.other }} 被其他程序占用（不是 dsh，不影响导出）。
+          </p>
+          <!-- running 为 null = 探测没拿到结果。不谎报「没在跑」，明说判不出来 -->
+          <p v-else-if="dshExportInfo.running === null" class="hint">
+            未能确认 dsh 是否在运行。若你正开着 dsh，建议先退出再导出。
+          </p>
+
+          <label class="field row">
+            <span class="label">包含凭据</span>
+            <input type="checkbox" :checked="cfg.dshExportCred" @change="dshExportSetCred(($event.target as HTMLInputElement).checked)" />
+            <span class="hint">
+              默认不带。<code>.credentials.yaml</code> 等在包里是<strong>明文</strong> ——
+              要迁移登录态才勾，勾了别把包拷给别人或传网盘。
+            </span>
+          </label>
+          <label class="field row">
+            <span class="label">跳过依赖</span>
+            <input type="checkbox" :checked="cfg.dshExportNoMod" @change="dshExportSetNoMod(($event.target as HTMLInputElement).checked)" />
+            <span class="hint">
+              默认跳过 <code>node_modules</code>（可重装、体积是配置的几十倍）。
+              取消勾选会显著增大包体积与耗时。
+            </span>
+          </label>
+
+          <!-- 未勾凭据但目录里确实有凭据文件时给出具体名字，
+               泛泛说「会排除凭据」用户不知道指的是哪个文件 -->
+          <p v-if="!cfg.dshExportCred && dshExportInfo.credFiles?.length" class="hint">
+            将排除 {{ dshExportInfo.credFiles.length }} 个凭据文件：
+            <code>{{ dshExportInfo.credFiles.slice(0, 3).join('、') }}</code>
+            <template v-if="dshExportInfo.credFiles.length > 3">等</template>
+          </p>
+
+          <p v-if="dshExportInfo.truncated" class="hint">
+            ⚠️ 文件数超过上限（{{ dshExportInfo.maxEntries }}），<strong>导出会被拒绝</strong>。
+            请先清理 <code>$DSH_HOME</code> 下的会话记录再试。
+          </p>
+
+          <div class="btn-row">
+            <button
+              class="utils-btn utils-primary"
+              :disabled="dshExportBusy || !dshExportInfo.entries || dshExportInfo.truncated"
+              @click="dshExportCreate()"
+            >{{ dshExportBusy ? '导出中…' : '导出为 zip…' }}</button>
+            <button class="secondary utils-btn utils-secondary" :disabled="dshExportBusy" @click="dshExportRefresh()">重新统计</button>
+          </div>
+
+          <p v-if="dshExportFlash.msg" class="msg" :class="msgCls(dshExportFlash)">{{ dshExportFlash.msg }}</p>
+          <!-- 导出成功才给「打开所在文件夹」：路径只在本次导出后有效，
+               刷新/重进页面就该消失，避免指向一个早被移走的文件 -->
+          <div v-if="dshExportLastPath" class="fold">
+            <button class="link-btn utils-btn utils-secondary" :title="dshExportLastPath" @click="dshExportReveal()">
+              打开所在文件夹
+            </button>
+          </div>
+        </template>
+      </template>
+    </section>
     <!-- [dsh] dsh 本地用量统计：读 ~/.dsh 下 dsh-usage 的账本与会话投影缓存，纯本地、不联网 -->
     <section v-if="activeTab === 'dev'" class="card dsh-card">
       <div class="card-head">
@@ -7786,7 +7908,8 @@ onUnmounted(() => {
         <!-- ⚠️ 「说明」不能放进上面那个 .btn-row：.btn-row 的 `flex: 1` 会展开成 `flex-basis: 0`，
              而 .link-btn 的 `padding: 0` 让「文字撑出宽度」这条退路也没了 —— 两者相加宽度恒为 0，
              按钮看得见却点不到（点击落到邻座的「预览改动」上）。
-             所以独立成 .fold 一行；位置放在整卡最后 —— 与本 Tab 其余 5 张卡统一（说明都在末尾），
+             所以独立成 .fold 一行；位置放在整卡最后 —— 本 Tab 多数卡（主控 / 转储 / 用量 / 开关 / 市场 / Codex）
+             都把「说明」收在末尾（导出卡没有说明、诊断卡的说明嵌在「已安装」分支内，是两处例外）。
              说明是补充信息，不该插在「候选 → 预览 → 确认」这条动作链中间。 -->
         <!-- 两个回执各自一条：逐条开关归 dshPatchFlash，批量隔离归 dshIsolateFlash，
              快照（还原/删除/命名/清理）归列表内的 dshBackupFlash（见下方快照折叠区）—— 三件事
@@ -8041,6 +8164,7 @@ onUnmounted(() => {
       <div class="card-head">
         <h2 class="card-toggle" @click="toggleDevCard('dshMarket')">
           <span class="caret">{{ devFolds.dshMarket ? '▾' : '▸' }}</span>dsh 插件市场
+          <!-- 收起态摘要：与其余卡同构 —— 只在「本会话已展开读过」后才显示，否则不预读、直接提示点开 -->
           <span v-if="!devFolds.dshMarket" class="card-sum">{{ dshMarketSummary }}</span>
         </h2>
       </div>
@@ -8613,116 +8737,8 @@ onUnmounted(() => {
       </template>
       </template>
     </section>
-    <!-- [dsh] 全量导出：把整个 $DSH_HOME 压成一个 zip 交给用户，用于「换台机器接着用 / 存档」。
-         与上面「dsh 插件开关」里的**快照**卡是两件事：那张卡白名单备 3 个文件、为了回滚 patch，
-         这张卡全量、为了搬运。所以不复用那张卡，也不共用回执。 -->
-    <section v-if="activeTab === 'dev'" class="card dsh-card">
-      <div class="card-head">
-        <h2 class="card-toggle" @click="toggleDevCard('dshExport')">
-          <span class="caret">{{ devFolds.dshExport ? '▾' : '▸' }}</span>dsh 全量导出
-          <!-- 收起态摘要：只在「本会话已展开读过」后才显示，否则不预读、直接提示点开 -->
-          <span v-if="!devFolds.dshExport" class="card-sum">
-            <template v-if="dshExportSummary">{{ dshExportSummary }}</template>
-            <template v-else>点击展开查看</template>
-          </span>
-        </h2>
-      </div>
-      <template v-if="devFolds.dshExport">
-        <p class="hint">
-          把整个 <code>$DSH_HOME</code> 打包成一个 <code>.zip</code>（含 <code>profiles/</code> 下的
-          patch、插件、会话记录），用于<strong>换台机器接着用</strong>或长期存档。
-          包内会附一份 <code>whale-dsh-export.json</code> 清单，写明导出时间、来源目录与跳过了什么。
-        </p>
-        <p class="hint">
-          与上面「dsh 插件开关」里的<strong>快照</strong>不是一回事：快照只备 3 个文件、由挂件管、
-          用来把 patch 还原回去；这里是全量搬运，<strong>挂件不解析包内容、也不负责还原</strong>。
-        </p>
-
-        <p v-if="dshExportInfo && !dshExportInfo.ok" class="hint">
-          {{ dshExportInfo.error || '读取失败，请稍后重试。' }}
-        </p>
-
-        <template v-else-if="dshExportInfo">
-          <label class="field row">
-            <span class="label">来源目录</span>
-            <span class="ver" :title="dshExportInfo.dshHome">{{ dshExportInfo.dshHome }}</span>
-          </label>
-          <label class="field row">
-            <span class="label">预计导出</span>
-            <span class="ver">
-              {{ dshExportInfo.entries || 0 }} 个文件 / {{ dshExportSize(dshExportInfo.bytes || 0) }}
-              <template v-if="dshExportInfo.excluded">（另有 {{ dshExportInfo.excluded }} 项不进包）</template>
-            </span>
-          </label>
-
-          <!-- dsh 运行中提示：会话文件是追加写的，边跑边导可能拿到半条记录。
-               放在「预计导出」正下方 —— 用户看完条目数就会往下扫，这里是必读位置。
-               三种状态分开说：在跑（黄）/ 端口被别的程序占（灰，性质不同）/ 判不出来（灰） -->
-          <p v-if="dshExportInfo.running && dshExportInfo.running.running" class="hint hint-warn">
-            ⚠️ 检测到 dsh <strong>正在运行</strong><template v-if="dshExportInfo.running.pid">（pid {{ dshExportInfo.running.pid }}）</template>。
-            建议先退出 dsh 再导出：会话记录是<strong>边写边存</strong>的，运行中导出可能取到写了一半的记录，
-            配置也可能正处在修改中间态。<strong>不退出也能导，但包不保证是某一时刻的完整快照。</strong>
-          </p>
-          <p v-else-if="dshExportInfo.running && dshExportInfo.running.other" class="hint">
-            端口 {{ dshExportInfo.running.other }} 被其他程序占用（不是 dsh，不影响导出）。
-          </p>
-          <!-- running 为 null = 探测没拿到结果。不谎报「没在跑」，明说判不出来 -->
-          <p v-else-if="dshExportInfo.running === null" class="hint">
-            未能确认 dsh 是否在运行。若你正开着 dsh，建议先退出再导出。
-          </p>
-
-          <label class="field row">
-            <span class="label">包含凭据</span>
-            <input type="checkbox" :checked="cfg.dshExportCred" @change="dshExportSetCred(($event.target as HTMLInputElement).checked)" />
-            <span class="hint">
-              默认不带。<code>.credentials.yaml</code> 等在包里是<strong>明文</strong> ——
-              要迁移登录态才勾，勾了别把包拷给别人或传网盘。
-            </span>
-          </label>
-          <label class="field row">
-            <span class="label">跳过依赖</span>
-            <input type="checkbox" :checked="cfg.dshExportNoMod" @change="dshExportSetNoMod(($event.target as HTMLInputElement).checked)" />
-            <span class="hint">
-              默认跳过 <code>node_modules</code>（可重装、体积是配置的几十倍）。
-              取消勾选会显著增大包体积与耗时。
-            </span>
-          </label>
-
-          <!-- 未勾凭据但目录里确实有凭据文件时给出具体名字，
-               泛泛说「会排除凭据」用户不知道指的是哪个文件 -->
-          <p v-if="!cfg.dshExportCred && dshExportInfo.credFiles?.length" class="hint">
-            将排除 {{ dshExportInfo.credFiles.length }} 个凭据文件：
-            <code>{{ dshExportInfo.credFiles.slice(0, 3).join('、') }}</code>
-            <template v-if="dshExportInfo.credFiles.length > 3">等</template>
-          </p>
-
-          <p v-if="dshExportInfo.truncated" class="hint">
-            ⚠️ 文件数超过上限（{{ dshExportInfo.maxEntries }}），<strong>导出会被拒绝</strong>。
-            请先清理 <code>$DSH_HOME</code> 下的会话记录再试。
-          </p>
-
-          <div class="btn-row">
-            <button
-              class="utils-btn utils-primary"
-              :disabled="dshExportBusy || !dshExportInfo.entries || dshExportInfo.truncated"
-              @click="dshExportCreate()"
-            >{{ dshExportBusy ? '导出中…' : '导出为 zip…' }}</button>
-            <button class="secondary utils-btn utils-secondary" :disabled="dshExportBusy" @click="dshExportRefresh()">重新统计</button>
-          </div>
-
-          <p v-if="dshExportFlash.msg" class="msg" :class="msgCls(dshExportFlash)">{{ dshExportFlash.msg }}</p>
-          <!-- 导出成功才给「打开所在文件夹」：路径只在本次导出后有效，
-               刷新/重进页面就该消失，避免指向一个早被移走的文件 -->
-          <div v-if="dshExportLastPath" class="fold">
-            <button class="link-btn utils-btn utils-secondary" :title="dshExportLastPath" @click="dshExportReveal()">
-              打开所在文件夹
-            </button>
-          </div>
-        </template>
-      </template>
-    </section>
     <!-- [dsh] Codex 本地会话统计：读 ~/.codex/sessions 的 rollout JSONL，纯本地、不联网。
-         上方 6 张卡都属于 dsh，这张不是 —— 用一条纯分界线隔开即可，不写字：
+         上方 7 张卡都属于 dsh，这张不是 —— 用一条纯分界线隔开即可，不写字：
          写字会和紧邻的卡标题「Codex 会话统计」重复，反而更啰嗦。 -->
     <hr v-if="activeTab === 'dev'" class="group-sep">
     <section v-if="activeTab === 'dev'" class="card dsh-card">
@@ -10242,8 +10258,8 @@ input[type='checkbox'] {
 .btn-row button.danger {
   background: none;
 }
-/* ===== dsh 分组的按钮（dsh 主控 · 环境诊断 · 配置转储 · 用量统计 · 插件开关 · Codex 会话统计）=====
-   这 6 张卡原先各写各的按钮：主控卡用 .btn-row（实心蓝主 + .secondary 灰蓝、font-size 13 / 无 padding），
+/* ===== dsh 分组的按钮（dsh 主控 · 环境诊断 · 配置转储 · 全量导出 · 用量统计 · 插件开关 · 插件市场 · Codex 会话统计）=====
+   这 8 张卡原先各写各的按钮：主控卡用 .btn-row（实心蓝主 + .secondary 灰蓝、font-size 13 / 无 padding），
    外围四张卡却把 .btn-row 当容器、里面清一色 .secondary（字号掉到按钮默认值），
    候选行的 .patch-btn 又是 2px/10px 的迷你尺寸，分组轴 .iso-axis-btn 更是自带一套胶囊边框 ——
    同一条动作链（刷新 → 预览 → 确认）上的按钮高矮胖瘦全不一样。

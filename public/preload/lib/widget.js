@@ -210,6 +210,8 @@ function repositionFromAnchor() {
     const wa = usableArea(pos[0] + winS / 2, pos[1] + winS / 2)
     const p = anchorToRect(wa, winS, readAnchor())
     win.setPosition(Math.round(p.x), Math.round(p.y))
+    // 主动挪完窗口必须同步页面：否则菜单仍按旧位置摆，贴错边或朝屏幕外展开
+    pushSnapped()
     return true
   } catch (err) {
     logErr('[whale][anchor] 重新摆放挂件失败', err && err.message)
@@ -248,7 +250,11 @@ function watchTick() {
     log('[whale][taskbar] 可用区变化，按锚点重摆挂件', sig)
     clearLiveScaleCtx()
     repositionFromAnchor()
-  } catch (err) {}
+  } catch (err) {
+    // 轮询体失败必须留痕：这里静默的话，避让任务栏会「莫名不生效」而无从取证。
+    // 250ms 高频下同键重复会被 log.js 的抑制窗口折叠，不会刷爆日志
+    logErr('[whale][taskbar] 任务栏轮询失败', err && err.message)
+  }
 }
 function syncTaskbarWatch() {
   const need = winAlive() && readConfig().avoidTaskbar !== false
@@ -307,6 +313,21 @@ function widgetSpace() {
     const s = widgetSide(winS)
     return spaceAround(usableArea(x + winS / 2, y + WIN_PAD + s / 2), x, y, winS)
   } catch (err) { return null }
+}
+
+// 把当前的「横向贴哪边 + 上下空白」推给页面：页面的 menu 依赖这两个值决定贴窗口哪条边、朝上还是朝下展开。
+// 凡是**宿主主动挪窗口**的路径（任务栏/显示器变化、改间距、复位位置）都要推一次，
+// 否则页面还拿旧值摆菜单 —— 菜单会贴错边、或朝屏幕外展开而看不见。
+// 与 ipc.js 的 whale:drag-end 回推共用一个事件名（whale:snapped），页面侧只需一套处理
+function pushSnapped() {
+  if (!winAlive()) return
+  const anchor = readAnchor()
+  sendToWidget('whale:snapped', {
+    hAnchor: anchor.hAnchor,
+    vAnchor: anchor.vAnchor,
+    flipped: flippedOf(anchor),
+    space: widgetSpace(),
+  })
 }
 
 // 把「挂件本体」矩形限制在工作区内（留白可越界）
@@ -731,6 +752,9 @@ function applyScaleToWindow(scale, persist) {
         vDist: anchor.vAnchor === 'top' ? Math.round(c.y - wa.y) : Math.round(wa.y + wa.height - (c.y + newS)),
       }
       writeAnchor(nextAnchor)
+      // 缩放改了窗口尺寸，上下空白（spaceAround）随之变化 —— 页面的菜单靠它判断朝上还是朝下展开。
+      // 只在这里（松手提交）推一次：实时拖动路径每帧都推会白烧 60fps 的 IPC。
+      pushSnapped()
     }
   } catch (err) {
     logErr('[whale][scale] applyScaleToWindow 异常:', err && err.message, err && err.stack)
@@ -765,6 +789,7 @@ module.exports = {
   sendToWidget,
   pushInit,
   pushConfig,
+  pushSnapped,
   clearLiveScaleCtx,
   queueLiveScale,
   applyScaleToWindow,
