@@ -267,12 +267,17 @@ run('git', ['tag', '-a', `v${nextVersion}`, '-F', path.relative(root, tagMsgPath
 // 回读校验：正文丢失是静默的（tag 照样建成功），只能建完再看一眼。
 // 必须比**整段正文**而不是首行：脚本注释里记录过的事故形态正是「第一行在、多行正文丢」——
 // 只比 body.split('\n')[0] 时这种事故照样通过，校验形同虚设。
-// git cat-file 的原始对象里，头部与正文之间是空行；正文里的换行原样保留。
+// git cat-file 的原始对象含 object / type / tag / tagger 头部，正文在第一个空行之后，
+// 而正文自身的第一行又是版本号（见上面 -F 写文件处）、空行之后才是 README 章节 ——
+// 所以「第一个空行切出来的那一段」是 `v<版本>\n\n<body>`，并不等于 body。
+// 早期版本拿它直接与 body 比，两者永远不等，校验恒 fail（发版每次都在此中断）。
+// 改为与写入侧逐字对齐：期望值就是当时写进 -F 文件的那份完整消息（末尾的 \n 由 trim 吸收）。
 const tagMsg = capture('git', ['cat-file', 'tag', `v${nextVersion}`], { allowFail: true })
 const tagBody = tagMsg.out.includes('\n\n') ? tagMsg.out.slice(tagMsg.out.indexOf('\n\n') + 2) : ''
+const expected = `v${nextVersion}\n\n${body}\n`
 // 归一化行尾再比：body 已在上面归一成 LF，但 cat-file 输出在 Windows 上可能带 CRLF
 const normEol = (s) => s.replace(/\r\n?/g, '\n').trim()
-if (tagMsg.status !== 0 || normEol(tagBody) !== normEol(body)) {
+if (tagMsg.status !== 0 || normEol(tagBody) !== normEol(expected)) {
   fail('tag 消息与预期不符（正文可能没写全）；先 git tag -d v' + nextVersion + ' 删掉再重试')
 }
 run('git', ['push', 'origin', `v${nextVersion}`])
