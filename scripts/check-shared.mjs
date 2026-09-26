@@ -63,6 +63,17 @@ function jsNumber(marker) {
   }
 }
 
+// JS 里「有值就取值、没值回落默认」形态的兜底数字（如 var port = s.port || 3080）。
+// 不能用 jsNumber：它的 `=\s*数字` 要求等号后紧跟数字，而这里等号后是 `s.port || 3080`，
+// 取不到会直接抛「找不到 marker」，把一条真实存在的副本报成缺失。
+function jsFallbackNumber(marker) {
+  return (src, file) => {
+    const m = src.match(new RegExp(marker + '\\s*=\\s*[^|\\n]*\\|\\|\\s*(-?[\\d.]+)'))
+    if (!m) throw new Error(`${file} 里找不到「${marker}」的 || 回落值`)
+    return m[1]
+  }
+}
+
 // CSS 变量（如 --whale-pad: 200px），比对时去掉单位
 function cssPx(name) {
   return (src, file) => {
@@ -434,6 +445,19 @@ const CHECKS = [
     parts: [
       { file: CONSTANTS, pick: jsString('const NEWEST_VERSION') },
       { file: APP_VUE, pick: jsString('const NEWEST_VERSION') },
+    ],
+  },
+  // dsh Web UI 的默认监听端口：宿主 constants.js 与设置页各一份 ——
+  // 设置页拿它当输入框的默认值与非法值兜底，宿主拿它决定 spawn dsh 时 `--port` 的默认值。
+  // 写错会出现「界面显示 3080、实际监听别的端口」这类静默不一致（诊断卡的目标端口也跟着错）。
+  // 挂件页还有第三份：状态行取快照的 s.port，只在快照缺 port 时回落到这个字面量 ——
+  // 它是条兜底路径，正常拿不到快照里没有 port，正因如此漏了就很难被人工发现，必须一起纳入校验。
+  {
+    name: 'dsh 默认端口 DSH_PORT_DEFAULT',
+    parts: [
+      { file: CONSTANTS, pick: jsNumber('const DSH_PORT_DEFAULT') },
+      { file: APP_VUE, pick: jsNumber('const DEFAULT_DSH_PORT') },
+      { file: FLOATING_PAGE, pick: jsFallbackNumber('var port') },
     ],
   },
   // 气泡字号基准：CSS 的四条 font-size 是未缩小时默认值，floating-page.js 的 BUBBLE_FONT 是

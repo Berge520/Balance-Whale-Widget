@@ -97,6 +97,9 @@ export interface WhaleConfig {
   // DeepSeek Harness（dsh，开发者）：自定义 Node.js 目录（''=自动探测）/ 退出后是否保留进程
   dshNodeDir: string
   dshKeepAlive: boolean
+  // dsh Web UI 监听端口（默认 3080 = DSH_PORT_DEFAULT）。落在系统动态保留段被占用时可改，
+  // 宿主把它透传给 `dsh web --port <n>`；改动需重启 dsh 才生效
+  dshPort: number
   // npm 注册源（'' = 官方源）/ 固定版本（'' = 自动：安装/更新时取 latest）/ 更新前是否先删掉插件目录里的 dsh / 启动是否带 --no-open
   dshRegistry: string
   dshVersion: string
@@ -520,6 +523,9 @@ export interface DshBackupSnapshot {
   profile: string
   // 'manual' / 'before-disable' / 'before-enable' …
   reason: string
+  // 系统记的「这份快照是为哪个对象建的」（如包名 `dshmarket@1.65.1`）。空串 = 没记
+  // ⚠️ 与 name 是两回事：name 是**用户**起的，note 是**系统**记的事实。两者都会显示
+  note: string
   total: number
   // 建快照时真的存在、被备走的文件数（< total 说明有文件当时就不存在，属正常）
   present: number
@@ -1290,13 +1296,16 @@ export interface DshStatus {
   prefix: string
   // 「查询可用版本」结果（list 按版本号升序，latest 为最后一个）
   versions: { at: number; latest: string; list: string[] }
-  // 3080 上的进程探测：external=别的终端启动的 dsh；portOther=非 dsh 进程名
+  // dsh 端口（默认 3080，可在设置页改）上的进程探测：external=别的终端启动的 dsh；portOther=非 dsh 进程名
   external: boolean
   externalPid: number
   externalName: string
+  // 外部 dsh 实际监听的端口（0 = 无留档）。与 port 区分：改过配置端口后外部进程仍停在它上面，
+  // 界面据此说明「现监听哪个端口」；被结束或自行退出后归零（宿主按 pid 校验存活）
+  externalRunPort: number
   extBusy: boolean
   portOther: string
-  // 本插件启动的进程是否已就绪（3080 开始监听）；npx 首次启动要下载，会有「启动中」阶段
+  // 本插件启动的进程是否已就绪（该端口开始监听）；npx 首次启动要下载，会有「启动中」阶段
   ready: boolean
   readyAt: number
   // dsh 打印的带 token 的页面地址（浏览器首次访问需要它，否则提示 authentication required）
@@ -1306,6 +1315,10 @@ export interface DshStatus {
   // 本次启动实际用的版本；缓存里已换成别的版本时 needsRestart=true（需点「重启」才生效）
   runVersion: string
   needsRestart: boolean
+  // 本次启动实际监听的端口（0 = 未在运行）。与 port（配置值）区分：
+  // 在跑的进程停在 runPort 上，改了配置端口后只有「重启」才能切过去
+  runPort: number
+  needsPortRestart: boolean
 }
 
 export interface DshDirPickResult {
@@ -1782,7 +1795,10 @@ export interface WhaleServices {
   dshMarketInstall(opts: { profile?: string; spec: string; npm?: string; name?: string; version?: string; needsBuild?: boolean; dryRun?: boolean; exact?: boolean; targetVersion?: string; force?: boolean }): Promise<DshMarketInstallResult>
   // 卸载：remove 缺省 = 只写 disabled: true 禁用（包留磁盘）；remove=true = npm uninstall 删包。
   // spec 可替代 npm 传入，宿主会自己反查 package.json 里真实的键名
-  dshMarketUninstall(opts: { profile?: string; npm?: string; spec?: string; name?: string; remove?: boolean; dryRun?: boolean }): Promise<DshMarketUninstallResult>
+  // ⚠️ id = dryRun 返回的 patch 条目 id（用户当前写在 patch 里的那个名字，可能是去掉 scope 的短名）。
+  // 真写会把它带回来，宿主优先按它写 patch，反查只在没有 id 时才做 —— 用户手工改过 patch 时，
+  // 重算出来的 id 可能与他当初在单据上看到的不是同一个，写错 id 等于往 dsh 里塞一条死条目
+  dshMarketUninstall(opts: { profile?: string; npm?: string; spec?: string; id?: string; name?: string; remove?: boolean; dryRun?: boolean }): Promise<DshMarketUninstallResult>
   // 检查已装插件有没有新版。⚠️ **要目录数据**（catalog 由界面把已拿到的目录原样传回来，
   // 宿主不自己联网）—— 所以只在目录已加载后才调，否则就等于绕过「默认零网络请求」
   dshMarketCheckUpdates(opts?: { profile?: string; catalog?: DshMarketCatalogResult }): DshMarketCheckUpdatesResult

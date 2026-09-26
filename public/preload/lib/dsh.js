@@ -7,6 +7,8 @@
  *    因此「已安装 / 实际使用 / 设置里选的版本」三者始终一致
  *  - 「更新」＝结束正在运行的 dsh → 重新安装指定版本 → 原本在跑就用新版重新启动
  *  - --no-open 可在设置页勾选（默认勾选＝启动不自动弹浏览器，用「打开页面」按钮打开）
+ *  - 监听端口可在设置页「高级选项」改（默认 3080）：3080 落在 Windows/Hyper-V 的动态端口保留段里，
+ *    被系统预留时 dsh 会 bind 失败，上游 `dsh web --port <n>` 支持换端口，这里透传下去
  * Node.js 目录：优先用户自定义目录，其次 PATH，最后常见安装位置（含 nvm）。
  */
 const { spawn, execFile, execFileSync } = require('child_process')
@@ -15,11 +17,11 @@ const path = require('path')
 const os = require('os')
 const { log, logErr } = require('./log')
 const { readConfig } = require('./store')
-const { K, NEWEST_VERSION } = require('./constants')
+const { K, NEWEST_VERSION, DSH_PORT_DEFAULT } = require('./constants')
 const { homeDir } = require('./util')
 
-const DSH_PORT = 3080
-const DSH_URL = 'http://127.0.0.1:' + DSH_PORT
+const DSH_TAIL = 'web' // dsh 的 Web UI 子命令
+const DSH_HOST = '127.0.0.1'
 const DSH_PKG = '@deepseek-ai/dsh'
 const LOG_MAX = 160 // 内存里保留的日志行数
 // pnpm 子进程的硬超时：卡在锁等待 / 网络黑洞时它会永不退出，Promise 不 resolve
@@ -44,18 +46,32 @@ const state = {
   version: '',        // '' = 自动（安装/更新时取 latest）；否则固定版本号
   reinstall: false,   // 更新前先删掉插件目录里的 dsh，强制重装
   noOpen: true,       // 启动时带 --no-open（不自动开浏览器，用「打开页面」按钮打开）
+  port: DSH_PORT_DEFAULT, // Web UI 监听端口（可在设置页改；改动要重启 dsh 才生效）
   versions: { at: 0, latest: '', list: [] }, // 「查询版本」结果（落库缓存，重载插件后仍在）
   versionsLoaded: false,
   installed: '',      // 插件目录里实际安装的 dsh 版本（所见即所跑）
   prefix: '',         // 插件自己那份 dsh 的安装目录（懒解析）
   globalWritable: null, // 全局安装目录当前用户可写？null=还没测过（只在需要时试写一次）
-  extPid: 0,          // 监听 3080 的外部 dsh 进程（非本插件启动）
+  extPid: 0,          // 监听 state.port 的外部 dsh 进程（非本插件启动）
   extName: '',
-  ready: false,       // 本次启动后 3080 是否已就绪（首次安装要下载，起来要一会儿）
+  // 外部 dsh「实际在哪个端口上跑」。probe 只描述**当前配置端口**（单例、与 state.port 绑定），
+  // 换端口时 probe 必须清空重探（否则快照自相矛盾）；但清空后若不留档，界面会在重探完成前
+  // 落进「未运行」，而旧端口上的外部进程明明还活着（2026-09-26 实测反馈：「外部 dsh · pid 25696」
+  // 改端口后直接变「未运行」，3081 却还在跑，连「结束」按钮都被禁用）。
+  // 与 runPort 是同一类信息，只是主体从「本插件启的进程」换成「外部进程」——两者都要能被改端口绕过。
+  extRunPort: 0,
+  extRunPid: 0,
+  extRunName: '',
+  ready: false,       // 本次启动后 state.port 是否已就绪（首次安装要下载，起来要一会儿）
   readyAt: 0,
   readyTimer: null,
   webUrl: '',         // dsh 打印的带 token 的页面地址（浏览器认证用），停止后失效
   runVersion: '',     // 本次启动实际用的版本（用于判断更新后是否要重启）
+  // 本次启动实际监听的端口。与 state.port（配置值）分开存，因为端口随时可改：
+  // 改了配置不等于在跑的进程换了端口（它还在旧端口上监听，必须重启才切过去）。
+  // ⚠️ 不记下来就会出现「running 为 true + ready 为 false」的错觉：界面把
+  //    「配置端口还没就绪」误读成「新端口正在启动…」，而用户根本没点启动。
+  runPort: 0,
   tail: '',           // 输出滚动缓冲：token 地址可能被拆到两个 data 事件里
   versionCache: {},   // dir → node -v 结果
   resolveCache: { key: '\u0000', value: null },
@@ -88,7 +104,7 @@ function pushLog(text) {
 
 // ──────────────────────────────────────────────
 // 状态变更广播
-// 挂件菜单只在点击操作时拉一次快照，而 3080 就绪 / 进程退出 / 安装完成 / 版本查完
+// 挂件菜单只在点击操作时拉一次快照，而端口就绪 / 进程退出 / 安装完成 / 版本查完
 // 都是稍后才发生的异步事件 —— 不主动广播，挂件状态会一直停在「启动中…」「正在结束…」
 // （设置页靠每 4s 轮询能自愈，挂件不轮询）。由 IPC 层订阅后转发给挂件窗口。
 // ──────────────────────────────────────────────
@@ -329,8 +345,8 @@ const probe = { pid: 0, name: '', cmdline: '', cmdlineKnown: false, at: 0, busy:
 function isDshName(name) { return /^(node|dsh)(\.exe)?$/i.test(String(name || '').trim()) }
 // 命令行里出现这些字样才算「这确实是 dsh」。
 // 只看进程名（node.exe）是不够的：任何 Node 程序都叫 node.exe。
-// 本机实测（2026-09-22）起一个裸 `node -e "net.createServer().listen(3080)"` 占住 3080，
-// 进程名同样是 node.exe，旧判据于是把它报成「3080 上已有外部 dsh 在运行」——
+// 本机实测（2026-09-22）起一个裸 `node -e "net.createServer().listen(3080)"` 占住 dsh 端口，
+// 进程名同样是 node.exe，旧判据于是把它报成「端口上已有外部 dsh 在运行」——
 // 把一个真占用降级成了无害的 warning，用户按提示去「接管」必然失败。
 // 真 dsh 的命令行长这样（本项目实测）：
 //   "D:\nodejs\node.exe" D:\nodejs\npm-global\node_modules\@deepseek-ai\dsh\lib\bin.js web --no-open
@@ -343,7 +359,7 @@ function looksLikeDsh(cmdline) {
   if (!s) return null
   return DSH_CMDLINE_RE.test(s)
 }
-// netstat -ano（Windows）/ lsof（POSIX）输出 → 监听 DSH_PORT 的 pid
+// netstat -ano（Windows）/ lsof（POSIX）输出 → 监听 state.port 的 pid
 function parsePortPid(out) {
   const text = String(out || '')
   if (!WIN) {
@@ -353,7 +369,7 @@ function parsePortPid(out) {
   for (const line of text.split('\n')) {
     if (!/LISTENING/i.test(line)) continue
     const parts = line.trim().split(/\s+/)
-    if (parts.length >= 4 && parts[1] && parts[1].indexOf(':' + DSH_PORT) >= 0) return Number(parts[parts.length - 1]) || 0
+    if (parts.length >= 4 && parts[1] && parts[1].indexOf(':' + state.port) >= 0) return Number(parts[parts.length - 1]) || 0
   }
   return 0
 }
@@ -505,7 +521,7 @@ function probePort(cb, force) {
   const myGen = ++probe.gen
   const stale = () => __isStale(myGen, probe.gen) // 已有更新的轮次 → 本轮作废，不写 probe
   const exe = WIN ? 'netstat' : 'lsof'
-  const args = WIN ? ['-ano', '-p', 'tcp'] : ['-nP', '-iTCP:' + DSH_PORT, '-sTCP:LISTEN', '-t']
+  const args = WIN ? ['-ano', '-p', 'tcp'] : ['-nP', '-iTCP:' + state.port, '-sTCP:LISTEN', '-t']
   execFile(exe, args, { timeout: 6000, windowsHide: true, maxBuffer: 4 * 1024 * 1024 }, (err, stdout) => {
     const pid = err ? 0 : parsePortPid(stdout)
     if (!pid) {
@@ -543,30 +559,46 @@ function probePort(cb, force) {
     })
   })
 }
-// 结束外部 dsh：命令返回码 + 复查 3080，如实反馈；
+// 结束外部 dsh：命令返回码 + 复查，如实反馈；
 // 普通权限被拒（拒绝访问）时自动改用管理员权限再杀一次（会弹一次 UAC）
-function stopExternal(pid, done) {
+//
+// probePort 复查只认**配置端口**：改过端口后，要结束的外部进程停在旧端口上（留档 extRun*），
+// 拿配置端口探当然探不到，会被误判成「已结束」。所以复查分两种口径：
+//   · 目标端口 == 配置端口（常规场景）→ 探端口，最可靠（能区分「进程换了」与「端口彻底空了」）
+//   · 目标端口 ≠ 配置端口（改端口后结束留档）→ 只能按 pid 判活
+function stopExternal(pid, done, runPort) {
   setCmd(WIN ? 'taskkill /pid ' + pid + ' /T /F' : 'kill -TERM ' + pid)
   const opts = { windowsHide: true, encoding: 'buffer' }
+  const byPid = !!(runPort && runPort !== state.port)
   let elevated = false
   const report = (still) => {
     if (still) {
-      state.error = '结束失败：3080 仍在监听（pid ' + still + '）。可能是权限不足（可尝试以管理员身份运行 uTools），'
+      state.error = '结束失败：' + (byPid ? 'pid ' + pid : state.port) + ' 仍在监听（pid ' + still + '）。可能是权限不足（可尝试以管理员身份运行 uTools），'
         + '或 dsh 有守护进程把它拉了起来（在它自己的终端里按 Ctrl+C 更可靠）'
       pushLog(state.error)
     } else {
       state.error = ''
       probe.pid = 0
       probe.name = ''
+      // 留档也要清：结束的就是它，留着会让状态卡继续显示「外部 dsh 在跑」
+      state.extRunPort = 0
+      state.extRunPid = 0
+      state.extRunName = ''
       pushLog('已结束外部启动的 dsh（pid=' + pid + '）')
     }
     broadcast() // 复查/可能的 UAC 提权要 1.5–15s，结束后主动推一次
     if (done) done(snapshot())
   }
+  // 复查：还在返回 pid，已结束返回 0
+  const recheck = (cb) => {
+    if (!byPid) return probePort(cb)
+    // 进程还活着 → 回它自己；pidAliveState 说不准（unknown）也当还活着，避免误报「已结束」
+    cb(pidAliveState(pid) === 'dead' ? 0 : pid)
+  }
   // 等 waitMs 后复查；还没起来就再等 rounds 轮（每轮 1.5s，用于等用户点 UAC）
   const verify = (waitMs, rounds) => {
     setTimeout(() => {
-      probePort((still) => {
+      recheck((still) => {
         if (!still) { report(0); return }
         if (WIN && !elevated) {
           elevated = true
@@ -595,9 +627,9 @@ function stopExternal(pid, done) {
   else execFile('kill', ['-TERM', String(pid)], opts, onDone)
 }
 // 某 pid 的父进程 pid（拿不到返回 0）。
-// 用于「沿父链上溯」，判断监听 3080 的进程是不是本插件 spawn 出来的后代。
+// 用于「沿父链上溯」，判断监听 dsh 端口的进程是不是本插件 spawn 出来的后代。
 // ⚠️ 不能只看 state.pid === probe.pid：Windows 下 spawn 用了 shell:true，插件拿到的是
-// cmd.exe 的 pid，真正监听 3080 的是它的子进程 node.exe（cmd 是中间层）。
+// cmd.exe 的 pid，真正监听端口的是它的子进程 node.exe（cmd 是中间层）。
 // 本机实测（2026-09-22）进程链：插件 → cmd.exe(28260) → node.exe(12488 监听 3080)，
 // 于是 probe.pid(12488) !== state.pid(28260)，externalPid() 判定成「外部 dsh」，
 // 状态卡说「运行中」而诊断卡说「外部进程在跑」，自相矛盾。必须上溯祖辈才能认出自己人。
@@ -644,7 +676,7 @@ function isDescendantOf(from, self, parents, depth) {
 // 纯函数（便于单测）：某轮探测是否已被更新的轮次取代 —— 取代后不许再写 probe，
 // 也不许放行 waiters（否则调用方拿到的是旧值）。force 让两轮能并存，靠它定唯一写口。
 function __isStale(myGen, latestGen) { return myGen !== latestGen }
-// 监听 3080 的进程是不是本插件启动的那份（含「它是插件子进程的后代」）。
+// 监听 dsh 端口的进程是不是本插件启动的那份（含「它是插件子进程的后代」）。
 // 快路径是同 pid 相等；慢路径才去查父链（要跑 execFile，有成本）。
 function isSelfOwnedPort(pid, cb) {
   if (!pid) { cb(false); return }
@@ -664,9 +696,9 @@ function isSelfOwnedPort(pid, cb) {
   }
   step(pid, 8)
 }
-// 外部 dsh：3080 被占用、不是本插件的子进程（含后代）、且**命令行能证明它是 dsh**。
+// 外部 dsh：dsh 端口被占用、不是本插件的子进程（含后代）、且**命令行能证明它是 dsh**。
 // ⚠️ 光看进程名（node.exe）不算数：任何 Node 程序都叫 node.exe，本机实测一个裸 node 探针
-// 占着 3080 时会被旧判据说成「外部 dsh」（漏报真占用）。命令行拿不到时保守返回 0 ——
+// 占着该端口时会被旧判据说成「外部 dsh」（漏报真占用）。命令行拿不到时保守返回 0 ——
 // 宁可报「无法确认」也不能把别的程序说成 dsh（会让用户去点「接管」，然后失败）。
 function externalPid() {
   if (!probe.pid || probe.pid === state.pid) return 0
@@ -676,14 +708,14 @@ function externalPid() {
   if (!isDshName(probe.name)) return 0
   return looksLikeDsh(probe.cmdline) === true ? probe.pid : 0
 }
-// 非 dsh 进程占着 3080 时不允许结束（避免误杀别的程序）。
+// 非 dsh 进程占着 dsh 端口时不允许结束（避免误杀别的程序）。
 // 分两种「非 dsh」：
 //   · 名字就不像 dsh（chrome.exe / nginx…）→ 直接给出进程名
 //   · 名字像（node.exe）但命令行证明不是 dsh → 也说成占用，且带上名字 + 明示「非 dsh 的 node 程序」
 // 命令行拿不到（null）时返回 '' —— 这是「判不出来」，交给 C5 报「无法确认是不是 dsh」
 function portOccupiedByOther() {
   if (!probe.pid || probe.pid === state.pid) return ''
-  // 与 externalPid 同理：本插件启动的那份监听着 3080 时，不能算「别人占用」
+  // 与 externalPid 同理：本插件启动的那份监听着 dsh 端口时，不能算「别人占用」
   if (probe.selfOwned) return ''
   if (!isDshName(probe.name)) return probe.name || '未知进程'
   return looksLikeDsh(probe.cmdline) === false ? (probe.name || 'node') : ''
@@ -895,6 +927,56 @@ function configure(cfg) {
   state.version = version
   state.noOpen = c.dshNoOpen !== false
   state.reinstall = c.dshReinstall === true
+  // 端口是新的（store 的 normDshPort 保证 1–65535）。换了端口就得把「端口相关」的缓存全部复位：
+  // probe / ready / ext* 都描述**旧端口**上的状态，留着会污染新端口的判定 —— 典型误判是
+  // ready=true 让状态卡一直显示「运行中 · pid x」，而那个 pid 其实监听的是旧端口。
+  // 不复位 extPid 的后果更重：start() 会拿旧 pid 去说「已被另一个 dsh 占用」并把启动挡掉。
+  // 这里不复位 runVersion / webUrl：它们不影响端口判定，且换端口不该顺手抹掉「需重启」提示与 token 地址。
+  //
+  // ⚠️ 关键分支：若本插件启动的进程还活着（state.child），它监听的是 state.runPort（旧端口），
+  //    改配置只是把它标成「需重启」。**不能**让 ready 落到「新端口未就绪」上：那会让界面把
+  //    「旧进程仍在跑」误显示成「新端口正在启动…，已等待 N 秒」（2026-09-26 实测反馈）。
+  //    所以端口变更时按「进程是否活着」分两条路：活着 → ready 仍表示**运行端口**的就绪；
+  //    没活着 → ready 表示**配置端口**的就绪（下次 start 会用它）。
+  const port = Number.isFinite(c.dshPort) ? Math.round(c.dshPort) : DSH_PORT_DEFAULT
+  if (port !== state.port) {
+    log('[whale][dsh] 端口变更', { from: state.port, to: port, runningOn: state.runPort })
+    // ⚠️ 必须在 state.port 被改写**之前**把外部进程信息搬进 extRun*：
+    //    probe 里那份（probe.pid/name）描述的正是「旧配置端口」上的占用，改完 state.port
+    //    它们就成了「上一次探测的残留」，不能直接丢 —— 旧端口上的外部 dsh 还在跑，
+    //    界面要靠 extRun* 才能在重探完成前继续显示「外部 dsh · pid N（现监听旧端口）」。
+    //    与 state.child 分支同理：进程没停，它占着旧端口这个事实就仍然成立。
+    const ext = externalPid()
+    if (ext) {
+      state.extRunPort = state.port
+      state.extRunPid = ext
+      state.extRunName = probe.name || ''
+    } else if (!state.child) {
+      // 既没有本插件启的进程、也没有已确认的外部 dsh：旧端口上没人在跑，清掉留档
+      state.extRunPort = 0
+      state.extRunPid = 0
+      state.extRunName = ''
+    }
+    // 有本插件启的进程时保留 extRun* 不动（外部进程的留档与它是否在跑无关，
+    // 这里不主动清，避免「插件进程刚好有 + 外部留档也有」时被顺手抹掉）
+    state.port = port
+    // ext* / probe 描述的都是「旧配置端口」上的外部占用，与新配置端口无关，一律清掉重探
+    state.extPid = 0
+    state.extName = ''
+    probe.pid = 0
+    probe.name = ''
+    probe.cmdline = ''
+    probe.cmdlineKnown = false
+    probe.selfOwned = false
+    if (!state.child) {
+      // 没有本插件启动的进程：ready 归零，等下次 start 去探新端口
+      state.ready = false
+      state.readyAt = 0
+      state.runPort = 0
+    }
+    // 有进程在跑则**保持 ready 与 readyAt 不动**：它们描述的是 runPort（旧端口）上的事实，
+    // 旧进程没停就仍然成立；界面据 needsPortRestart 提示「需重启切到新端口」。
+  }
 }
 // 每次操作前从配置同步（设置页/挂件菜单都可能改），避免漏掉某个调用点
 function syncConfig() {
@@ -924,15 +1006,21 @@ function targetVersion() {
 // 包名（@版本）
 function pkgSpec(v) { return DSH_PKG + '@' + (v || installVersion()) }
 function regArgs() { return state.registry ? ['--registry=' + state.registry] : [] }
-// 子命令：默认带 --no-open（不自动弹浏览器，用「打开页面」打开）
-function webArgs() { return state.noOpen ? ['web', '--no-open'] : ['web'] }
+// 子命令：默认带 --no-open（不自动弹浏览器，用「打开页面」打开）；
+// --port 显式下发监听端口 —— 不写就跟着 dsh 自己的默认值走，改了设置也不生效
+function webArgs() {
+  return [DSH_TAIL, '--port', String(state.port)].concat(state.noOpen ? ['--no-open'] : [])
+}
+// 不带 token 的页面地址：只在没捕获到 dsh 打印的带 token 地址时兜底
+// （直接访问它会提示 authentication required）
+function webUrl() { return 'http://' + DSH_HOST + ':' + state.port }
 // npm 提速参数：跳过审计与赞助请求
 // 不能加 --prefer-offline：它会跳过缓存新鲜度校验，用旧的 packument 解析依赖树，
 // 于是「刚发布的版本 / 它新带的子包」会被判成 ETARGET（选固定版本时最容易踩，缓存里的 tarball 本来就会命中）
 function fastArgs() {
   return ['--no-audit', '--no-fund']
 }
-// 启动后就绪检测：3080 真正开始监听才算可用（首次安装要下载，可能几十秒）
+// 启动后就绪检测：state.port 真正开始监听才算可用（首次安装要下载，可能几十秒）
 function watchReady() {
   if (state.readyTimer) clearInterval(state.readyTimer)
   let ticks = 0
@@ -947,7 +1035,7 @@ function watchReady() {
       // 超过 3 分钟仍未监听：不放弃（dsh 晚启动成功也能补上就绪），重置计数继续等，
       // 顺手推一次快照让界面别停在旧状态
       ticks = 0
-      pushLog('3080 仍未就绪，继续等待（dsh 启动异常请看设置页日志）')
+      pushLog(state.port + ' 仍未就绪，继续等待（dsh 启动异常请看设置页日志）')
       broadcast()
     }
     probePort((pid) => {
@@ -955,9 +1043,9 @@ function watchReady() {
       state.ready = true
       state.readyAt = Date.now()
       const sec = state.startedAt ? ((state.readyAt - state.startedAt) / 1000).toFixed(1) + 's' : '未知'
-      pushLog('3080 已就绪（启动用时 ' + sec + '）')
+      pushLog(state.port + ' 已就绪（启动用时 ' + sec + '）')
       if (state.readyTimer) { clearInterval(state.readyTimer); state.readyTimer = null }
-      broadcast() // 关键推送：挂件状态从「启动中…（3080 未就绪）」变「运行中 · pid」
+      broadcast() // 关键推送：挂件状态从「启动中…（端口未就绪）」变「运行中 · pid」
     })
   }, 1200)
 }
@@ -968,7 +1056,7 @@ function clearReady() {
   state.tail = ''
   if (state.readyTimer) { clearInterval(state.readyTimer); state.readyTimer = null }
 }
-// dsh web 会打印形如 http://127.0.0.1:3080/?token=xxx 的地址，浏览器首次访问必须带 token，
+// dsh web 会打印形如 http://127.0.0.1:<端口>/?token=xxx 的地址，浏览器首次访问必须带 token，
 // 否则只显示「authentication required」。这里把地址抓下来供「打开页面」使用（优先本机回环地址）
 const LOCAL_TOKEN_URL_RE = /https?:\/\/(?:127\.0\.0\.1|localhost|\[::1\])[^\s"'`]*[?&]token=[A-Za-z0-9._~%-]+/i
 const ANY_TOKEN_URL_RE = /https?:\/\/[^\s"'`]*[?&]token=[A-Za-z0-9._~%-]+/i
@@ -986,16 +1074,16 @@ function captureWebUrl(text) {
 function start() {
   syncConfig()
   if (state.child) { state.error = ''; return snapshot() }
-  // 3080 已被别的进程占着时不重复启动（外部 dsh 可先用「结束」处理）
+  // state.port 已被别的进程占着时不重复启动（外部 dsh 可先用「结束」处理）
   const ext = externalPid()
   if (ext) {
-    state.error = '端口 ' + DSH_PORT + ' 已被另一个 dsh（pid ' + ext + '）占用：请先「结束」或「重启」它'
+    state.error = '端口 ' + state.port + ' 已被另一个 dsh（pid ' + ext + '）占用：请先「结束」或「重启」它'
     pushLog(state.error)
     return snapshot()
   }
   const other = portOccupiedByOther()
   if (other) {
-    state.error = '端口 ' + DSH_PORT + ' 被 ' + other + ' 占用（不是 dsh），已停止启动'
+    state.error = '端口 ' + state.port + ' 被 ' + other + ' 占用（不是 dsh），已停止启动'
     pushLog(state.error)
     return snapshot()
   }
@@ -1039,6 +1127,8 @@ function start() {
   state.pid = child.pid || 0
   state.startedAt = Date.now()
   state.stopping = false
+  // 记下本次真正监听的端口：之后用户改配置端口时，靠它才能说清「在跑的仍是哪个端口」
+  state.runPort = state.port
   clearReady()
   watchReady()
   bindOutput(child)
@@ -1046,7 +1136,7 @@ function start() {
     state.error = '启动失败：' + ((err && err.message) || err)
     pushLog(state.error)
     logErr('[whale][dsh] 启动失败', err && err.message)
-    if (state.child === child) { state.child = null; state.pid = 0; state.runVersion = '' }
+    if (state.child === child) { state.child = null; state.pid = 0; state.runVersion = ''; state.runPort = 0 }
     broadcast()
   })
   child.on('exit', (code, signal) => {
@@ -1054,10 +1144,10 @@ function start() {
     clearReady()
     // 端口被别的 dsh 占着时给个明确的处置提示（本插件只能结束自己启动的进程）
     if (code !== 0 && /EADDRINUSE|address already in use|端口|占用/i.test(state.log.slice(-6).join('\n'))) {
-      state.error = '端口 ' + DSH_PORT + ' 已被占用：dsh 可能已在别处运行，请先结束它再启动'
+      state.error = '端口 ' + state.port + ' 已被占用：dsh 可能已在别处运行，请先结束它再启动'
       pushLog(state.error)
     }
-    if (state.child === child) { state.child = null; state.pid = 0; state.stopping = false; state.runVersion = '' }
+    if (state.child === child) { state.child = null; state.pid = 0; state.stopping = false; state.runVersion = ''; state.runPort = 0 }
     state.exitCode = code
     state.exitAt = Date.now()
     // 关键推送：taskkill 完成后进程真正退出在这里发生，不广播挂件会一直显示「正在结束…」。
@@ -1074,10 +1164,10 @@ function stop(done) {
   syncConfig()
   const child = state.child
   if (!child) {
-    // 没有本插件启动的进程：看 3080 上是不是别人（别的终端）跑的 dsh
+    // 没有本插件启动的进程：看 state.port 上是不是别人（别的终端）跑的 dsh
     const other = portOccupiedByOther()
     if (other) {
-      state.error = '端口 ' + DSH_PORT + ' 被 ' + other + ' 占用（不是 dsh），已中止结束操作'
+      state.error = '端口 ' + state.port + ' 被 ' + other + ' 占用（不是 dsh），已中止结束操作'
       pushLog(state.error)
       if (done) done(snapshot())
       return snapshot()
@@ -1086,6 +1176,14 @@ function stop(done) {
     if (ext) {
       state.error = ''
       stopExternal(ext, done)
+      return snapshot()
+    }
+    // 改过端口后的外部 dsh：它停在旧端口（extRun*）上，externalPid() 按新配置端口探不到。
+    // 留档还在就说明进程没被结束，用户点「结束」应当结束它 —— 否则这个进程既结束不掉、
+    // 状态卡又显示它在跑。
+    if (state.extRunPid > 0) {
+      state.error = ''
+      stopExternal(state.extRunPid, done, state.extRunPort)
       return snapshot()
     }
     state.error = ''
@@ -1124,17 +1222,26 @@ function stop(done) {
   return snapshot()
 }
 
-// 重启：先结束（自己的或外部终端启的），等 3080 真正释放后再用当前配置启动
+// 重启：先结束（自己的或外部终端启的），等端口真正释放后再用当前配置启动
 function restart(done) {
   syncConfig()
   const ext = externalPid()
-  if (!state.child && !ext) { const s = start(); if (done) done(s); return }
+  // ⚠️ 「要先结束」的判据必须含留档：改过端口后 externalPid() 按新端口探不到那份外部 dsh，
+  //    只看它就会直接 start()，结果旧端口上的实例没被结束、两个 dsh 并存
+  //    （用户已确认期望：改端口后点重启＝结束旧端口的进程，再在新端口启动）。
+  if (!state.child && !ext && !state.extRunPid) { const s = start(); if (done) done(s); return }
   stop(() => {
     if (state.error) { broadcast(); if (done) done(snapshot()); return }
+    // 结束的是旧端口上的进程时，probePort 探新配置端口必然「一开始就空」，等不出旧进程退出。
+    // 但 taskkill 已由 stop() 同步发起，这里仍按 pid 确认旧进程真的没了再启动，避免抢端口。
+    const waitPid = !state.child && !externalPid() ? state.extRunPid : 0
     let tries = 0
     const timer = setInterval(() => {
       tries++
-      probePort((pid) => {
+      const check = waitPid
+        ? (cb) => cb(pidAliveState(waitPid) === 'dead' ? 0 : waitPid)
+        : probePort
+      check((pid) => {
         if (!pid || tries > 20) {
           clearInterval(timer)
           const s = start()
@@ -1187,7 +1294,7 @@ function update() {
       broadcast()
       return
     }
-    // 等 3080 真正释放（刚 taskkill 完可能还没退干净，文件也还被占用）
+    // 等端口真正释放（刚 taskkill 完可能还没退干净，文件也还被占用）
     let tries = 0
     const timer = setInterval(() => {
       tries++
@@ -1763,7 +1870,7 @@ function listVersions() {
 
 // 打开 dsh 的 Web UI：优先用捕获到的带 token 地址（否则只会显示 authentication required）
 function openWeb() {
-  const url = state.webUrl || DSH_URL
+  const url = state.webUrl || webUrl()
   try {
     utools.shellOpenExternal(url)
     log('[whale][dsh] 打开页面', url)
@@ -1843,7 +1950,7 @@ function cleanNpxCaches() {
   return snapshot()
 }
 
-// uTools 退出（isKill=true）且用户没勾「保留」时结束 dsh，避免留下孤进程占着 3080
+// uTools 退出（isKill=true）且用户没勾「保留」时结束 dsh，避免留下孤进程占着端口
 function stopOnQuit() {
   syncConfig()
   if (state.keepAlive || !state.child) return
@@ -1863,6 +1970,15 @@ function snapshot() {
   if (gv && state.globalWritable === null) {
     state.globalWritable = canWriteDir(path.dirname(path.dirname(gv.pkgDir)))
   }
+  // 外部 dsh 的留档校验（见下方 external 字段的注释）：留档只对**旧端口**有意义（换了配置端口后
+  // 探不到它了），所以在这里按 pid 判活，进程确证已死就清掉留档 —— 否则「外部 dsh 在跑」会永远挂着。
+  // pidAliveState 是同步的（process.kill(pid,0)），快照里可以直接判；unknown（查不准）时保守保留，
+  // 宁可多报一次「外部在跑」也不要把还在的进程说成没了（与该函数自身的保守口径一致）。
+  if (state.extRunPid > 0 && state.extRunPort !== state.port && pidAliveState(state.extRunPid) === 'dead') {
+    state.extRunPort = 0
+    state.extRunPid = 0
+    state.extRunName = ''
+  }
   return {
     running: !!state.child,
     stopping: !!state.stopping,
@@ -1872,8 +1988,8 @@ function snapshot() {
     exitCode: state.exitCode,
     exitAt: state.exitAt,
     keepAlive: state.keepAlive,
-    url: DSH_URL,
-    port: DSH_PORT,
+    url: webUrl(),
+    port: state.port,
     nodeDir: node ? node.dir : '',
     nodeVersion: node ? nodeVersion(node) : '',
     nodeAuto: !state.nodeDir,
@@ -1901,15 +2017,35 @@ function snapshot() {
     // 本次启动用的版本 + 是否需要重启才生效（目录里已是另一个版本）
     runVersion: state.runVersion,
     needsRestart: !!state.child && !!state.runVersion && !!act && act.version !== state.runVersion,
-    // 3080 上的进程探测：识别别的终端里跑的 dsh。
+    // 本次启动实际监听的端口（0 = 没在跑）。与 port（配置值）区分：
+    // 在跑的进程停在 runPort 上，用户改了配置端口后只有「重启」才能切过去。
+    runPort: state.child ? state.runPort : 0,
+    // 配置端口与运行端口不一致 → 需重启才生效。
+    // ⚠️ 用 >0 而不是 !!：端口是数字，只判断非零且不等。运行端口为 0（旧快照/未记）时不提示，
+    //    避免把「刚启动、runPort 尚未写入」的瞬间误报成需重启。
+    //    外部 dsh 同理：extRunPort 是「外部进程实际占的端口」，与 runPort 并列参与判定 ——
+    //    否则外部 dsh 在跑时改端口会既丢了 running 语义、又不给「需重启」提示。
+    needsPortRestart: (!!state.child && state.runPort > 0 && state.runPort !== state.port)
+      || (state.extRunPid > 0 && state.extRunPort > 0 && state.extRunPort !== state.port),
+    // dsh 端口上的进程探测：识别别的终端里跑的 dsh。
     // ⚠️ 不能再拿 `probe.busy` 当「外部实例存在」的判据：那是异步探测的工程状态，不是业务结论。
     // 2026-09-22 实测：插件自己启动 dsh 后，watchReady 每 1.2s 探一次端口，probe.busy 长期为 true，
     // 界面于是显示「外部 dsh · pid 0」——启动按钮被禁用、提示还写着「别的终端启动的」。
     // externalPid() 读的是已算好的 probe 结果（未算好时保守返回 0），是否 busy 交给 extBusy 表达。
-    external: !!externalPid(),
-    externalPid: externalPid() || 0,
-    externalName: probe.pid && probe.pid !== state.pid && !probe.selfOwned ? probe.name : '',
-    // 监听 3080 的进程是本插件启动的那份（含父链上溯：Windows 下 spawn 有 cmd 中间层，
+    // ⚠️ 改配置端口会把 probe 清空重探（探的是**新**端口），此时 probe 上那份「旧端口有外部 dsh」
+    //    的结论会暂时消失。extRun* 就是为此留的档：只要留档还有效（旧端口上的进程没被结束），
+    //    就仍然按「外部 dsh 在跑」报告 —— 否则用户改个端口，状态卡直接变「未运行」、
+    //    「结束」按钮一并禁用，而 3081 上的进程明明还在（2026-09-26 实测反馈）。
+    //    留档只对**旧端口**有意义（探不到），所以在这里按 pid 校验它是否还活着：
+    //    进程已退（在别处 Ctrl+C / 被杀）就清掉留档，免得永远误报「外部 dsh 在跑」。
+    //    pidAliveState 是同步的（process.kill(pid,0)），快照里可以直接判；unknown 时保守保留，
+    //    宁可多报一次「外部在跑」也不要把还在的进程说成没了（与 pidAliveState 的保守口径一致）。
+    external: !!externalPid() || state.extRunPid > 0,
+    externalPid: externalPid() || state.extRunPid || 0,
+    // 外部 dsh 实际监听的端口（0 = 没有留档在跑）。界面在「配置端口 ≠ 它」时说明「现监听哪个」
+    externalRunPort: state.extRunPid > 0 ? state.extRunPort : 0,
+    externalName: probe.pid && probe.pid !== state.pid && !probe.selfOwned ? probe.name : (state.extRunPid > 0 ? state.extRunName : ''),
+    // 监听该端口的进程是本插件启动的那份（含父链上溯：Windows 下 spawn 有 cmd 中间层，
     // 监听者是插件子进程的**子进程**，单比 pid 会认不出来）
     selfOwned: !!probe.selfOwned,
     // 占端口的进程命令行能否证明「是 dsh」：true/false/null（null = 拿不到命令行，判不出来）。
@@ -1918,14 +2054,14 @@ function snapshot() {
     // **谁在监听这个端口**（本插件启的 / 外部的 / 别的程序，都算）。
     // ⚠️ 不能拿 externalPid 代替它：那是「外部 dsh」的 pid，本插件自己启的那份恒为 0。
     // 2026-09-22 实测：插件启动 dsh 后 externalPid=0、portOther=''，C5 于是把 pid 当 0
-    // 判成「3080 空闲（无进程监听）」—— 状态卡同时显示「运行中 · pid 26916」，自相矛盾。
+    // 判成「端口空闲（无进程监听）」—— 状态卡同时显示「运行中 · pid 26916」，自相矛盾。
     // 区分「有没有人占」与「占的人是不是外人」是两件事，必须两个字段。
     portPid: (probe.busy ? 0 : probe.pid) || 0,
     portName: probe.busy ? '' : probe.name,
     portCmdlineKnown: !!probe.cmdlineKnown,
     extBusy: !!probe.busy,
     portOther: portOccupiedByOther(),
-    // 本插件启动的进程是否已经能提供服务（3080 开始监听）
+    // 本插件启动的进程是否已经能提供服务（dsh 端口开始监听）
     ready: state.ready,
     readyAt: state.readyAt,
     // dsh 打印的带 token 页面地址（浏览器认证用）
@@ -1962,8 +2098,6 @@ function note(text) {
 }
 
 module.exports = {
-  DSH_PORT,
-  DSH_URL,
   DSH_PKG,
   configure,
   start,
@@ -1983,6 +2117,19 @@ module.exports = {
   stopOnQuit,
   probePort,
   snapshot,
+  // 内部状态本体。仅供单测：端口/版本这几对「配置值 vs 运行值」的语义光看快照判不全，
+  // 需要一个能直接摆状态、再断言 configure/snapshot 结论的入口（不对外暴露给页面）
+  // ⚠️ 别删：test/dsh-port-change.test.mjs 靠它摆出「进程在跑」的内存态。删掉不会有构建/三关
+  //    报错（测试少了入口只是抛 require 错误，或更糟：被改成断言不到东西的假绿），
+  //    但「改端口误报启动中」这条回归就此失守。
+  __state: state,
+  // 端口探测结果的缓存本体。仅供单测：external / portOther 这些结论全从它派生，
+  // 要复现「外部 dsh 在跑时改端口」就得能直接把它摆成那个样子（不对外暴露给页面）
+  // ⚠️ 同上，别删：外部进程那条用例靠它构造 probe.pid/name/cmdline。
+  __probe: probe,
+  // 配置读取。仅供单测：端口变更的真实路径是 syncConfig → readConfig → configure，
+  // 测试要按同一条路走，才不会出现「喂了半份配置所以没生效」的假绿
+  readConfig,
   // 轻量进度（安装/更新期间前端 1Hz 刷新用），只读内存、不起子进程
   progress,
   // 往 dsh 的日志流里播一条「阶段说明」。给插件市场的安装/更新链路用：
@@ -2036,7 +2183,7 @@ module.exports = {
   looksLikeDsh,
   // 父链上溯（纯函数，单测喂邻接表）：判断 pid 是否为 self 的后代。
   // 修的是「插件启动的 dsh 被误报成外部进程」—— Windows 下 spawn 有 cmd 中间层，
-  // 监听 3080 的是插件的**孙进程**，单比 pid 认不出自己人
+  // 监听 dsh 端口的是插件的**孙进程**，单比 pid 认不出自己人
   isDescendantOf,
   // 探测轮次号的白盒入口（仅供单测）：诊断点「强制重跑」时若蹭上 watchReady
   // 正在跑的旧轮，会拿到 dsh 尚未 bind 时的空结果 —— 这两个钩子钉住「旧轮不许写 probe」

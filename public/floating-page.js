@@ -57,7 +57,7 @@
     onSounds: function () {}, onSkin: function () {}, onBubbles: function () {}, onModels: function () {},
     ready: function () {}, refresh: function () {}, saveConfig: function () {},
     saveTimer: function () {}, notifyTimerDone: function () {},
-    dragMove: function () {}, dragEnd: function () {}, setIgnoreMouse: function () {}, setInputFocus: function () {},
+    dragBegin: function () {}, dragMove: function () {}, dragEnd: function () {}, setIgnoreMouse: function () {}, setInputFocus: function () {},
     openSettings: function () {}, dsh: function () {}, onDsh: function () {},
     refreshModels: function () {}, setMainModel: function () {}, hideWidget: function () {},
     reportError: function () {},
@@ -122,7 +122,7 @@
   var menuGroupEls = {};
 
   // 菜单分组：点标题折叠/展开。只默认展开常用组，避免菜单过长
-  // key：落盘标识；onExpand：展开时的回调（dsh 组用它按需拉状态：收着时状态行看不见，不必白探一次 3080）
+  // key：落盘标识；onExpand：展开时的回调（dsh 组用它按需拉状态：收着时状态行看不见，不必白探一次端口）
   function menuGroup(key, title, defaultOpen, onExpand) {
     var box = document.createElement('div');
     box.className = 'dshwv-group';
@@ -626,7 +626,9 @@
       positionMenu(); // 菜单高度变了，重新夹一次，别让它顶出可视区
     }
     var err = s.error ? String(s.error) : '';
-    // 3080 上的进程：running=本插件启动；external=别的终端启动的 dsh；portOther=非 dsh 占用
+    // dsh 端口上的进程：running=本插件启动；external=别的终端启动的 dsh；portOther=非 dsh 占用
+    // 端口可配（设置页「高级选项」，默认 3080），文案里的端口号一律取快照的 s.port
+    var port = s.port || 3080;
     var ext = !!(s.external && s.externalPid);
     var other = s.portOther || '';
     var text = '未获取';
@@ -634,9 +636,12 @@
     else if (s.busy === 'update') text = '更新中…';
     else if (s.busy === 'versions') text = '查询版本中…';
     else if (err) text = err;
-    else if (s.running) text = s.stopping ? '正在结束…' : (s.ready ? '运行中 · pid ' + s.pid : '启动中…（3080 未就绪）');
-    else if (ext) text = '外部 dsh · pid ' + s.externalPid;
-    else if (other) text = '端口 3080 被 ' + other + ' 占用';
+    // 端口被改但进程还在跑：ready 描述的是 runPort（旧端口）上的事实，不能读成「启动中」。
+    // 与设置页文案保持一致：说明现监听哪个端口，让用户去点「重启」。
+    else if (s.running) text = s.stopping ? '正在结束…' : (s.needsPortRestart ? '运行中 · pid ' + s.pid + '（' + s.runPort + '）· 端口已改为 ' + port : (s.ready ? '运行中 · pid ' + s.pid : '启动中…（' + port + ' 未就绪）'));
+    // 外部 dsh 同理：它可能停在旧端口上（改过配置端口），要说明「现监听哪个」，否则用户以为端口已切过去。
+    else if (ext) text = '外部 dsh · pid ' + s.externalPid + (s.externalRunPort && s.externalRunPort !== port ? '（' + s.externalRunPort + '）· 端口已改为 ' + port : '');
+    else if (other) text = '端口 ' + port + ' 被 ' + other + ' 占用';
     else text = '未运行';
     var cls = 'dshwv-dsh-state';
     if (err) cls += ' dshwv-dsh-err';
@@ -645,10 +650,10 @@
     dshStateEl.textContent = text;
     dshStateEl.title = text +
       '\ndsh：' + (s.url || '') +
-      (s.running ? '\n状态：' + (s.ready ? '3080 已就绪' : '启动中，稍等') + (s.needsRestart ? '（已换成 ' + (s.resolved || '') + '，点「重启」生效）' : '') : '') +
+      (s.running ? '\n状态：' + (s.ready ? (s.runPort || port) + ' 已就绪' : '启动中，稍等') + (s.needsPortRestart ? '；端口已改为 ' + port + '，点「重启」生效' : '') + (s.needsRestart ? '（已换成 ' + (s.resolved || '') + '，点「重启」生效）' : '') : '') +
       '\nNode：' + (s.nodeDir || '未找到') + (s.nodeVersion ? '（' + s.nodeVersion + '）' : '') +
       '\n版本：' + (s.resolved || '未安装') + (s.source === 'global' ? '（全局）' : s.source === 'plugin' ? '（插件目录）' : '') +
-      (ext ? '\n外部进程：由别的终端启动，「结束」会结束它，「重启」会用当前配置重新启动' : '') +
+      (ext ? '\n外部进程：由别的终端启动（' + ((s.externalRunPort && s.externalRunPort !== port) ? '现监听 ' + s.externalRunPort + '，端口已改为 ' + port + '，' : '') + '「结束」会结束它，「重启」会用当前配置重新启动）' : '') +
       '\n页面：' + (s.webUrl ? '已捕获带 token 地址' : (s.url || '')) +
       '\n详细日志见设置页「DeepSeek Harness」';
     dshCmdEl.textContent = s.lastCmd || '—';
@@ -721,6 +726,11 @@
   bubbleBox.appendChild(textBox);
   bubbleBox.addEventListener('click', function (e) {
     e.stopPropagation();
+    // 气泡圆开得很满（left:-7.97%、top:-4.67%、width:118%），打开后 SVG path 带
+    // pointer-events:visiblePainted，正好盖住右上角的菜单按钮。menuBtn 是 body 的兄弟节点，
+    // 冒泡路径（path → bubbleBox → body → root）不经过它，所以这里不能只 return，
+    // 必须把这次点击显式转交给按钮，否则「有气泡时菜单点不开」。
+    if (isOverMenuBtn(e)) { toggleMenu(); return; }
     if (!bubbleShown) return;
     if (bubbleRandomActive || bubbleTimerActive) {
       // 「只显计时」关闭时计时只是先弹一下：点掉它要接着显示常规内容，而不是直接把气泡收起
@@ -832,13 +842,73 @@
   function passTakeOver() {
     passHoverActive = true;
     passApplyIndicator();
-    menuBtn.classList.add('dshwv-menu-btn-visible');
+    // 接管成功＝此刻正在与挂件交互，按钮必须亮起。这里 forceShow：
+    // 不能用位置判断（按钮就压在鲸鱼轮廓顶边上沿，位置判定常判成「不在鲸鱼上」→ 按钮不显示）
+    forceShowMenuBtn();
     sendIgnoreMouse(false);
   }
   function passRelease() {
     passHoverActive = false;
     passApplyIndicator();
+    // 交回穿透后按钮未必该消失：指针可能仍压在鲸鱼上（接管是为别的触发场景发生的）。
+    // 用「最后一次已知位置」重算，避免这里无条件移除后、下一次 pointermove 前不显示
+    applyMenuBtnAtLast();
+    sendIgnoreMouse(true);
+  }
+  // ============ 菜单按钮显隐 ============
+  // 规则（唯一判据）：**指针在鲸鱼轮廓内（或按钮本身上）→ 显示；否则隐藏**。
+  //
+  // 设计要点（照搬成熟参考项目的范式，也是本项目此前反复出错的教训）：
+  // 1) **单一入口 + 声明式**：只由 applyMenuBtn(e) 一个函数决定显隐，内部用
+  //    classList.toggle(cls, want) 一次性把 class 设成「此刻应有」的样子。命令式的
+  //    add/remove 分散在多处时，任何两条路径的结论不一致就会互相翻盘。
+  // 2) **单一坐标源**：判定只读调用方手上的那个事件对象（或显式传入的点），不维护
+  //    lastHoverPt 之类的快照 —— 双坐标源正是历史上「轮廓边界上两条路径给出相反结论」的根源。
+  // 3) **无定时器、无迟滞、无豁免轮次**：这些状态越多，边界上越容易互相抵消。参考项目
+  //    的做法（每次 pointermove 同步 toggle）证明了根本不需要它们。
+  // 4) 隐藏态由 CSS 的 visibility:hidden + pointer-events:none 保证「看不见＝点不到」，
+  //    因此本函数**只**负责按位置决定显隐，不必再为命中测试做任何补偿。
+  function applyMenuBtn(e) {
+    var want;
+    if (!menuBtnEnabled) want = false;
+    else if (menuOpen) want = true;                        // 菜单开着：按钮必须常显（它是菜单锚点）
+    else if (e && isFinite(e.clientX)) want = isWhaleHit(e) || isOverMenuBtn(e);
+    else return;                                          // 没有可信坐标：不动（下次 pointermove 自会纠正）
+    menuBtn.classList.toggle('dshwv-menu-btn-visible', want);
+  }
+  // 用「最后一次已知的指针位置」重算（拖拽收尾 / 配置变更 / 穿透切换等无事件对象的场景）。
+  // 指针可能正静止，不会有 pointermove 来纠正，所以这些场景必须显式重算一次。
+  function applyMenuBtnAtLast() {
+    if (lastHoverPt) applyMenuBtn(lastHoverPt);
+    else applyMenuBtn(null);
+  }
+  // 强制显示：点开菜单、穿透接管等「此刻正在与挂件交互」的场景。
+  // 不能靠位置判定 —— 按钮压在鲸鱼轮廓顶边上沿，位置判定容易判成「不在鲸鱼上」而隐藏。
+  function forceShowMenuBtn() {
+    menuBtn.classList.toggle('dshwv-menu-btn-visible', !!menuBtnEnabled);
+  }
+  // 指针离开整个窗口：收起按钮并交回穿透。必须有这条「窗口级」兜底 ——
+  // 主判定由 pointermove 驱动，指针一旦移出窗口客户区就不再派发，按钮残留没人清理
+  // （窗口比鲸鱼本体四周各多 WIN_PAD=200px 透明留白，指针停在留白里也算「没动」）。
+  function onWindowPointerLeave(e) {
+    // 子元素之间移动也会冒泡出 pointerleave（relatedTarget 仍在窗口内），只认真正离开窗口的那种。
+    // relatedTarget 为 null 时无法区分，按「离开」处理 —— 这是安全的默认值
+    // （漏收只是晚一点隐藏，误收也只是按钮多显示一瞬）
+    if (e && e.relatedTarget && e.relatedTarget !== document.documentElement
+        && document.documentElement.contains(e.relatedTarget)) return;
+    passDwellCancel();
+    passReleaseCancel();
+    if (menuOpen) closeMenu();
+    // 指针既然已离开窗口，按钮一律先收起，并作废悬停点 —— 之后若指针回来，
+    // 下一次 pointermove 会重新写入 lastHoverPt 并恢复显示
+    lastHoverPt = null;
     menuBtn.classList.remove('dshwv-menu-btn-visible');
+    // 拖拽中不动穿透与光标：窗口正被拖着走，指针必然短暂离开客户区，
+    // 此刻 setIgnoreMouse(true) 会掐断后续 pointerup，拖拽就收不了尾
+    if (drag && drag.active) return;
+    passHoverActive = false;
+    passApplyIndicator();
+    setWidgetCursor('');
     sendIgnoreMouse(true);
   }
   // 提醒气泡自动收起：remindSec = 0 表示常驻，等用户点掉（设置页可配）
@@ -882,7 +952,6 @@
   var menuOpen = false;
   var menuDown = false; // 本次打开锁定的展开方向（true = 向按钮下方展开）
   var menuDirLocked = false; // 方向已定：打开动画期间内容高度变化不重算，防面板在按钮上下侧来回翻
-  var hideBtnTimer = null; // 菜单按钮延迟隐藏（鲸鱼→按钮之间的透明间隙里保持可点）
   var firstBalance = true, pendingManual = false;
   var lastIsPeak = null; // 上一次的峰谷状态，用于检测「进入峰时/谷时」的切换
 
@@ -2070,6 +2139,11 @@
     });
   }
   // 拖动中的实时预览：rAF 合并，只通知宿主改窗口几何，不写存储、不回推
+  // 拖拽中不进这里：滚轮 handler 已按 `drag.active` 挡掉实时缩放，而菜单（唯一另一处
+  // setScale(false) 来源）在 pointerdown 时就被 closeMenu 关掉了，所以拖拽期本函数只可能
+  // 被滚轮调到、且已被上游拦住。这里不再重复判 `drag.active` —— 拖拽冻结的**最终防线在宿主**
+  // （applyScaleToWindow 的 dragFrozen，它同时兜住 commit=true 的 saveCfg 路径），
+  // 页面侧只负责拦本地滚轮手势，两处判据职责不同，合成一处反而会让 commit 路径丢请求。
   var liveRaf = 0;
   function sendLiveScale() {
     if (liveRaf) return;
@@ -2187,9 +2261,12 @@
       passHoverActive = false;
       passDwellCancel();
       passReleaseCancel();
+      // 开关穿透即改变「指针是否与挂件交互」的前提，旧悬停点不再可信（鼠标可能正静止，
+      // 不会有 pointermove 来纠正），作废它，让按钮先收起
+      lastHoverPt = null;
+      menuBtn.classList.remove('dshwv-menu-btn-visible');
       if (passThroughOn) {
         if (menuOpen) closeMenu();
-        menuBtn.classList.remove('dshwv-menu-btn-visible');
         sendIgnoreMouse(true);
         if (passNoticeReady) showPassNotice(true);
       } else {
@@ -2198,7 +2275,6 @@
         // 否则菜单留在屏上、窗口却已 ignoreMouse=true，点了会穿透到下层应用
         if (menuOpen) closeMenu();
         sendIgnoreMouse(true);
-        menuBtn.classList.remove('dshwv-menu-btn-visible');
         if (passNoticeReady) showPassNotice(false);
       }
       passApplyIndicator();
@@ -2221,9 +2297,8 @@
       menuBtn.classList.toggle('dshwv-menu-btn-off', !menuBtnEnabled);
       passApplyIndicator(); // 按钮被关掉时，穿透角标也要跟着收起
       if (!menuBtnEnabled) {
-        if (hideBtnTimer) { clearTimeout(hideBtnTimer); hideBtnTimer = null; }
-        menuBtn.classList.remove('dshwv-menu-btn-visible');
         if (menuOpen) closeMenu();
+        applyMenuBtnAtLast(); // applyMenuBtn 的 menuBtnEnabled=false 分支会移除 visible
       }
     }
     // 菜单分组展开态：设置页 / 别的窗口改过就同步过来；不在这里回写（saveCfg），
@@ -2486,9 +2561,13 @@
     menuOpen = !menuOpen;
     if (menuOpen) {
       menuDirLocked = false; // 新一轮打开：按当前几何重新决定展开方向（见 positionMenu）
+      // 点开菜单＝最强交互信号，无条件亮起按钮。
+      // positionMenu 紧接着要读它的 getBoundingClientRect 当锚点 —— 先亮起再定位最稳。
+      // 不能靠位置判定：按钮压在鲸鱼轮廓顶边上沿，位置判定常判成「不在鲸鱼上」而隐藏
+      forceShowMenuBtn();
       positionMenu();
       menuBox.scrollTop = 0; // 小尺寸挂件上菜单可滚动：重开时回到顶部，否则停在上次滚到的位置
-      // dsh 分组收着时状态行看不见，不必白探一次 3080；展开时才拉（见 menuGroup 的 onExpand）
+      // dsh 分组收着时状态行看不见，不必白探一次 dsh 端口；展开时才拉（见 menuGroup 的 onExpand）
       if (groupDsh.el.classList.contains('dshwv-group-open')) dshSend('status');
       // 模型列表懒加载：宿主侧有 5 分钟节流，反复开菜单不会一直打网络
       whaleApi.refreshModels(null, false);
@@ -2505,7 +2584,9 @@
     }
     menuBox.classList.toggle('dshwv-menu-open', menuOpen);
     menuBtn.setAttribute('aria-expanded', menuOpen ? 'true' : 'false');
-    if (menuOpen) menuBtn.classList.add('dshwv-menu-btn-visible');
+    // 开/关都走统一求值：关菜单后若指针已不在鲸鱼/按钮上，会立即隐藏，
+    // 不再依赖「用户恰好再动一下鼠标」才清理（这就是按钮偶尔残留的主因）
+    applyMenuBtnAtLast();
   }
   function closeMenu() {
     menuOpen = false;
@@ -2605,63 +2686,123 @@
   }
 
   // —— 像素命中测试（透明区域不响应/可穿透） ——
-  var hitCanvas = null, hitReady = false;
+  // 性能要点：命中判定在指针移动时每帧都会跑（onDocPointerMove → scheduleHover → updateHover
+  // → isWhaleHit）。原先每次都对 610×610 画布做 getImageData(x,y,1,1) 单像素读回 —— 那会强制
+  // GPU→CPU 同步，单次几毫秒，**每帧一次**就是拖拽卡顿的根源（也解释了为何「锁定位置」后无此问题：
+  // dragLock 时 updateHover 提前 return，压根不做命中检测）。
+  // 改为：图片加载完成时一次性把整张 alpha 读进 Uint8Array（610*610 ≈ 372KB），
+  // isWhaleHit 只做一次数组下标访问，纯内存、零 GPU 同步。
+  var hitReady = false, hitAlpha = null, hitFailed = false;
   function setupHitTest() {
     try {
       hitReady = false; // 换形象时先失效，避免旧轮廓还在生效
-      hitCanvas = document.createElement('canvas');
+      hitFailed = false;
+      hitAlpha = null;
+      // 离屏画布仅用于一次性把形象描出轮廓，读完 alpha 后即可丢弃，故用局部变量
+      var hitCanvas = document.createElement('canvas');
       hitCanvas.width = 610;
       hitCanvas.height = 610;
       var probe = new Image();
       probe.onload = function () {
         try {
-          hitCanvas.getContext('2d').drawImage(probe, 0, 0, 610, 610);
+          var ctx = hitCanvas.getContext('2d');
+          ctx.drawImage(probe, 0, 0, 610, 610);
+          // 一次性读回整张画布的 alpha（每像素第 4 个字节），之后命中判定不再碰 canvas
+          var rgba = ctx.getImageData(0, 0, 610, 610).data;
+          var alpha = new Uint8Array(610 * 610);
+          for (var i = 0, n = alpha.length; i < n; i++) alpha[i] = rgba[i * 4 + 3];
+          // 采样自检：画布读回在个别环境下会被抹成全透明（隐私保护 / 指纹防护），
+          // 此时 alpha 全是 0，命中判定会处处判假 → 整只挂件点不动，而 hitReady 仍为 true
+          // 就走不到降级分支。6×6 网格扫一遍，一个不透明像素都取不到就判命中表不可用
+          var opaque = 0;
+          for (var gy = 0; gy < 6 && !opaque; gy++) {
+            for (var gx = 0; gx < 6; gx++) {
+              var px = Math.min(609, Math.floor(gx * 610 / 6 + 305 / 6));
+              var py = Math.min(609, Math.floor(gy * 610 / 6 + 305 / 6));
+              if (alpha[py * 610 + px] > 10) { opaque = 1; break; }
+            }
+          }
+          if (!opaque) {
+            hitFailed = true;
+            logErr('[whale][page] 命中测试画布读回全透明，降级为矩形判定');
+            return;
+          }
+          hitAlpha = alpha;
           hitReady = true;
-        } catch (err) { logErr('[whale][page] 命中测试画布绘制失败', err && err.message); }
+        } catch (err) {
+          hitFailed = true;
+          logErr('[whale][page] 命中测试画布绘制失败', err && err.message);
+        }
       };
-      probe.onerror = function () { logErr('[whale][page] 命中测试图片加载失败', IMG_URL); };
+      probe.onerror = function () {
+        hitFailed = true;
+        logErr('[whale][page] 命中测试图片加载失败', IMG_URL);
+      };
       probe.src = IMG_URL;
     } catch (err) {}
   }
+  // 命中表不可用时的降级判定：只在**图片矩形内**算命中。
+  // 关键：绝不能在这里返回 true 兜底 —— 那等于「整个窗口（含四周 200px 透明留白）都是鲸鱼」，
+  // 指针移出挂件后仍被判成「没离开」，菜单按钮于是不隐藏（历史 bug 的根源之一）。
+  function isWhaleRectHit(e) {
+    var r = img.getBoundingClientRect();
+    if (!r || r.width <= 0 || r.height <= 0) return false;
+    return e.clientX >= r.left && e.clientX < r.right && e.clientY >= r.top && e.clientY < r.bottom;
+  }
+  // 纯几何判定，**无状态**：只回答「这个坐标此刻是否落在鲸鱼轮廓内」。
+  // 拖拽 / 点击拦截 / 穿透接管等路径都用它 —— 那些场景要的是即时事实，不能受历史影响。
   function isWhaleHit(e) {
-    if (!hitCanvas || !hitReady) return true;
     try {
       var r = img.getBoundingClientRect();
       if (!r || r.width <= 0 || r.height <= 0) return false;
+      // 命中表已判定不可用（读回被抹白 / 读回抛错 / 图片加载失败）：直接走矩形降级，
+      // 且**记住**这个结论，不再每次重试
+      if (hitFailed) return isWhaleRectHit(e);
       var lx = (e.clientX - r.left) / r.width * 610;
       var ly = (e.clientY - r.top) / r.height * 610;
       if (lx < 0 || ly < 0 || lx >= 610 || ly >= 610) return false;
+      // 轮廓表尚未就绪（形象刚切换 / 首帧图片还没解码完）：同样只在矩形内算命中
+      if (!hitAlpha || !hitReady) return true;
       if (flipped) lx = 610 - lx;
-      var data = hitCanvas.getContext('2d').getImageData(Math.floor(lx), Math.floor(ly), 1, 1).data;
-      return data[3] > 10;
+      var x = Math.floor(lx), y = Math.floor(ly);
+      return hitAlpha[y * 610 + x] > 10;
     } catch (err) {
-      return true;
+      return false;
     }
   }
-
   // —— 点击穿透 / 光标 ——
   var widgetCursor = '';
+  // 光标走**类切换**而不是每次写 document.body.style.cursor：
+  // cursor 是可继承属性，改它会让渲染引擎失效本窗口文档树的样式；本函数在按下/抬手
+  // 各被调一次，正好压在点击链路上。切 class 只在值变化时动一次 DOM，且让 CSS 持有具体
+  // 光标值（切 grab/grabbing 只需换一个类名）。注意作用域是本悬浮窗自己的文档，
+  // 与宿主页面无关，失效范围有限。
   function setWidgetCursor(v) {
-    if (v !== widgetCursor) {
-      widgetCursor = v;
-      try { document.body.style.cursor = v; } catch (err) {}
-    }
+    if (v === widgetCursor) return;
+    widgetCursor = v;
+    try {
+      document.body.classList.toggle('dshwv-cursor-grab', v === 'grab');
+      document.body.classList.toggle('dshwv-cursor-grabbing', v === 'grabbing');
+    } catch (err) {}
   }
   // 菜单按钮命中：用屏幕坐标几何判定，按钮四周留过桥边距，
-  // 保证从鲸鱼移向按钮经过透明间隙时按钮不消失、窗口不穿透
+  // 保证从鲸鱼移向按钮经过透明间隙时按钮不消失、窗口不穿透。
+  // 注意：这里是**按钮本身**的命中区，和 isWhaleHit 的 alpha 轮廓判定互相独立补充。
+  // 按钮钉在 top: calc(40.55% + 4px)（即鲸鱼本体顶边上沿）、right: 4px，二者只隔约 4px，
+  // 所以过桥边距不需要很大：取 12px 足以跨过间隙，又不会把命中区撑到远处留白区。
   function isOverMenuBtn(e) {
     if (!menuBtnEnabled) return false;
     try {
       var r = menuBtn.getBoundingClientRect();
       if (!r || r.width <= 0) return false;
-      var m = 26; // 过桥边距
+      var m = 12; // 过桥边距：够跨过按钮与鲸鱼间的约 4px 间隙，不伸进远处留白
       return e.clientX >= r.left - m && e.clientX <= r.right + m &&
              e.clientY >= r.top - m && e.clientY <= r.bottom + m;
     } catch (err) { return false; }
   }
 
   // 根据指针位置决定窗口是否穿透：鲸鱼/打开的气泡/菜单/菜单按钮 → 不穿透；其余透明区 → 穿透
-  function updateHover(e) {
+  function updateHover(e, syncBtn) {
     if (!e) return;
     var overBtn = isOverMenuBtn(e);
     var overWhale = isWhaleHit(e);
@@ -2669,9 +2810,11 @@
     // 这样既满足「平时不挡下层应用」，又不用回设置页就能操作挂件。
     if (passThroughOn && !passHoverActive) {
       if (menuOpen) closeMenu();
-      setWidgetCursor('');
       if (drag && drag.active) return; // 开关切换瞬间若在拖拽，等 pointerup 自然收尾
       if (overWhale || overBtn) {
+        // 光标只在真正压在鲸鱼/按钮上时才给「可抓」；原先把 setWidgetCursor('') 写在
+        // 这个判断之前，导致悬停在鲸鱼上的抓手指针被无条件清掉（看着像没悬停）
+        setWidgetCursor(overWhale && !dragLock ? 'grab' : '');
         passReleaseCancel();
         if (!passDwellTimer) {
           passDwellTimer = setTimeout(function () {
@@ -2685,9 +2828,14 @@
           }, PASS_DWELL_MS);
         }
       } else {
+        setWidgetCursor('');
         passDwellCancel();
         sendIgnoreMouse(true);
       }
+      // 穿透未接管时也要维护按钮显隐：这条分支原先直接 return，按钮的隐藏完全指望
+      // passRelease（只在接管过的路径才会走到），于是「穿透中把鼠标移出挂件」时按钮没人收。
+      // applyMenuBtn 是唯一判定入口，本次事件坐标直接喂给它
+      if (syncBtn) applyMenuBtn(e);
       return;
     }
     var overUI = false;
@@ -2705,17 +2853,10 @@
     if (menuOpen) { passReleaseCancel(); sendIgnoreMouse(false); }
     else sendIgnoreMouse(!overUI);
     setWidgetCursor((drag && drag.active) ? 'grabbing' : (overUI && !dragLock ? 'grab' : ''));
-    // 按钮可见性：在鲸鱼/按钮区/菜单打开时常显；离开后延迟一小段再隐藏（越过透明间隙）
-    var wantBtn = menuBtnEnabled && (overWhale || overBtn || menuOpen);
-    if (wantBtn) {
-      if (hideBtnTimer) { clearTimeout(hideBtnTimer); hideBtnTimer = null; }
-      menuBtn.classList.add('dshwv-menu-btn-visible');
-    } else if (!hideBtnTimer) {
-      hideBtnTimer = setTimeout(function () {
-        hideBtnTimer = null;
-        menuBtn.classList.remove('dshwv-menu-btn-visible');
-      }, 350);
-    }
+    // 按钮显隐交 applyMenuBtn 统一决策，坐标同样用本次事件对象。
+    // onDocPointerMove 主路径已调用过同一入口（那里的 e 就是事件对象），此处 syncBtn 为真时
+    // 属于事后重算场景（hoverAt / hoverNow：拖拽收尾、配置变更、穿透接管），坐标同样可信。
+    if (syncBtn) applyMenuBtn(e);
     // 临时接管中：离开鲸鱼/菜单/按钮一小会儿后交回穿透（拖拽期间不交回，否则会拖一半断掉）
     if (passThroughOn && passHoverActive) {
       if (overUI || (drag && drag.active)) passReleaseCancel();
@@ -2737,12 +2878,16 @@
     if (hoverRaf) return;
     hoverRaf = requestAnimationFrame(function () {
       hoverRaf = 0;
-      if (lastHoverPt) updateHover(lastHoverPt);
+      // syncBtn=false：按钮显隐已由 onDocPointerMove 用本次事件的精确坐标判过，
+      // 这里再拿 lastHoverPt（合帧快照）判一次只会与那次冲突（详见 updateHover 里的说明）
+      if (lastHoverPt) updateHover(lastHoverPt, false);
     });
   }
   function hoverNow() {
     if (hoverRaf) { cancelAnimationFrame(hoverRaf); hoverRaf = 0; }
-    if (lastHoverPt) updateHover(lastHoverPt);
+    // syncBtn=true：这是「事后重算」路径（拖拽收尾 / 配置变更 / 穿透接管），
+    // 此刻 lastHoverPt 刚由 hoverAt 写成最新值或被显式作废，是唯一的可信坐标源
+    if (lastHoverPt) updateHover(lastHoverPt, true);
   }
   // 用事件里的最新位置立即重算（拖拽收尾、配置变更后用）
   function hoverAt(e) {
@@ -2752,6 +2897,11 @@
 
   // —— 拖拽 / 按压 / 点击 ——
   function onDocPointerDown(e) {
+    // 菜单按钮优先于气泡：气泡圆开得很满（left:-7.97%、top:-4.67%、width:118%），
+    // 打开后 SVG path 带 pointer-events:visiblePainted，正好盖住右上角按钮那一小块。
+    // 若先按 e.target 分流，点在按钮位置上命中的是气泡 path，会走「气泡自己处理」分支，
+    // 按钮的按下就此丢掉（点得动气泡、点不动菜单）。所以这里先按几何判按钮，命中就交按钮。
+    if (isOverMenuBtn(e)) return;
     if (e.target && e.target.closest) {
       if (e.target.closest('.dshwv-bubble') || e.target.closest('.dshwv-menu') || e.target.closest('.dshwv-menu-btn')) return;
     }
@@ -2767,6 +2917,9 @@
     try { e.preventDefault(); e.stopPropagation(); } catch (err) {}
     // 目标窗口左上角 = 屏幕指针坐标 - 指针在窗内的客户区坐标（拖拽过程恒定）
     drag = { active: true, sSX: e.screenX, sSY: e.screenY, cx0: e.clientX, cy0: e.clientY, moved: false, raf: 0, tx: 0, ty: 0 };
+    // 先通知宿主冻结缩放：不能等第一次 drag-move —— 从按下到首次移动之间若来一次
+    // 滚轮/实时缩放，窗口尺寸会先被改掉（用户反馈的「拖着拖着变大」由此而来）
+    try { whaleApi.dragBegin(); } catch (err) {}
     passReleaseCancel(); // 开始拖拽：别让「交回穿透」的定时器在拖拽中途开火
     sendIgnoreMouse(false);
     pressDown();
@@ -2781,17 +2934,40 @@
       var dy = e.screenY - drag.sSY;
       if (dx * dx + dy * dy >= CLICK_SQ) drag.moved = true;
       if (drag.moved) {
+        // 只记录「最新」目标位置，实际发送由 pumpDragMove 的 rAF 节流控制
         drag.tx = e.screenX - drag.cx0;
         drag.ty = e.screenY - drag.cy0;
-        if (!drag.raf) {
-          drag.raf = requestAnimationFrame(function () {
-            drag.raf = 0;
-            if (drag && drag.active) whaleApi.dragMove(drag.tx, drag.ty);
-          });
-        }
+        pumpDragMove();
       }
+      // 拖拽中直接返回、不做悬停判定：拖起点必在鲸鱼本体上，指针又随窗口同步移动，
+      // 故 overWhale/overBtn/穿透结论在拖拽期恒定不变 —— 而 updateHover 里的
+      // elementFromPoint 会强制布局，是除 setPosition 外每帧最贵的一项，纯属白做。
+      // （松手后 endDrag 会用最终位置 hoverAt 补算一次，状态不会漏更新）
+      return;
     }
-    scheduleHover(e); // 合并到每帧一次
+    // pointermove 主路径：把本次事件的精确坐标交给按钮显隐唯一入口 applyMenuBtn。
+    // 下面的 scheduleHover 只做命中测试（elementFromPoint / 穿透接管），它的 rAF 里
+    // 传 syncBtn=false，不会再拿旧快照对按钮显隐判第二次（历史 bug：两套坐标在轮廓边界
+    // 交替给出相反结论 → 按钮该隐藏时不隐藏）
+    applyMenuBtn(e);
+    scheduleHover(e); // 命中测试（elementFromPoint + closest）仍合并到每帧一次
+  }
+  // 拖拽位置上报：rAF 节流到「每帧最多一发」，宿主在 drag-move 里直接 setPosition。
+  //
+  // 曾经踩过的两个坑，都别再回头走：
+  // 1) 「发一帧 → 等宿主 ack → 再发下一帧」的严格背压：那是一条串行往返，画圈时鼠标每帧
+  //    位置都不同、没有可合并的冗余帧，吞吐被单个往返延迟锁死，挂件永远落后一个往返时间。
+  // 2) 宿主侧 setTimeout 自驱循环（~120Hz）来 apply 最新目标：它与页面 rAF 形成第二条节奏源，
+  //    拖拽期空转 setPosition，实测比不加更卡。
+  // 结论：只保留「页面 rAF 节流发送 + 宿主直接应用」这一条最简链路。
+  function pumpDragMove() {
+    if (!drag || !drag.active || drag.raf) return;
+    drag.raf = requestAnimationFrame(function () {
+      drag.raf = 0;
+      if (drag && drag.active) {
+        try { whaleApi.dragMove(drag.tx, drag.ty); } catch (err) {}
+      }
+    });
   }
   function onDocPointerUp(e) {
     try { if (isWhaleHit(e)) { e.preventDefault(); e.stopPropagation(); } } catch (err) {}
@@ -2807,6 +2983,8 @@
     document.removeEventListener('pointercancel', onDocPointerCancel, true);
     pressUp();
     drag = null;
+    // 手势被系统没收也要解冻宿主（这里不像 pointerup 会吸附落盘，只是把冻结态撤掉）
+    try { whaleApi.dragEnd(); } catch (err) {}
     hoverAt(null); // 沿用上一次有效悬停点重算（取消事件的位置字段不可信）
   }
   function endDrag(e, clickAllowed) {
@@ -2821,13 +2999,24 @@
     if (wasClick) {
       showBubble(true); // 用户点击：计时气泡即使不常驻也要弹出来
       refresh(true);
+      // 只是点击、没真正拖动，不会走下面的 dragEnd（那条路才会解冻宿主）。
+      // 不补这一下，宿主会一直停在「拖拽冻结」态 —— 之后滚轮缩放全部失效，
+      // 看上去就是「点了挂件一下就再也调不了大小了」。
+      try { whaleApi.dragEnd(); } catch (err) {}
     } else {
       // 宿主吸附后回推 whale:snapped → 镜像翻转
       whaleApi.dragEnd();
     }
-    hoverAt(e); // 立即按松手位置重算：穿透态下这里要决定是交回穿透还是保持接管
+    // 立即按松手位置重算：穿透态下这里要决定是交回穿透还是保持接管；
+    // 按钮显隐也在这次重算里按松手位置判过（hoverAt → hoverNow → updateHover(..., true)），
+    // 不要再补第二次 —— 两次决策配上不同坐标源就会互相翻盘（这正是「偶尔不隐藏」的来源）。
+    hoverAt(e);
   }
   function onDocClickStopper(e) {
+    // 菜单按钮优先于气泡（原因见 onDocPointerDown 同名判断）：
+    // 点在按钮几何范围内时事件目标可能是气泡 path，这里必须先放行给按钮，
+    // 否则下面会把这次点击当作「鲸鱼上的点击」preventDefault 掉，菜单按钮的 click 收不到。
+    if (isOverMenuBtn(e)) return;
     // 菜单/气泡/到点动作条都压在鲸鱼图形上：不排除的话这里会 preventDefault 掉菜单里
     // 输入框的点击，留言框点不进光标、数字框选不中 —— 看着就像「菜单改不了」
     if (e.target && e.target.closest) {
@@ -2838,9 +3027,15 @@
   }
   document.addEventListener('pointerdown', onDocPointerDown, true);
   document.addEventListener('pointermove', onDocPointerMove, true);
+  // pointerleave 不冒泡，只能挂在 documentElement 上（挂到 document 上永远收不到）
+  document.documentElement.addEventListener('pointerleave', onWindowPointerLeave);
   document.addEventListener('click', onDocClickStopper, true);
   // 右键鲸鱼打开菜单：即使隐藏了右上角菜单按钮，也能通过右键唤出设置菜单
   document.addEventListener('contextmenu', function (e) {
+    // 拖拽中不弹菜单：左键按住拖动时再按右键，Windows 仍会派发 contextmenu（右键按下即触发，
+    // 与左键是否按住无关）。菜单一弹出来就打断拖拽，用户看到的是「拖到一半突然冒出三点菜单」。
+    // 注意这里只挡「正在拖」这一种情况，拖拽结束后右键唤菜单的能力完全保留
+    if (drag && drag.active) { try { e.preventDefault(); e.stopPropagation(); } catch (err) {} return; }
     if (e.target && e.target.closest) {
       if (e.target.closest('.dshwv-menu') || e.target.closest('.dshwv-menu-btn')) return;
     }
@@ -2855,9 +3050,14 @@
 
   // 滚轮缩放：指针在鲸鱼上时滚动调整大小（滚动中实时预览，停手 260ms 后持久化）
   // 锁定位置时禁用缩放（锁定 = 位置与大小都固定），仅保留点击刷新
+  // 拖拽中禁用缩放：拖动时难免带出滚轮事件（触控板尤其容易误触），窗口正被拖着走、
+  // 尺寸又跟着变，会让人分不清是拖还是缩，也让吸附落点变得不可预期。
+  // ⚠️ 这道判据只管「本地滚轮手势」；拖拽冻结的最终防线在宿主 applyScaleToWindow 的 dragFrozen，
+  //    那边还要兜住 saveCfg(commit=true) 这条不经本页的路径。两处职责不同，不要合并。
   var wheelCommitTimer = null;
   document.addEventListener('wheel', function (e) {
     if (dragLock) return;
+    if (drag && drag.active) return;
     if (e.target && e.target.closest && e.target.closest('.dshwv-menu')) return; // 菜单内滚动不缩放
     if (!isWhaleHit(e)) return;
     try { e.preventDefault(); } catch (err) {}

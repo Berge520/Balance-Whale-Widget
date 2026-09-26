@@ -4,7 +4,7 @@
 const {
   K, MIN_SCALE, MAX_SCALE, MODEL_MAX, MODEL_TEMPLATES, DEFAULT_MAIN_MODEL, LOW_ALERT_BY_CURRENCY,
   TOKEN_PRICE_DEFAULT, TOKEN_PRICE_MAX, TOKEN_RATE_MAX, TOKEN_PRICE_MODELS_MAX, TIMER_NOTE_MAX,
-  NEWEST_VERSION,
+  NEWEST_VERSION, DSH_PORT_DEFAULT,
 } = require('./constants')
 const { logErr } = require('./log')
 
@@ -345,7 +345,18 @@ function normMenuGroupsRev(v) {
   return n
 }
 function defaultConfig() {
-  return { scale: 1.3, vol: 0.9, soundOn: true, soundSet: 'duck', usageMode: 'ledger', peakMode: 'default', peakRemindOn: true, bubbleOn: true, menuBtn: true, onTop: true, lowAlertOn: true, lowAlertAmount: LOW_ALERT_BY_CURRENCY.CNY, budgetOn: false, budgetAmount: 0, dropAlertOn: false, dropAlertAmount: 5, clickQueueOn: false, remindSec: 8, quietOn: false, quietFrom: '23:00', quietTo: '07:00', timeBubbleOn: true, updateCheckOn: false, dragLock: false, enterMode: 'both', timerNotifyOn: true, timerMailOn: true, timerPersistOn: true, timerMode: 'off', timerSec: 1500, timerAt: '07:30', timerNote: '', timerBreakMin: 5, timerRemindSec: 8, timerBubblePin: true, timerBubbleOnly: true, guideDone: false, dshNodeDir: '', dshKeepAlive: false, dshRegistry: '', dshVersion: '', dshReinstall: false, dshNoOpen: true, dshMarketUrl: '', dshMarketMirror: true, dshMarketRegistry: '', dshMarketOfficial: false, dshExportCred: false, dshExportNoMod: true, avoidTaskbar: true, edgeTop: 0, edgeRight: 0, edgeBottom: 0, edgeLeft: 0, scrollGapOn: false, scrollGapPx: SCROLL_GAP_DEFAULT, snapMode: 'ratio', snapRatio: SNAP_RATIO_DEFAULT, opacity: 100, passThrough: false, skin: 'DSniang1', theme: 'default', quotes: normQuotes(null), alerts: normAlerts(null), quotaTotal: 0, quotaReset: 'monthly', tokenPrice: normTokenPrice(null), historyKeepDays: HISTORY_KEEP_DEFAULT, models: [], mainModelId: DEFAULT_MAIN_MODEL, dshBackupKeep: DSB_KEEP_DEFAULT, menuGroups: normMenuGroups(null), menuGroupsRev: 0, ghAccelOn: false, ghAccelIps: normIps(null), ghAccelRefreshedAt: 0, ghAccelSrc: normGhAccelSrc(null), notifySystemOn: true, notifyMailOn: false, mailFrom: '', mailTo: '', mailFromName: '小鲸鱼余额挂件', mailSubjectPrefix: '[小鲸鱼余额挂件]' }
+  return { scale: 1.3, vol: 0.9, soundOn: true, soundSet: 'duck', usageMode: 'ledger', peakMode: 'default', peakRemindOn: true, bubbleOn: true, menuBtn: true, onTop: true, lowAlertOn: true, lowAlertAmount: LOW_ALERT_BY_CURRENCY.CNY, budgetOn: false, budgetAmount: 0, dropAlertOn: false, dropAlertAmount: 5, clickQueueOn: false, remindSec: 8, quietOn: false, quietFrom: '23:00', quietTo: '07:00', timeBubbleOn: true, updateCheckOn: false, dragLock: false, enterMode: 'both', timerNotifyOn: true, timerMailOn: true, timerPersistOn: true, timerMode: 'off', timerSec: 1500, timerAt: '07:30', timerNote: '', timerBreakMin: 5, timerRemindSec: 8, timerBubblePin: true, timerBubbleOnly: true, guideDone: false, dshNodeDir: '', dshKeepAlive: false, dshPort: DSH_PORT_DEFAULT, dshRegistry: '', dshVersion: '', dshReinstall: false, dshNoOpen: true, dshMarketUrl: '', dshMarketMirror: true, dshMarketRegistry: '', dshMarketOfficial: false, dshExportCred: false, dshExportNoMod: true, avoidTaskbar: true, edgeTop: 0, edgeRight: 0, edgeBottom: 0, edgeLeft: 0, scrollGapOn: false, scrollGapPx: SCROLL_GAP_DEFAULT, snapMode: 'ratio', snapRatio: SNAP_RATIO_DEFAULT, opacity: 100, passThrough: false, skin: 'DSniang1', theme: 'default', quotes: normQuotes(null), alerts: normAlerts(null), quotaTotal: 0, quotaReset: 'monthly', tokenPrice: normTokenPrice(null), historyKeepDays: HISTORY_KEEP_DEFAULT, models: [], mainModelId: DEFAULT_MAIN_MODEL, dshBackupKeep: DSB_KEEP_DEFAULT, menuGroups: normMenuGroups(null), menuGroupsRev: 0, ghAccelOn: false, ghAccelIps: normIps(null), ghAccelRefreshedAt: 0, ghAccelSrc: normGhAccelSrc(null), notifySystemOn: true, notifyMailOn: false, mailFrom: '', mailTo: '', mailFromName: '小鲸鱼余额挂件', mailSubjectPrefix: '[小鲸鱼余额挂件]' }
+}
+// dsh Web UI 监听端口（默认 3080）。
+// ⚠️ 为什么必须能配：3080 属于 Windows/Hyper-V 的「动态端口保留段」，被系统预留时
+//    dsh 根本 bind 不上（报 EADDRINUSE），而用户无从改起 —— 上游 `dsh web --port <n>` 支持换端口，
+//    插件侧把端口透传下去即可。取值必须是**能真正监听的 TCP 端口**：0 与 >65535 都会被系统拒绝，
+//    非法值静默退回默认端口（与 normHm 同理：宁可回默认，也不留一个注定失败的配置）。
+function normDshPort(v) {
+  const n = Number(v)
+  if (!isFinite(n)) return DSH_PORT_DEFAULT
+  const p = Math.round(n)
+  return p >= 1 && p <= 65535 ? p : DSH_PORT_DEFAULT
 }
 // dsh 注册源：只接受 http(s) 或空（默认官方源）
 function normRegistry(v) {
@@ -604,6 +615,7 @@ function readConfig() {
     guideDone: p.guideDone === true,
     dshNodeDir: typeof p.dshNodeDir === 'string' ? p.dshNodeDir.slice(0, 260) : dft.dshNodeDir,
     dshKeepAlive: p.dshKeepAlive === true,
+    dshPort: normDshPort(p.dshPort),
     dshRegistry: normRegistry(p.dshRegistry),
     dshVersion: normVersion(p.dshVersion),
     dshReinstall: p.dshReinstall === true,
@@ -710,6 +722,7 @@ function writeConfig(cfg) {
       guideDone: cfg.guideDone === true,
       dshNodeDir: typeof cfg.dshNodeDir === 'string' ? cfg.dshNodeDir.slice(0, 260) : '',
       dshKeepAlive: cfg.dshKeepAlive === true,
+      dshPort: normDshPort(cfg.dshPort),
       dshRegistry: normRegistry(cfg.dshRegistry),
       dshVersion: normVersion(cfg.dshVersion),
       dshReinstall: cfg.dshReinstall === true,
@@ -817,6 +830,7 @@ function patchConfig(patch) {
   if (p.guideDone !== undefined) cfg.guideDone = p.guideDone === true
   if (p.dshNodeDir !== undefined) cfg.dshNodeDir = String(p.dshNodeDir || '').trim().slice(0, 260)
   if (p.dshKeepAlive !== undefined) cfg.dshKeepAlive = !!p.dshKeepAlive
+  if (p.dshPort !== undefined) cfg.dshPort = normDshPort(p.dshPort)
   if (p.dshRegistry !== undefined) cfg.dshRegistry = normRegistry(p.dshRegistry)
   if (p.dshVersion !== undefined) cfg.dshVersion = normVersion(p.dshVersion)
   if (p.dshReinstall !== undefined) cfg.dshReinstall = !!p.dshReinstall

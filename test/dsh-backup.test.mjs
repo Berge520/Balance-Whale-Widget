@@ -120,6 +120,64 @@ test('createSnapshot：白名单 —— .credentials.yaml 与其它无关文件�
   assert.equal(blob.includes('profiles/other'), false)
 })
 
+// note：系统记的「这份快照是对哪个对象做的」，宿主那边拼成 `安装 dshmarket@1.65.1`。
+// 为什么要单测它：市场里装/卸/禁用/更新各建一份快照，reason 只有四种、短时间里会堆出十几份，
+// 光靠 reason 分不出「这份是为了回滚哪个包」—— note 就是那份清单唯一的辨识线索，
+// 一旦没写进 manifest 或读不回来，用户就只能靠时间戳猜。
+test('createSnapshot / listSnapshots：note 往返一致（写进 manifest 也读得回来）', () => {
+  makeHome(fullHome())
+  const r = bak.createSnapshot({ profile: 'web', reason: 'before-market-uninstall', note: '卸载 dshmarket@1.65.1' })
+  assert.equal(r.ok, true, r.error)
+
+  const m = JSON.parse(fs.readFileSync(path.join(r.dir, 'manifest.json'), 'utf8'))
+  assert.equal(m.note, '卸载 dshmarket@1.65.1')
+
+  const hit = bak.listSnapshots().find((s) => s.dirName === r.dirName)
+  assert.ok(hit, '刚建的快照必须在列表里')
+  assert.equal(hit.note, '卸载 dshmarket@1.65.1')
+  assert.equal(hit.reason, 'before-market-uninstall')
+})
+
+// note 里的包名可能来自 `github:a/b` 或 200+ 字符的 tarball URL，含 `@` / `:` / `/` / `#`
+// 这些对路径与 shells 都不友好的字符。它只被写进 manifest.json 的字符串字段、从不当目录名
+// （目录名由 timestamp 决定），所以必须逐字原样往返 —— 一旦有人「顺手」按目录名规则清洗它，
+// 用户看到的包名就会被改得认不出来。
+test('createSnapshot：note 含 @ : / # 等字符时逐字往返（它只进 manifest，不参与目录名）', () => {
+  makeHome(fullHome())
+  const odd = '安装 @scope/pkg@1.0.0#ref/github:a/b'
+  const r = bak.createSnapshot({ profile: 'web', reason: 'before-market-install', note: odd })
+  assert.equal(r.ok, true, r.error)
+  // 目录名不受 note 影响：仍是时间戳那一档，没有把 note 拼进去
+  assert.equal(/^[0-9]{8}-[0-9]{6}/.test(r.dirName), true, '目录名应仍是时间戳：' + r.dirName)
+
+  const m = JSON.parse(fs.readFileSync(path.join(r.dir, 'manifest.json'), 'utf8'))
+  assert.equal(m.note, odd)
+  assert.equal(bak.listSnapshots().find((s) => s.dirName === r.dirName).note, odd)
+})
+
+test('listSnapshots：不传 note 时读回空串（不是 undefined，界面要拿它判 v-if）', () => {
+  makeHome(fullHome())
+  const r = bak.createSnapshot({ profile: 'web', reason: 'manual' })
+  const hit = bak.listSnapshots().find((s) => s.dirName === r.dirName)
+  assert.equal(hit.note, '')
+})
+
+// 回归：note 是**后加**的字段，加它之前建的快照 manifest 里没有这个键。
+// 读的时候必须容缺（给空串），不能因为「字段缺失」就把整条快照判成读不到 ——
+// 否则用户升级插件后，升级前攒下的所有快照会在列表里凭空消失（旧的仍占磁盘、却删不掉）。
+test('listSnapshots：老 manifest 没有 note 字段时仍读得回（容缺，不能整条丢掉）', () => {
+  makeHome(fullHome())
+  const r = bak.createSnapshot({ profile: 'web', reason: 'before-disable' })
+  const mp = path.join(r.dir, 'manifest.json')
+  const m = JSON.parse(fs.readFileSync(mp, 'utf8'))
+  delete m.note
+  fs.writeFileSync(mp, JSON.stringify(m, null, 2), 'utf8')
+
+  const hit = bak.listSnapshots().find((s) => s.dirName === r.dirName)
+  assert.ok(hit, '缺 note 字段的老快照必须仍在列表里')
+  assert.equal(hit.note, '')
+})
+
 test('createSnapshot：受管文件缺失是预期分支（记 ok:false），不算失败', () => {
   // 只放 patch，故意不放 package.json / settings.yaml
   makeHome({ 'profiles/web/cordis.patch.yml': PATCH_V1 })

@@ -3,7 +3,7 @@
  */
 const fs = require('fs')
 const path = require('path')
-const { PLUGIN_VERSION, K, MODEL_TEMPLATES, MODEL_MAX, DEFAULT_MAIN_MODEL } = require('./constants')
+const { PLUGIN_VERSION, K, MODEL_TEMPLATES, MODEL_MAX, DEFAULT_MAIN_MODEL, DSH_PORT_DEFAULT } = require('./constants')
 const { log, logErr, LOG_FILE } = require('./log')
 const {
   clampNum, readConfig, patchConfig, readSecrets, writeSecrets, readLedger, historyKeepDays,
@@ -19,8 +19,28 @@ const {
   applyScaleToWindow, applyOnTop, pushConfig, queueLiveScale, repositionFromAnchor,
   taskbarState, syncTaskbarWatch, sendToWidget,
 } = require('./widget')
-const dsh = require('./dsh')
-const hosts = require('./hosts')
+// dsh 一族合计 300KB+，且本模块在设置窗加载时会被求值。下面所有 dsh.xxx 的调用都在函数体内
+// （无模块求值期引用），故改成惰性：首次访问 dsh.* 时才 require，之后复用同一份。
+let dshMod = null
+function dshOf() {
+  if (!dshMod) dshMod = require('./dsh')
+  return dshMod
+}
+const dsh = new Proxy({}, {
+  get(_t, key) { return dshOf()[key] },
+})
+// hosts.js(88KB) 只服务「GitHub 加速」这一组 API（设置页「帮助」Tab / AccelView 才用到）。
+// 顶层 require 会让它在设置页 preload 求值阶段就被同步解析一遍，而绝大多数会话根本不会
+// 打开加速页。改成惰性加载：首次访问 hosts.* 时才 require，之后复用同一份。
+// 下面所有 hosts.xxx 的调用都在函数体内（无模块求值期引用），故 getter 方案不影响原有语义。
+let hostsMod = null
+function hostsOf() {
+  if (!hostsMod) hostsMod = require('./hosts')
+  return hostsMod
+}
+const hosts = new Proxy({}, {
+  get(_t, key) { return hostsOf()[key] },
+})
 const { sendMail, mailSubject, notifySystem, sendMailAsync } = require('./notify')
 const backup = require('./backup')
 const assets = require('./assets')
@@ -758,6 +778,9 @@ function marketUpdate(opts) {
   const spec = dsh.validPkgSpec(o.spec !== undefined ? o.spec : o.npm)
   if (!spec) return { ok: false, error: '不是可更新的 spec：' + String(o.spec || o.npm || '（空）') }
   const label = String(o.name || o.npm || spec)
+  // ⚠️ npm 名要放过来自界面的**完整包名**（`@scope/x`），不能退化成 o.npm 的用途混淆：
+  //    v1.7.1 起前端在 update 链路也带 npmName（原先只有 install 带），界面才能显示
+  //    「<包名> 的版本范围」而不是拿 spec 当包名。validPkgName 挡掉 `github:` / URL 形态。
   const npm = dsh.validPkgName(o.npm) || ''
 
   if (o.dryRun === true) {
@@ -821,7 +844,13 @@ function updateAfterCompat(o, ctx) {
   // ⚠️ 只取**实装版本**，拿不到就留空 —— 绝不退回 `hit.depVersion`：那是声明范围（`^0.5.11`），
   //    界面会拼成 `v^0.5.11` 这种不成立的写法。空字符串时界面走不含 from 的那条文案分支。
   const fromBefore = before ? realizedOf(profile, before, spec) : ''
-  const snap = dshBackup.createSnapshot({ profile: profile, reason: 'before-market-update' })
+  // 版本记「要升到的目标版」（dryRun 回传的 o.version），不是当前版 —— 用户翻快照时
+  // 想看的是「这次动了什么」；当前版是回滚目标，已由快照文件本身承载
+  const snap = dshBackup.createSnapshot({
+    profile: profile,
+    reason: 'before-market-update',
+    note: snapNote('更新', npm || spec, String(o.version == null ? '' : o.version).trim()),
+  })
   if (!snap.ok) {
     logErr('[whale][dsh-market] 快照失败，已中止更新', snap.error || '')
     return Promise.resolve({ ok: false, error: '建快照失败，已中止更新：' + (snap.error || '未知错误') })
@@ -945,6 +974,29 @@ function updateAfterCompat(o, ctx) {
       needsRestart: true,
     }
   })
+}
+
+// 拼快照的 note：`安装 dshmarket@1.65.1`。
+//
+// ⚠️ 为什么要拼成一句话而不是只留包名（2026-09-25 用户反馈「写具体点，比如在操作什么、
+//    安装某个具体插件名」）：快照列表里 reason 已经用中文说了动作（「市场安装前」），
+//    但同一条链路里安装 / 更新 / 卸载 / 禁用各建一份、短时间能堆十几份，光看 reason
+//    只能在**同一类动作**里挑；note 补的是「哪个包」，再把动作重复一遍是为了这份快照
+//    被单拎出来看时（截图、日志、磁盘上的目录对照）不依赖旁边的 reason 标签就自解释。
+//
+// ⚠️ 包名优先用 npm 名、退化到 spec：github / tarball 来源的 spec 是 `github:a/b` 或一长串
+//    URL（最长 214 字符），能认出「哪个包」的只有 npm 名；npm 名也没有时才用 spec，
+//    总比 note 空着好 —— 空 note 界面上整段不渲染，等于没记。
+// ⚠️ 版本拿不到就只写包名，**不留 @**：`安装 dshmarket@` 看着像被截断了。
+// ⚠️ 上限 120 字符：note 会进 manifest 与界面标题，且界面按 220px 省略号截断；
+//    spec 那一档可能很长，截一下免得整块 manifest 被一条 URL 撑开。
+const SNAP_NOTE_MAX = 120
+
+function snapNote(action, name, version) {
+  const n = String(name == null ? '' : name).trim()
+  const v = String(version == null ? '' : version).trim()
+  const s = v ? action + ' ' + n + '@' + v : action + ' ' + n
+  return s.length > SNAP_NOTE_MAX ? s.slice(0, SNAP_NOTE_MAX - 1) + '…' : s
 }
 
 // 取一个已装命中项的**实装版本**（node_modules 里的真实 version），拿不到返 ''。
@@ -1183,7 +1235,12 @@ function installWrite(o, ctx) {
   const targetVersion = ctx.targetVersion
   const safeNote = ctx.safeNote
   safeNote('开始安装 ' + runSpec + '：先建 profile 快照（备份 package.json 等，随后才起 pnpm）')
-  const snap = dshBackup.createSnapshot({ profile: profile, reason: 'before-market-install' })
+  // npm 名优先（比 `github:owner/repo` 这类 spec 好认），版本用 dryRun 传下来的目标版本
+  const snap = dshBackup.createSnapshot({
+    profile: profile,
+    reason: 'before-market-install',
+    note: snapNote('安装', npm || spec, targetVersion),
+  })
   if (!snap.ok) {
     logErr('[whale][dsh-market] 快照失败，已中止安装', snap.error || '')
     safeNote('建快照失败，已中止安装：' + (snap.error || '未知错误'))
@@ -1297,6 +1354,9 @@ function marketUninstall(opts) {
   const o = opts && typeof opts === 'object' ? opts : {}
   const profile = String(o.profile || 'web')
   const spec = dsh.validPkgSpec(o.spec)
+  // 界面 dryRun 时已经算出的 patch 条目 id（write 时按它写，见 disabled 分支的说明）；
+  // 真写会把它带回来，因为真写阶段不再有 dryRun 那份 status 可依据
+  const oid = dsh.validPkgName(o.id) || ''
   let npm = dsh.validPkgName(o.npm)
   if (!npm && spec) {
     // 反查要在「键名列表」上做，而不是拿 hit 的 depVersion 猜键 ——
@@ -1325,7 +1385,13 @@ function marketUninstall(opts) {
           : npm + ' 不在 profile 依赖里，无需卸载',
       }
     }
-    const snap = dshBackup.createSnapshot({ profile: profile, reason: 'before-market-uninstall' })
+    // 记「卸载 包名@版本」并带上**卸载之前**的实装版本 —— 快照建完才跑 pnpm，此时读到的
+    // 还是旧版本，正是这份快照能回滚回去的那一版（见 snapNote 的注释）
+    const snap = dshBackup.createSnapshot({
+      profile: profile,
+      reason: 'before-market-uninstall',
+      note: snapNote('卸载', npm, npm),
+    })
     if (!snap.ok) {
       logErr('[whale][dsh-market] 快照失败，已中止卸载', snap.error || '')
       return Promise.resolve({ ok: false, error: '建快照失败，已中止卸载：' + (snap.error || '未知错误') })
@@ -1362,6 +1428,10 @@ function marketUninstall(opts) {
   const status = marketStatus({ profile: profile })
   const hit = dshMarket.matchInstalled(status.installed, npm)
   const id = hit && hit.inPatch ? shortName(npm, status.installed) : npm
+  // 真写优先用界面回传的 id：真写这次调用没有 dryRun 那份 status，若照旧自己重算，
+  // 一旦 profile 在这两步之间被动过（如用户手工改了 patch），写进去的 id 就可能与
+  // 用户当初在单据上看到的那个不是同一个 —— 写 patch 的 id 错了等于往 dsh 里塞一条死条目
+  const writeId = oid || id
   const probe = toggleDshPatchItem({ profile: profile, id: id, disabled: true, dryRun: true })
   if (o.dryRun === true) {
     if (!probe.ok) return probe
@@ -1382,13 +1452,19 @@ function marketUninstall(opts) {
   }
   if (!probe.ok) return probe
   if (!probe.changed) return { ok: true, changed: false, remove: false, npm: npm, id: id, name: label, profile: profile }
-  const snap = dshBackup.createSnapshot({ profile: profile, reason: 'before-market-disable' })
+  // 记「禁用 包名@版本」—— 禁用不动磁盘上的包，版本取自 profile 声明（实装版本这里读不到，
+  // 也不影响辨认：用户认出是哪个包就够，版本只是顺带）
+  const snap = dshBackup.createSnapshot({
+    profile: profile,
+    reason: 'before-market-disable',
+    note: snapNote('禁用', npm, hit && hit.depVersion),
+  })
   if (!snap.ok) {
     logErr('[whale][dsh-market] 快照失败，已中止禁用', snap.error || '')
     return { ok: false, error: '建快照失败，已中止禁用：' + (snap.error || '未知错误') }
   }
-  const res = toggleDshPatchItem({ profile: profile, id: id, disabled: true })
-  log('[whale][dsh-market] 已禁用插件', { id: id })
+  const res = toggleDshPatchItem({ profile: profile, id: writeId, disabled: true })
+  log('[whale][dsh-market] 已禁用插件', { id: writeId })
   return Object.assign({ remove: false, npm: npm, name: label, snapshot: snap.dirName }, res)
 }
 
@@ -1592,22 +1668,25 @@ function diagnoseDsh(opts) {
     }, 15000)
     // readEnv 是本轮唯一的同步重活（走 dsh.snapshot()），留在探测回调之外，
     // 免得探测慢的时候把这段同步耗时叠加到用户感知的卡顿上
-    diagnostics.detectPort(3080, (portState) => {
-      let env
-      try {
-        env = diagnostics.readEnv()
-      } catch (err) {
-        logErr('[whale][diagnostics] 读环境失败', (err && err.message) || '')
-        done({ ok: false, at: Date.now(), cached: false, pass: 0, bad: 0, results: [], env: null, error: (err && err.message) || '读环境失败' })
-        return
-      }
+    let env
+    try {
+      env = diagnostics.readEnv()
+    } catch (err) {
+      logErr('[whale][diagnostics] 读环境失败', (err && err.message) || '')
+      done({ ok: false, at: Date.now(), cached: false, pass: 0, bad: 0, results: [], env: null, error: (err && err.message) || '读环境失败' })
+      return
+    }
+    // 端口可配：诊断的目标端口必须与 dsh 实际在用的端口一致，否则 C5 会去查一个
+    // 根本没在用的端口（永远报「空闲」）。env.port 取自 dsh.snapshot()，就是当前生效值
+    const port = Number.isFinite(env.port) ? env.port : DSH_PORT_DEFAULT
+    diagnostics.detectPort((portState) => {
       const ctx = diagnostics.buildContext({
         home: env.home,
         nodeVersion: env.nodeVersion,
         dshVersion: env.dshVersion,
         dshSource: env.dshSource,
         profile: env.profile,
-        port: 3080,
+        port: port,
         portState: portState,
       })
       let results
@@ -1891,7 +1970,11 @@ module.exports = {
     if (asked.length) {
       if (!host) {
         for (const p of asked) results[p] = { status: 'unknown', reason: 'no-host-version', requirement: '', package: p }
-        return { ok: true, host: '', results: results }
+        // ⚠️ 必须包成 Promise：本函数其余分支都返回 Promise（类型声明也是 Promise），
+        //    这里若直接返回裸对象，调用方写 `await services.dshHostCompatCheck(...)`
+        //    或用 `.then()` 时不巧走到「拿不到宿主版本」这条早退分支就会炸（抛 then is not a function）。
+        //    现在靠调用方各自套 Promise.resolve 兜着，等于把正确性押在调用点写法上。
+        return Promise.resolve({ ok: true, host: '', results: results })
       }
       const registry = String(o.registry || cfgRegistry() || dshMarket.MIRROR_REGISTRY)
       return dshHostCompat.lookup(asked, { registry: registry }).then((res) => {

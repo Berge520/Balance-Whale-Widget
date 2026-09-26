@@ -92,7 +92,7 @@ test('orderResults：critical → warning → ok，同级保持原顺序（stabl
 
 // ── C5 降级不污染整轮（D26 必测）──
 test('D26：端口「无法判定」只产生 warning，不得让 overallOk 变 false', () => {
-  const noProbe = diag.CHECKS.find((c) => c.id === 'port-3080')
+  const noProbe = diag.CHECKS.find((c) => c.id === 'port-dsh')
   // portState 缺失 = 探测没跑成
   const f1 = noProbe.detect(diag.buildContext({ home: 'X', port: 3080, portState: null }))
   assert.equal(f1.ok, false)
@@ -109,14 +109,14 @@ test('D26：端口「无法判定」只产生 warning，不得让 overallOk 变 
 
   // 把这三态塞进整轮，overallOk 必须仍为 true
   for (const f of [f1, f2, f3]) {
-    const results = [{ id: 'port-3080', threw: false, findings: f.findings }]
+    const results = [{ id: 'port-dsh', threw: false, findings: f.findings }]
     assert.equal(diag.overallOk(results), true, 'C5 的 warning 不应让整轮失败')
     assert.equal(diag.summarize(results).pass, 0, '但也不算「通过」')
   }
 })
 
 test('C5：端口空闲 → ok；被非 dsh 占用 → error；外部 dsh → warn', () => {
-  const c5 = diag.CHECKS.find((c) => c.id === 'port-3080')
+  const c5 = diag.CHECKS.find((c) => c.id === 'port-dsh')
   // 空闲
   const idle = c5.detect(diag.buildContext({ home: 'X', portState: { pid: 0 } }))
   assert.equal(idle.ok, true)
@@ -141,7 +141,7 @@ test('C5：端口空闲 → ok；被非 dsh 占用 → error；外部 dsh → wa
 // 于是四关全绿也拦不住这个 bug（本项目第二次出现「测试与实现共享同一个错误假设」，
 // 上一次是 C2/C3 双双少写一层 profiles/<n>）。所以这里必须钉死三态，而不是只钉住一态。
 test('C5：进程名像 dsh 但命令行证明不是 → error（裸 node 占端口不许降级成「外部 dsh」）', () => {
-  const c5 = diag.CHECKS.find((c) => c.id === 'port-3080')
+  const c5 = diag.CHECKS.find((c) => c.id === 'port-dsh')
   // 本机真实形状：pid 26428 是我起的探针，进程名 node.exe，命令行是 `node -e ...`（无 dsh 特征）
   const probe = c5.detect(diag.buildContext({
     home: 'X',
@@ -157,7 +157,7 @@ test('C5：进程名像 dsh 但命令行证明不是 → error（裸 node 占端
 // 同样是「有 pid + 名字像 node」，但这次是**真 dsh**：不能走进上面那条 error 分支。
 // 两条用例合起来才钉住「判据看的是命令行，不是名字」。
 test('C5：portDsh 为 true / null 时不得走进「被非 dsh 占用」分支', () => {
-  const c5 = diag.CHECKS.find((c) => c.id === 'port-3080')
+  const c5 = diag.CHECKS.find((c) => c.id === 'port-dsh')
   // 真 dsh 由本插件监听（externalPid 为 0 因为不是外部进程）→ 正常
   const mine = c5.detect(diag.buildContext({
     home: 'X',
@@ -186,7 +186,7 @@ test('C5：portDsh 为 true / null 时不得走进「被非 dsh 占用」分支'
 // 但命令行拿不到 → 不得报 ok」——那是在钉一个错误行为（插件自己启动的 dsh 恰恰该报 ok）。
 // 要让「名字不是证据」成立，必须把 selfOwned 也去掉：只剩名字，才真的没有证据。
 test('C5：name 是 node 但 portDsh 不是 true → 绝不报 ok（名字不是证据）', () => {
-  const c5 = diag.CHECKS.find((c) => c.id === 'port-3080')
+  const c5 = diag.CHECKS.find((c) => c.id === 'port-dsh')
   // 只有名字像 node/dsh：既非自己的进程树（selfOwned 假），也没命令行（portDsh null）
   const byName = c5.detect(diag.buildContext({
     home: 'X',
@@ -205,7 +205,7 @@ test('C5：name 是 node 但 portDsh 不是 true → 绝不报 ok（名字不是
 // 它陪跑的那次 snapshot() 里 externalName 为空（dsh 是本插件自己的子进程，externalPid 为 0），
 // 但 portDsh 为 true（命令行里能看到 @deepseek-ai\dsh\lib\bin.js）—— 那才是「是我的 dsh」的证据。
 test('C5：端口由本插件的 dsh 监听（selfOwned + portDsh）→ ok，不得降级成「无法判定」', () => {
-  const c5 = diag.CHECKS.find((c) => c.id === 'port-3080')
+  const c5 = diag.CHECKS.find((c) => c.id === 'port-dsh')
   const self = c5.detect(diag.buildContext({ home: 'X', portState: { pid: 9692, name: '', selfOwned: true, portDsh: true } }))
   assert.equal(self.ok, true, '自己启动的 dsh 占着端口是正常态')
   assert.equal(diag.severestLevel(self.findings), '', '不应产生任何 finding')
@@ -226,7 +226,7 @@ test('C5：端口由本插件的 dsh 监听（selfOwned + portDsh）→ ok，不
 //   1. externalPid 为空 + selfOwned → 必须 [✓]（修复目标）
 //   2. externalPid 非空 → 仍是 [!]（不能矫枉过正，真的外部 dsh 该照报）
 test('C5：命令行拿不到但进程树证明是自己人（selfOwned）→ 仍报 ok，不得误报「外部进程」', () => {
-  const c5 = diag.CHECKS.find((c) => c.id === 'port-3080')
+  const c5 = diag.CHECKS.find((c) => c.id === 'port-dsh')
   // 命令行取不到（wmic 已从新版 Windows 移除 / powershell CIM 超时）→ portDsh 为 null
   const onlyTree = c5.detect(diag.buildContext({
     home: 'X',
@@ -251,7 +251,7 @@ test('C5：命令行拿不到但进程树证明是自己人（selfOwned）→ �
 // C5 的 `if (!ps.pid)` 判成空闲。修法是改用 snapshot().portPid（端口上到底有没有人）。
 // 这条钉住：「自己人监听着」绝不能报空闲，且必须一路走到 [✓]。
 test('C5：本插件自己的 dsh 在监听 → 报「由本插件监听」，绝不是「空闲」', () => {
-  const c5 = diag.CHECKS.find((c) => c.id === 'port-3080')
+  const c5 = diag.CHECKS.find((c) => c.id === 'port-dsh')
   const own = c5.detect(diag.buildContext({
     home: 'X',
     portState: { pid: 28216, name: 'node', selfOwned: true, portDsh: true },
@@ -686,7 +686,7 @@ test('C4：settings.yaml 可读且结构正常 → ok；Tab 缩进 → error', (
 })
 
 // ── buildContext ──
-test('buildContext 补齐默认值（port 默认 3080、profile 默认 web），脏入参不抛错', () => {
+test('buildContext 补齐默认值（port 默认取 DSH_PORT_DEFAULT、profile 默认 web），脏入参不抛错', () => {
   const c = diag.buildContext()
   assert.equal(c.port, 3080)
   assert.equal(c.profile, 'web')
@@ -696,6 +696,27 @@ test('buildContext 补齐默认值（port 默认 3080、profile 默认 web），
   assert.equal(c2.port, 1234)
   assert.equal(c2.profile, 'cli')
   assert.equal(c2.home, 'H')
+})
+
+// 端口可配（设置页「高级选项」）后，C5 的检查项 id 不能再叫 port-3080 ——
+// 它得跟着端口走，且 title 里不再写死端口号（端口号由 ctx.port 渲染进 summary/findings）
+test('C5：id 为 port-dsh（不写死端口），title 不含端口号', () => {
+  const c5 = diag.CHECKS.find((c) => c.id === 'port-dsh')
+  assert.ok(c5, 'id 必须是 port-dsh')
+  assert.ok(!/3080/.test(c5.title), 'title 不写死端口号，否则端口一改标题就骗人')
+  assert.ok(!diag.CHECKS.some((c) => c.id === 'port-3080'), '旧的 port-3080 id 应已不存在')
+})
+
+// C5 的所有文案都要跟着 ctx.port 走：端口换了，摘要/明细里必须出现新端口而不是 3080
+test('C5：摘要按 ctx.port 渲染（换成 4080 时不得出现 3080）', () => {
+  const c5 = diag.CHECKS.find((c) => c.id === 'port-dsh')
+  const idle = c5.detect(diag.buildContext({ home: 'X', port: 4080, portState: { pid: 0 } }))
+  assert.match(idle.summary, /4080/)
+  assert.ok(!/3080/.test(idle.summary), '端口换成 4080 后摘要里不该再出现 3080')
+  const other = c5.detect(diag.buildContext({ home: 'X', port: 4080, portState: { pid: 11, occupiedByOther: 'nginx' } }))
+  assert.match(other.summary, /4080/)
+  assert.match(other.findings[0].text, /4080/)
+  assert.ok(!/3080/.test(other.findings[0].text))
 })
 
 // ── 缓存（D6）──

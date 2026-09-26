@@ -6,15 +6,53 @@ const { log, logErr } = require('./log')
 const { getBalance, refreshModels, getModelsPayload } = require('./api')
 const { readConfig, patchConfig, writeAnchor, writeTimer, clearTimer } = require('./store')
 const { notify } = require('./notify')
-const dsh = require('./dsh')
+// dsh 一族（dsh / dsh-market / dsh-export / dsh-backup / dsh-usage / ...）合计 300KB+。
+// 顶层 require 会把它压进每次 preload 加载的求值阶段（本模块在启动路径上必加载），
+// 而这里对 dsh 的引用全在运行时（菜单操作、状态广播），没有一处是模块求值期。
+// 改成惰性：首次访问 dsh.xxx 时才 require，之后复用同一份。
+let dshMod = null
+function dshOf() {
+  if (!dshMod) dshMod = require('./dsh')
+  return dshMod
+}
+const dsh = new Proxy({}, {
+  get(_t, key) { return dshOf()[key] },
+})
 const {
   pushInit, sendToWidget, applyScaleToWindow, applyOnTop, pushConfig,
-  winAlive, getWindow, clearLiveScaleCtx, queueLiveScale, widgetOrigin,
-  winOrigin, widgetSide, spaceAround, clampWidget, usableArea, snapRect, flippedOf,
+  winAlive, getWindow, queueLiveScale, widgetOrigin,
+  widgetSide, spaceAround, usableArea, snapRect, flippedOf,
   syncTaskbarWatch, destroyWidget, ensureSkipTaskbar,
+  beginDragSession, endDragSession, dragMoveTo,
 } = require('./widget')
-// 挂件菜单改配置后，通知已打开的设置窗口同步刷新开关（详见 settings.js 的 onConfigChange）
-const { emitConfigChange } = require('./settings')
+// 挂件菜单改配置后，通知已打开的设置窗口同步刷新开关（详见 settings.js 的 onConfigChange）。
+// settings.js(153KB) 连带其依赖树只在「设置窗开着」时才有订阅者；顶层 require 会把这一整片
+// 压进启动求值阶段（本模块在启动路径上必加载）—— 这正好绕过了 services.js 里对它的惰性挂载。
+// 这里只在真正要广播时才 require（emitConfigChange 只有 3 处调用，全在函数体内）。
+function emitConfigChange() {
+  try {
+    require('./settings').emitConfigChange()
+  } catch (err) { logErr('[whale][ipc] 通知设置窗刷新失败', err && err.message) }
+}
+
+// 把某个 scale 目标值落库 + 改窗口 + 全量广播。
+// 用途：拖拽期间被冻结的实时缩放请求，在 drag-end 后补做一次。
+// 复用 whale:config 的持久化分支，保证「写存储 / 改窗口尺寸 / 推页面 / 回推设置页」四件事
+// 与用户手动拖滑块完全一致 —— 只调 applyScaleToWindow 会漏掉存储与广播，
+// 那就又回到「窗口变大了、大小描述却不变」的老问题。
+function syncScaleFromConfig(scale) {
+  const prev = readConfig()
+  let cfg
+  try {
+    cfg = patchConfig({ scale: scale })
+  } catch (err) {
+    logErr('[whale][ipc] 补做拖拽期缩放：保存失败', err && err.message)
+    return
+  }
+  if (cfg.scale !== prev.scale) applyScaleToWindow(cfg.scale, true)
+  pushConfig()
+  emitConfigChange()
+}
 
 function registerIpc() {
   // dsh 异步状态变更（3080 就绪 / 进程退出 / 安装或版本查询完成 …）主动推给挂件：
@@ -103,29 +141,27 @@ function registerIpc() {
     emitConfigChange()
   })
 
+  // 拖拽开始：立刻冻结缩放（含页面侧实时缩放请求），并作废拖拽期几何缓存。
+  // 只靠 drag-move 首次到达才冻结是不够的 —— 页面 pointerdown 到第一次 move 之间
+  // 若来一次滚轮/实时缩放，窗口尺寸仍会先被改掉。
+  ipcRenderer.on('whale:drag-begin', () => {
+    if (!winAlive()) return
+    beginDragSession()
+  })
+
+  // 拖拽位置：页面已用 rAF 节流到「每帧最多一发」，宿主直接同步 setPosition。
+  // 不要再加自驱循环或逐帧回执背压 —— 试过宿主 setTimeout 自驱（~120Hz）与「发一帧等 ack」
+  // 两种方案，都会和页面的 rAF 形成第二条节奏源 / 把吞吐锁死在往返延迟上，实测更卡。
   ipcRenderer.on('whale:drag-move', (event, data) => {
     if (!winAlive() || !data) return
-    const w = getWindow()
-    clearLiveScaleCtx() // 拖拽改变窗口位置，实时缩放缓存失效
-    try {
-      const sz = w.getSize()
-      const winS = sz[0]
-      const s = widgetSide(winS) // 挂件本体边长
-      const x = Number(data.x), y = Number(data.y) // 目标窗口左上角
-      if (!isFinite(x) || !isFinite(y)) return
-      const wgt = widgetOrigin(x, y) // 目标挂件左上角
-      const wa = usableArea(wgt.x + s / 2, wgt.y + s / 2)
-      // 限制「挂件本体」在工作区内；透明留白可越界，不影响
-      const c = clampWidget(wa, wgt.x, wgt.y, s)
-      const wp = winOrigin(c.x, c.y)
-      w.setPosition(Math.round(wp.x), Math.round(wp.y))
-    } catch (err) {}
+    dragMoveTo(data.x, data.y)
   })
 
   ipcRenderer.on('whale:drag-end', (event, data) => {
     if (!winAlive()) return
     const w = getWindow()
-    clearLiveScaleCtx() // 吸附会改变窗口位置，实时缩放缓存失效
+    // 先解冻（endDragSession 返回拖拽期间被冻结的最后一个缩放目标）
+    const pendingScale = endDragSession()
     try {
       const pos = w.getPosition()
       const sz = w.getSize()
@@ -146,6 +182,19 @@ function registerIpc() {
         space: spaceAround(wa, r.x, r.y, width),
       })
     } catch (err) {}
+    // 拖拽中来的缩放请求：按吸附后的新位置把尺寸补做一次并持久化
+    // （applyScaleToWindow 会以窗口真实状态重算不动点，所以不会跳位）。
+    // 必须排在吸附之后：补做缩放会写 anchor、推配置，顺序颠倒会把吸附结果覆盖掉。
+    // ⚠️ 不拿「记录值 ≠ 存储当前值」当判据：拖拽期进来的可能是 persist=true 的已落库请求
+    //    （设置页滑块 / whale:config 广播），存储里那时已经是新值，用这个条件会把该补的缩放挡掉、
+    //    窗口尺寸永远跟不上存储（用户拖完发现大小没变，而设置页显示的是新值）。
+    //    这里记的就是拖拽期最后一个目标值，直接让它当最终值。
+    //    syncScaleFromConfig 内部已判 `cfg.scale !== prev.scale`，值本就一致时不会白改尺寸。
+    if (pendingScale != null && isFinite(pendingScale)) {
+      try { syncScaleFromConfig(pendingScale) } catch (err) {
+        logErr('[whale][drag] 补做拖拽期缩放失败', err && err.message)
+      }
+    }
   })
 
   // 穿透开关状态缓存：值没变就不调 setIgnoreMouseEvents（鼠标在挂件上移动时

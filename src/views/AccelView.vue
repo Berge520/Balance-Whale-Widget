@@ -102,6 +102,23 @@ function ghPendingEnd(key: string) {
 const ghAccelIpsFold = ref(false)
 // 「获取方式」高级区折叠态：默认收起，不干扰普通用户
 const ghAccelSrcFold = ref(false)
+// 整张卡片默认折叠：本卡在「帮助」Tab 里块头最大（开关 + 状态 + 四个折叠区 + 日志），
+// 而它对多数用户是「配一次就不再动」的功能。默认收起来只留一行标题，
+// 帮助 Tab 的其它卡（使用帮助 / 关于与更新）不再被它挤到屏幕外。
+// 与本文件其它 xFold 同约定：true = 内容展开，false = 收起（初值即默认折叠）
+const ghAccelCardFold = ref(false)
+// 「是否已经加载过」：整卡折叠时不发任何请求（读 hosts、扫冲突、拉源表清单），
+// 首次展开才加载一次。用独立布尔而不是复用 ghAccelCardFold —— 折叠/展开会来回切，
+// 已经拿到的数据没必要丢掉重取（读 hosts 是异步 IO + 扫全文件冲突，不便宜）。
+const ghAccelLoaded = ref(false)
+function toggleGhAccelCard() {
+  ghAccelCardFold.value = !ghAccelCardFold.value
+  if (!ghAccelCardFold.value || ghAccelLoaded.value) return
+  ghAccelLoaded.value = true
+  refreshGhAccel()
+  // 社区源表清单（渲染「源表优先级」用）只随版本变化，拉一次就够
+  loadGhAccelSources()
+}
 // 卡片顶部那段原理说明的折叠态：同样默认收起 —— 普通用户只想点开关，
 // 原理（hosts 改写 / UAC / 探测校验）属于想了解再看的补充信息
 const ghAccelIntroFold = ref(false)
@@ -762,17 +779,9 @@ function removeGhAccelRow(i: number) {
   ghAccelTableDirty.value = true
   ghAccelVerify.value = null
 }
-// 「实际状态」进 Tab 就要立刻显示，不能停在「读取中…」。
-// 本组件被父级 v-if="activeTab === 'help'" 挂着，进 Tab 时才**创建**，
-// 所以这里直接在 setup 阶段同步读一次（非响应式 `watch(props.activeTab)` 配 immediate
-// 看似等价，实则不行：watch 的 immediate 回调虽也同步执行，但回调里对模板 ref 的写入
-// 不会即刻参与本次挂载渲染 —— 而初值就是渲染的输入，必须同步落定）。
-// `ghAccelStatus()` 走异步读 hosts（同进程直调但 fs 是异步的），不阻塞首帧渲染
-refreshGhAccel()
-// 社区源表清单（渲染「源表优先级」用）同样在 setup 阶段拉一次：它只随版本变化，
-// 不必每次都拉，但进 Tab 时要有值，否则源表列表是空的
-loadGhAccelSources()
-// 已在帮助 Tab 内、父级再切回来时组件被重建，上面那行同样覆盖到，无需额外监听
+// 注意：这两个首次读取**不在这里**调用 —— 整卡默认折叠，没人看时不该付这份成本
+//（读 hosts 是异步 IO、ghAccelScanConflicts 还要扫全文件）。改为首次展开卡片时触发，
+// 见上面的 toggleGhAccelCard()。因此展开前不会有「实际状态」「源表优先级」的数据。
 // 离开帮助 Tab 就丢掉校验结论：探测结果有时效，下次进来重新测，避免用旧结论标色误导
 watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = null })
 </script>
@@ -783,7 +792,22 @@ watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = nu
   <div class="gh-accel">
     <!-- [帮助] GitHub 加速（hosts 方案）：走系统 hosts 直连，不装常驻进程 -->
     <section class="card">
-    <h2>GitHub 加速</h2>
+    <!-- 标题行即折叠开关：整卡默认收起，展开才去读 hosts / 源表（见 toggleGhAccelCard）。
+         不用 .fold 那套（它样式与其它折叠区一致、字重偏轻）—— 这里要的是卡片的主标题，
+         所以就地做成一行 h2 + 右侧箭头，视觉上与其它卡片的 <h2> 对齐 -->
+    <h2 class="gh-accel-head" @click="toggleGhAccelCard">
+      <span>GitHub 加速</span>
+      <!-- 折叠时把「已生效 / 未生效」透出来：收起来也要能一眼确认 accelerated 状态，
+           否则用户必须展开才知道加速开着没有（这正是整卡折叠最大的信息损失）。
+           数据没加载过时按配置意图显示，避免露一个空的「读取中…」 -->
+      <span v-if="!ghAccelCardFold" class="gh-accel-sum">
+        <span class="gh-accel-sum-state" :class="ghAccelActual ? (ghAccelActual.on ? 'on' : 'off') : (cfg.ghAccelOn ? 'on' : 'off')">
+          {{ ghAccelActual ? (ghAccelActual.on ? '已生效（' + ghAccelActual.active.length + ' 个域名）' : '未生效') : (cfg.ghAccelOn ? '已开启' : '未开启') }}
+        </span>
+      </span>
+      <span class="gh-accel-caret">{{ ghAccelCardFold ? '▾' : '▸' }}</span>
+    </h2>
+    <div v-if="ghAccelCardFold">
     <!-- 原理说明默认折叠：卡片首屏只留标题 + 开关 + 实时进度，降低普通用户的理解成本 -->
     <div class="fold">
       <button class="link-btn utils-btn utils-secondary" @click="ghAccelIntroFold = !ghAccelIntroFold">
@@ -1064,6 +1088,7 @@ watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = nu
         <p v-if="ghAccelSrcMsg" class="hint">{{ ghAccelSrcMsg }}</p>
       </div>
     </div>
+    </div>
     </section>
   </div>
 </template>
@@ -1115,6 +1140,41 @@ watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = nu
   font-size: 14px;
   font-weight: 600;
   color: var(--fg-dim);
+}
+/* 标题行即整卡折叠开关：做成可点的一整行（鼠标移到卡片任何位置都不会误触，
+   只有这一行响应），hover 时给右侧箭头与摘要一点反馈，暗示「这里可以点」 */
+.gh-accel .gh-accel-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  cursor: pointer;
+  user-select: none;
+}
+/* 折叠时摘要就是唯一的状态信息，所以它是 h2 的子项、不再自带 margin；
+   展开时（v-if 隐藏）不占位，标题回到和其它卡一模一样的形态 */
+.gh-accel .gh-accel-sum {
+  flex: 0 1 auto;
+  min-width: 0;
+  font-weight: 400;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.gh-accel .gh-accel-sum-state.on {
+  color: var(--ok);
+}
+.gh-accel .gh-accel-sum-state.off {
+  color: var(--fg-faint);
+}
+/* 箭头钉在行尾，与标题左端拉开距离 —— 卡片窄时摘要换行也不会把它挤走 */
+.gh-accel .gh-accel-caret {
+  margin-left: auto;
+  flex: none;
+  color: var(--fg-faint);
+  font-size: 11px;
+}
+.gh-accel .gh-accel-head:hover .gh-accel-caret,
+.gh-accel .gh-accel-head:hover span:first-child {
+  color: var(--accent);
 }
 .gh-accel .field {
   display: block;

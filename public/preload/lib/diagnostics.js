@@ -14,7 +14,7 @@
  */
 const fs = require('fs')
 const path = require('path')
-const { K } = require('./constants')
+const { K, DSH_PORT_DEFAULT } = require('./constants')
 const { logErr } = require('./log')
 const { num, homeDir, readTextSafe, readJsonSafe, normalizePath } = require('./util')
 const { probePort, snapshot } = require('./dsh')
@@ -194,7 +194,7 @@ function buildContext(input) {
     dshVersion: String(i.dshVersion || ''),
     dshSource: String(i.dshSource || ''),
     profile: String(i.profile || 'web'),
-    port: Number.isFinite(i.port) ? i.port : 3080,
+    port: Number.isFinite(i.port) ? i.port : DSH_PORT_DEFAULT,
     portState: i.portState || null, // { pid, name, occupiedByOther, external, externalPid }
   }
 }
@@ -522,13 +522,15 @@ CHECKS.push({
   },
 })
 
-// ── C5 port-3080（第三梯队：尽力而为，D26）──
+// ── C5 port-dsh（第三梯队：尽力而为，D26）──
 // 依赖链 tasklist/ps 两套逻辑 + 进程名反推，是本期唯一真正有平台风险的项。
 // 降级规则：探测失败 / 无法判定 → warning + reason，**不影响其余四项**，
 // 且**不得让整轮 ok:false**。
+// id 用 port-dsh 而非 port-3080：端口可配（设置页「高级选项」，默认 3080），
+// 标题里的端口号由 ctx.port 渲染，id 不能再把端口写死。
 CHECKS.push({
-  id: 'port-3080',
-  title: '3080 端口归属',
+  id: 'port-dsh',
+  title: 'dsh 端口归属',
   severity: 'warning',
   fixable: false,
   detect(ctx) {
@@ -571,7 +573,7 @@ CHECKS.push({
     }
     // 名字像 node/dsh 但**命令行证明它不是 dsh** —— 是别的 Node 程序占了端口。
     // 这是 error：dsh 启动会直接失败，且用户必须换端口或结束它，没有别的出路。
-    // 本机实测（2026-09-22）：一个裸 node 探针占 3080 时旧判据报「已有外部 dsh 在运行」(warning)，
+    // 本机实测（2026-09-22，端口 3080）：一个裸 node 探针占 3080 时旧判据报「已有外部 dsh 在运行」(warning)，
     // 用户按提示去「接管」必然失败 —— 漏报了一个真占用。
     if (ps.portDsh === false) {
       findings.push({
@@ -596,7 +598,7 @@ CHECKS.push({
     }
     // ── 走到这里只剩「拿不到命令行」这条 ──
     // ⚠️ 唯一能证明「是本插件的 dsh」的证据是**命令行**（portDsh === true）。
-    // 不能拿「名字像 node/dsh」当证据 —— 旧判据正是这么干的，才把一个占着 3080 的
+    // 不能拿「名字像 node/dsh」当证据 —— 旧判据正是这么干的，才把一个占着端口（实测 3080）的
     // 裸 node 探针说成「已有外部 dsh 在运行」（漏报真占用）。名字不像也不等于无事：
     // 那是别的程序占着端口，只是这里拿不到证据说明。两种情况都按 D26 报「无法确认」，
     // 宁可让用户看到 [!]，也不给一个蒙出来的 [✓]。
@@ -614,7 +616,10 @@ CHECKS.push({
 // probePort 内部有全局单例缓存与 busy 标志，与状态卡共用 → 不可并发。
 // 这里做一次「排队 + 超时兜底」，保证诊断不会因探测卡住而永久挂起。
 // ──────────────────────────────────────────────
-function detectPort(port, cb) {
+// 探测当前 dsh 端口上的进程归属（端口由 dsh 模块按配置决定，不在这里写死）。
+// 端口可配（设置页「高级选项」，默认 3080）后，参数只剩 cb —— 旧签名 detectPort(port, cb)
+// 那个 port 从来没被用过（探测目标端口一直取自 dsh 模块内部），留着只会让调用方误以为能指定端口
+function detectPort(cb) {
   let done = false
   const finish = (state) => {
     if (done) return
@@ -627,8 +632,8 @@ function detectPort(port, cb) {
     // force=true：诊断必须拿到**本轮新鲜**的探测结果。
     // 默认的排队复用会把调用方挂进 waiters，蹭上正在跑的那一轮 —— 而状态卡的 watchReady
     // 每 1.2s 就探一次，用户点「强制重跑」时极可能撞上它，于是诊断读到的是几毫秒前
-    // （当时 dsh 还没 bind 3080）的空结果，界面报「3080 空闲」，而状态卡同时显示「运行中」。
-    // 本机实测（2026-09-22）：状态卡 pid 37112、诊断报「3080 空闲」，netstat 显示 28216 在监听。
+    // （当时 dsh 还没 bind 端口）的空结果，界面报「端口空闲」，而状态卡同时显示「运行中」。
+    // 本机实测（2026-09-22，端口 3080）：状态卡 pid 37112、诊断报「3080 空闲」，netstat 显示 28216 在监听。
     probePort(() => {
       clearTimeout(timer)
       try {
@@ -640,13 +645,13 @@ function detectPort(port, cb) {
         // ⚠️ 不要再把 snap.pid 兜进 pid：那是【本插件 spawn 的子进程】pid，与端口归属无关。
         // 原先写成 `... || (snap.portOther ? num(snap.pid) : 0) || num(snap.pid)`，于是当
         // dsh 正是本插件启动时（externalPid/portOther 都为空），界面会把插件的 cmd.exe
-        // 包装进程 pid 当成「占用 3080 的进程」显示出来 —— 本机实测报 pid 26932(cmd.exe)，
+        // 包装进程 pid 当成「占用端口的进程」显示出来 —— 本机实测（端口 3080）报 pid 26932(cmd.exe)，
         // 而真正监听 3080 的是 9692(node.exe)。pid 宁可为 0（让 C5 走「无法判定」），
         // 也不能给一个错的值。
         finish({
           // 「谁在监听端口」——本插件启的、外部的、别的程序，都算在这里。
           // ⚠️ 不能写成 `externalPid || (portOther ? pid : 0)`：本插件自己启的 dsh 两个都为空，
-          // 于是 pid=0，C5 的 `if (!ps.pid)` 判成「3080 空闲（无进程监听）」，
+          // 于是 pid=0，C5 的 `if (!ps.pid)` 判成「端口空闲（无进程监听）」，
           // 而状态卡同时显示「运行中 · pid 26916」—— 本机实测（2026-09-22）的自相矛盾。
           // snapshot().portPid 才是「端口上有人」的唯一真值。
           pid: num(snap.portPid) || num(snap.externalPid) || (snap.portOther ? num(snap.pid) : 0),
@@ -660,10 +665,10 @@ function detectPort(port, cb) {
           portDsh: snap.portDsh === true ? true : (snap.portDsh === false ? false : null),
           // 端口在监听、且不是外部进程 —— 就是本插件这份 dsh 在服务（C5 据此报正常而非「无法判定」）。
           // 两个来源任一成立就算自己人：
-          //   · snap.selfOwned —— 监听 3080 的进程是插件 spawn 进程的后代（父链上溯，2026-09-22 新增）。
+          //   · snap.selfOwned —— 监听端口的进程是插件 spawn 进程的后代（父链上溯，2026-09-22 新增）。
           //     Windows 下 spawn 走 shell:true，插件拿到 cmd.exe 的 pid、真正监听的是它的子进程
           //     node.exe，单比 pid 必然认不出，会把自家的 dsh 误报成「外部进程在跑」。
-          //   · snap.ready —— 插件自己 watchReady 观察到「3080 已开始监听」（老判据，保留兜底）。
+          //   · snap.ready —— 插件自己 watchReady 观察到「端口已开始监听」（老判据，保留兜底）。
           //     用 ready 而不是 running：子进程刚起、端口还没起来时不能算已归属。
           // 注意 fail-open 方向：两者都取 false 时 C5 会报「无法判定」(warning) 而非 error，
           // 认不出自己人最坏是多一句提示，不会诱导用户去点「接管」杀掉自己刚启的 dsh。
@@ -687,7 +692,7 @@ function detectPort(port, cb) {
 // home 的口径必须与 dsh-usage.js 的 dshHome() 完全一致（同一个 $DSH_HOME），
 // 否则会出现「用量统计读到了、诊断说找不到目录」这种自相矛盾。所以共用 util.homeDir。
 function readEnv() {
-  const out = { home: '', nodeVersion: '', dshVersion: '', dshSource: '', profile: 'web', installed: false }
+  const out = { home: '', nodeVersion: '', dshVersion: '', dshSource: '', profile: 'web', installed: false, port: DSH_PORT_DEFAULT }
   out.home = homeDir({ env: 'DSH_HOME', fallback: '.dsh', expand: true, relative: true })
   try {
     const snap = snapshot()
@@ -695,6 +700,9 @@ function readEnv() {
     out.dshVersion = String(snap.resolved || snap.installed || snap.globalVersion || '')
     out.dshSource = String(snap.source || '')
     out.installed = !!(snap.installed || snap.resolved)
+    // 当前生效的 dsh 端口（配置值，来自 dsh.snapshot）。诊断的目标端口必须跟着它走 ——
+    // 端口可配后，写死 3080 会让 C5 去查一个根本没在用的端口，永远报「空闲」
+    if (Number.isFinite(snap.port)) out.port = snap.port
   } catch (err) {
     logErr('[whale][diagnostics] 读 dsh 快照失败', (err && err.message) || '')
   }

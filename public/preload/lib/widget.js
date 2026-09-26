@@ -1,7 +1,7 @@
 /*
  * 悬浮窗窗口管理（CommonJS）：创建/销毁/几何/缩放/向子窗推送数据。
  */
-const { MIN_SCALE, MAX_SCALE, BASE_MIN, BASE_CAP, BASE_MAX, WIN_PAD } = require('./constants')
+const { MIN_SCALE, MAX_SCALE, BASE_MIN, BASE_CAP, BASE_MAX, WIN_PAD, K } = require('./constants')
 const { execFileSync } = require('child_process')
 const { log, logErr } = require('./log')
 const { clampNum, readConfig, readAnchor, writeAnchor, defaultAnchor, readTimer } = require('./store')
@@ -51,7 +51,26 @@ function displayInfo(x, y) {
 // StuckRects3\Settings 里 byte[8] 低两位 = 0 左 / 1 上 / 2 右 / 3 下，后面还带任务栏矩形
 const TASKBAR_REG = 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StuckRects3'
 const TB_TTL = 60000 // 注册表结果缓存 60s：任务栏设置一般不会频繁改，也避免每次拖拽都起进程
+const TB_DISK_KEY = K.taskbar
 let tbCache = { at: 0, edge: '', size: 0 }
+
+// 上次查到的任务栏方向/厚度落盘复用。
+// tbCache 只活在内存，uTools 插件进程一退就没了 —— 而 createWidget 里 usableArea() 是
+// 建窗前的必经调用，自动隐藏任务栏的机器每次冷启动都要同步起一次 reg.exe，首帧就这样被拖慢。
+// 任务栏方向/厚度属于「极少变」的设置，把上次结果读回来当初始缓存，同步路径就不用起进程了；
+// 真正的刷新仍由 TTL 到期后的正常查询负责，最长滞后 60s，且方向/厚度变了也会被及时纠正。
+function loadTbCacheFromDisk() {
+  try {
+    const v = utools.dbStorage.getItem(TB_DISK_KEY)
+    if (v && typeof v === 'object') {
+      tbCache = {
+        at: 0, // at=0 表示「仅供启动期兜底」：下次查询一定重新落盘，避免把过期值一直续命
+        edge: typeof v.edge === 'string' ? v.edge : '',
+        size: Number(v.size) > 0 ? Number(v.size) : 0,
+      }
+    }
+  } catch (err) {}
+}
 
 function taskbarFromRegistry() {
   const now = Date.now()
@@ -79,8 +98,11 @@ function taskbarFromRegistry() {
     // 读不到（权限/精简系统/非 Windows）→ 用兜底值
   }
   tbCache = { at: now, edge: edge, size: size }
+  try { utools.dbStorage.setItem(TB_DISK_KEY, { edge: edge, size: size }) } catch (err) {}
   return tbCache
 }
+// 模块加载即回填：createBrowserWindow 之前就会调 usableArea()，必须在此之前备好兜底值
+loadTbCacheFromDisk()
 
 // 光标是否停在任务栏那条边的「条带」里（= 正压在任务栏上）、是否压到屏幕最边上（= 触发它弹出）
 let cursorWarned = false
@@ -170,8 +192,9 @@ function taskbarState() {
 // 实际可用于摆放挂件的区域 = 系统工作区（常显任务栏已被排除）+ 四边「贴边间距」。
 // 自动隐藏的任务栏 workArea 不会跟着变，所以它此刻正弹出时，这里自己按注册表厚度让位；
 // 收起时不让位（挂件可以贴满边）。「自动避让任务栏」关掉则不跟随。
-function usableArea(x, y) {
-  const cfg = readConfig()
+// cfgIn：可选，调用方已读过配置时传入，避免重复读存储（读存储在 uTools 里是同步的）
+function usableArea(x, y, cfgIn) {
+  const cfg = cfgIn || readConfig()
   const info = displayInfo(x, y)
   const wa = info.wa
   const m = {
@@ -511,7 +534,7 @@ function ensureWidgetInner(opts) {
 function createWidget(focusable) {
   const wantFocus = !!focusable
   const cfg = readConfig()
-  const wa = usableArea()
+  const wa = usableArea(undefined, undefined, cfg) // 复用上面这次读，别再读一遍存储
   const size = winSize(wa, cfg.scale)
   const anchor = readAnchor()
   const pos = anchorToRect(wa, size, anchor)
@@ -595,6 +618,12 @@ function destroyWidget() {
   }
   win = null
   clearLiveScaleCtx()
+  // 必须一起清拖拽冻结态：窗口没了，页面侧 `drag` 也随之消失，再没有任何路径会调 dragEnd 来解冻。
+  // 若留着 dragFrozen=true，重建后的新窗口从出生起就是冻结的 —— 之后滚轮/设置页改大小
+  // 全被 applyScaleToWindow 拦下并记进 dragPendingScale（永远等不到 drag-end 来补做），
+  // 表现为「挂件再也调不了大小」。这种重建在拖拽中途就可能发生（ensureWidgetInner 改焦点、
+  // 设置页重置后重建），不是理论情况。这里直接复用 endDragSession 的重置，别再抄一份字段清单。
+  endDragSession()
   syncTaskbarWatch() // 窗口没了 → 停掉任务栏轮询
 }
 
@@ -653,12 +682,97 @@ function pushConfig() {
 let liveScaleCtx = null // { pivotX, pivotY, wa, anchor }
 function clearLiveScaleCtx() { liveScaleCtx = null }
 
+// —— 拖拽会话 ——
+// 拖拽期间**冻结一切缩放**：窗口正被拖着走，同时在改尺寸会让人分不清是拖还是缩，
+// 吸附落点也不可预期。用户反馈的「拖动时不由自主变大、大小描述却不变」就是这条路径：
+// 拖拽中的滚轮事件（触控板尤其容易误触）触发了实时缩放，而实时缩放不写存储、不回推配置，
+// 于是窗口变大了、scale 描述还停在旧值。
+// 冻结而非丢弃：拖拽期间来的缩放请求只记最后一个目标值，drag-end 时补一次，
+// 保证「松手后大小确实是我滚出来的那个」的预期不落空。
+let dragFrozen = false
+let dragPendingScale = null
+let dragWinSize = 0 // 拖拽期窗口宽度缓存：见 beginDragSession
+
+function beginDragSession() {
+  dragFrozen = true
+  dragPendingScale = null
+  // 拖拽期尺寸被 dragFrozen 锁死（applyScaleToWindow 一律拒绝改尺寸），不可能中途变化，
+  // 所以在会话开始读一次就够。原先 dragMoveTo 每帧都 win.getSize() —— 那是同步 IPC 往返，
+  // 拖拽时每秒要付 ~60 次，且每次都拿到同一个值，纯属白烧。
+  try {
+    const sz = winAlive() ? win.getSize() : null
+    dragWinSize = (sz && isFinite(sz[0])) ? sz[0] : WIN_PAD * 2 + BASE_MIN
+  } catch (err) {
+    dragWinSize = WIN_PAD * 2 + BASE_MIN
+  }
+  clearLiveScaleCtx() // 拖拽会把窗口挪到别处，旧的实时缩放不动点/工作区缓存一律作废
+}
+
+// 结束拖拽会话：返回拖拽期间被冻结的最后一个缩放目标（无则 null），由调用方决定何时补做
+function endDragSession() {
+  dragFrozen = false
+  const pending = dragPendingScale
+  dragPendingScale = null
+  dragWinSize = 0
+  clearLiveScaleCtx()
+  dragWin = null
+  dragPosKey = ''
+  return pending
+}
+
+// —— 拖拽期窗口几何缓存 ——
+// drag-move 每帧一次 IPC，宿主侧要算「挂件中心落在哪个可用区」。usableArea() 内部会
+// readConfig + getDisplayNearestPoint +（自动隐藏任务栏时）问注册表，全是同步往返，
+// 每帧跑一遍就是卡顿的主因。拖拽期间这几项都不会变，缓存一次即可；
+// 只有跨显示器时才失效重算 —— 各屏可用区/间距本来就不同，跨屏不重算会贴错边。
+let dragWin = null // { s, wa }
+let dragPosKey = ''
+function dragGeometry(winX, winY, winS) {
+  const s = widgetSide(winS)
+  if (dragWin && dragWin.s === s) {
+    const cx = winX + WIN_PAD + s / 2
+    const cy = winY + WIN_PAD + s / 2
+    if (cx >= dragWin.wa.x && cx <= dragWin.wa.x + dragWin.wa.width
+      && cy >= dragWin.wa.y && cy <= dragWin.wa.y + dragWin.wa.height) {
+      return { s, wa: dragWin.wa }
+    }
+  }
+  const wa = usableArea(winX + WIN_PAD + s / 2, winY + WIN_PAD + s / 2)
+  dragWin = { s, wa }
+  return { s, wa }
+}
+
+// 拖拽中挪窗口：算完目标位置就 setPosition。
+// 与上一次完全相同的位置直接跳过 —— 拖拽帧率高于指针实际位移时（触控板/高刷屏常见），
+// 相邻帧的目标位置经常一模一样，跳过能省掉一次同步 IPC。
+function dragMoveTo(winX, winY) {
+  if (!winAlive()) return
+  try {
+    // 用 drag-begin 时缓存的尺寸，不再每帧 win.getSize()（同步 IPC，是拖拽延迟的主因）
+    const winS = dragWinSize || WIN_PAD * 2 + BASE_MIN
+    const x = Number(winX), y = Number(winY)
+    if (!isFinite(x) || !isFinite(y)) return
+    const g = dragGeometry(x, y, winS)
+    const wgt = widgetOrigin(x, y) // 目标挂件左上角
+    // 限制「挂件本体」在工作区内；透明留白可越界，不影响
+    const c = clampWidget(g.wa, wgt.x, wgt.y, g.s)
+    const wp = winOrigin(c.x, c.y)
+    const rx = Math.round(wp.x)
+    const ry = Math.round(wp.y)
+    const key = rx + ',' + ry
+    if (key === dragPosKey) return
+    dragPosKey = key
+    win.setPosition(rx, ry)
+  } catch (err) {}
+}
+
 // 拖动滑块时的实时缩放：页面侧已用 rAF 合并 IPC（每帧最多一次），
 // 宿主侧直接同步执行 applyScaleToWindow，避免主窗不可见时 rAF 被节流导致延迟。
 // 优化后 applyScaleToWindow 实时路径只做一次 setBounds，无同步读 IPC，可扛 60fps。
 function queueLiveScale(s) {
   const n = Number(s)
   if (!isFinite(n)) return
+  if (dragFrozen) { dragPendingScale = n; return } // 拖拽中冻结，drag-end 后补做
   applyScaleToWindow(n, false)
 }
 
@@ -667,6 +781,17 @@ function queueLiveScale(s) {
 // persist=true（松手提交）：从窗口读真实状态，写 anchor
 function applyScaleToWindow(scale, persist) {
   if (!winAlive()) return
+  // 拖拽中一律不改尺寸：窗口正在被拖动，改尺寸会与拖拽争抢 setPosition，
+  // 表现为「拖着拖着变大」且吸附落点乱跳。请求留给 drag-end 补做。
+  // ⚠️ 这里是拖拽冻结的**最终防线**，页面侧那道 `drag.active` 只拦本地滚轮手势。
+  //    本函数还兜着 saveCfg(commit=true)（设置页滑块 / 菜单 / whale:config 广播）——
+  //    那条路径不经页面滚轮 handler，页面侧拦不到。所以两处判据职责不同、不可合并，
+  //    删掉本条会让「拖拽中改大小」重新变成静默丢请求。
+  // ⚠️ 两种 persist 都要记下来，不能只记实时那种：
+  //    已落库的改动（设置页滑块、whale:config 广播）persist=true 进来，
+  //    若在这里直接 return 而不记录，这个缩放请求就彻底消失 ——
+  //    用户拖完发现挂件大小没跟上，而设置页/存储里已经是新值，正是反方向的「大小描述不一致」。
+  if (dragFrozen) { dragPendingScale = Number(scale); return }
   try {
     let pivotX, pivotY, wa, anchor
     if (!persist && liveScaleCtx) {
@@ -793,4 +918,7 @@ module.exports = {
   clearLiveScaleCtx,
   queueLiveScale,
   applyScaleToWindow,
+  beginDragSession,
+  endDragSession,
+  dragMoveTo,
 }

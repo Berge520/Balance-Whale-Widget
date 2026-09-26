@@ -79,6 +79,7 @@ const PATCH_FIXTURES = {
   timerNote: { timerNote: '打个招呼' }, timerBreakMin: { timerBreakMin: 9 }, timerRemindSec: { timerRemindSec: 15 },
   timerBubblePin: { timerBubblePin: false }, timerBubbleOnly: { timerBubbleOnly: false },
   guideDone: { guideDone: true }, dshNodeDir: { dshNodeDir: 'C:\\node' }, dshKeepAlive: { dshKeepAlive: true },
+  dshPort: { dshPort: 4080 },
   dshRegistry: { dshRegistry: 'https://example.com/npm' }, dshVersion: { dshVersion: '1.2.3' },
   dshReinstall: { dshReinstall: true }, dshNoOpen: { dshNoOpen: false },
   dshMarketUrl: { dshMarketUrl: 'https://example.com/cat' }, dshMarketMirror: { dshMarketMirror: false },

@@ -164,9 +164,15 @@ function resolveDirName(diskName, manifestName) {
 }
 
 // ── 快照 ──
-// opts = { profile?: string, reason?: string, name?: string, knownGood?: boolean, at?: Date }
+// opts = { profile?: string, reason?: string, name?: string, note?: string, knownGood?: boolean, at?: Date }
 //   reason：为什么建这份快照（'manual' / 'before-disable' / ...），只写进 manifest 供界面展示，
 //           本模块不解读它的值 —— 加新 reason 不需要改这里
+//   note：这一份快照是**为哪个对象**建的（如包名 `dshmarket@1.65.1`）。与 reason 正交：
+//           reason 回答「哪类动作」，note 回答「对谁做的」。列表里同名 reason 会堆很多份，
+//           光看 reason 分不出「这份是为了回滚哪个包」—— note 就是补这个的。
+//           ⚠️ 只进 manifest，**不替代 `name`**：name 是用户自己起的名（进 meta.json、
+//           被 knownGood 的自动清理规则保护，见 isProtected），note 是系统记的事实。
+//           两者都显示，用户改过名的快照照样能看见它当初是给哪个包建的。
 //   name / knownGood：用户标记，写进 meta.json（不进 manifest，见 META_NAME 的说明）
 //   at：快照时间戳，默认「此刻」，允许调用方注入（回归测试需要造出确定的时间序）
 //
@@ -240,6 +246,8 @@ function createSnapshot(opts) {
     dirName: dirName,
     profile: profile,
     reason: String(o.reason || 'manual'),
+    // 空串不写：老快照与「没传 note」的调用方读回来都是 ''，界面据此不显示那一段
+    note: String(o.note || ''),
     dshHome: dshHome(),
     files: files,
   }
@@ -314,6 +322,9 @@ function listSnapshots() {
       at: String(m.at || ''),
       profile: String(m.profile || ''),
       reason: String(m.reason || ''),
+      // 老快照的 manifest 里没有这个字段（加 note 之前的版本建的），读回空串即可 ——
+      // 不能因为缺字段就把整条快照判成读不到，否则升级后旧快照会在列表里凭空消失
+      note: String(m.note || ''),
       total: files.length,
       present: files.filter((f) => f && f.ok).length,
       name: meta.name,

@@ -5,7 +5,7 @@
  *  - 接收宿主推送：whale:init / whale:balance / whale:config / whale:snapped / whale:sounds
  *              / whale:skin / whale:bubbles / whale:models
  *  - 向宿主上报：whale:ready / whale:refresh / whale:config / whale:timer / whale:timer-done
- *              / whale:drag-move / whale:drag-end / whale:ignore-mouse / whale:open-settings
+ *              / whale:drag-begin / whale:drag-move / whale:drag-end / whale:ignore-mouse / whale:open-settings
  *              / whale:models-refresh / whale:set-main-model / whale:hide-widget
  *
  * 页面侧统一通过 window.whale 调用，不直接碰 electron / utools。
@@ -85,6 +85,8 @@ const api = {
   dsh(payload) {
     send('whale:dsh', typeof payload === 'string' ? { action: payload } : (payload || {}))
   },
+  // 拖拽开始：宿主据此冻结缩放，避免「拖一半窗口突然变大、大小描述还不变」
+  dragBegin() { send('whale:drag-begin', {}) },
   dragMove(x, y) { send('whale:drag-move', { x: Number(x), y: Number(y) }) },
   dragEnd() { send('whale:drag-end', {}) },
   setIgnoreMouse(ignore) { send('whale:ignore-mouse', { ignore: !!ignore }) },

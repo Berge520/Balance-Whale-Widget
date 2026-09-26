@@ -62,6 +62,13 @@
     transition: transform .3s ease;
   }
   .dshwv-root.dshwv-left { transform: scaleX(-1) }
+  /* 光标：由 JS 切 root 上的类（不是写 document.body.style.cursor —— 那是可继承属性，
+     写 body 会让渲染引擎失效整棵文档树样式，而它在按下/抬手各写一次，正好压在点击链路上）。
+     注意 root 与 .dshwv-img 都是 pointer-events:none，光标由窗口自己决定：
+     窗口在非穿透时整窗可接收指针事件，此时把光标挂在 body 上是**局部**写法（只写本窗口
+     自己的文档，不是宿主页面），失效范围仅限本悬浮窗，代价可忽略。 */
+  body.dshwv-cursor-grab, body.dshwv-cursor-grab * { cursor: grab; }
+  body.dshwv-cursor-grabbing, body.dshwv-cursor-grabbing * { cursor: grabbing; }
   .dshwv-body {
     position: absolute;
     left: 0; top: 0;
@@ -172,13 +179,24 @@
     align-items: center; justify-content: center;
     gap: 4px; padding: 0;
     z-index: 2;
+    /* 隐藏态用 visibility 而不是 opacity：opacity:0 的元素**仍然参与命中测试**
+       （配合 pointer-events:auto 就成了「看不见却点得到」—— 历史上正因此出现过
+       「按钮已隐藏，用户点中它却看不到菜单」的诡异）。visibility:hidden 同时把
+       绘制与命中一起关掉，隐藏即真的不可点，无需再靠 JS 保证状态一致。 */
+    visibility: hidden;
     opacity: 0;
-    transition: opacity .15s ease, background .15s ease, transform .15s ease, box-shadow .15s ease;
+    transition: opacity .15s ease, visibility 0s linear .15s, background .15s ease, transform .15s ease, box-shadow .15s ease;
   }
-  .dshwv-menu-btn.dshwv-menu-btn-visible { opacity: 1; }
+  /* 可见态：必须同时把 visibility 拉回 visible，否则元素仍不参与命中测试 */
+  .dshwv-menu-btn.dshwv-menu-btn-visible {
+    visibility: visible;
+    opacity: 1;
+    transition: opacity .15s ease, visibility 0s, background .15s ease, transform .15s ease, box-shadow .15s ease;
+  }
   /* 鼠标穿透中（尚未接管）：低透明度 + 虚线环常显 —— 既提示「此刻点不动」，
      也是悬停接管的抓手（在它或鲸鱼上停留约 1 秒即可临时接管） */
   .dshwv-menu-btn.dshwv-menu-btn-pass {
+    visibility: visible;
     opacity: .45;
     border: 1px dashed rgba(255,255,255,.8);
     box-shadow: none;
