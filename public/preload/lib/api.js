@@ -17,7 +17,14 @@ const {
 } = require('./store')
 const { isPeakTime, nextPeakChangeAt, priceFor, customPriceTable, customModelPrice } = require('./pricing')
 const { notify } = require('./notify')
-const codex = require('./codex')
+// codex(33KB) 只在解析「Codex 本地会话统计」时用得到（parseModelCodex，运行时）。
+// 顶层 require 会把它压进启动求值阶段（本模块在启动路径上必加载），而用户很可能不开这个模型统计。
+// 改成惰性取用：首次调用才 require，之后复用同一份。
+let codexMod = null
+function codexOf() {
+  if (!codexMod) codexMod = require('./codex')
+  return codexMod
+}
 
 // ──────────────────────────────────────────────
 // 余额
@@ -335,7 +342,7 @@ function parseModelQuota(model, data) {
 // Codex 本地会话统计（kind='codex'）：值来自 lib/codex.js 解析 ~/.codex 的会话日志，
 // 不查接口也不要密钥。复用「余额」那套运行时状态，只是把金额换成 token 数
 function parseModelCodex() {
-  const r = codex.codexSummary()
+  const r = codexOf().codexSummary()
   if (!r || !r.ok) return { ok: false, error: (r && r.error) || 'Codex 会话统计失败' }
   // codexWindows 单独取名，不与额度型的 windows（QuotaWindow[]）混用
   return { ok: true, tokens: r.todayTokens, monthTokens: r.monthTokens, codexWindows: r.windows || null }

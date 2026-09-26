@@ -25,7 +25,13 @@ const https = require('https')
 const { log, logErr } = require('./log')
 const { GH_DOMAINS, GH520_HOSTS_URL } = require('./constants')
 const { normIps, patchConfig, readConfig } = require('./store')
-const { psExe } = require('./dsh')
+// psExe 只在提权写 hosts 时（运行时）用得到；顶层 require 会把整片 dsh 一族压进本模块的
+// 求值阶段。改成惰性取用，避免 hosts.js 一被加载就连带解析 300KB+。
+let dshMod = null
+function psExe() {
+  if (!dshMod) dshMod = require('./dsh')
+  return dshMod.psExe()
+}
 
 const WIN = process.platform === 'win32'
 const HOSTS_PATH = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'drivers', 'etc', 'hosts')

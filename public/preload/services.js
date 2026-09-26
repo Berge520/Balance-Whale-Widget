@@ -17,7 +17,12 @@ const { notify } = require('./lib/notify')
 const { checkUpdate } = require('./lib/api')
 const { ensureWidget, toggleWidget, pushConfig } = require('./lib/widget')
 const { registerIpc } = require('./lib/ipc')
-const dsh = require('./lib/dsh')
+
+// dsh 一族（dsh / dsh-market / dsh-export / dsh-backup / dsh-usage / ...）合计 300KB+，
+// 而启动路径上只在「插件进程真正退出」时才用得到 stopOnQuit()。顶层 require 会把这整片
+// 模块的求值都压进 preload 加载阶段，直接拖慢首帧。改成用到时再加载：退出清理是异步时机，
+// 那时再付解析成本完全来得及。
+function dshModule() { return require('./lib/dsh') }
 
 // 当前 preload 所处窗口类型：main=主窗 / detach=分离窗 / browser=createBrowserWindow 窗口
 function winType() {
@@ -27,8 +32,33 @@ function winType() {
 // ──────────────────────────────────────────────
 // 对外 API（设置页）
 // ──────────────────────────────────────────────
-window.services = require('./lib/settings')
-const settingsApi = window.services
+// settings.js(153KB) 连带 hosts.js(88KB) 一片，只在设置页所在的窗口里才用得到；
+// 悬浮窗走的是 floating.js（另一份 preload），根本不需要 window.services。
+// 顶层无条件 require 会让这两片在**每次** preload 加载时都求值，包括创建挂件窗口时 ——
+// 那是高频路径（每次「显示挂件」都走）。这里按窗口类型惰性挂载，非设置页窗口不付这份解析成本。
+//
+// 惰性 getter：保持 window.services 的「属性访问即取用」语义不变（设置页里 `window.services.xxx`
+// 与解构写法都照常工作），只是把 require 推迟到真正被读取的那一刻。
+function isSettingsWindow() {
+  const t = winType()
+  return t === 'main' || t === 'detach'
+}
+let settingsMod = null
+function getSettings() {
+  if (!settingsMod) settingsMod = require('./lib/settings')
+  return settingsMod
+}
+if (isSettingsWindow()) {
+  try {
+    Object.defineProperty(window, 'services', {
+      configurable: true,
+      enumerable: true,
+      get: getSettings,
+    })
+  } catch (err) { logErr('[whale][boot] 挂载 window.services 失败', err && err.message) }
+}
+// 供 passthrough 分支等内部使用：主窗才有意义，其它窗口返回 null
+function settingsApiOrNull() { return isSettingsWindow() ? getSettings() : null }
 
 // 启动横幅：dev 下写入 %TEMP%\whale-debug.log（进程被杀不丢，用于事后排查生命周期问题）
 log('[whale][boot] preload 已加载', { windowType: winType(), logFile: LOG_FILE || '(仅控制台)' })
@@ -61,7 +91,7 @@ try {
       patchConfig({ passThrough: next })
       pushConfig()
       // 设置页开着时同步开关状态（emitConfigChange 只在本窗口有订阅者时生效）
-      try { settingsApi.emitConfigChange() } catch (err) {}
+      try { settingsApiOrNull()?.emitConfigChange() } catch (err) {}
       // 系统通知：穿透态下气泡可能被计时/峰谷占用，这条保证用户一定得到反馈。
       // 文案取设置页的「提醒文案」模板（与气泡同一份），换行合并成一行
       notify(alertOneLine(alertFor(cfg, next ? 'passOn' : 'passOff')), cfg)
@@ -125,7 +155,7 @@ try {
     // 插件进程真正结束（isKill=true）时按「保留 dsh」开关决定是否结束 dsh，避免留下孤进程占着 3080。
     // 关闭已分离的设置窗口也会触发 onPluginOut，但那种情况 isKill=false，不能动 dsh。
     if (isKill) {
-      try { dsh.stopOnQuit() } catch (err) { logErr('[whale][dsh] 退出清理失败', err && err.message) }
+      try { dshModule().stopOnQuit() } catch (err) { logErr('[whale][dsh] 退出清理失败', err && err.message) }
     }
   })
 } catch (err) { logErr('[whale][lifecycle] 注册 onPluginOut 失败', err && err.message) }
