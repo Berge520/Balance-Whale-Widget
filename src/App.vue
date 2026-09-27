@@ -273,6 +273,21 @@ const dsh = reactive({
   external: false, externalPid: 0, externalName: '', externalRunPort: 0, portOther: '', webUrl: '', installed: '',
 })
 const dshFlash: Flash = useFlash()
+// 安装 / 更新的终态横幅：dshFlash 是 12px 的细字，位置又在卡片最底部，
+// 更新这类「要等几十秒、结果决定接下来怎么办」的动作只落到那里等于没提示 ——
+// 用户点完往下滚才发现「原来早就装好了」。这里在「更新版本」行正下方挂一条醒目横幅，
+// 成功/失败都停住不自动消失（要等用户关掉或发起下一次动作），避免刚好错过。
+// 为什么另起一个 ref 而不是复用 dshFlash：dshFlash 语义是「瞬时回执」（改端口、复制等一闪过），
+// 两者生命周期不同，混用会让横幅被无关的小回执顶掉。
+const dshResult = ref<{ msg: string; err: boolean } | null>(null)
+// 「打开 Web UI」的招揽态：dsh 起来后这个按钮才是真正可用的下一步，但它和「重启 / 结束」
+// 同排同色，用户扫一眼看不出该点哪个。这里借用 GitHub 加速卡片「执行中按钮」那套呼吸动效
+// （见 AccelView 的 .btn-busy）把它做成会脉动的高亮，视线自然被拉过去。
+// ⚠️ 与 .btn-busy 的区别：那边表示「正在执行、请等待」，这边表示「可以点了」，
+//    语义相反但视觉手法一致（描边 + 亮度脉动），所以不复用类名，另起一个以免将来改错语义。
+// 只脉动**没被点过**的那一次：点过就说明用户已经知道入口在哪，一直闪是干扰。
+// 首次 ready 时置 true，用户点开（dshOpenPage）或 dsh 停下时置 false。
+const dshWebHint = ref(false)
 const dshLogOpen = ref(false)
 const dshLogEl = ref<HTMLElement | null>(null)
 // 异步动作（启动 / 重启 / 更新）的终态收尾令牌与状态机。
@@ -306,7 +321,9 @@ const dshMainFold = ref(true)
 function dshToggleVersions() {
   dshFolds.versions = !dshFolds.versions
   if (!dshFolds.versions) dshConfirm.value = ''
-  if (dshFolds.versions && !dshHasVersions.value) dshQueryVersions()
+  // 只在「确实没查过」时自动查：dshVersionsQueried 是持久化的，重载插件后展开不会白打一次 npm view。
+  // 查过但缓存里那份列表为空（上游下架等），也认作查过 —— 要重查由用户点「重试」
+  if (dshFolds.versions && !dshHasVersions.value && !dshVersionsQueried.value && !dshQueryFailed.value) dshQueryVersions()
 }
 const dshConfirm = ref('') // '' | 'remove-plugin' | 'clean-npx' | 'clear-log'
 const dshNow = ref(Date.now()) // 未就绪时的「已等待 x 秒」
@@ -402,6 +419,15 @@ function dshApply(s: any) {
   dsh.globalDir = s.globalDir || ''
   dsh.globalWritable = s.globalWritable !== false
   dsh.versions = s.versions && typeof s.versions === 'object' ? s.versions : { at: 0, latest: '', list: [] }
+  // 版本查询结论随快照带回：白名单过滤，避免宿主 / 未来字段把 dshVersionsCode 写成别的值
+  const vc = s.versionsCode
+  dshVersionsCode.value = vc === 'hit' || vc === 'empty' ? vc : ''
+  // 查过就落库：宿主只在真打了一次 npm view 后回 'hit'，轮询读到的落库缓存不会带码。
+  // 界面自己再写一遍是幂等补充（本设置页可能比宿主先拿到结论）
+  if (dshVersionsCode.value && !dshVersionsQueried.value) {
+    dshVersionsQueried.value = true
+    try { utools.dbStorage.setItem(KEY_DSH_QUERIED, true) } catch (err) {}
+  }
   dsh.external = !!s.external
   dsh.externalPid = s.externalPid || 0
   dsh.externalName = s.externalName || ''
@@ -464,11 +490,14 @@ function dshSettle() {
   dshAsync.active = false
   const act = dshAsync.action
   dshAsync.action = ''
+  // 终态一律撤掉「正在更新…」这类进度占位：结果已由 dshResult 横幅独立承担，
+  // 留着会让卡底细字与横幅说同一件事（一上一下两处重复）
+  dshFlash.msg = ''
   if (dsh.error) {
-    // 失败：dsh.error 已在卡底单独成行，这里只把占位消息清掉，避免两句红字打架
     dshFlash.err = true
-    dshFlash.msg = ''
     dshLogOpen.value = true
+    // 横幅要自己说清「哪一步失败了」，不能只留卡底那行 dsh.error —— 它可能被日志推高后滚出视野
+    dshResult.value = { msg: (act === 'update' ? '更新' : act === 'restart' ? '重启' : '启动') + '失败：' + dsh.error, err: true }
     return
   }
   if (act === 'update') {
@@ -476,19 +505,19 @@ function dshSettle() {
     // ⚠️ 这里**不**要求 dsh.ready：更新完的 dsh 未必被拉起来（也可能用户设了不自动启动），
     //    用 ready 当判据会把「装成功了但没启动」误报成失败。
     const now = dsh.installed || dsh.globalVersion || dsh.runVersion || dsh.resolved || ''
-    dshFlash.err = false
-    dshFlash.msg = (dshAsync.before && now && now !== dshAsync.before)
-      ? '更新完成：' + dshAsync.before + ' → ' + now
-      : (dsh.ready ? '更新完成，dsh 已用新版启动' : '更新完成（新版本已装好，下次启动生效）')
+    dshResult.value = {
+      msg: (dshAsync.before && now && now !== dshAsync.before)
+        ? '更新完成：' + dshAsync.before + ' → ' + now
+        : (dsh.ready ? '更新完成，dsh 已用新版启动' : '更新完成（新版本已装好，下次启动生效）'),
+      err: false,
+    }
   } else if (act === 'restart') {
-    dshFlash.err = !dsh.ready
-    dshFlash.msg = dsh.ready ? '已重启 dsh：' + dsh.port : '重启后 dsh 未就绪（详见日志）'
+    dshResult.value = { msg: dsh.ready ? '已重启 dsh：' + dsh.port : '重启后 dsh 未就绪（详见日志）', err: !dsh.ready }
   } else {
     // 启动：首次会自动下载安装，ready（3080 真正监听）才是判据
-    dshFlash.err = !dsh.ready
-    dshFlash.msg = dsh.ready ? 'dsh 已启动' : '启动未成功：进程没能在限时内监听 ' + dsh.port + '，详见日志'
+    dshResult.value = { msg: dsh.ready ? 'dsh 已启动' : '启动未成功：进程没能在限时内监听 ' + dsh.port + '，详见日志', err: !dsh.ready }
   }
-  if (dshFlash.err) dshLogOpen.value = true
+  if (dshResult.value && dshResult.value.err) dshLogOpen.value = true
 }
 // 轮询统一管理：start 幂等（先停再起），stop 可重复调用；页面隐藏时跳过本轮，
 // 避免后台空跑（dsh 状态与任务栏状态两处共用，见下方 dshPolling / taskbarPolling）
@@ -560,6 +589,9 @@ function dshDo(action: 'start' | 'stop' | 'restart' | 'update') {
     const fn = action === 'start' ? api.dshStart : action === 'stop' ? api.dshStop : action === 'restart' ? api.dshRestart : api.dshUpdate
     dshApply(fn?.())
     dshFlash.err = false
+    // 发起新动作就把上一条终态横幅撤掉：否则「更新完成」会一直挂在按钮下面，
+    // 与这次的「正在更新…」并存，用户没法判断哪个才是当下状态
+    dshResult.value = null
     // 启动/重启/更新都要等一会儿（首次安装要下载），自动展开日志方便看进度
     if (action !== 'stop') dshLogOpen.value = true
     dshFlash.msg = action === 'start' ? '已启动 dsh（首次会自动下载安装，稍等片刻再看状态）'
@@ -591,6 +623,7 @@ function dshDo(action: 'start' | 'stop' | 'restart' | 'update') {
     dshAsync.active = false
     dshFlash.err = true
     dshFlash.msg = '操作失败：' + String(err?.message || err)
+    dshResult.value = { msg: '操作失败：' + String(err?.message || err), err: true }
   }
 }
 // 清空日志：与维护类操作同一套二段确认（日志是排查现场，点错就没法复原）
@@ -685,6 +718,8 @@ function dshValueTip(key: string, tip: string, err = false) {
   window.setTimeout(() => { if (token === dshValueTick) dshValueFlash.value = { key: '', text: '', err: false } }, 2000)
 }
 function dshOpenPage() {
+  // 用户已经找到入口了，脉动的使命到此为止 —— 再闪就是干扰
+  dshWebHint.value = false
   try {
     const url = services.dshOpenWeb?.()
     if (!url) {
@@ -828,6 +863,15 @@ const dshStateText = computed(() => {
   return '未运行'
 })
 const dshBusy = computed(() => dsh.busy === 'update' || dsh.busy === 'versions' || dsh.busy === 'install')
+// dsh 从「没在跑」变成「跑起来了」的那一刻，点亮「打开 Web UI」的招揽脉动。
+// 只在上升沿置位：挂件菜单里启动 dsh 也会走到这里，此时设置页可能正开着，
+// 按钮得跟着亮起来，否则用户回到设置页还是看到一个平平的次按钮。
+// 用 running/external 而非 ready：ready 还要等 3080 真正监听，那时才亮会把
+// 「进程已起、马上就能进」的窗口漏掉，用户在这几秒里仍不知道该点哪。
+watch(() => dsh.running || dsh.external, (now, was) => {
+  if (now && !was) dshWebHint.value = true
+  else if (!now) dshWebHint.value = false // 停了就撤掉，免得下次启动前一直闪
+})
 // 版本下拉：「自动」＝安装/更新时取 latest；也可以固定成某个具体版本
 const dshVersionOptions = computed(() => {
   const list: string[] = (dsh.versions && dsh.versions.list) || []
@@ -874,8 +918,15 @@ const DSH_QUERY_MSG = '正在查询可用版本…'
 // 「查询可用版本」只在两种情况下有意义 —— 还没查过、以及上次查失败要重试。
 // 查询成功后 latest 直接显示在下面的「npm latest」行里，按钮留着只会让人怀疑「是不是还要再点一下」。
 const dshQueryFailed = ref(false)
-// 已经查到 latest 就别自动再查一遍：npm view 要联网、较慢，
-// 每次展开运行详情都打一次是白花流量（用户想看最新的可手动点「重新查询」）。
+// 已查询到的版本缓存在宿主 dbStorage 里（重载插件后仍在），所以「已经查过」有三个来源：
+// 本次会话查到了、本次会话查失败了、以及重载插件前查过（只在展开时读回来）。
+// 记不住这个状态就会出现「按钮永远重查」或「查过却说没查」，
+// 用一个持久化标记统管，展开折叠区时按它决定要不要自动查一次。
+const dshVersionsQueried = ref(false)
+// 版本查询的结论码，宿主随快照回溯：'' 无结论 | 'hit' 本次查询拿到版本 | 'empty' 查到但没版本
+const dshVersionsCode = ref('')
+const KEY_DSH_QUERIED = 'whale:dshVersionsQueried'
+try { dshVersionsQueried.value = utools.dbStorage.getItem(KEY_DSH_QUERIED) === true } catch (err) {}
 const dshHasVersions = computed(() => !!(dsh.versions && dsh.versions.latest))
 // 「npm latest」那一行的取值：查询结果是异步回来的（宿主查到 latest 后由轮询带回），
 // 所以要区分三态 —— 查到 / 正在查 / 没查过。写成 `latest || '未查询'` 会让查询途中就报「未查询」，
@@ -884,30 +935,38 @@ const dshLatestText = computed(() => {
   if (dshHasVersions.value) return (dsh.versions && dsh.versions.latest) || ''
   return dshQueryFailed.value ? '查询失败' : '未查询'
 })
-// 轮询是异步的，等结果期间先挂个「正在查询」。查到了要主动清掉：
-// dshStatus 是通用轮询入口、成功时不碰 dshFlash，若不在这里清，提示会一直挂着到下次操作。
-let dshQueryDone = 0 // 本次查询的令牌，防止上一轮的兜底定时器清掉下一轮刚设的提示
+// 轮询是异步的，等结果期间先挂个「正在查询」。
+// ⚠️ 不能用「清空提示」来标记本轮结束：dshFlash 是启动/重启/更新动作共用的提示位，
+//    用户在查询途中点一次「启动」，清掉的是动作的提示；反过来动作的提示也会被这里的
+//    超时分支覆盖成「查询超时」，把刚播报的成功结果抹掉。收尾只认宿主快照里的结论码。
+let dshQueryToken = 0 // 本次查询的令牌，防止上一轮的兜底定时器清掉下一轮刚设的提示
 function dshQueryVersions() {
   try {
-    services.dshListVersions?.()
+    // 先清失败态再发请求：宿主每次都是重新打一遍 npm view，上一次的失败结论对本次无效。
+    // 清了之后按钮文案会从「重试」回落到「查询中…」（busy 由宿主快照带回）
     dshQueryFailed.value = false
-    dshFlash.err = false
-    dshFlash.msg = DSH_QUERY_MSG
-    const token = ++dshQueryDone
+    const token = ++dshQueryToken
+    services.dshListVersions?.()
     // 宿主查到 latest 后会在后续快照里带回来，所以每次都读一遍状态、顺带把提示收掉
     const probe = () => {
       dshStatus()
-      if (token !== dshQueryDone) return
-      if (dsh.versions && dsh.versions.latest) { dshFlash.msg = ''; dshQueryDone++; return }
-      // 只有「还是我发的那条」才清，避免覆盖用户期间其他操作的消息
+      if (token !== dshQueryToken) return
+      if (dsh.versions && dsh.versions.latest) { dshVersionsQueried.value = true; return }
+      // 查到「没有可用版本」也是有效结论：不再自动重查，但保留「重试」入口
+      if (dshVersionsCode.value === 'empty') { dshQueryFailed.value = true; return }
+      // 只有「还是我发的那条」才改，避免覆盖用户期间其他操作的消息
       if (dshFlash.msg === DSH_QUERY_MSG && Date.now() - t0 > 12000) {
         dshQueryFailed.value = true // 留下来给用户一个「重试」入口，按钮不再自动隐藏
         dshFlash.err = true
         dshFlash.msg = '查询超时：未取到可用版本，请检查网络或 npm 注册源后重试。'
-        dshQueryDone++
+        dshQueryToken++
       }
     }
+    // 超时判定放在发请求之后取时间：宿主是同步返回快照、随后才 spawn npm，
+    // 提示文案要等下一次轮询（≤4s）才会被 busy 分支挂上，不能把这段等待算进 12s 里
     const t0 = Date.now()
+    dshFlash.err = false
+    dshFlash.msg = DSH_QUERY_MSG
     for (const ms of [2000, 5000, 9000]) window.setTimeout(probe, ms)
     window.setTimeout(probe, 12000)
   } catch (err: any) {
@@ -2504,6 +2563,20 @@ function dshMarketLatestText(p: DshMarketPlugin): string {
   if (v.error || !v.version) return '未查到'
   return 'v' + v.version
 }
+// 卡片行内也要能看出「官方有新版本」—— 这套结论原先只在列表**上方**的汇总区
+// （.mkt-latest-list）成立，卡片里只写目录版本的 `vA → vB`，两处口径不同：
+// 汇总区比的是**官方 registry**（dshMarketLatestStale），卡片比的是**目录快照**
+// （dshMarketUpdateOf），于是同一插件会出现「上面说能升到 0.4.3、卡片里只在 0.4.2→0.4.3 间打转」，
+// 用户得在两屏之间来回对。这里把汇总区那条「已装 vX → 官方 vY」的话术复用到卡片上，
+// 有官方滞后结论时优先说它（那才是用户真正想点的升级目标）。
+function dshMarketOfficialText(p: DshMarketPlugin): string {
+  if (!dshMarketLatestStale(p)) return ''
+  const v = dshMarketLatestOf(p)
+  const reg = String(v?.version || '')
+  if (!reg) return ''
+  const base = dshMarketBaseVer(p)
+  return base ? '已装 v' + base + ' → 官方 v' + reg : '官方 v' + reg
+}
 // 汇总区某一条的完整说明（title）
 function dshMarketLatestTip(p: DshMarketPlugin): string {
   const v = dshMarketLatestOf(p)
@@ -2757,12 +2830,19 @@ function dshMarketHasUpdate(p: DshMarketPlugin): boolean {
 // ⚠️ v 前缀只加在**能确定是版本号**的一侧：实装版本是裸 `0.5.11`，加 v 没问题；
 //    退回显示声明范围时是 `^0.5.11`，加 v 会变成 `v^0.5.11` 这种不成立的写法，
 //    所以那一档前面带「声明」二字、不加 v。
+// ⚠️ 两侧同版本时**整行不显示**（返回空串）：装的就是目录那一版时画成「v1.66.2 → v1.66.2」，
+//    用户会以为有个自己没看出来的更新在等着，实际什么也没变。
+//    注意这里判的是「两个数字相等」而不是 state —— state 为 'update' 是宿主按 semver 比的结论，
+//    而展示用的是字符串版本文本，两者在构建号/前缀不同的写法下可能对不上，所以按展示值自己判一次。
 function dshMarketVersionText(p: DshMarketPlugin): string {
   const u = dshMarketUpdateOf(p)
   if (!u) return ''
   const latest = String(u.latest || '')
   if (!latest) return ''
-  if (u.installed) return 'v' + u.installed + ' → v' + latest
+  if (u.installed) {
+    if (String(u.installed) === latest) return ''
+    return 'v' + u.installed + ' → v' + latest
+  }
   return '声明 ' + (u.range || '?') + ' → v' + latest
 }
 
@@ -7479,7 +7559,10 @@ onUnmounted(() => {
         <button class="utils-btn utils-primary" :disabled="dsh.running || dsh.external || !!dsh.portOther || dshBusy" @click="dshDo('start')">启动</button>
         <button class="secondary utils-btn utils-secondary" :disabled="(!dsh.running && !dsh.external) || dshBusy" @click="dshDo('restart')">重启</button>
         <button class="secondary utils-btn utils-secondary" :disabled="(!dsh.running && !dsh.external) || dshBusy" @click="dshDo('stop')">结束</button>
-        <button class="secondary utils-btn utils-secondary" @click="dshOpenPage">打开 Web UI</button>
+        <!-- 打开 Web UI 的可用性与「重启 / 结束」同源：没在跑就没有页面可开（点了只会拿到一句打开失败）。
+             跑起来时升成主操作实心色，并叠 dsh-web-hint 的脉动招揽 —— 它是 dsh 起来后最常点的下一步，
+             同排四个按钮里只有它该被一眼看到（动效手法参考 AccelView 的 .btn-busy） -->
+        <button class="utils-btn dsh-web-btn" :class="[dsh.running || dsh.external ? 'utils-primary' : 'utils-secondary', { 'dsh-web-hint': dshWebHint }]" :disabled="(!dsh.running && !dsh.external) || dshBusy" @click="dshOpenPage">打开 Web UI</button>
       </div>
       <!-- 装哪个版本 + 更新，是同一条动作链的两个环节，所以放同一行；
            版本下拉原先在「高级选项」里，一次「装指定版本」要横跨三个折叠区才走完 -->
@@ -7494,6 +7577,14 @@ onUnmounted(() => {
         <button class="secondary utils-btn utils-secondary" :disabled="dshBusy" @click="dshDo('update')">
           {{ dsh.resolved || dsh.globalVersion ? '更新' : '安装' }}<span v-if="dsh.hasUpdate" class="tag tag-new">有新版</span>
         </button>
+      </div>
+      <!-- 安装 / 更新的终态横幅：紧贴「更新版本」行，用户点完不用往下滚就能看到结果。
+           成功 / 失败都做成整块高对比底色 + 左侧色条，与卡底 12px 的 .msg 细字区分开 ——
+           那条只留给「改端口、复制地址」这类瞬时回执 -->
+      <div v-if="dshResult" class="dsh-result" :class="dshResult.err ? 'err' : 'ok'">
+        <span class="dsh-result-icon" aria-hidden="true">{{ dshResult.err ? '✕' : '✓' }}</span>
+        <span class="dsh-result-text">{{ dshResult.msg }}</span>
+        <button class="dsh-result-close utils-btn" title="关闭提示" @click="dshResult = null">×</button>
       </div>
       <p v-if="dsh.external" class="hint">{{ dsh.port }} 上检测到由<strong>别的终端</strong>启动的 dsh（pid {{ dsh.externalPid }}）：「结束」会结束它，「重启」会结束它并按当前版本重新启动。</p>
       <p v-else-if="dsh.portOther" class="hint">{{ dsh.port }} 被 {{ dsh.portOther }} 占用（不是 dsh）。为避免误杀，插件不会结束它。</p>
@@ -7544,10 +7635,15 @@ onUnmounted(() => {
                其余三个（刷新状态 / 定位 dsh 目录 / 复制地址）都是「顺手一下」的辅助动作，
                降成下面一行的文字按钮 —— 否则 8 个等宽按钮并列，主次完全看不出来，还容易误点「清空」。 -->
           <div class="btn-row">
-            <!-- 查询过就不再摆按钮：结果已经显示在「npm latest」行里，留着反而让人以为还得再点一下。
-                 只有「还没查过」和「上次查失败」才需要这个入口（失败时文案变「重试」） -->
-            <button v-if="dshQueryFailed || !dshHasVersions" class="secondary utils-btn utils-secondary" :disabled="dsh.busy === 'versions'" @click="dshQueryVersions">
-              {{ dsh.busy === 'versions' ? '查询中…' : (dshQueryFailed ? '重试：查询可用版本' : '查询可用版本') }}
+            <!-- 查询按钮**常驻**：结果虽已显示在「npm latest」行里，但那份缓存无过期时间
+                （whale:dshVersions 与有 12h TTL 的 whale:update 不同），上游发了新版也不会自己变。
+                原先「查过就藏按钮」在缓存陈旧时把用户逼进死角 —— 界面显示几周前的版本号，
+                既不自动重查、也没有任何入口手动重查，用户只能删库重来。
+                现在任何时刻都能点一次刷新，文案按四态区分「查过没有」：
+                查过→重新查询（这是常态，不再用疑问口吻催人）、查询中→查询中…（禁用）、
+                失败→重试（带上失败原因由 dshValueFlash 提示）、没查过→查询可用版本 -->
+            <button class="secondary utils-btn utils-secondary" :disabled="dsh.busy === 'versions'" @click="dshQueryVersions">
+              {{ dsh.busy === 'versions' ? '查询中…' : (dshQueryFailed ? '重试：查询可用版本' : (dshVersionsQueried ? '重新查询可用版本' : '查询可用版本')) }}
             </button>
             <!-- 日志按钮都带 dsh 前缀：帮助 Tab 里另有一处「复制诊断日志 / 打开日志文件」，
                  那是插件自身的 whale-debug.log，与这里的 dsh 子进程日志是两回事 -->
@@ -8768,8 +8864,17 @@ onUnmounted(() => {
                      改口径前这里放的是 `^0.5.11` 这种范围原文，再被硬拼一个 `v` 前缀，
                      渲染成 `v^0.5.11` 这种不成立的写法，也答不了「我现在装的是哪版」。
                      实在读不到实装版本（包在磁盘但 node_modules 里没有）才退回显示声明范围，
-                     此时不带 v —— `v^0.5.11` 不能出现。 -->
-                <span v-if="dshMarketUpdateOf(p)?.latest" class="mkt-ver" :title="dshMarketUpdateTip(p)">
+                     此时不带 v —— `v^0.5.11` 不能出现。
+                     ⚠️ v-if 判的是**渲染结果**而不是 latest 有没有值：dshMarketVersionText 在
+                     「已装版本 == 目录版本」时返回空串（无意义的等值箭头，见该函数注释），
+                     若只判 latest 就会留下一个空的 .mkt-ver（带 title 的空白占位）。
+                     ⚠️ 有官方 registry 的滞后结论时**改说官方那条**（dshMarketOfficialText）：
+                     它比目录版本更新、也更接近用户真正想装的目标；两者叠加显示等于一行两个「→」，
+                     反而看不出该信哪个。官方版查过且更高时，目录那行自动退场。 -->
+                <span v-if="dshMarketOfficialText(p)" class="mkt-ver mkt-ver-official" :title="'官方 npm 上已有更新版本：' + dshMarketOfficialText(p)">
+                  {{ dshMarketOfficialText(p) }}
+                </span>
+                <span v-else-if="dshMarketVersionText(p)" class="mkt-ver" :title="dshMarketUpdateTip(p)">
                   {{ dshMarketVersionText(p) }}
                 </span>
                 <span class="mkt-spacer"></span>
@@ -10461,6 +10566,12 @@ select:focus,
   opacity: 0.75;
   white-space: nowrap;
 }
+/* 官方 registry 版本（比目录快照更新）：这一条是「真能升上去」的目标，比目录那行更该被看见，
+   所以把 opacity 补回来并加粗 —— 但不上彩色，一行里已经有「可更新」绿标，再上色就打架了 */
+.mkt-ver-official {
+  opacity: 1;
+  font-weight: 600;
+}
 /* ── 回源查「官方最新版」：卡片顶部一行（按钮 + 范围说明 + 汇总）──
    与卡片内其它「辅助动作」（刷新目录 / 测速）同一视觉层级，不抢主按钮的注意力 */
 .mkt-latest-bar {
@@ -10607,6 +10718,32 @@ input[type='checkbox'] {
 .dsh-card .btn-row button {
   flex: 1 1 auto;
 }
+/* 「打开 Web UI」的招揽脉动：dsh 起来后它才是可用入口，但同排四个按钮等宽同形，
+   光靠实心色仍不够醒目（「启动」本来就是实心，视线会先落在已经禁用变灰的那个上）。
+   这里搬运 AccelView 的 .btn-busy 手法：强调色描边 + 亮度呼吸，让视线自己找过来。
+
+   ⚠️ 关键坑（照抄 AccelView 的结论）：不能动 opacity —— 按钮在 dshBusy（更新/查版本）期间
+   会同时带 disabled，而 `button.utils-btn:disabled { opacity: .45 }`（0,2,1）特异性高于
+   `.dsh-web-hint`，会把 keyframe 里的 opacity 压成固定值，呼吸完全看不出来。
+   filter 是独立属性，不与之打架。 */
+.dsh-card .dsh-web-btn.dsh-web-hint {
+  border-color: #536ba9;
+  box-shadow: 0 0 0 1px #536ba9;
+  animation: dsh-web-hint 1.2s ease-in-out infinite;
+}
+@keyframes dsh-web-hint {
+  0%, 100% { filter: brightness(0.9); }
+  50% { filter: brightness(1.3); }
+}
+/* 尊重系统「减少动态效果」：与 .btn-busy 同策略 —— 不直接 animation:none
+   （该动效承载「这里可以点了」的功能信息，关掉后用户就看不出这个按钮有特殊地位了），
+   只把节奏放慢、幅度收窄，减轻前庭负担仍保留「在动」的感知 */
+@media (prefers-reduced-motion: reduce) {
+  .dsh-card .dsh-web-btn.dsh-web-hint {
+    animation-duration: 2.4s;
+  }
+}
+
 /* 「运行详情」的次要动作行：全是文字按钮，贴内容宽即可 ——
    继承上面的 flex:1 会把「刷新状态 / 定位 dsh 目录 …」也拉成等宽块状，
    看着还是一条主按钮行，白降一级。.link-btn 的尺寸仍由基类给，这里只管排版。 */
@@ -10665,6 +10802,63 @@ input[type='checkbox'] {
 .msg.clickable {
   cursor: pointer;
   text-decoration: underline;
+}
+/* 安装 / 更新的终态横幅：整块底色 + 左侧粗色条，做成「一眼就能看出成败」的强度。
+   卡底那条 .msg 是 12px 单行细字，混在一起时成功/失败几乎没差别，
+   更新完还容易被日志推高到视野外 —— 这里靠色块和留白把它拉回视线中心 */
+.dsh-result {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  border-left: 4px solid var(--ok);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--ok) 14%, transparent);
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--fg);
+}
+.dsh-result.err {
+  border-left-color: var(--err);
+  background: color-mix(in srgb, var(--err) 14%, transparent);
+}
+.dsh-result-icon {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  margin-top: 1px;
+  border-radius: 50%;
+  background: var(--ok);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 18px;
+  text-align: center;
+}
+.dsh-result.err .dsh-result-icon {
+  background: var(--err);
+}
+.dsh-result-text {
+  flex: 1;
+  min-width: 0;
+  word-break: break-word;
+}
+/* 关闭按钮：默认弱化，悬停才显形，避免抢横幅本身的注意力 */
+.dsh-result-close {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--fg-dim);
+  font-size: 16px;
+  line-height: 20px;
+  cursor: pointer;
+}
+.dsh-result-close:hover {
+  color: var(--fg);
 }
 .link-btn {
   margin-top: 10px;

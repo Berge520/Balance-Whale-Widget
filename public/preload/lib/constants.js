@@ -143,6 +143,9 @@ const K = {
   update: 'whale:update',   // dbStorage：上次检查更新结果缓存
   timer: 'whale:timer',     // dbStorage：计时状态（重建挂件后恢复）
   dshVersions: 'whale:dshVersions', // dbStorage：dsh 可用版本列表缓存（查询结果，重载后仍可选用）
+  // dbStorage：dsh 版本「查过没有」的标记。与 dshVersions 分开存：列表可能为空（上游下架），
+  // 但「查过」这件事决定界面是否还要自动重查、按钮是否还挂着
+  dshVersionsQueried: 'whale:dshVersionsQueried',
   sounds: 'whale:sounds',   // dbStorage：自定义音效元信息，六槽位 press/release/low/budget/peak/pass 各 {name,ext,at}|null
   skins: 'whale:skins',     // dbStorage：自定义挂件形象画廊 { items: [{ id, name, ext, at }], current: id }
   bubbles: 'whale:bubbles', // dbStorage：自定义气泡图片（点鲸鱼时随机显示一张）[{ id, name, ext, at }]

@@ -2825,6 +2825,8 @@ module.exports = {
       try { utools.dbStorage.removeItem(K.win) } catch (err) {}
       try { utools.dbStorage.removeItem(K.update) } catch (err) {}
       try { utools.dbStorage.removeItem(K.dshVersions) } catch (err) {}
+      // 「查过版本」标记与版本列表同进退：清了列表却留着标记，设置页会以为已查过而不再自动查
+      try { utools.dbStorage.removeItem(K.dshVersionsQueried) } catch (err) {}
       resetAnchorCache()
     }
     resetBalanceCache()

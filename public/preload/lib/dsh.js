@@ -49,6 +49,9 @@ const state = {
   port: DSH_PORT_DEFAULT, // Web UI 监听端口（可在设置页改；改动要重启 dsh 才生效）
   versions: { at: 0, latest: '', list: [] }, // 「查询版本」结果（落库缓存，重载插件后仍在）
   versionsLoaded: false,
+  // 本次 listVersions 的结论：'hit' 真打了一次 npm 并拿到版本 | 'empty' 查到了但没版本。
+  // 界面靠它判定「本次查询已收尾」，不能用「提示文案被清掉」当信号 —— dshFlash 与启停动作共用
+  versionsCode: '',
   installed: '',      // 插件目录里实际安装的 dsh 版本（所见即所跑）
   prefix: '',         // 插件自己那份 dsh 的安装目录（懒解析）
   globalWritable: null, // 全局安装目录当前用户可写？null=还没测过（只在需要时试写一次）
@@ -1800,11 +1803,19 @@ function loadVersions() {
 function saveVersions() {
   try { utools.dbStorage.setItem(K.dshVersions, state.versions) } catch (err) { logErr('[whale][dsh] 写版本缓存失败', err && err.message) }
 }
+// 「查过版本」这一事实单独落库：它管的是界面上的按钮与自动重查策略，
+// 与 versions 里那份列表「有没有内容」是两件事 —— 上游给空列表时列表为空，但查询确实发生过了。
+// 界面展开「运行详情」时靠它决定要不要自动打一次 npm view（避免重载插件后白查一次）
+function saveVersionsQueried() {
+  try { utools.dbStorage.setItem(K.dshVersionsQueried, true) } catch (err) { logErr('[whale][dsh] 写查询标记失败', err && err.message) }
+}
 
 // 查询可用版本列表（npm view <pkg> versions --json），结果缓存在 state.versions
 function listVersions() {
   syncConfig()
   if (state.busy) { state.error = '正在' + (state.busy === 'versions' ? '查询版本' : state.busy === 'install' ? '安装' : '更新') + '中，请稍候'; return snapshot() }
+  // 每次查询先清掉上一次的结论码：界面若在查询途中读到 'empty'（上一轮），会把这一轮误判成已收尾
+  state.versionsCode = ''
   const node = resolveNode(state.nodeDir)
   const exe = node && node.npm
   if (!exe) {
@@ -1851,6 +1862,10 @@ function listVersions() {
       }
     } catch (err) { list = [] }
     if (!list.length && !tag) {
+      // 命令成功但没解析出任何版本（上游下架 / 注册源返回空）：这同样是「查询已完成」的结论，
+      // 落 queried 标记并报 'empty'，界面据此收掉「正在查询」、改挂一个「重试」
+      state.versionsCode = 'empty'
+      saveVersionsQueried()
       state.error = '没有查到可用版本'
       pushLog(state.error)
       broadcast()
@@ -1861,7 +1876,9 @@ function listVersions() {
       latest: tag || list[list.length - 1] || '',
       list: list.slice(-60),
     }
+    state.versionsCode = 'hit'
     saveVersions()
+    saveVersionsQueried()
     pushLog('可用版本 ' + list.length + ' 个，latest 标签：' + (state.versions.latest || '未知'))
     broadcast() // 版本列表 / 「有新版本」提示落库后推一次
   })
@@ -2013,6 +2030,9 @@ function snapshot() {
     reinstall: state.reinstall,
     prefix: dshPrefix(),
     versions: state.versions,
+    // 版本查询结论码（见 state.versionsCode）。每次 listVersions 覆盖一次，
+    // 界面据此收掉「正在查询」并决定是否再挂「重试」入口
+    versionsCode: state.versionsCode,
     installed: installed,
     // 本次启动用的版本 + 是否需要重启才生效（目录里已是另一个版本）
     runVersion: state.runVersion,
