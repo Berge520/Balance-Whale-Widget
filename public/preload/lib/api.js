@@ -410,12 +410,19 @@ async function refreshModels(ids, force) {
     } else if (r.balance !== undefined) {
       // 今日已用：本插件拦不到对话，只能按余额差估算（挂件上带 ~ 标记）
       let used = cur.date === today && typeof cur.todayUsage === 'number' ? cur.todayUsage : 0
-      if (cur.date === today && typeof cur.prevBalance === 'number' && cur.prevBalance > r.balance) {
+      // 换 Key 防护：模型 id 不变但密钥换了（设置页直接改密钥），两边余额不可比。
+      // 若不认指纹，新 Key 余额低于旧 Key 时会凭空记出一笔巨额「今日已用」——
+      // 与全局账本 keyChanged 同一根因，这条链路此前漏了。
+      const keyId = keyFingerprint(secrets.models[m.id])
+      const keyChanged = !!(cur.keyId && keyId && cur.keyId !== keyId)
+      if (keyChanged) used = 0
+      else if (cur.date === today && typeof cur.prevBalance === 'number' && cur.prevBalance > r.balance) {
         used += cur.prevBalance - r.balance
       }
       next.balance = r.balance
       next.todayUsage = Math.round(used * 10000) / 10000
       next.prevBalance = r.balance
+      if (keyId) next.keyId = keyId
       delete next.usedPct
       delete next.resetAt
       delete next.windows

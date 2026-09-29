@@ -19,6 +19,9 @@ const { logErr } = require('./log')
 const { num, homeDir, readTextSafe, readJsonSafe, normalizePath } = require('./util')
 const { probePort, snapshot } = require('./dsh')
 
+// 平台判定：只用于 globalModuleRoots 的候选目录分派（Windows 的 npm 全局目录 vs POSIX 的 /usr 布局）
+const WIN = process.platform === 'win32'
+
 // ──────────────────────────────────────────────
 // 常量
 // ──────────────────────────────────────────────
@@ -301,16 +304,24 @@ function globalModuleRoots() {
   const out = []
   const add = (d) => { if (d && out.indexOf(d) < 0) out.push(d) }
   const nodeDir = path.dirname(process.execPath)
+  // 与 Node 安装目录相关的落点（两平台同构）
   add(path.join(nodeDir, 'node_modules'))
   add(path.join(nodeDir, '..', 'node_modules'))
   add(path.join(nodeDir, '..', 'lib', 'node_modules'))
-  add(path.join(nodeDir, 'node_global', 'node_modules'))
-  add(path.join(nodeDir, 'npm-global', 'node_modules'))
-  if (process.env.APPDATA) add(path.join(process.env.APPDATA, 'npm', 'node_modules'))
-  if (process.env.LOCALAPPDATA) add(path.join(process.env.LOCALAPPDATA, 'npm', 'node_modules'))
-  add(path.join(process.env.HOME || process.env.USERPROFILE || '', '.npm-global', 'lib', 'node_modules'))
-  add('/usr/local/lib/node_modules')
-  add('/usr/lib/node_modules')
+  if (WIN) {
+    // Windows：npm 全局目录默认在 %APPDATA%\npm，hoist 出来的可执行档同层；
+    // User 级自定义前缀常见于 %USERPROFILE%\.npm-global
+    add(path.join(nodeDir, 'node_global', 'node_modules'))
+    add(path.join(nodeDir, 'npm-global', 'node_modules'))
+    if (process.env.APPDATA) add(path.join(process.env.APPDATA, 'npm', 'node_modules'))
+    if (process.env.LOCALAPPDATA) add(path.join(process.env.LOCALAPPDATA, 'npm', 'node_modules'))
+    if (process.env.USERPROFILE) add(path.join(process.env.USERPROFILE, '.npm-global', 'lib', 'node_modules'))
+  } else {
+    // POSIX：node 自带的 /usr 布局 + 用户级 ~/.npm-global（npm prefix 常见自定义位置）
+    add('/usr/local/lib/node_modules')
+    add('/usr/lib/node_modules')
+    if (process.env.HOME) add(path.join(process.env.HOME, '.npm-global', 'lib', 'node_modules'))
+  }
   return out.filter((d) => d && fs.existsSync(d))
 }
 

@@ -4,7 +4,7 @@
 const {
   K, MIN_SCALE, MAX_SCALE, MODEL_MAX, MODEL_TEMPLATES, DEFAULT_MAIN_MODEL, LOW_ALERT_BY_CURRENCY,
   TOKEN_PRICE_DEFAULT, TOKEN_PRICE_MAX, TOKEN_RATE_MAX, TOKEN_PRICE_MODELS_MAX, TIMER_NOTE_MAX,
-  NEWEST_VERSION, DSH_PORT_DEFAULT,
+  NEWEST_VERSION, DSH_PORT_DEFAULT, SKIN_PACK_PREFIX_MAX,
 } = require('./constants')
 const { logErr } = require('./log')
 
@@ -75,6 +75,23 @@ function normStrList(v) {
     if (t && !out.includes(t)) out.push(t)
   }
   return out
+}
+// 形象素材包的**自填加速前缀**归一化（如 'https://ghfast.top/'）。
+// 空串 / 非法一律回 ''（= 用 constants 的内置默认前缀），不抛错也不保留半个坏串：
+// 这个值会被直接拼进 URL 交给 fetch，放行任意字符串等于让一个手改出来的串发起请求。
+// 只校验「http(s) 绝对 URL + 末尾带 /」—— 是否真能加速由下载时的候选链实测（拿不到就顺延下一个源）
+function normSkinPackPrefix(v) {
+  const s = typeof v === 'string' ? v.trim() : ''
+  if (!s || s.length > SKIN_PACK_PREFIX_MAX) return ''
+  try {
+    const p = new URL(s)
+    if (p.protocol !== 'https:' && p.protocol !== 'http:') return ''
+    if (!p.host) return ''
+  } catch (err) {
+    return '' // 不是合法 URL：丢掉，回落到内置默认前缀
+  }
+  // 强制末尾 '/': 拼接规则是「前缀 + 真源」直接相连，缺 '/' 会拼出 ...tophttps://github.com/…
+  return s.endsWith('/') ? s : s + '/'
 }
 
 // ──────────────────────────────────────────────
@@ -162,7 +179,7 @@ const QUOTE_MAX_LEN = 60
 const QUOTE_MAX_COUNT = 30
 // 随机台词组：一组 = 一个抽签项，权重越大越常抽到。
 // card = 内置的余额 / 时段卡（内容按当前数据现算，文本不可编辑）；text = 用户自己填的台词
-// （一行一条候选，随机抽一条显示）；image = 抽一张自定义气泡图（没导入过就用内置 rua.gif）。
+// （一行一条候选，随机抽一条显示）；image = 抽一张自定义气泡图（没导入过就用内置 rua.webp）。
 const QUOTE_GROUP_KINDS = ['card', 'text', 'image']
 const QUOTE_GROUP_MAX = 12
 const QUOTE_GROUP_W_MAX = 999
@@ -345,7 +362,7 @@ function normMenuGroupsRev(v) {
   return n
 }
 function defaultConfig() {
-  return { scale: 1.3, vol: 0.9, soundOn: true, soundSet: 'duck', usageMode: 'ledger', peakMode: 'default', peakRemindOn: true, bubbleOn: true, menuBtn: true, onTop: true, lowAlertOn: true, lowAlertAmount: LOW_ALERT_BY_CURRENCY.CNY, budgetOn: false, budgetAmount: 0, dropAlertOn: false, dropAlertAmount: 5, clickQueueOn: false, remindSec: 8, quietOn: false, quietFrom: '23:00', quietTo: '07:00', timeBubbleOn: true, updateCheckOn: false, dragLock: false, enterMode: 'both', timerNotifyOn: true, timerMailOn: true, timerPersistOn: true, timerMode: 'off', timerSec: 1500, timerAt: '07:30', timerNote: '', timerBreakMin: 5, timerRemindSec: 8, timerBubblePin: true, timerBubbleOnly: true, guideDone: false, dshNodeDir: '', dshKeepAlive: false, dshPort: DSH_PORT_DEFAULT, dshRegistry: '', dshVersion: '', dshReinstall: false, dshNoOpen: true, dshMarketUrl: '', dshMarketMirror: true, dshMarketRegistry: '', dshMarketOfficial: false, dshExportCred: false, dshExportNoMod: true, avoidTaskbar: true, edgeTop: 0, edgeRight: 0, edgeBottom: 0, edgeLeft: 0, scrollGapOn: false, scrollGapPx: SCROLL_GAP_DEFAULT, snapMode: 'ratio', snapRatio: SNAP_RATIO_DEFAULT, opacity: 100, passThrough: false, skin: 'DSniang1', theme: 'default', quotes: normQuotes(null), alerts: normAlerts(null), quotaTotal: 0, quotaReset: 'monthly', tokenPrice: normTokenPrice(null), historyKeepDays: HISTORY_KEEP_DEFAULT, models: [], mainModelId: DEFAULT_MAIN_MODEL, dshBackupKeep: DSB_KEEP_DEFAULT, menuGroups: normMenuGroups(null), menuGroupsRev: 0, ghAccelOn: false, ghAccelIps: normIps(null), ghAccelRefreshedAt: 0, ghAccelSrc: normGhAccelSrc(null), notifySystemOn: true, notifyMailOn: false, mailFrom: '', mailTo: '', mailFromName: '小鲸鱼余额挂件', mailSubjectPrefix: '[小鲸鱼余额挂件]' }
+  return { scale: 1.3, vol: 0.9, soundOn: true, soundSet: 'duck', usageMode: 'ledger', peakMode: 'default', peakRemindOn: true, bubbleOn: true, menuBtn: true, onTop: true, lowAlertOn: true, lowAlertAmount: LOW_ALERT_BY_CURRENCY.CNY, budgetOn: false, budgetAmount: 0, dropAlertOn: false, dropAlertAmount: 5, clickQueueOn: false, remindSec: 8, quietOn: false, quietFrom: '23:00', quietTo: '07:00', timeBubbleOn: true, updateCheckOn: false, dragLock: false, enterMode: 'both', timerNotifyOn: true, timerMailOn: true, timerPersistOn: true, timerMode: 'off', timerSec: 1500, timerAt: '07:30', timerNote: '', timerBreakMin: 5, timerRemindSec: 8, timerBubblePin: true, timerBubbleOnly: true, guideDone: false, dshNodeDir: '', dshKeepAlive: false, dshPort: DSH_PORT_DEFAULT, dshRegistry: '', dshVersion: '', dshReinstall: false, dshNoOpen: true, dshMarketUrl: '', dshMarketMirror: true, dshMarketRegistry: '', dshMarketOfficial: false, dshExportCred: false, dshExportNoMod: true, avoidTaskbar: true, edgeTop: 0, edgeRight: 0, edgeBottom: 0, edgeLeft: 0, scrollGapOn: false, scrollGapPx: SCROLL_GAP_DEFAULT, snapMode: 'ratio', snapRatio: SNAP_RATIO_DEFAULT, opacity: 100, passThrough: false, skin: 'DSniang1', theme: 'default', quotes: normQuotes(null), alerts: normAlerts(null), quotaTotal: 0, quotaReset: 'monthly', tokenPrice: normTokenPrice(null), historyKeepDays: HISTORY_KEEP_DEFAULT, models: [], mainModelId: DEFAULT_MAIN_MODEL, dshBackupKeep: DSB_KEEP_DEFAULT, menuGroups: normMenuGroups(null), menuGroupsRev: 0, ghAccelOn: false, ghAccelIps: normIps(null), ghAccelRefreshedAt: 0, ghAccelSrc: normGhAccelSrc(null), skinPackSrc: '', notifySystemOn: true, notifyMailOn: false, mailFrom: '', mailTo: '', mailFromName: '小鲸鱼余额挂件', mailSubjectPrefix: '[小鲸鱼余额挂件]' }
 }
 // dsh Web UI 监听端口（默认 3080）。
 // ⚠️ 为什么必须能配：3080 属于 Windows/Hyper-V 的「动态端口保留段」，被系统预留时
@@ -401,19 +418,34 @@ function clampNum(v, lo, hi, dft) {
 function normTimerNote(v) {
   return String(v == null ? '' : v).replace(/\s+/g, ' ').trim().slice(0, TIMER_NOTE_MAX)
 }
-// 挂件形象：内置形象的 id（= public/whale/ 下的图片文件名）/ 'custom'（用户导入）。
-// 与 floating-page.js 的 BUILTIN_SKINS、设置页「形象」下拉三处同值，加形象要一起改。
-const BUILTIN_SKINS = [
-  'liuy', 'black', 'ciya', 'DSniang1', 'DSniang02', 'DSniang3', 'DSniang4',
-  'DSniang5', 'DSniang6', 'DSniang7', 'glby', 'Jian', '无稽之谈改',
-]
+// 随包分发的内置形象：v1.7.x 起只留默认那张（约 39KB），其余改为用户按需从 GitHub
+// Release 下载 —— 目的是把插件包从约 2.7MB 压到约 1.7MB。（v1.9.0 起可下载包再从 12 张
+// 精简为 1 张 DSniang02，其余 11 张与共享角色包同图、改由共享角色包提供。）
+// 下载回来的形象进「自定义画廊」（whale:skins，带 builtin 标记），不走这里的白名单，
+// 所以 normSkin 不认识它们也能正常切换（它们对应 skin: 'custom'）。
+// 与 floating-page.js 的 BUILTIN_SKINS、设置页「形象」下拉三处同值，check-shared 会校验。
+const BUILTIN_SKINS = ['DSniang1']
 const DEFAULT_SKIN = 'DSniang1'
 // v1.5.0 及更早只存过 'whale' / 'whale2' 两个 id（对应前两张图），这里映射过去 ——
-// 否则老配置被判成非法值会悄悄换回默认形象，用户会以为「形象自己变了」
+// 否则老配置被判成非法值会悄悄换回默认形象，用户会以为「形象自己变了」。
+// 注意所有「曾经存在过的内置 id」都要在这里留档：用户升级后 cfg.skin 可能还是
+// 'liuy' / 'DSniang7' 这类已移出包的值，normSkin 必须**原样保留**（见下方注释），
+// 但不能靠 BUILTIN_SKINS 去认它 —— 那些图已在画廊里，切过去走 custom 分支。
 const SKIN_ALIAS = { whale: 'DSniang1', whale2: 'DSniang02' }
+// 历史内置形象 id 全集（13 张原始清单）。用于「老用户兼容」：升级后配置里若仍是这些
+// 已移出包的值，说明该形象大概率已随旧版落进画廊（或用户根本没用它），一律原样保留，
+// 不打回默认 —— 否则用户升级后形象会被悄悄换掉，属行为破坏。
+// 头一项从 BUILTIN_SKINS 展开而非重复写死：随包那张必然也是合法值，两处写死容易漏改。
+// check-shared 两边都校验（随包清单与历史清单各一条），所以展开也算进「同值副本」。
+const LEGACY_BUILTIN_SKINS = [
+  ...BUILTIN_SKINS,
+  'liuy', 'black', 'ciya', 'DSniang02', 'DSniang3', 'DSniang4',
+  'DSniang5', 'DSniang6', 'DSniang7', 'glby', 'Jian', 'wjztg',
+]
 function normSkin(v) {
   const id = SKIN_ALIAS[v] || v
-  return id === 'custom' || BUILTIN_SKINS.includes(id) ? id : DEFAULT_SKIN
+  if (id === 'custom' || LEGACY_BUILTIN_SKINS.includes(id)) return id
+  return DEFAULT_SKIN
 }
 // 气泡配色主题
 function normTheme(v) {
@@ -669,6 +701,8 @@ function readConfig() {
     ghAccelRefreshedAt: normGhAccelRefreshedAt(p.ghAccelRefreshedAt),
     // IP 获取来源开关（doh / community / manual），默认全开
     ghAccelSrc: normGhAccelSrc(p.ghAccelSrc),
+    // 形象素材包的自填加速前缀（空 = 用内置默认 ghfast.top；非法串一律回空）
+    skinPackSrc: normSkinPackPrefix(p.skinPackSrc),
     // 通知渠道：系统通知（默认开，沿用旧行为）+ 邮件通知（默认关，需先配好 SMTP）。
     // 邮件凭据（服务器/端口/账号/授权码）不在配置里，见 readSecretMail —— 只这里存「非敏感」的收发件人与信头
     notifySystemOn: p.notifySystemOn !== false,
@@ -761,6 +795,7 @@ function writeConfig(cfg) {
       ghAccelIps: normIps(cfg.ghAccelIps),
       ghAccelRefreshedAt: normGhAccelRefreshedAt(cfg.ghAccelRefreshedAt),
       ghAccelSrc: normGhAccelSrc(cfg.ghAccelSrc),
+      skinPackSrc: normSkinPackPrefix(cfg.skinPackSrc),
       notifySystemOn: cfg.notifySystemOn !== false,
       notifyMailOn: cfg.notifyMailOn === true,
       mailFrom: String(cfg.mailFrom || '').trim().slice(0, 200),
@@ -912,6 +947,9 @@ function patchConfig(patch) {
       customSources: s.customSources === undefined ? cfg.ghAccelSrc.customSources : s.customSources,
     })
   }
+  // 形象素材包自填加速前缀：空串是合法值（= 回落到内置默认），故不能用 `!== undefined` 之外的真值判断，
+  // 这里显式接受字符串（含空串）
+  if (p.skinPackSrc !== undefined) cfg.skinPackSrc = normSkinPackPrefix(p.skinPackSrc)
   // 通知渠道开关 + 邮件的非敏感字段（SMTP 服务器/授权码走 saveMailSecrets，不经这里）
   if (p.notifySystemOn !== undefined) cfg.notifySystemOn = !!p.notifySystemOn
   if (p.notifyMailOn !== undefined) cfg.notifyMailOn = !!p.notifyMailOn
@@ -1230,7 +1268,8 @@ function clearTimer() {
 // ──────────────────────────────────────────────
 // 多厂商模型的运行时状态
 // ──────────────────────────────────────────────
-// 结构：{ [模型 id]: { at, balance, currency, todayUsage, usedPct, resetAt, error } }。
+// 结构：{ [模型 id]: { at, balance, currency, todayUsage, usedPct, resetAt, error, keyId } }。
+// keyId 是该模型密钥的指纹，用于换 Key 时只重置基准、不把两边余额差记成用量。
 // 只用于展示与预警、不参与记账，所以不进备份（备份里的 config.models 才是用户填的那份）。
 function readModelState() {
   try {

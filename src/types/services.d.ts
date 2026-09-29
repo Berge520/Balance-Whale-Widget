@@ -1,12 +1,15 @@
 // 主窗 preload（public/preload/services.js）注入到 window.services 的宿主 API 类型声明。
 // 仅用于设置页（src/App.vue）的类型提示与校验，运行时实现见 public/preload/services.js。
 
-// 挂件形象 id：内置形象的 id 即 public/whale/ 下的图片文件名（宿主 store.js 的 normSkin
-// 与设置页 App.vue 的 BUILTIN_SKINS 各有一份同值清单）；'custom' = 用户导入的图片
+// 挂件形象 id：随包内置形象的 id 即 public/whale/ 下的图片文件名（宿主 store.js 的 normSkin
+// 与设置页 App.vue 的 BUILTIN_SKINS 各有一份同值清单）；'custom' = 用户导入的图片。
+// 其余历史内置形象 id（LEGACY_BUILTIN_SKINS）已移出插件包、改为按需下载，但老配置里可能仍是
+// 这些值（下载回来之前挂件回退默认形象），故 normalize 时原样保留、不打回默认。
 export type SkinId =
+  | 'DSniang1'
   | 'liuy' | 'black' | 'ciya'
-  | 'DSniang1' | 'DSniang02' | 'DSniang3' | 'DSniang4' | 'DSniang5' | 'DSniang6' | 'DSniang7'
-  | 'glby' | 'Jian' | '无稽之谈改'
+  | 'DSniang02' | 'DSniang3' | 'DSniang4' | 'DSniang5' | 'DSniang6' | 'DSniang7'
+  | 'glby' | 'Jian' | 'wjztg'
   | 'custom'
 
 export interface WhaleConfig {
@@ -1104,12 +1107,81 @@ export interface SkinMeta {
 // 画廊里的一张：元信息 + 缩略图。缩略图缺失（老数据/生成失败）时小图回落到原图，大图为空串
 export interface SkinGalleryItem extends SkinMeta {
   thumb: string
+  // 由「内置形象按需下载」装进来的那张（lib/skin-packs.js）：不占 20 张导入配额，
+  // 设置页据此与用户自己导入的区分展示
+  builtin: boolean
 }
 
 export interface SkinGallery {
   // 挂件当前使用的那张的 id；画廊为空时为空串
   current: string
   items: SkinGalleryItem[]
+}
+
+// 可下载的内置形象（挂 Release，设置页形象区据此渲染「未装 / 已装」）
+export interface SkinPackItem {
+  id: string
+  size: number
+  installed: boolean
+}
+
+export interface SkinPackList {
+  ok: boolean
+  items: SkinPackItem[]
+  totalSize: number
+  installedCount: number
+}
+
+export interface SkinPackDownloadResult {
+  ok: boolean
+  // 本次真正落盘的 id（已装过的不在内）
+  installed?: string[]
+  // 已装过而跳过的 id、以及清单里对不上的文件名
+  skipped?: string[]
+  total?: number
+  // 逐张失败的原因（一张坏不连累整包）
+  errors?: string[]
+  error?: string
+}
+
+// 共享素材（角色图 36 张 / 音效库 45 个，上游 QQ 群素材，挂 Release 按需下）
+// 缩略图由设置页内嵌静态资源提供（resources/thumbs/<id>.webp），宿主清单里不带图
+export interface SharedSkinItem {
+  id: string
+  // 中文原名（仅展示；落盘 id 是打包时生成的 ASCII 短哈希）
+  name: string
+  size: number
+  installed: boolean
+}
+
+export interface SharedSoundItem {
+  id: string
+  name: string
+  ext: string
+  size: number
+  installed: boolean
+}
+
+export interface SharedPackList<T> {
+  ok: boolean
+  items: T[]
+  totalSize: number
+  installedCount: number
+}
+
+export type SharedSkinList = SharedPackList<SharedSkinItem>
+export type SharedSoundList = SharedPackList<SharedSoundItem>
+
+export interface SharedPackDownloadResult {
+  ok: boolean
+  // 本次真正落盘的项目（形象是 id，音效是 id）
+  installed?: string[]
+  // 已装过而跳过的项、以及清单里对不上的项
+  skipped?: string[]
+  total?: number
+  // 逐项失败的原因（一项坏不连累整包）
+  errors?: string[]
+  error?: string
 }
 
 export interface SkinImportResult {
@@ -1294,8 +1366,10 @@ export interface DshStatus {
   reinstall: boolean
   // 插件自己那份 dsh 的安装目录
   prefix: string
-  // 「查询可用版本」结果（list 按版本号升序，latest 为最后一个）
-  versions: { at: number; latest: string; list: string[] }
+  // 「查询可用版本」结果。list 是 npm 给的**发布顺序**（不可当版本序用，挑最大版本须逐项比较）；
+  // times = 版本 → 官方发布时间戳，版本先后一律按它判（dsh 会给旧分支补发版本号更低的补丁，
+  // semver 会把「后发的老版本号」判反）。老缓存可能没有 times，那时才退回 semver
+  versions: { at: number; latest: string; list: string[]; times?: Record<string, number> }
   // dsh 端口（默认 3080，可在设置页改）上的进程探测：external=别的终端启动的 dsh；portOther=非 dsh 进程名
   external: boolean
   externalPid: number
@@ -1691,6 +1765,24 @@ export interface WhaleServices {
   // 把某一张移到画廊最前（不改变当前使用的那张）
   pinSkin(id: string): { ok: boolean; error?: string }
   removeSkin(id: string): { ok: boolean; current?: string; left?: number; error?: string }
+  // —— 可选下载的内置形象（v1.7.x 起随包只留默认那张，其余挂 Release 按需下） ——
+  // 可下载清单 + 已装状态（缩略图与清单是设置页内嵌的静态资源，不走这条 IPC）
+  listSkinPacks(): SkinPackList
+  // 下载并安装整包（已装过的跳过写盘）；成功后宿主会把新形象推给挂件。
+  // prefix 是用户自填的加速前缀（'' = 只用内置候选链：默认 ghfast + 直连兜底）
+  downloadSkinPacks(prefix?: string): Promise<SkinPackDownloadResult>
+  // —— 共享素材（角色图 36 张 / 音效库 45 个，上游 QQ 群素材，挂 Release 按需下） ——
+  // 可下载清单 + 已装状态（缩略图是设置页内嵌静态资源 resources/thumbs，不走这条 IPC）
+  listSharedSkins(): SharedSkinList
+  listSharedSounds(): SharedSoundList
+  // 下载并安装整包共享角色（与内置形象同链路，装完推给挂件）
+  downloadSharedSkins(prefix?: string): Promise<SharedPackDownloadResult>
+  // 下载并安装整包音效库到 shared 槽位（素材池，不参与实播，故不推给挂件）
+  downloadSharedSounds(prefix?: string): Promise<SharedPackDownloadResult>
+  // 把共享库的一段「选用」到某个实播槽位（file 是共享库里那段的文件名）
+  useSharedSound(file: string, role: string): { ok: boolean; role?: string; name?: string; error?: string }
+  // 试听共享库里的一段：按名取一段 data URL（shared 槽位不在 getSoundData 里）
+  readSharedSoundData(name: string): { ok: boolean; url?: string; error?: string }
   // —— 自定义气泡图片（点鲸鱼随机显示一张；文件复制进 userData/whale-bubbles） ——
   // 列表：元信息 + 缩略图 data URL
   listBubbles(): BubbleList
@@ -1850,6 +1942,9 @@ export interface WhaleServices {
   dshOpenWeb(): string
   // 查询可用版本（结果在状态的 versions 字段里，稍后刷新状态可见）
   dshListVersions(): DshStatus
+  // 取「实装版本 → 目标版本」区间的更新说明（区间聚合，见 preload/lib/dsh-notes.js）。
+  // 结果不经返回值，而是随状态快照的 notes / notesBusy 字段异步回传
+  dshLoadNotes(force?: boolean): unknown
   // 清空内存日志
   dshClearLog(): DshStatus
   // 删除插件目录里的那份 dsh

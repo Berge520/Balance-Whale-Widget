@@ -111,6 +111,30 @@ function skinIdsFromArray(marker) {
     return ids.sort().join(',')
   }
 }
+// 可下载形象清单：宿主是 `[{ id: 'x', file: ..., sha256: ... }, ...]` 的对象数组，
+// 只抽 id 字段（sha256/体积这些不该跨文件比对），排序后逗号连接。
+function skinIdsFromPack(marker) {
+  return (src, file) => {
+    const body = jsLiteral(marker)(src, file)
+    const ids = [...body.matchAll(/\bid\s*:\s*['"]([^'"]+)['"]/g)].map((m) => m[1])
+    if (!ids.length) throw new Error(`${file} 里「${marker}」没解析出任何 id`)
+    return ids.sort().join(',')
+  }
+}
+
+// 共享角色清单：宿主是 `[{ id: 'sXxx...', name: '中文名', sha256: ... }, ...]`，
+// 设置页副本是 `[{ id, name }, ...]`。抽成 `id:name` 逐项排序连接 —— 只比 id 与展示名
+// （sha256 / 体积 / 文件扩展名不该跨文件比对，那些由宿主单侧说了算）。
+function sharedSkinIds(marker) {
+  return (src, file) => {
+    const body = jsLiteral(marker)(src, file)
+    // 逐项取 `id: '...'` 与同项紧随的 `name: '...'`
+    const items = [...body.matchAll(/id\s*:\s*['"]([^'"]+)['"][^}]*?name\s*:\s*['"]([^'"]*)['"]/g)]
+      .map((m) => m[1] + ':' + m[2])
+    if (!items.length) throw new Error(`${file} 里「${marker}」没解析出任何 id/name`)
+    return items.sort().join(',')
+  }
+}
 
 // 账本历史保留天数的**形态不同**：宿主是三个数字常量（HISTORY_KEEP_DEFAULT / _MIN / _MAX），
 // 设置页是一个对象（HISTORY_KEEP = { DEFAULT, MIN, MAX }）。两边都抽成「默认,下限,上限」再比对。
@@ -385,14 +409,35 @@ const CHECKS = [
       { file: APP_VUE, pick: jsNumber('const SNAP_RATIO_DEFAULT') },
     ],
   },
-  // 内置形象清单同样是三份（挂件页对象 / 宿主数组 / 设置页数组），加形象只改一处
-  // 会出现「设置页选得到、挂件不认」这类静默不一致。
+  // 随包内置形象清单（挂件页对象 / 宿主数组 / 设置页数组）三份同值。v1.7.x 起随包只留
+  // DEFAULT_SKIN 一张，所以这里实际只比对「一个 id」—— 但保留比对结构，将来再加随包形象时
+  // 仍能兜住「加一处忘另一处」。
   {
-    name: '内置形象清单 BUILTIN_SKINS',
+    name: '随包内置形象清单 BUILTIN_SKINS',
     parts: [
       { file: FLOATING_PAGE, pick: skinIdsFromObject('var BUILTIN_SKINS =') },
       { file: STORE, pick: skinIdsFromArray('const BUILTIN_SKINS =') },
       { file: APP_VUE, pick: skinIdsFromArray('const BUILTIN_SKINS =') },
+    ],
+  },
+  // 历史内置形象 id 全集（13 张原始清单）：宿主 store.js 用它做老用户兼容（normSkin 原样
+  // 保留已移出包的值），设置页用它把老配置里的值也算合法，避免升级后形象被打回默认。
+  // 两处同值，改一处忘另一处会出现「宿主认、设置页不认」的静默不一致。
+  {
+    name: '历史内置形象清单 LEGACY_BUILTIN_SKINS',
+    parts: [
+      { file: STORE, pick: skinIdsFromArray('const LEGACY_BUILTIN_SKINS =') },
+      { file: APP_VUE, pick: skinIdsFromArray('const LEGACY_BUILTIN_SKINS =') },
+    ],
+  },
+  // 可下载形象清单（v1.9.0 起精简为 1 张）：宿主 constants 的 SKIN_PACK_SKINS（对象数组，
+  // 含 sha256）与设置页的字面量副本（id 数组）同值。设置页那份决定资源页列出哪些可下载，
+  // 宿主那份决定下载后落到画廊的 id 校验，两边不一致会出现「设置页点了下载、宿主不认」。
+  {
+    name: '可下载形象清单 SKIN_PACK_SKINS',
+    parts: [
+      { file: CONSTANTS, pick: skinIdsFromPack('const SKIN_PACK_SKINS =') },
+      { file: APP_VUE, pick: skinIdsFromArray('const SKIN_PACK_SKINS =') },
     ],
   },
   {
@@ -506,18 +551,28 @@ const CHECKS = [
       { file: APP_VUE, pick: jsNumber('const QUOTE_GROUP_MAX') },
     ],
   },
+  // 共享角色清单（36 张）：宿主 constants.js 的 SHARED_SKIN_PACK_SKINS（对象数组，含 sha256）
+  // 与设置页字面量副本（`{ id, name }` 数组）同值。两边不一致会出现「设置页列了这张、宿主下不下来」
+  // 或「下载成功但设置页认不出是哪个已装」。
+  {
+    name: '共享角色清单 SHARED_SKIN_PACK_SKINS',
+    parts: [
+      { file: CONSTANTS, pick: sharedSkinIds('const SHARED_SKIN_PACK_SKINS =') },
+      { file: APP_VUE, pick: sharedSkinIds('const SHARED_SKIN_PACK_SKINS =') },
+    ],
+  },
 ]
 
 let bad = 0
 for (const c of CHECKS) {
   const vals = c.parts.map((p) => {
     try {
-      return { file: p.file, v: p.pick(read(p.file), p.file) }
+      return { file: p.file, v: p.pick(read(p.file), p.file), part: p }
     } catch (err) {
       // ⚠️ 读失败必须**独立计为坏**，不能混进下面那套「取值是否全等」的比较：
       //    两侧都读失败时错误串完全相同，`new Set(...).size === 1` 会把它判成「一致」，
       //    构建门禁就被绕过了（marker 写错 → 两处都抛同一条 → 静默放行）。
-      return { file: p.file, v: null, err: err.message }
+      return { file: p.file, v: null, err: err.message, part: p }
     }
   })
   const failed = vals.filter((x) => x.err)

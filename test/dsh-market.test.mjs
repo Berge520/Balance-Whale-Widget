@@ -887,6 +887,23 @@ test('loadCatalog：竞速 —— 快源内容坏掉时不算胜出，慢但合�
   assert.equal(r.plugins[0].name, 'good-mirror')
 })
 
+test('loadCatalog：镜像 tarball 非 gzip（宿主 undici 污染全局 fetch，上游 #742）→ 明确报错并标出 Node 版本', async () => {
+  clearCache()
+  const tarballUrl = MIRROR_REGISTRY + '/' + MIRROR_PKG + '/-/pkg.tgz'
+  // 污染后拿到的体「不是 gzip」：这里用明文 tar 冒充被剥离了 content-encoding 的情形
+  const plain = makeTar('package/plugins.json', catalogJson([raw()]))
+  const calls = []
+  const f = fakeFetch({
+    [MIRROR_REGISTRY + '/' + MIRROR_PKG + '/latest']: JSON.stringify({ dist: { tarball: tarballUrl } }),
+    [tarballUrl]: () => ({ ok: true, status: 200, arrayBuffer: async () => plain, headers: { get: () => '' } }),
+  }, calls)
+  const r = await loadCatalog({ fetchImpl: f })
+  assert.equal(r.ok, false)
+  // 关键：报错要能一眼区分「疑是宿主污染」而不是「镜像坏了」
+  assert.ok(r.error.indexOf('疑似宿主 undici 污染') >= 0, 'error 应标出 undici 嫌疑：' + r.error)
+  assert.ok(r.error.indexOf(process.version) >= 0, 'error 应带上 Node 版本便于定位：' + r.error)
+})
+
 test('loadCatalog：换 registry 后重新抓（缓存键含 registry，别拿上一家的目录冒充）', async () => {
   clearCache()
   const other = 'https://mirrors.cloud.tencent.com/npm'

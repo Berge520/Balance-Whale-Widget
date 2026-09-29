@@ -1,6 +1,6 @@
 <script lang="ts" setup>
 import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
-import type { AssetsApplyResult, AssetsExportResult, AssetsPreviewResult, BackupPreviewResult, BubbleMeta, CodexSummaryResult, CodexWindow, CodexWindows, DshBackupListResult, DshBackupSnapshot, DshDiagnoseFinding, DshDiagnoseItem, DshDiagnoseResult, DshDumpResult, DshExportPreviewResult, DshHostCompatCheckResult, DshHostCompatVerdict, DshIsolateCandidate, DshIsolateCandidatesResult, DshIsolatePlan, DshMarketCatalogResult, DshMarketInstallResult, DshMarketInstalledEntry, DshMarketPingEntry, DshMarketPlugin, DshMarketRegistryLatestEntry, DshMarketRegistryLatestResult, DshMarketStatusResult, DshMarketUninstallResult, DshMarketUpdateEntry, DshPatchItem, DshPatchListResult, DshUsageResult, LedgerDetailDay, LedgerDetailEntry, ModelUsageRow, SkinGallery, SkinMeta, SoundMeta, SoundRole, WhaleMailSecrets, WhaleModel, WhaleModelRow, WhaleModelTemplate, WhalePriceModel, WhaleServices, WhaleTokenPrice } from './types/services'
+import type { AssetsApplyResult, AssetsExportResult, AssetsPreviewResult, BackupPreviewResult, BubbleMeta, CodexSummaryResult, CodexWindow, CodexWindows, DshBackupListResult, DshBackupSnapshot, DshDiagnoseFinding, DshDiagnoseItem, DshDiagnoseResult, DshDumpResult, DshExportPreviewResult, DshHostCompatCheckResult, DshHostCompatVerdict, DshIsolateCandidate, DshIsolateCandidatesResult, DshIsolatePlan, DshMarketCatalogResult, DshMarketInstallResult, DshMarketInstalledEntry, DshMarketPingEntry, DshMarketPlugin, DshMarketRegistryLatestEntry, DshMarketRegistryLatestResult, DshMarketStatusResult, DshMarketUninstallResult, DshMarketUpdateEntry, DshPatchItem, DshPatchListResult, DshUsageResult, LedgerDetailDay, LedgerDetailEntry, ModelUsageRow, SharedSkinList, SharedSoundItem, SharedSoundList, SkinGallery, SkinMeta, SkinPackList, SoundMeta, SoundRole, WhaleMailSecrets, WhaleModel, WhaleModelRow, WhaleModelTemplate, WhalePriceModel, WhaleServices, WhaleTokenPrice } from './types/services'
 import SkinCropper from './components/SkinCropper.vue'
 import SoundTrimmer from './components/SoundTrimmer.vue'
 import FirstRunGuide from './components/FirstRunGuide.vue'
@@ -26,14 +26,86 @@ const PRICE_MODEL_MAX = 20
 // （下限 35 是为了「本月汇总」在 31 号能回溯到 1 号）
 const HISTORY_KEEP = { DEFAULT: 365, MIN: 35, MAX: 730 }
 
-// 内置形象 id（= public/whale/ 下的图片文件名），数组顺序即「形象」下拉的顺序。
+// 随包内置形象 id（= public/whale/ 下的图片文件名），数组顺序即「形象」下拉的顺序。
 // 也是同值副本：宿主 store.js 的 BUILTIN_SKINS 与挂件页面 floating-page.js 的 BUILTIN_SKINS
 // 各有一份（设置页拿不到 preload 常量），加形象要三处一起改。
-const BUILTIN_SKINS = [
-  'liuy', 'black', 'ciya', 'DSniang1', 'DSniang02', 'DSniang3', 'DSniang4',
-  'DSniang5', 'DSniang6', 'DSniang7', 'glby', 'Jian', '无稽之谈改',
-]
+// v1.7.x 起只留默认那张随包 —— 其余移出插件包、挂 Release 按需下载（见下方
+// SKIN_PACK_SKINS），把插件包从约 2.7MB 压到约 1.7MB。
+const BUILTIN_SKINS = ['DSniang1']
 const DEFAULT_SKIN = 'DSniang1'
+
+// 历史上曾是内置形象、现已移出插件包的 id（同值副本：宿主 store.js 的 LEGACY_BUILTIN_SKINS，
+// 由 scripts/check-shared.mjs 比对）。留着是为了「不打回默认」——老用户配置里存的是这些 id，
+// 下载回来之前挂件找不到文件会回退默认形象显示，但配置值本身要原样保留，
+// 否则用户一下载就发现「我选的形象被改了」。
+// 头一项从 BUILTIN_SKINS 展开、不重复写死（宿主那份同款写法），check-shared 两边都按展开后比对。
+const LEGACY_BUILTIN_SKINS = [
+  ...BUILTIN_SKINS,
+  'liuy', 'black', 'ciya', 'DSniang02', 'DSniang3', 'DSniang4',
+  'DSniang5', 'DSniang6', 'DSniang7', 'glby', 'Jian', 'wjztg',
+]
+
+// 可下载的内置形象（同值副本：宿主 lib/constants.js 的 SKIN_PACK_SKINS，由 check-shared.mjs
+// 比对 id 清单；size 供界面显示「共约 x MB」，缩略图是下面 THUMB_* 内嵌的静态资源）。
+// v1.9.0 起从 12 张精简为 1 张：其余 11 张与「共享角色包」是同图重复（那批本是用户从 QQ 群
+// 挑一部分转 webp 单独打包，原图同时也在共享角色包里整包分发），一律改由共享角色包提供。
+const SKIN_PACK_SKINS = [
+  { id: 'DSniang02', size: 74578 },
+]
+
+// 共享角色（36 张，上游 QQ 群素材，挂 Release 按需下）。与宿主 lib/constants.js 的
+// SHARED_SKIN_PACK_SKINS 同值（scripts/check-shared.mjs 逐项比对 id 与展示名）——
+// 这里只留展示要用的 id/name，sha256 与体积由宿主那侧说了算。
+// 落盘 id 是打包时生成的 ASCII 短哈希（如 s34330e4aba），中文原名只作展示。
+// 缩略图随插件包分发，路径 './resources/thumbs/<id>.webp'（见 vite.config.js 的
+// copyResourcesExceptSkip：只拷 thumbs/，两个 .whaleassets 大件留给 Release）。
+// 不写 TS 类型标注：check-shared.mjs 用「声明名 + 等号」这个 marker 定位数组字面量
+// （jsLiteral 找 marker 之后的第一个 [/{），加了 `: Array<{...}>` 会让它命中类型里的
+// `{`，抽不出清单、整条比对静默跳过——那等于闸门失效。也正因如此，注释里不要出现
+// 完整的声明语句，否则 indexOf 会先命中注释、同样抽错。
+const SHARED_SKIN_PACK_SKINS = [
+  { id: 'Q1', name: 'Q版小鲸鱼(配色1)' },
+  { id: 'Q2', name: 'Q版小鲸鱼(配色2)' },
+  { id: 'Q3', name: 'Q版小鲸鱼(配色3)' },
+  { id: 's00f8c08fa9', name: '原版小鲸鱼(黑配色)' },
+  { id: 's070d47c13b', name: '凯伊' },
+  { id: 's16f0b0311b', name: '远坂凛' },
+  { id: 's1a94068ae6', name: '亚丝娜' },
+  { id: 's1cba53fc36', name: '优香' },
+  { id: 's1e815bca0e', name: '春日野穹' },
+  { id: 's34330e4aba', name: '钟离' },
+  { id: 's34d8444337', name: '哥伦比亚' },
+  { id: 's3fd9cc08f5', name: '诺亚' },
+  { id: 's4db0fec6c4', name: '可露希尔' },
+  { id: 's52b8efd026', name: '旅行者荧' },
+  { id: 's52bf39e5af', name: '未解锁小鲸鱼' },
+  { id: 's52fa3a3e51', name: '小鲸鱼(异色)' },
+  { id: 's5df9934040', name: '莉音' },
+  { id: 's68c065ada9', name: '原版小鲸鱼(呲牙)' },
+  { id: 's68d2d6025c', name: '薇薇安' },
+  { id: 's7303c1b0d5', name: '胡桃' },
+  { id: 's74c705e8db', name: '曼波' },
+  { id: 's762accf9cc', name: '阿篱（戈薇）' },
+  { id: 's78bbaca4aa', name: '绪山真寻-无稽之谈' },
+  { id: 's7c4c1631fb', name: '席德' },
+  { id: 's80ac059dc2', name: '瓦雷莎' },
+  { id: 's8995615309', name: '派蒙' },
+  { id: 's8a23dfae26', name: '洛琪希' },
+  { id: 's8ecaf6b8b0', name: '两仪式' },
+  { id: 's98f716c60d', name: '三月七（照相机）' },
+  { id: 'sbdd0f63848', name: '三月七（啥子）' },
+  { id: 'sc0d50309e4', name: '原版小鲸鱼(表情)' },
+  { id: 'scb3c3b976a', name: '芙宁娜' },
+  { id: 'sd577294ef9', name: '睦子米' },
+  { id: 'se981cc7b13', name: '鼠鼠-简' },
+  { id: 'seacc9959c4', name: '原版小鲸鱼' },
+  { id: 'sf16b3b9610', name: '流萤' },
+]
+
+// 形象下载源前缀长度上限（同值副本：宿主 lib/constants.js 的 SKIN_PACK_PREFIX_MAX，
+// 只用于输入框 maxlength 提示；归一化与拒绝逻辑在宿主 store.js#normSkinPackPrefix，
+// 未经 check-shared 比对，改任一处需两处同改）
+const SKIN_PACK_PREFIX_MAX = 200
 
 // 避让滚动条的默认留白像素，同宿主 store.js 的 SCROLL_GAP_DEFAULT（同值副本，
 // 由 scripts/check-shared.mjs 比对）
@@ -80,6 +152,83 @@ const TABS = [
 type TabKey = (typeof TABS)[number]['key']
 const activeTab = ref<TabKey>('look')
 const activeTabDesc = computed(() => TABS.find((t) => t.key === activeTab.value)?.desc || '')
+
+// —— 卡片搜索（跨 Tab 找卡片）——
+// 痛点：卡片按主题分了 7 组、共 20 余张，还大量用 .fold 折叠；找一项要「先猜在哪组、再翻折叠」。
+// 这里只做「卡片级」检索：命中哪张卡就跨 Tab 把这张卡单独渲染出来，不定位卡内控件（控件太多无稳定文本）。
+// 索引来源是**卡片可见文本**：每张卡在模板上挂 data-search（标题 + 同义词 + 栏目名），
+// 搜的是这份索引而不是实时 DOM —— 因为卡片是 v-if 渲染的，未激活的 Tab 根本没进 DOM，抓不到文本；
+// 且折叠区默认收起、DOM 里也读不到里面的字。索引与模板同处一文件，改卡片时顺手改这行，不会漂移。
+const searchQuery = ref('')
+const searchActive = computed(() => searchQuery.value.trim().length > 0)
+// 归一化：去空白、英文小写，让「API Key」「api key」「apikey」等价
+function normSearch(s: string) {
+  return s.toLowerCase().replace(/\s+/g, '')
+}
+// 卡片索引：key 与模板上的 data-search 一一对应。额外收一批「同义词 / 别称 / 英文名」——
+// 用户不一定记得界面上的措辞（如搜「穿透」得能命中「挂件窗口」，搜「token」得能命中「DeepSeek 凭据」）。
+const SEARCH_INDEX: Record<string, { label: string; tab: TabKey; keys: string }> = {
+  credentials: { label: 'DeepSeek 凭据（API Key / 平台 Token）', tab: 'data', keys: 'apikey api key 密钥 token 令牌 凭据 授权' },
+  look: { label: '挂件外观', tab: 'look', keys: '形象 皮肤 音色 音效 大小 缩放 气泡 主题 报时 点按 播放' },
+  assetsOverview: { label: '资源概览', tab: 'assets', keys: '素材 占用 体积 清除 未使用 素材包 导出 导入 备份' },
+  assetsSkins: { label: '导入的形象', tab: 'assets', keys: '形象 皮肤 图片 缩略图 置顶 删除 导入' },
+  assetsBubbles: { label: '导入的气泡图', tab: 'assets', keys: '气泡 图 动图 gif 图片 导入 删除' },
+  assetsSounds: { label: '导入的音效', tab: 'assets', keys: '音效 声音 按压 释放 提醒音 试听 导入 删除' },
+  assetsBuiltin: { label: '内置资源', tab: 'assets', keys: '内置 形象 音色 对照 预览' },
+  quotes: { label: '文案', tab: 'look', keys: '台词 文案 台词库 提醒文案 随机 权重 报时 动图' },
+  usage: { label: '用量与账本', tab: 'usage', keys: '用量 趋势 账本 历史 区间 导出 csv 导入 校准 额度 单价 模型占比 明细' },
+  notify: { label: '提醒与通知', tab: 'usage', keys: '提醒 通知 系统通知 邮件 smtp 预算 低余额 波动 免打扰 计时 倒计时 休息' },
+  models: { label: '模型与余额', tab: 'usage', keys: '模型 余额 提供商 厂商 刷新 api key 额度 主显示' },
+  window: { label: '挂件窗口', tab: 'window', keys: '窗口 显隐 位置 复位 透明度 穿透 吸附 翻转 避让 任务栏 间距' },
+  help: { label: '使用帮助', tab: 'help', keys: '帮助 快捷键 使用说明 故障排查 日志 新手引导' },
+  privacy: { label: '数据与隐私', tab: 'data', keys: '清除 数据 隐私 备份 恢复 重置' },
+  dshMain: { label: 'DeepSeek Harness（dsh）', tab: 'dev', keys: 'dsh harness 启动 重启 结束 更新 版本 端口 注册源 node 日志' },
+  dshDiagnose: { label: 'dsh 环境诊断', tab: 'dev', keys: 'dsh 诊断 环境 检查 排障 patch 冲突 端口占用' },
+  dshDump: { label: 'dsh 配置转储', tab: 'dev', keys: 'dsh 配置 转储 dump 分层 默认树 差异' },
+  dshExport: { label: 'dsh 全量导出', tab: 'dev', keys: 'dsh 导出 zip 打包 全量 备份' },
+  dshUsage: { label: 'dsh 用量统计', tab: 'dev', keys: 'dsh 用量 统计 token 趋势' },
+  dshIsolate: { label: 'dsh 插件开关', tab: 'dev', keys: 'dsh 插件 开关 隔离 patch 启用 禁用' },
+  dshMarket: { label: 'dsh 插件市场', tab: 'dev', keys: 'dsh 市场 插件 安装 卸载 更新 目录' },
+  codex: { label: 'Codex 会话统计', tab: 'dev', keys: 'codex 会话 统计 token 用量 日志' },
+  about: { label: '关于与更新', tab: 'help', keys: '关于 更新 版本 反馈 好评 市场' },
+  ghAccel: { label: 'GitHub 加速', tab: 'help', keys: 'github 加速 hosts 直连 ip 刷新 源 冲突 证书' },
+}
+// 命中卡片的 key 列表（按 SEARCH_INDEX 声明顺序，与模板中的卡片顺序不同也没关系，
+// 因为搜索结果里每张卡自带栏目名，用户看得到它属于哪一组）
+const searchHits = computed(() => {
+  const q = normSearch(searchQuery.value)
+  if (!q) return []
+  return Object.keys(SEARCH_INDEX).filter((k) => {
+    const it = SEARCH_INDEX[k]
+    return normSearch(it.label + it.keys).includes(q)
+  })
+})
+// 某张卡是否应该在当前搜索态下渲染：搜索中 → 只有命中的卡渲染（跨 Tab）；非搜索态 → 沿用原 Tab 判定
+function cardOn(tab: TabKey, key: string) {
+  if (searchActive.value) return searchHits.value.includes(key)
+  return activeTab.value === tab
+}
+// 卡片在搜索结果里的来源标签（如「用量」），用于告诉用户这张卡本来在哪一组
+function cardTabLabel(key: string) {
+  const t = SEARCH_INDEX[key]?.tab
+  return TABS.find((x) => x.key === t)?.label || ''
+}
+// 清空搜索：回到正常 Tab 视图。点 Tab 标签时也走它 —— 搜索态下点某个分组 = 「我不搜了，去看这一组」
+function clearSearch() {
+  searchQuery.value = ''
+}
+// 点命中标签 → 滚到那张卡。卡片在搜索结果里按 SEARCH_INDEX 顺序渲染，标签与之同序，
+// 故直接按 key 找模板上的 data-search（跨 Tab 渲染出的卡都在 DOM 里，能选到）。
+// 滚动用 scrollIntoView({block:'start'}) 把卡顶到视口顶部；吸顶的 .tab-bar 会挡住卡头，
+// 故用 scroll-margin-top 预留出它的高度（见 .card 样式），不必在这里手算偏移。
+function scrollToCard(key: string) {
+  const el = document.querySelector(`[data-search="${key}"]`)
+  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+}
+// 平台判定：仅用于 dev Tab 里那几处 Windows 专属文案（Hyper-V 端口段 / UAC 提权）。
+// 宿主 preload 不往页面透传平台，uTools 在渲染进程直接可用（本文件已有 utools.dbStorage 用法）。
+// 取不到时按非 Windows 处理：这些文案只在 Windows 才成立，宁可不显示也不误导。
+const IS_WIN = (() => { try { return utools.isWindows() } catch (err) { return false } })()
 // 统一的消息态：msg=文案、err=是否错误态；模板用 msgCls(f) 生成 class（合并原先 11 组 msg/err ref）
 type Flash = { msg: string; err: boolean }
 function useFlash(): Flash { return reactive({ msg: '', err: false }) }
@@ -216,6 +365,9 @@ const cfg = reactive({
   // IP 获取来源开关 + 两段优先级顺序：sources = 社区源表内部顺序，order = 来源层候选链顺序。
   // 与宿主 normGhAccelSrc 同结构；默认全 true + 两段空数组 = 宿主默认候选链，与升级前行为一致
   ghAccelSrc: { doh: true, community: true, manual: true, sources: [] as string[], order: [] as string[] },
+  // 形象素材包下载源：用户自填的加速前缀（如 'https://ghfast.top/'），空 = 只用内置候选链
+  // （默认 ghfast.top → 直连 github.com 兜底）。与 ghAccelSrc 无关，只作用于「按需下载形象」
+  skinPackSrc: '',
   // 通知渠道：系统通知（默认开）+ 邮件通知（默认关，需先配 SMTP）。
   // 邮件的收发件人/显示名/主题前缀属于「配置」进这里；服务器、账号、授权码属于凭据，走 mail 表单
   notifySystemOn: true,
@@ -269,7 +421,11 @@ const dsh = reactive({
   nodeDir: '', nodeVersion: '', nodeAuto: true, found: true,
   error: '', lastCmd: '', log: '',
   registry: '', version: '', resolved: '', hasUpdate: false, runVersion: '', needsRestart: false, reinstall: false, prefix: '', source: '', globalVersion: '', globalDir: '', globalWritable: true,
-  versions: { at: 0, latest: '', list: [] as string[] },
+  versions: { at: 0, latest: '', list: [] as string[], times: {} as Record<string, number> },
+  // 版本说明（所选版本那一版、或「实装 → 所选」区间的 release notes 聚合，见 dsh-notes.js）。
+  // 宿主回 null = 还没取 / 没有可看的区间，界面据此整块不渲染
+  notes: null as any,
+  notesBusy: false,
   external: false, externalPid: 0, externalName: '', externalRunPort: 0, portOther: '', webUrl: '', installed: '',
 })
 const dshFlash: Flash = useFlash()
@@ -303,7 +459,7 @@ const dshAsync = { active: false, token: 0, wasBusy: false, idleTicks: 0, action
 // 折叠区（默认收起，卡片更短）。
 // 主控卡里的实际顺序：运行详情 / dsh 故障排查 / 高级选项 / 使用说明 —— 运行详情与排查提到最前，
 // 它们是「出问题时才看」的，排在卡尾等于出事时滚不到；高级选项与使用说明是配置与说明，靠后无妨。
-const dshFolds = reactive({ advanced: false, help: false, trouble: false, versions: false })
+const dshFolds = reactive({ advanced: false, help: false, trouble: false, versions: false, notes: false })
 // 折叠「dsh 故障排查」时清掉二段确认态：dshConfirm 是单值且不随折叠重置，
 // 用户点出「确认删除插件目录的 dsh？」后若收起该块再展开，按钮仍停在确认态，容易误点第二次直接执行。
 function dshToggleTrouble() {
@@ -325,6 +481,28 @@ function dshToggleVersions() {
   // 查过但缓存里那份列表为空（上游下架等），也认作查过 —— 要重查由用户点「重试」
   if (dshFolds.versions && !dshHasVersions.value && !dshVersionsQueried.value && !dshQueryFailed.value) dshQueryVersions()
 }
+// 展开「版本说明」时按需取一次 —— **取数只由这里发起**（宿主在 listVersions 结束时不再顺手捞，
+// 版本变化也不再自动重取，见下方对应注释）。三条触发条件：
+//  · 没取过（dsh.notes 为空）
+//  · 上次失败过（ok === false）：否则用户展开只会一直看到那条失败提示，没有自愈路径
+//  · 手上那份过期了（!dshNotesFresh()）：版本换过、说明还是旧的 —— 必须重取，
+//    否则会拿「上一段区间」的结论冒充当前这一段
+function dshToggleNotes() {
+  dshFolds.notes = !dshFolds.notes
+  if (!dshFolds.notes) return
+  const failed = !!(dsh.notes && dsh.notes.ok === false)
+  const stale = !!(dsh.notes && !dshNotesFresh())
+  if (!dsh.notesBusy && (!dsh.notes || failed || stale)) dshLoadNotes(failed || stale)
+}
+// 取说明：结果由轮询经快照的 notes / notesBusy 字段异步回传，这里不自己存结果。
+// 调用本身失败（IPC 通道缺失等）用 dshFlash 提示 —— 设置页没有写宿主日志的通道，
+// 页面侧的异常一律走这条既有的提示位，不吞掉也不自造第二个错误态
+function dshLoadNotes(force?: boolean) {
+  try { services.dshLoadNotes?.(force === true) } catch (err: any) {
+    dshFlash.err = true
+    dshFlash.msg = '取版本说明失败：' + String(err?.message || err)
+  }
+}
 const dshConfirm = ref('') // '' | 'remove-plugin' | 'clean-npx' | 'clear-log'
 const dshNow = ref(Date.now()) // 未就绪时的「已等待 x 秒」
 let dshTickTimer = 0
@@ -338,9 +516,9 @@ function dshTickSync(running: boolean, ready: boolean) {
 // 「装最新（含测试版）」的哨兵版本号，与宿主 constants.js 的 NEWEST_VERSION 必须一致
 // （设置页不能 require 宿主模块，只能各持一份；改一处要同步，check-shared 会校验）。
 const NEWEST_VERSION = 'newest'
-// 版本号比较：数字段逐位比，数字段 > 字母段，与宿主 isNewer 同一套口径
+// 版本号比较（semver 兜底）：数字段逐位比，数字段 > 字母段，与宿主 isNewer 同一套口径
 // （同上，这里也是副本，改一处务必同步另一处）。
-function dshVerNewer(a: string, b: string) {
+function dshVerSemver(a: string, b: string) {
   const pa = String(a || '').split(/[.\-+]/), pb = String(b || '').split(/[.\-+]/)
   for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
     const x = pa[i], y = pb[i]
@@ -354,34 +532,77 @@ function dshVerNewer(a: string, b: string) {
   }
   return false
 }
+// 「a 是否比 b 更新」——必须与宿主的 newerByTime **逐字镜像**：优先按 **npm 发布时间**（times），
+// 时间拿不到才退回 semver。这里是副本（设置页不能 require 宿主模块），改一处务必同步另一处。
+//
+// 为什么不能只按 semver：dsh 官方不按 semver 递增发布，会给旧分支补发版本号更低的补丁
+// （实测 0.1.5-rc.3 发布于 0.1.6-alpha.2 **之后**）。若这里按 semver 挑「最新（含测试版）」，
+// 会挑出号更大但发布更早的那版，与宿主 maxVersion 算出的目标版本对不上 —— 而 dshNotesResolved
+// 又拿本函数算「所选是否比实装新」去拼新鲜度键，一旦判反，键与宿主对不上 → 版本说明永远卡在
+// 「正在获取说明…」（判据问题，重取多少次都没用）。宿主那边退回 semver 的兜底也照搬，保持对称。
+function dshVerNewer(a: string, b: string) {
+  const x = String(a || '').trim(), y = String(b || '').trim()
+  if (!x) return false
+  if (!y) return true
+  const t = (dsh.versions && dsh.versions.times) || null
+  const tx = t && t[x], ty = t && t[y]
+  if (tx && ty) return tx > ty
+  if (tx && !ty) return true
+  if (!tx && ty) return false
+  return dshVerSemver(x, y)
+}
 // 当前配置下「更新」会装到哪个版本：'' = latest 标签，'newest' = 版本列表里最高（含测试版），
 // 其余为固定版本号。与宿主 installVersion 的口径保持一致。
 const dshTargetVersion = computed(() => {
   if (cfg.dshVersion === NEWEST_VERSION) {
     const list = (dsh.versions && dsh.versions.list) || []
-    // 列表是 npm 的发布顺序而非版本序，所以要按版本号比较取最大值，不能取末位
+    // 列表是 npm 的发布顺序而非版本序，所以要逐项比较取「最新」的那版，不能取末位。
+    // dshVerNewer 走宿主同一套口径（优先按 times 发布时间），这里自动跟着对
     let best = ''
     for (const v of list) if (!best || dshVerNewer(v, best)) best = v
     return best
   }
   return cfg.dshVersion || ((dsh.versions && dsh.versions.latest) || '')
 })
-const dshLatestTip = computed(() => {
-  if (!dsh.hasUpdate) return ''
-  return '有新版本 ' + dshTargetVersion.value + '，点「更新」'
+// 「实际使用」那一栏的版本说法。口径与 dshHasUpdateTip 完全一致（实装 vs npm latest），
+// dshHasUpdateTip 已经带上了具体版本号，这里直接复用，不再自己去算目标版本 —— 
+// 之前这里取的是 dshTargetVersion（用户手选的版本），实装 0.1.7-alpha.2 且也选了它时
+// 会写成「0.1.7-alpha.2（有新版本：0.1.7-alpha.2）」，版本号原地重复两遍。
+// 实装版本（取到哪一份在用）：宿主 resolved 优先全局，再退插件目录那份
+const dshCurVer = computed(() => dsh.resolved || dsh.installed || '')
+const dshCurText = computed(() => {
+  const cur = dshCurVer.value
+  if (!dshHasVersions.value) return dshStateText.value // 没查到版本，回落「查询中 / 查询失败 / 未运行…」
+  if (!cur) return '未安装'
+  return cur + '（' + dshHasUpdateTip.value + '）'
 })
+// 更新状态句：「已是最新 / 有新版本 x.y.z」。
+// 全卡**只有这一处**报「有没有新版」：状态行标签与「实际使用」行都取它 ——
+// 先前三处各说一遍（状态行标签、按钮「有新版」、实际使用行），版本号口径还不一样，读出来全是矛盾。
+// 判据是宿主给的 dsh.hasUpdate，它比的是**实装版本 vs npm latest**；这里显示的版本号也必须取
+// **同一个值**（dsh.versions.latest），不能取 dshTargetVersion —— 后者会优先返回用户在下拉里手选的
+// 版本，实装 0.1.7-alpha.2 且恰好也选了它时，就会写出「有新版本 0.1.7-alpha.2」，
+// 和同一屏的「npm latest 0.1.7-rc.2」打脸（用户报的就是这个）。
+// 下拉选哪个版本只决定「更新时装成哪一版」，不该改写「npm 上有没有新版」这个事实。
+const dshHasUpdateTip = computed(() => {
+  if (!dshHasVersions.value) return ''
+  const latest = (dsh.versions && dsh.versions.latest) || ''
+  return dsh.hasUpdate ? '有新版本' + (latest ? ' ' + latest : '') : '已是最新'
+})
+// 未安装时不能断言「有新版本」：没有可比对的基准，只说「npm 上有哪些版本」
+const dshLatestLabel = computed(() => (dshCurVer.value ? dshHasUpdateTip.value : '可安装'))
 // 「实际使用」与「更新会装到的版本」是否一致。
-// 注意这是**另一个维度**、不是「谁更新」：手动装过 alpha / 指定过版本时，
-// 目标版本可能比在用的旧（如目标 1.5.0-rc.2 而实际 1.6.0-alpha.2），
-// 此时按 semver「没有更新」（状态行的 dshLatestTip 不会出现），但点「更新」仍会把你**替换**成目标版本。
-// 这句提示专门补这个盲区，避免用户以为「没提示就是已是最新」。
+// 注意这是**另一个维度**、与上半句的「谁更新」互不覆盖：
+//  · dshHasUpdateTip 说的是「npm latest 比在用的新」（客观事实，只看 latest）；
+//  · 这句说的是「你选的版本和实际在用的不一致，点更新会把你替换掉」（看的是下拉所选值）。
+// 两者可以同时成立（选了更老的一版，而 npm latest 又比在用的新）—— 那时上半句报「有新版本」，
+// 这句补一句「点了会被替换成 X」，否则用户按提示点了更新，装回来的却是自己没预期的老版本。
 const dshVerMismatch = computed(() => {
-  if (dsh.hasUpdate) return '' // 升级情形已由状态行的 dshLatestTip 覆盖，不重复
-  const latest = dshTargetVersion.value
-  if (!latest) return ''
-  const cur = dsh.resolved || dsh.installed || ''
-  if (!cur || latest === cur) return ''
-  return '当前 ' + cur + ' 与所选版本（' + latest + '）不同，点「更新」会替换为 ' + latest
+  const tgt = dshTargetVersion.value
+  if (!tgt) return ''
+  const cur = dshCurVer.value
+  if (!cur || tgt === cur) return ''
+  return '当前 ' + cur + ' 与所选版本（' + tgt + '）不同，点「更新」会替换为 ' + tgt
 })
 function dshApply(s: any) {
   if (!s || typeof s !== 'object') return
@@ -418,7 +639,11 @@ function dshApply(s: any) {
   dsh.globalVersion = s.globalVersion || ''
   dsh.globalDir = s.globalDir || ''
   dsh.globalWritable = s.globalWritable !== false
-  dsh.versions = s.versions && typeof s.versions === 'object' ? s.versions : { at: 0, latest: '', list: [] }
+  // 兜底对象也带上 times：老宿主快照没有它时，dshVerNewer 靠它为空退回 semver（不能留 undefined）
+  dsh.versions = s.versions && typeof s.versions === 'object' ? s.versions : { at: 0, latest: '', list: [], times: {} }
+  // 版本说明：宿主给 null / 非对象时一律归 null（模板按 null 判定整块不渲染，不必再防一层）
+  dsh.notes = s.notes && typeof s.notes === 'object' ? s.notes : null
+  dsh.notesBusy = s.notesBusy === true
   // 版本查询结论随快照带回：白名单过滤，避免宿主 / 未来字段把 dshVersionsCode 写成别的值
   const vc = s.versionsCode
   dshVersionsCode.value = vc === 'hit' || vc === 'empty' ? vc : ''
@@ -885,19 +1110,20 @@ const dshVersionOptions = computed(() => {
     if (!marks[v]) marks[v] = []
     if (!marks[v].includes(m)) marks[v].push(m)
   }
+  // 下拉里**只标「已安装」**，不标「已选」：
+  //  · 「已选」是 select 自身的勾选态，浏览器原生就显示（选中项就是它），再拼一遍纯属重复；
+  //    原先顶端还跟着一条「0.0.1-rc.1（已选）」+ 旁边按钮挂「有新版」，
+  //    用户读到的是「已选 0.0.1-rc.1 + 有新版」—— 与「npm latest 0.1.7-rc.2」互相打脸。
+  //  · 「已安装」则必须标：下拉默认只显示所选值，不展开就看不到实装的是哪一版，
+  //    而「已安装」正是判断要不要更新的基准，比勾选态重要得多。
+  // 顶部两条固定项（自动 / 最新）的哨兵值同理：选中态交给 select，不再往 label 里拼「（已选）」。
   // 「已安装」要标在**实际在用**的那份上（resolved 优先全局，见宿主 snapshot）
   if (dsh.resolved) addMark(dsh.resolved, dsh.source === 'global' ? '全局已安装' : '插件目录已安装')
-  // 哨兵值不是真实版本号，不能拿去 addMark：那会在下面多推出一条 value='newest' 的选项，
-  // 与固定写的那条「最新（含测试版…）」重复。它的「已选」改由选项的 label 自己拼。
-  if (cfg.dshVersion && cfg.dshVersion !== NEWEST_VERSION) addMark(cfg.dshVersion, '已选')
   if (latest) addMark(latest, 'latest 标签')
 
   const out: Array<{ v: string; label: string }> = [
     { v: '', label: '自动（安装/更新时取 latest）' },
-    {
-      v: NEWEST_VERSION,
-      label: '最新（含测试版，取列表中最高版本）' + (cfg.dshVersion === NEWEST_VERSION ? '（已选）' : ''),
-    },
+    { v: NEWEST_VERSION, label: '最新（含测试版，取列表中最高版本）' },
   ]
   const seen: Record<string, boolean> = { '': true }
   seen[NEWEST_VERSION] = true
@@ -935,7 +1161,107 @@ const dshLatestText = computed(() => {
   if (dshHasVersions.value) return (dsh.versions && dsh.versions.latest) || ''
   return dshQueryFailed.value ? '查询失败' : '未查询'
 })
-// 轮询是异步的，等结果期间先挂个「正在查询」。
+// 版本说明。三种呈现：
+//  · 有内容（区间聚合、或单版本自己那一版）→ 折叠行 + 展开的清单；
+//  · 已是最新（empty）→ 一行纯文案，明确告诉用户「查过了，没有新版本」；
+//  · 还没取到（notes 为 null）→ **仍给折叠行**（右侧显示「展开」），点开才去取。
+// 最后这一档是必需的，不是可选：说明结果要联网才有，而入口若也等结果才渲染，
+// 就形成「要有结果才给入口、要有入口才有结果」的死锁 —— 用户永远点不到，
+// 只会看到这一块凭空消失。界面显示得比取数慢一拍没关系，不能连入口都没有。
+// 失败（ok:false）落在「已取到答案但没成功」：同样保留折叠行，展开后由宿主提示失败原因。
+const dshNotes = computed(() => dsh.notes)
+const dshNotesOk = computed(() => !!(dshNotes.value && dshNotes.value.ok))
+// 「有可展开的区间」：empty 为假 + sections 有长度（版本是否新鲜由 dshNotesFresh 统一把关，见下）
+const dshNotesFilled = computed(() => !!(dshNotesOk.value && !dshNotes.value.empty && Array.isArray(dshNotes.value.sections) && dshNotes.value.sections.length))
+const dshHasNotes = computed(() => dshNotesFilled.value && dshNotesFresh())
+// 「版本说明」折叠行的摘要。两种模式各有各的说法 —— 说「跨 N 个版本」还是「这一版」，
+// 取决于说明到底覆盖了几个版本；用户在两种模式下看到的必须是能对上的描述。
+// 单版本模式只有 1 个版本，此时还写「跨 1 个版本」会很别扭（听着像升级跨度），改说「这一版」
+const dshNotesSummary = computed(() => {
+  const n = dshNotes.value
+  if (!n || !dshNotesOk.value || !dshNotesFresh()) return ''
+  if (n.empty) return ''
+  const ver = Array.isArray(n.versions) ? n.versions.length : 0
+  const head = ver > 1 ? '实装 → 最新跨 ' + ver + ' 个版本' : '所选版本 ' + ((n.versions && n.versions[0]) || '')
+  return head + ' · 共 ' + (n.total || 0) + ' 条'
+})
+// 实装版本 —— **必须与宿主取说明时用的那一份同源**（dsh.js 的 loadNotes 用 activeDsh().version）。
+// 只有一处：宿主广播的 `resolved`（= activeDsh().version，全局优先）。
+// 先前这里写的是 `dsh.source === 'global' && dsh.globalVersion ? dsh.globalVersion : dsh.installed || dsh.globalVersion`，
+// 看着等价，实则走的是**另一个字段**：`dsh.installed` 是 installedVersion() 读「插件目录」那份，
+// **不含全局安装**。全局装 dsh 的用户（正是最常见的情形）于是两边拿的不是同一个版本 ——
+// 用户实测：全局 0.1.7-alpha.2、选 0.1.7-rc.1，宿主按 alpha.2 判出「区间模式」，
+// 这里按插件目录那份判成「单版本模式」，两个 resolvedTarget 对不上 → dshNotesFresh 恒 false
+// → 永远停在「正在获取说明…」。注意 rc.2 恰好两种口径都落区间模式、把差异掩盖了，
+// 所以这个 bug 只在「选一个比实装新的中间版本」时才现形。
+// 空值链保留 globalVersion 兜底：resolved 尚未广播（首帧 / 快照未回）时不至于空手判据。
+const dshInstalledVer = computed(() => dsh.resolved || dsh.globalVersion || dsh.installed || '')
+// 与宿主 dsh.js 的 loadNotes **逐字**对应地算出「这份说明算的是哪一段」，用来核对回传的 notes 是否
+// 属于当前这组版本。宿主的键是 `newerByTime(target, installed) ? installed + '->' + target : target`：
+//   · 所选版本比实装新 → 区间模式，上界随实装版本走，实装变了就得重算，所以键里带上实装版本；
+//   · 所选版本不高于实装（含相等）→ 单版本模式，看的是所选那一版自己，与实装版本无关，键就是所选版本。
+// 注意 dshVerNewer 是 newerByTime 的副本，两边判据必须都按 **times 发布时间**（其中一方退回 semver 就会漂）。
+// 为什么要「逐字」：这个键两边一旦不一致，就会退化成 dshNotesFresh 恒为 false —— 界面永远停在
+// 「正在获取说明…」，再重取多少次都没用（判据问题，不是数据问题）。先前这里自己复刻过一套
+// 「取区间上界」的算法，改单版本模式时必然要再改一遍，索性改成镜像宿主这一行，只有一处会漂。
+const dshNotesResolved = computed(() => {
+  const target = dshTargetVersion.value
+  if (!target) return ''
+  const installed = dshInstalledVer.value
+  return installed && dshVerNewer(target, installed) ? installed + '->' + target : target
+})
+const dshNotesFresh = () => {
+  const n = dshNotes.value
+  if (!n || !dshNotesOk.value) return false
+  return n.resolvedTarget === dshNotesResolved.value
+}
+// 无区间时的文案。三重前提，缺一不可：
+//  ① ok —— 真取到了结论；
+//  ② empty —— 宿主算出的区间确实为空；
+//  ③ **这份结论属于当前这组版本** —— notes.installed / notes.target 与此刻的实装、目标一致。
+// 第 ③ 条是踩坑后补的（用户实测：实装 0.1.7-alpha.2、latest 0.1.7-rc.2，却报「已是最新」）：
+// notes 是**异步**回传的，换版本重查时宿主只是重新发起取数，旧的那份 notes 会继续挂在界面上，
+// 直到新结果回来。旧结果是按**上一组**版本算的「已是最新」，直接拿来展示就会张冠李戴；
+// 更糟的是显示成「已是最新」会连带把折叠行藏掉，用户连点开重取的入口都没有，卡死在这个错判上。
+// 版本对不上就当「还没取到」（归到折叠行那一档），点开自会去取新的
+const dshNotesLatest = computed(() => !!(dshNotesOk.value && dshNotes.value.empty && dshNotesFresh()))
+// 折叠行是否渲染：有区间、或已是最新、或还没取到 —— 三种都要给入口。
+// 只排除「有版本列表可用于取说明」这一前提都没有的情况（版本都没查到，区间无从谈起）
+const dshNotesRow = computed(() => {
+  if (dshHasNotes.value || dshNotesLatest.value) return true
+  return !!(dsh.versions && dsh.versions.latest)
+})
+// 说明面板**展开期间**，实装 / 目标版本一变就立刻重取 —— 用户换完下拉不必再收起展开。
+// 只在展开时生效是刻意的：说明是附注信息，不点开就不该占用一趟网络（上游固定吐 380KB 全量）。
+// 收起态下版本变了怎么办：不重取，展开时的 dshNotesFresh() 判否 → 界面落回「正在获取说明…」那一档，
+// 用户点开那一下 dshToggleNotes 会补取（呈现上不会误导，也没有静默死局）。
+// 为什么要 watch 而不是只靠 dshToggleNotes：换下拉只落盘配置（patchCfg），
+// 中间**没有任何操作**会经过「展开」这个入口 —— 用户实测「切换版本后都要点击收起再展开才能获取」。
+// 触发条件是 !dshNotesFresh()：已是最新那几种情形（ok / 空区间 / 版本没变）自然不重取，不必另外判。
+watch([dshInstalledVer, dshTargetVersion, () => dsh.notesBusy], () => {
+  if (!dshFolds.notes || dsh.notesBusy) return
+  if (!dshNotesFresh()) dshLoadNotes(true)
+})
+// 取数结果靠 dshPolling 回传，而它是 4s 一跳的**粗粒度**状态轮询（状态行、按钮可用性够用）。
+// 说明这一趟实测 0.3~2.9s，用 4s 去接它的结果，平均要多等半格 —— 用户点开就是「要好几秒」的观感
+// （用户实测「获取需要 5 秒」。宿主其实早就落地了，只是界面还没轮到那一跳去读）。
+// 所以取数期间额外挂一条 600ms 的快轮询，一旦从快照里看到 notesBusy 落回 false 就停 ——
+// 自限时，不使用户多付任何成本；说明真失败/超时（TIMEOUT_MS）也照样有 4s 那条兜底，不会漏读。
+let dshNotesFastTimer = 0
+function dshNotesFastStop() {
+  if (dshNotesFastTimer) { window.clearInterval(dshNotesFastTimer); dshNotesFastTimer = 0 }
+}
+watch(() => dsh.notesBusy, (busy) => {
+  if (busy && !dshNotesFastTimer) {
+    dshNotesFastTimer = window.setInterval(() => {
+      dshStatus()
+      if (!dsh.notesBusy) dshNotesFastStop()
+    }, 600)
+  } else if (!busy) {
+    dshNotesFastStop()
+  }
+})
+onUnmounted(dshNotesFastStop)
 // ⚠️ 不能用「清空提示」来标记本轮结束：dshFlash 是启动/重启/更新动作共用的提示位，
 //    用户在查询途中点一次「启动」，清掉的是动作的提示；反过来动作的提示也会被这里的
 //    超时分支覆盖成「查询超时」，把刚播报的成功结果抹掉。收尾只认宿主快照里的结论码。
@@ -951,7 +1277,12 @@ function dshQueryVersions() {
     const probe = () => {
       dshStatus()
       if (token !== dshQueryToken) return
-      if (dsh.versions && dsh.versions.latest) { dshVersionsQueried.value = true; return }
+      if (dsh.versions && dsh.versions.latest) {
+        dshVersionsQueried.value = true
+        // 说明的取数在宿主侧已挂在 listVersions 结束时（宿主那侧是 force），这里不再补一刀：
+        // 设置页拿不到版本列表，没法自己判断区间是否已取全，重复触发只会多打一趟网络
+        return
+      }
       // 查到「没有可用版本」也是有效结论：不再自动重查，但保留「重试」入口
       if (dshVersionsCode.value === 'empty') { dshQueryFailed.value = true; return }
       // 只有「还是我发的那条」才改，避免覆盖用户期间其他操作的消息
@@ -4814,10 +5145,15 @@ async function onSkinCropConfirm(p: { dataUrl: string; name: string }) {
     skinFlash.msg = '导入失败：' + String(err?.message || err)
   }
 }
-// 随机换一个内置形象；「自定义」是用户自己导入的那张，不在抽签范围里。
-// 抽到当前这张时再抽一次（只有一张内置形象的极端情况会抽不出来，那就保持原样）
+// 随机换一个已装内置形象；「自定义」是用户自己导入的那张，不在抽签范围里。
+// 抽签池 = 随包那张 + 从「内置形象」区下载回来的（后者带 builtin 标记），
+// 所以下载过的形象也进随机 —— 不下载就只有一张，抽不出别的（保持原样）。
+// 抽到当前这张时再抽一次（只有一张时抽不出来，那就保持原样）
+const randomSkinPool = computed(() => BUILTIN_SKINS.concat(
+  skinGallery.value.items.filter(it => it.builtin).map(it => it.id),
+))
 function doRandomSkin() {
-  const pool = BUILTIN_SKINS.filter(s => s !== cfg.skin)
+  const pool = randomSkinPool.value.filter(s => s !== cfg.skin)
   const pick = pool.length ? pool[Math.floor(Math.random() * pool.length)] : cfg.skin
   cfg.skin = pick
   patchCfg({ skin: pick })
@@ -4878,7 +5214,7 @@ function doRemoveSkin(id: string) {
 }
 
 // —— 自定义气泡图片（点鲸鱼抽到「动图组」时随机显示一张） ——
-// 与形象的关键差别：没有「当前用哪张」——有图就随机抽，删光即自动回退内置 rua.gif，所以没有「使用中」标记。
+// 与形象的关键差别：没有「当前用哪张」——有图就随机抽，删光即自动回退内置 rua.webp，所以没有「使用中」标记。
 // 也不裁剪（原图原样落盘）：气泡里放的多是动图或整图，canvas 重编码会丢动画帧。
 const bubbleItems = ref<BubbleMeta[]>([])
 const bubbleFlash: Flash = useFlash()
@@ -5043,6 +5379,217 @@ function doPreviewBuiltin(url: string) {
   builtinFlash.err = false
   playAudioUrl(url, builtinFlash)
 }
+
+// —— 可下载的内置形象（v1.7.x 起随包只留默认那张，其余挂 Release 按需下） ——
+// 缩略图是构建期生成的静态资源（public/whale-pack/thumbs/<id>.webp；v1.9.0 起精简到 1 张
+// 约 4KB，随插件包分发、但不含素材包本体），不下载也能看见长什么样 —— 让用户「下手前有数」。
+// 走 Vite 的相对路径加载（大件 skins-pack.whaleassets 与 manifest.json 已在 vite.config.js 里排除）。
+function skinPackThumb(id: string) {
+  return './whale-pack/thumbs/' + encodeURIComponent(id) + '.webp'
+}
+const skinPackList = ref<SkinPackList | null>(null)
+const skinPackBusy = ref(false)
+const skinPackFlash: Flash = useFlash()
+// 已装状态从宿主清单来（以磁盘为准），而不是本地信心 —— 用户在「导入的形象」里删掉后这里要跟着变
+const skinPackInstalled = computed<Record<string, boolean>>(() => {
+  const out: Record<string, boolean> = {}
+  for (const it of (skinPackList.value?.items || [])) out[it.id] = it.installed === true
+  return out
+})
+const skinPackItems = computed(() => skinPackList.value?.items || [])
+const skinPackInstalledCount = computed(() => skinPackItems.value.filter(it => it.installed).length)
+const skinPackInstalledAny = computed(() => skinPackInstalledCount.value > 0)
+const skinPackAllInstalled = computed(() => !!skinPackItems.value.length && skinPackInstalledCount.value >= skinPackItems.value.length)
+// 「正在使用的形象当前拿不到」：配置里选的是历史内置形象（已移出插件包），但本地还没下载回来
+// —— 挂件此刻只能回退显示默认形象，对用户是**静默降级**（不下到「资源」页根本看不出）。
+// 判据走 LEGACY_BUILTIN_SKINS 与皮肤包清单，不新增存储键；「未下载」以宿主清单的 installed 为准
+const skinInUseMissing = computed<boolean>(() => {
+  const s = cfg.skin
+  if (!s || s === 'custom') return false
+  if (BUILTIN_SKINS.includes(s)) return false
+  if (!LEGACY_BUILTIN_SKINS.includes(s)) return false
+  return skinPackInstalled.value[s] !== true
+})
+const missingSkinName = computed(() => (skinInUseMissing.value ? cfg.skin : ''))
+// 首次判定出缺失时自动展开「内置资源」折叠区（否则提示藏在收起区里等于没有）。
+// 只在「从未展开过」时替用户展开一次，之后尊重他的手动收起（不反复弹开）
+const builtinFoldAutoOpened = ref(false)
+watch(skinInUseMissing, (v) => {
+  if (v && !builtinFoldAutoOpened.value) {
+    builtinFoldAutoOpened.value = true
+    assetFolds.builtin = true
+  }
+}, { immediate: true })
+// 未装部分的体积（按钮文案用「下载剩余 x 张（约 y）」比「已装 z/1」更直观）
+const skinPackRemainBytes = computed(() => skinPackItems.value.reduce((n, it) => n + (it.installed ? 0 : Number(it.size) || 0), 0))
+const skinPackBytes = computed(() => SKIN_PACK_SKINS.reduce((n, s) => n + (Number(s.size) || 0), 0))
+function refreshSkinPacks() {
+  const r = services.listSkinPacks?.()
+  skinPackList.value = r && Array.isArray(r.items) ? r : null
+}
+// 下载整包（宿主侧防重入，这里再加一层按钮禁用）。成功后刷新画廊（新形象已在里面）与清单（已装状态）
+async function doDownloadSkinPacks() {
+  if (skinPackBusy.value) return
+  skinPackFlash.msg = ''
+  skinPackFlash.err = false
+  skinPackBusy.value = true
+  try {
+    // 把用户自填的加速前缀交给宿主排进候选链最前（空串 = 只用内置链：ghfast.top → 直连兜底）
+    const r = await services.downloadSkinPacks?.(cfg.skinPackSrc || '')
+    refreshSkin()
+    refreshSkinPacks()
+    if (!r || !r.ok) {
+      skinPackFlash.msg = (r && r.error) || '下载失败，请稍后重试'
+      skinPackFlash.err = true
+      return
+    }
+    const n = (r.installed || []).length
+    skinPackFlash.msg = n ? `已下载 ${n} 张形象`
+      : (r.errors && r.errors.length ? `部分形象未能写入：${r.errors[0]}` : '形象已是最新，无需重复下载')
+    skinPackFlash.err = !!(r.errors && r.errors.length)
+  } finally {
+    skinPackBusy.value = false
+  }
+}
+// 点缩略图：未装 → 下载（下完自动切到这张，省得再点一次）；已装 → 直接选用
+async function doSkinPackCell(id: string) {
+  if (skinPackInstalled.value[id]) { doUseSkin(id); return }
+  await doDownloadSkinPacks()
+  if (skinPackInstalled.value[id]) doUseSkin(id)
+}
+
+// —— 共享素材（角色图 36 张 + 音效库 45 个，上游 QQ 群素材，挂 Release 按需下） ——
+// 与上面「可下载的内置形象」是同一套模式，但两类素材各一个大包（形象 40.6MB / 音效 2.7MB），
+// 且都按**整包**下（点任意一张缩略图 = 下整个形象包）。所以这里做的是「透明化」而不是
+// 假装能单张下：格子上直接标明「点任意一张 = 下载整包」，点了就如实提示在整包下。
+function sharedSkinThumb(id: string) {
+  return './resources/thumbs/' + encodeURIComponent(id) + '.webp'
+}
+const sharedSkinList = ref<SharedSkinList | null>(null)
+const sharedSkinBusy = ref(false)
+const sharedSkinFlash: Flash = useFlash()
+const sharedSkinInstalled = computed<Record<string, boolean>>(() => {
+  const out: Record<string, boolean> = {}
+  for (const it of (sharedSkinList.value?.items || [])) out[it.id] = it.installed === true
+  return out
+})
+const sharedSkinItems = computed(() => sharedSkinList.value?.items || [])
+const sharedSkinInstalledCount = computed(() => sharedSkinItems.value.filter(it => it.installed).length)
+const sharedSkinAllInstalled = computed(() => !!sharedSkinItems.value.length && sharedSkinInstalledCount.value >= sharedSkinItems.value.length)
+const sharedSkinRemainBytes = computed(() => Number(sharedSkinList.value?.totalSize || 0)
+  - sharedSkinItems.value.reduce((n, it) => n + (it.installed ? (Number(it.size) || 0) : 0), 0))
+const sharedSkinTotalBytes = computed(() => Number(sharedSkinList.value?.totalSize || 0))
+// 名字按 id 查本地清单（宿主清单里也带 name，但中文名以设置页这份为准，两边由 check-shared 比对）
+const sharedSkinNames = computed<Record<string, string>>(() => {
+  const out: Record<string, string> = {}
+  for (const s of SHARED_SKIN_PACK_SKINS) out[s.id] = s.name
+  return out
+})
+function refreshSharedSkins() {
+  const r = services.listSharedSkins?.()
+  sharedSkinList.value = r && Array.isArray(r.items) ? r : null
+}
+async function doDownloadSharedSkins() {
+  if (sharedSkinBusy.value) return
+  sharedSkinFlash.msg = ''
+  sharedSkinFlash.err = false
+  sharedSkinBusy.value = true
+  try {
+    const r = await services.downloadSharedSkins?.(cfg.skinPackSrc || '')
+    refreshSkin()
+    refreshSharedSkins()
+    if (!r || !r.ok) {
+      sharedSkinFlash.msg = (r && r.error) || '下载失败，请稍后重试'
+      sharedSkinFlash.err = true
+      return
+    }
+    const n = (r.installed || []).length
+    sharedSkinFlash.msg = n ? `已下载 ${n} 张共享角色`
+      : (r.errors && r.errors.length ? `部分角色未能写入：${r.errors[0]}` : '共享角色已是最新，无需重复下载')
+    sharedSkinFlash.err = !!(r.errors && r.errors.length)
+  } finally {
+    sharedSkinBusy.value = false
+  }
+}
+// 点缩略图：未装 → 下整包（下完自动切到这张）；已装 → 直接选用
+async function doSharedSkinCell(id: string) {
+  if (sharedSkinInstalled.value[id]) { doUseSkin(id); return }
+  await doDownloadSharedSkins()
+  if (sharedSkinInstalled.value[id]) doUseSkin(id)
+}
+
+// —— 共享音效库（45 个，与共享角色同一个包来源，但落 sounds 的 shared 槽位） ——
+// shared 是「素材池」，不直接参与实播 —— 用户在下面从池子里「选用」到某个实播槽位才生效，
+// 否则一装几十段、挂件随机播到哪段全看运气。
+const sharedSoundList = ref<SharedSoundList | null>(null)
+const sharedSoundBusy = ref(false)
+const sharedSoundFlash: Flash = useFlash()
+const sharedSoundItems = computed(() => sharedSoundList.value?.items || [])
+const sharedSoundInstalledCount = computed(() => sharedSoundItems.value.filter(it => it.installed).length)
+const sharedSoundAllInstalled = computed(() => !!sharedSoundItems.value.length && sharedSoundInstalledCount.value >= sharedSoundItems.value.length)
+const sharedSoundTotalBytes = computed(() => Number(sharedSoundList.value?.totalSize || 0))
+const sharedSoundRemainBytes = computed(() => Number(sharedSoundList.value?.totalSize || 0)
+  - sharedSoundItems.value.reduce((n, it) => n + (it.installed ? (Number(it.size) || 0) : 0), 0))
+function refreshSharedSounds() {
+  const r = services.listSharedSounds?.()
+  sharedSoundList.value = r && Array.isArray(r.items) ? r : null
+}
+async function doDownloadSharedSounds() {
+  if (sharedSoundBusy.value) return
+  sharedSoundFlash.msg = ''
+  sharedSoundFlash.err = false
+  sharedSoundBusy.value = true
+  try {
+    const r = await services.downloadSharedSounds?.(cfg.skinPackSrc || '')
+    refreshSounds()
+    refreshSharedSounds()
+    if (!r || !r.ok) {
+      sharedSoundFlash.msg = (r && r.error) || '下载失败，请稍后重试'
+      sharedSoundFlash.err = true
+      return
+    }
+    const n = (r.installed || []).length
+    sharedSoundFlash.msg = n ? `已下载 ${n} 段音效（存进「共享音效库」，可到下面选用）`
+      : (r.errors && r.errors.length ? `部分音效未能写入：${r.errors[0]}` : '共享音效已是最新，无需重复下载')
+    sharedSoundFlash.err = !!(r.errors && r.errors.length)
+  } finally {
+    sharedSoundBusy.value = false
+  }
+}
+// 共享库里的一段「选用」到实播槽位。成功后刷新音效元信息（实播槽位多了一段）
+const sharedSoundUseRole = reactive<Record<string, SoundRole>>({})
+// 已下载状态按 id 记（shared 槽位没有「当前用哪段」，只有装没装）
+const sharedSoundInstalled = computed<Record<string, boolean>>(() => {
+  const out: Record<string, boolean> = {}
+  for (const it of sharedSoundItems.value) out[it.id] = it.installed === true
+  return out
+})
+async function doUseSharedSound(it: SharedSoundItem) {
+  const role = sharedSoundUseRole[it.id]
+  if (!role) { sharedSoundFlash.msg = '先选一个音效段再点「选用」'; sharedSoundFlash.err = true; return }
+  const r = services.useSharedSound?.(it.name, role)
+  refreshSounds()
+  if (r && r.ok) {
+    sharedSoundFlash.msg = `已把「${it.name}」加入${SOUND_ROLE_LABEL[role] || role}`
+    sharedSoundFlash.err = false
+  } else {
+    sharedSoundFlash.msg = (r && r.error) || '选用失败'
+    sharedSoundFlash.err = true
+  }
+}
+// 试听共享库里的一段。shared 槽位不在 soundData（宿主只推实播槽位），
+// 按名从宿主临时取一段 data URL 来播
+function doPreviewSharedSound(it: SharedSoundItem) {
+  sharedSoundFlash.msg = ''
+  sharedSoundFlash.err = false
+  const r = services.readSharedSoundData?.(it.name)
+  if (!r || !r.ok || !r.url) {
+    sharedSoundFlash.msg = (r && r.error) || '没有可试听的音效'
+    sharedSoundFlash.err = true
+    return
+  }
+  playAudioUrl(r.url, sharedSoundFlash)
+}
 // 导入素材的总占用与段数：单个文件缺失时 size 为 0，不影响其它项的统计
 const importedSoundCount = computed(() => SOUND_ROLES.reduce((n, r) => n + soundsMeta.value[r].length, 0))
 const assetTotalBytes = computed(() => {
@@ -5184,6 +5731,8 @@ function doApplyAssets() {
       assetsFlash.msg = msg
       assetsPack.value = null
       refreshSkin()
+      refreshSkinPacks()
+      refreshSharedSkins()
       refreshBubbles()
       refreshSounds()
     }
@@ -5227,7 +5776,7 @@ const QUOTE_GROUP_MAX = 12
 // 不走抽签的两项固定文案（key 写成字面量联合，才能在 cfg.quotes 上按下标取值）
 const QUOTE_TEXT_FIELDS: Array<{ key: 'time' | 'gifFail'; label: string; hint: string }> = [
   { key: 'time', label: '报时文案', hint: '白天报时的几种说法，{t} 会替换成当前时间（HH:MM）；深夜/清晨/早上的固定说法不改' },
-  { key: 'gifFail', label: '动图降级', hint: '动图（rua.gif）加载失败时顶替显示的文案' },
+  { key: 'gifFail', label: '动图降级', hint: '动图（rua.webp）加载失败时顶替显示的文案' },
 ]
 const quoteFolds = reactive({ open: false })
 // 文案卡默认折叠：整张卡是「一次配好就不再动」的内容，展开要占一屏多，
@@ -5609,6 +6158,19 @@ function onGuideReopen() {
   guideReopen.value = true
   showGuide.value = true
 }
+// 引导完成页的「去挑形象」：关掉引导 → 切到「资源」Tab → 展开内置资源折叠区 → 滚到该卡。
+// 不在这里直接下形象 —— 下载是设置页形象区的活儿（含进度、失败提示、已装状态），
+// 引导层只负责把用户带到那儿，免得同一套逻辑写两份（历史上这种重复漏过收件人）
+function onGuideBrowseSkins() {
+  onGuideSkip()
+  clearSearch()
+  activeTab.value = 'assets'
+  assetFolds.builtin = true
+  nextTick(() => {
+    const el = document.querySelector('[data-search="assetsBuiltin"]')
+    if (el && typeof el.scrollIntoView === 'function') el.scrollIntoView({ block: 'start', behavior: 'smooth' })
+  })
+}
 
 function showWidget() {
   const r = services.showWidget?.() || { ok: true }
@@ -5939,7 +6501,9 @@ function applyConfig(c: any) {
   cfg.budgetAmount = typeof c.budgetAmount === 'number' ? c.budgetAmount : 0
   cfg.dropAlertOn = c.dropAlertOn === true
   cfg.dropAlertAmount = typeof c.dropAlertAmount === 'number' ? c.dropAlertAmount : 5
-  cfg.skin = c.skin === 'custom' || BUILTIN_SKINS.includes(c.skin) ? c.skin : DEFAULT_SKIN
+  // 内置（随包）与历史内置 id 都原样保留：老配置可能是已移出包的 id，下载回来就能用，
+  // 这里打回默认会让「一下载就发现我选的形象被改了」
+  cfg.skin = c.skin === 'custom' || LEGACY_BUILTIN_SKINS.includes(c.skin) ? c.skin : DEFAULT_SKIN
   cfg.theme = c.theme === 'dark' || c.theme === 'sakura' ? c.theme : 'default'
   cfg.clickQueueOn = c.clickQueueOn === true
   cfg.remindSec = c.remindSec === 0 || c.remindSec === 5 || c.remindSec === 15 ? c.remindSec : 8
@@ -6026,6 +6590,8 @@ function applyConfig(c: any) {
     sources: Array.isArray(gs.sources) ? gs.sources.filter((s: any) => typeof s === 'string') : [],
     order: Array.isArray(gs.order) ? gs.order.filter((s: any) => typeof s === 'string') : [],
   }
+  // 形象下载源前缀：宿主已归一化（非法串回空），这里只做类型兜底
+  cfg.skinPackSrc = typeof c.skinPackSrc === 'string' ? c.skinPackSrc : ''
   // 通知渠道：系统通知默认开（沿用旧行为）；邮件通知的服务器/授权码不在这里（走 secrets）
   cfg.notifySystemOn = c.notifySystemOn !== false
   cfg.notifyMailOn = c.notifyMailOn === true
@@ -6133,6 +6699,8 @@ onMounted(() => {
       refreshSounds()
       refreshSkin()
       refreshBubbles()
+      refreshSharedSkins()
+      refreshSharedSounds()
     } catch (err) {}
     // 更新检查与首次引导也一并后置：它们都涉及网络/弹窗，不能挡住首屏
     try { if (cfg.updateCheckOn) doCheckUpdate(false) } catch (err) {}
@@ -6170,13 +6738,34 @@ onUnmounted(() => {
     <nav class="tab-bar">
       <div class="tab-row">
         <button v-for="t in TABS" :key="t.key" type="button" class="tab"
-                :class="{ 'tab-on': activeTab === t.key }" @click="activeTab = t.key">{{ t.label }}</button>
+                :class="{ 'tab-on': !searchActive && activeTab === t.key }" @click="clearSearch(); activeTab = t.key">{{ t.label }}</button>
       </div>
-      <p class="tab-desc">{{ activeTabDesc }}</p>
+      <!-- 卡片搜索：输入即跨 Tab 过滤出命中的卡片（见 SEARCH_INDEX）。清空 / Esc 回到正常 Tab 视图 -->
+      <div class="search-row">
+        <input class="search-input" type="search" v-model="searchQuery" placeholder="搜索设置项（如：穿透 / 音效 / 备份 / dsh）"
+               @keydown.esc="clearSearch" />
+        <button v-if="searchActive" class="search-clear utils-btn utils-secondary" type="button" @click="clearSearch">清除</button>
+      </div>
+      <p class="tab-desc">
+        <template v-if="searchActive">
+          {{ searchHits.length ? `找到 ${searchHits.length} 张卡片（跨分组）` : '没有匹配的卡片，换个关键词试试' }}
+        </template>
+        <template v-else>{{ activeTabDesc }}</template>
+      </p>
     </nav>
 
+    <!-- 搜索结果为空时的指引：搜索是跨组过滤，匹配不到任何卡的可见文本 -->
+    <p v-if="searchActive && !searchHits.length" class="card search-empty">
+      没找到含「{{ searchQuery.trim() }}」的卡片。搜索匹配的是卡片标题与关键词（含同义词），
+      试试更短或更常见的词，如「形象」「用量」「通知」「hosts」。
+    </p>
+    <!-- 搜索态下每张命中卡标出「本来在哪一组」，点标签直接滚到那张卡（命中卡按索引顺序渲染、不带分组名会找不到北） -->
+    <div v-if="searchActive && searchHits.length" class="search-hits">
+      <button v-for="k in searchHits" :key="k" type="button" class="search-hit-tag" @click="scrollToCard(k)">{{ cardTabLabel(k) }} · {{ SEARCH_INDEX[k].label }}</button>
+    </div>
+
     <!-- [数据] 凭据：填一次就不动，默认收起（展开状态见 toolOpen.credentials） -->
-    <section v-if="activeTab === 'data'" class="card">
+    <section v-if="cardOn('data', 'credentials')" class="card" data-search="credentials">
       <div class="fold">
         <button class="link-btn utils-btn utils-secondary" @click="toolOpen.credentials = !toolOpen.credentials">
           {{ toolOpen.credentials ? '收起凭据设置' : 'DeepSeek 凭据（API Key / 平台 Token）' }}
@@ -6241,7 +6830,7 @@ onUnmounted(() => {
     <!-- [外观] 挂件外观：大小 / 形象 / 气泡（主题 · 峰谷文案 · 开关）/ 音效（开关 · 音色 · 音量）。
          素材的「导入 / 删除 / 试听 / 素材包」都在「资源」页，这里只选「用哪个」——
          所以素材说明统一放在卡片开头一句，各设置项下面只留「当前用的是什么」的状态 -->
-    <section v-if="activeTab === 'look'" class="card">
+    <section v-if="cardOn('look', 'look')" class="card" data-search="look">
       <h2>挂件外观</h2>
 
       <p class="hint">
@@ -6261,9 +6850,13 @@ onUnmounted(() => {
         <span class="label">形象</span>
         <select v-model="cfg.skin" @change="patchCfg({ skin: cfg.skin })">
           <option v-for="s in BUILTIN_SKINS" :key="s" :value="s">{{ s }}</option>
+          <!-- 老配置里存的可能是已移出包的历史内置形象：补一个 option，
+               否则 select 显示空白；下载回来之前挂件回退默认形象显示，不误导 -->
+          <option v-if="!BUILTIN_SKINS.includes(cfg.skin) && cfg.skin !== 'custom' && LEGACY_BUILTIN_SKINS.includes(cfg.skin)"
+                  :value="cfg.skin">{{ cfg.skin }}（未下载）</option>
           <option value="custom">自定义</option>
         </select>
-        <button class="export-btn utils-btn utils-outline" type="button" title="随机换一个内置形象" @click="doRandomSkin()">随机</button>
+        <button class="export-btn utils-btn utils-outline" type="button" title="随机换一个已装内置形象" @click="doRandomSkin()">随机</button>
       </label>
       <p v-if="cfg.skin === 'custom' && !skinMeta" class="hint">
         还没有导入形象，去「资源」页加一张后这里才有「自定义」可用（当前会回退为「默认形象」）。
@@ -6361,7 +6954,7 @@ onUnmounted(() => {
 
     <!-- [资源] 素材集中管理：概览（占用 / 清理 / 素材包）· 导入的形象 · 导入的音效 · 内置资源对照。
          与「挂件外观」分工：那边只选「用哪个」，这里管「导了什么、占多大、要不要删、换机器怎么带走」 -->
-    <section v-if="activeTab === 'assets'" class="card">
+    <section v-if="cardOn('assets', 'assetsOverview')" class="card" data-search="assetsOverview">
       <div class="card-head">
         <h2>资源概览</h2>
         <div class="head-actions">
@@ -6429,7 +7022,7 @@ onUnmounted(() => {
     </section>
 
     <!-- [资源] 导入的形象：画廊（点缩略图切换、置顶、删除） -->
-    <section v-if="activeTab === 'assets'" class="card">
+    <section v-if="cardOn('assets', 'assetsSkins')" class="card" data-search="assetsSkins">
       <div class="card-head">
         <h2>导入的形象</h2>
         <div class="head-actions">
@@ -6470,7 +7063,7 @@ onUnmounted(() => {
 
     <!-- [资源] 导入的气泡图：点小鲸鱼抽到「动图组」时随机显示一张。
          与形象不同 —— 没有「当前用哪张」（有图就随机抽，删光即回退内置动图），所以没有「使用中」标记与置顶 -->
-    <section v-if="activeTab === 'assets'" class="card">
+    <section v-if="cardOn('assets', 'assetsBubbles')" class="card" data-search="assetsBubbles">
       <div class="card-head">
         <h2>导入的气泡图</h2>
         <div class="head-actions">
@@ -6502,7 +7095,7 @@ onUnmounted(() => {
     </section>
 
     <!-- [资源] 导入的音效：六槽位（按压 / 释放 + 四类提醒音），每槽位可放多段（挂件随机播一条） -->
-    <section v-if="activeTab === 'assets'" class="card">
+    <section v-if="cardOn('assets', 'assetsSounds')" class="card" data-search="assetsSounds">
       <h2>导入的音效</h2>
       <div class="sound-group" v-for="r in SOUND_ROLES" :key="r">
         <div class="field row">
@@ -6537,18 +7130,66 @@ onUnmounted(() => {
 
     <!-- [资源] 内置资源：随插件附带、不可删，只作对照（选哪个在「挂件外观」）。
          纯查阅用，默认收起，避免与「导入的…」三张卡一起铺满一屏 -->
-    <section v-if="activeTab === 'assets'" class="card">
+    <section v-if="cardOn('assets', 'assetsBuiltin')" class="card" data-search="assetsBuiltin">
       <div class="fold">
         <button class="link-btn utils-btn utils-secondary" @click="assetFolds.builtin = !assetFolds.builtin">{{ assetFolds.builtin ? '收起内置资源' : '内置资源（随插件附带，只作对照）' }}</button>
         <div v-if="assetFolds.builtin">
           <p class="hint">随插件附带、不可删除，列在这里只作对照；换形象 / 音色请到「挂件外观」。</p>
-          <p class="group-title">内置形象 <em>（{{ BUILTIN_SKINS.length }} 张，当前：{{ cfg.skin === 'custom' ? '自定义' : cfg.skin }}）</em></p>
+          <p v-if="skinInUseMissing" class="msg err">
+            你正在使用的形象「{{ missingSkinName }}」随新版移出了插件包，挂件暂用默认形象显示。
+            点下方它的缩略图即可下载找回（也可整体「下载全部」）。
+          </p>
+          <p class="group-title">内置形象 <em>（随包 {{ BUILTIN_SKINS.length }} 张 · 可下载 {{ SKIN_PACK_SKINS.length }} 张，共约 {{ fmtBytes(skinPackBytes) }}；当前：{{ cfg.skin === 'custom' ? '自定义' : cfg.skin }}）</em></p>
           <div class="skin-grid">
-            <div v-for="s in BUILTIN_SKINS" :key="s" class="skin-cell" :class="{ active: cfg.skin === s }">
+            <div v-for="s in BUILTIN_SKINS" :key="'b-' + s" class="skin-cell" :class="{ active: cfg.skin === s }">
               <img class="skin-cell-img" :src="builtinSkinUrl(s)" :alt="s" :title="s" />
               <span class="skin-cell-tag">{{ s }}</span>
             </div>
+            <!-- 可下载的那批（v1.9.0 起只剩 1 张）：未装灰底 + 下载角标（缩略图是设置页内嵌的，不下载也能看见长什么样）；
+                 已装则与「导入的形象」共用一套展示（缩略图从画廊来），可选用 / 可删 -->
+            <div v-for="s in skinPackItems" :key="'p-' + s.id" class="skin-cell"
+                 :class="{ active: cfg.skin === s.id, 'is-remote': !skinPackInstalled[s.id] }">
+              <button class="skin-cell-pick" type="button"
+                      :title="skinPackInstalled[s.id] ? `${s.id}（已下载，点选用）`
+                        : `${s.id}（未下载，点一下下载整包，下完自动切到这张）`"
+                      @click="doSkinPackCell(s.id)">
+                <img class="skin-cell-img" :src="skinPackThumb(s.id)" :alt="s.id" />
+              </button>
+              <span v-if="skinPackInstalled[s.id]" class="skin-cell-ops">
+                <button class="skin-op danger" type="button" title="从本地删除这张（可重新下载）"
+                        @click.stop="doRemoveSkin(s.id)">删</button>
+              </span>
+              <!-- 角标写「下载全部」而非「下载」：单张点击实际会下整包，写「下载」会让人以为只下这一张 -->
+              <span v-else class="skin-cell-badge">下载全部</span>
+              <span class="skin-cell-tag">{{ s.id }}</span>
+              <span v-if="skinInUseMissing && s.id === cfg.skin" class="skin-cell-tag warn">正在使用 · 未下载</span>
+            </div>
           </div>
+          <div class="btn-row">
+            <button class="export-btn utils-btn utils-primary" type="button"
+                    :disabled="skinPackBusy || skinPackAllInstalled"
+                    @click="doDownloadSkinPacks()">
+              {{ skinPackBusy ? '正在下载…'
+                : skinPackAllInstalled ? '已全部下载'
+                  : skinPackInstalledAny ? `下载剩余 ${SKIN_PACK_SKINS.length - skinPackInstalledCount} 张（约 ${fmtBytes(skinPackRemainBytes)}）`
+                    : `下载全部 ${SKIN_PACK_SKINS.length} 张（约 ${fmtBytes(skinPackBytes)}）` }}
+            </button>
+          </div>
+          <p class="hint">
+            <strong>一次操作下载的是整包</strong>：形象打包在同一个 Release 文件里，没有按张分片，所以无论点缩略图还是点上面按钮，
+            都会把未下载的那几张一起下回来（已下载的自动跳过，不重复占体积），下完自动切到你点的那张。
+            已下载的缩略图悬停可「删」单张，删了能重新下载。下载回来的形象存本地、不占导入配额（「导入的形象」最多 20 张另算）。
+          </p>
+          <!-- 下载源：留空即内置候选链（ghfast.top 加速 → 直连 github.com 兜底）。
+               自填须是 http(s) 绝对 URL 前缀，宿主会归一化（非法串回空并回落内置），末尾 '/' 可省略 -->
+          <label class="field row">
+            <span class="label">形象下载源 <em>（留空用内置：ghfast.top，失败自动直连 github.com）</em></span>
+            <input type="text" :maxlength="SKIN_PACK_PREFIX_MAX" spellcheck="false" autocomplete="off"
+                   placeholder="https://ghfast.top/"
+                   :value="cfg.skinPackSrc"
+                   @change="patchCfg({ skinPackSrc: ($event.target as HTMLInputElement).value })" />
+          </label>
+          <p v-if="skinPackFlash.msg" class="msg" :class="msgCls(skinPackFlash)">{{ skinPackFlash.msg }}</p>
           <p class="group-title">内置音色 <em>（两组，在「挂件外观 → 音色」里选；提醒音没有内置回落）</em></p>
           <div class="field row" v-for="g in BUILTIN_SOUND_SETS" :key="g.key">
             <span class="label">{{ g.label }}</span>
@@ -6557,16 +7198,102 @@ onUnmounted(() => {
             <button class="export-btn utils-btn utils-outline" type="button" @click="doPreviewBuiltin(g.release)">试听释放</button>
           </div>
           <p class="hint">
-            内置形象与音色是插件包里的文件，不占本地数据目录空间，也不会被「清除素材」删掉。
+            内置音色是插件包里的文件，不占本地数据目录空间，也不会被「清除素材」删掉。
           </p>
           <p v-if="builtinFlash.msg" class="msg" :class="msgCls(builtinFlash)">{{ builtinFlash.msg }}</p>
         </div>
       </div>
     </section>
 
+    <!-- [资源] 共享角色：上游 QQ 群素材（36 张），挂 Release 按需下，不随插件包分发。
+         与「内置形象」同样是整包下载（点任意一张 = 下整个形象包），缩略图随包带上以便下载前预览 -->
+    <section v-if="cardOn('assets', 'assetsSharedSkins')" class="card" data-search="assetsSharedSkins">
+      <div class="card-head">
+        <h2>共享角色</h2>
+        <div class="head-actions">
+          <button class="export-btn utils-btn utils-primary" type="button"
+                  :disabled="sharedSkinBusy || sharedSkinAllInstalled"
+                  @click="doDownloadSharedSkins()">
+            {{ sharedSkinBusy ? '正在下载…'
+              : sharedSkinAllInstalled ? '已全部下载'
+                : sharedSkinInstalledCount ? `下载剩余 ${sharedSkinItems.length - sharedSkinInstalledCount} 张（约 ${fmtBytes(sharedSkinRemainBytes)}）`
+                  : `下载全部 ${sharedSkinItems.length} 张（约 ${fmtBytes(sharedSkinTotalBytes)}）` }}
+          </button>
+        </div>
+      </div>
+      <div class="skin-grid">
+        <div v-for="s in sharedSkinItems" :key="'sh-' + s.id" class="skin-cell"
+             :class="{ active: cfg.skin === s.id, 'is-remote': !sharedSkinInstalled[s.id] }">
+          <button class="skin-cell-pick" type="button"
+                  :title="sharedSkinInstalled[s.id] ? `${sharedSkinNames[s.id] || s.id}（已下载，点选用）`
+                    : `${sharedSkinNames[s.id] || s.id}（未下载，点一下下载整包，下完自动切到这张）`"
+                  @click="doSharedSkinCell(s.id)">
+            <img class="skin-cell-img" :src="sharedSkinThumb(s.id)" :alt="sharedSkinNames[s.id] || s.id" />
+          </button>
+          <span v-if="sharedSkinInstalled[s.id]" class="skin-cell-ops">
+            <button class="skin-op danger" type="button" title="从本地删除这张（可重新下载）"
+                    @click.stop="doRemoveSkin(s.id)">删</button>
+          </span>
+          <!-- 与内置形象同款说明：单张点击实际会下整包，写「下载」会让人以为只下这一张 -->
+          <span v-else class="skin-cell-badge">下载全部</span>
+          <span class="skin-cell-tag">{{ sharedSkinNames[s.id] || s.id }}</span>
+        </div>
+      </div>
+      <p v-if="!sharedSkinItems.length" class="hint">暂无可下载的共享角色。</p>
+      <p class="hint">
+        这些角色来自上游 QQ 群分享，<strong>不随插件包分发</strong>，改为按需从 GitHub Release 下载。
+        <strong>一次操作下载的是整包</strong>（所有角色打在一个文件里，没有按张分片），所以点任意一张缩略图或点上面按钮，
+        都会把未下载的一起下回来（已下载的自动跳过），下完自动切到你点的那张。
+        已下载的可悬停「删」单张，删了能重新下载；下载回来的角色存本地，不占「导入的形象」的 20 张配额。
+      </p>
+      <p v-if="sharedSkinFlash.msg" class="msg" :class="msgCls(sharedSkinFlash)">{{ sharedSkinFlash.msg }}</p>
+    </section>
+
+    <!-- [资源] 共享音效库：与共享角色同一批上游素材（45 段），落 sounds 的 shared 槽位。
+         它是「素材池」不直接参与实播 —— 要到下面选一个实播槽位「选用」才生效，
+         否则一装几十段、挂件随机播到哪段全看运气 -->
+    <section v-if="cardOn('assets', 'assetsSharedSounds')" class="card" data-search="assetsSharedSounds">
+      <div class="card-head">
+        <h2>共享音效库</h2>
+        <div class="head-actions">
+          <button class="export-btn utils-btn utils-primary" type="button"
+                  :disabled="sharedSoundBusy || sharedSoundAllInstalled"
+                  @click="doDownloadSharedSounds()">
+            {{ sharedSoundBusy ? '正在下载…'
+              : sharedSoundAllInstalled ? '已全部下载'
+                : sharedSoundInstalledCount ? `下载剩余 ${sharedSoundItems.length - sharedSoundInstalledCount} 段（约 ${fmtBytes(sharedSoundRemainBytes)}）`
+                  : `下载全部 ${sharedSoundItems.length} 段（约 ${fmtBytes(sharedSoundTotalBytes)}）` }}
+          </button>
+        </div>
+      </div>
+      <div class="field row sound-seg" v-for="it in sharedSoundItems" :key="'shs-' + it.id">
+        <span class="sound-file" :title="it.name">{{ it.name }}</span>
+        <span class="asset-meta">{{ fmtBytes(it.size) }}{{ sharedSoundInstalled[it.id] ? ' · 已下载' : '' }}</span>
+        <button v-if="sharedSoundInstalled[it.id]" class="export-btn utils-btn utils-outline" type="button"
+                @click="doPreviewSharedSound(it)">试听</button>
+        <template v-if="sharedSoundInstalled[it.id]">
+          <select class="sound-role-pick" :value="sharedSoundUseRole[it.id] || ''"
+                  @change="sharedSoundUseRole[it.id] = ($event.target as HTMLSelectElement).value as SoundRole">
+            <option value="">选择要加入的音效段…</option>
+            <option v-for="r in SOUND_ROLES" :key="'sr-' + r" :value="r">{{ SOUND_ROLE_LABEL[r] }}</option>
+          </select>
+          <button class="export-btn utils-btn utils-outline" type="button"
+                  :disabled="!sharedSoundUseRole[it.id]" @click="doUseSharedSound(it)">选用</button>
+        </template>
+        <span v-else class="asset-meta">未下载</span>
+      </div>
+      <p v-if="!sharedSoundItems.length" class="hint">暂无可下载的共享音效。</p>
+      <p class="hint">
+        这些音效来自上游 QQ 群分享，<strong>不随插件包分发</strong>，改为按需从 GitHub Release 下载。
+        下载后先进「共享音效库」这个素材池，<strong>不会自动播放</strong> —— 从下拉里选一个音效段（按压 / 释放 / 四类提醒音）再点「选用」，
+        才会把这段加进那个槽位（可多段，挂件随机播一条）。这样不会一装几十段、随机播到哪段全看运气。
+      </p>
+      <p v-if="sharedSoundFlash.msg" class="msg" :class="msgCls(sharedSoundFlash)">{{ sharedSoundFlash.msg }}</p>
+    </section>
+
     <!-- [外观] 文案：只剩台词库（随机台词组 + 6 个多行文本 + 保存 / 恢复默认）。
          提醒文案结构相同但属「提醒」主题，已并入「用量 → 提醒与通知」卡，免得调一类提醒要跳两个 Tab -->
-    <section v-if="activeTab === 'look'" class="card">
+    <section v-if="cardOn('look', 'quotes')" class="card" data-search="quotes">
       <div class="card-head">
         <button class="fold-title" type="button" @click="quoteCardFolds.open = !quoteCardFolds.open">
           <span class="fold-caret">{{ quoteCardFolds.open ? '▾' : '▸' }}</span>
@@ -6621,7 +7348,7 @@ onUnmounted(() => {
             内置卡片：内容按当前余额 / 峰谷时段现算，文字改不了
           </p>
           <p v-else-if="g.kind === 'image'" class="hint quote-group-note">
-            抽一张「气泡图」里的图（导入在「资源」页）；没导入过时用内置的 rua.gif
+            抽一张「气泡图」里的图（导入在「资源」页）；没导入过时用内置的 rua.webp
           </p>
         </div>
         <button class="export-btn utils-btn utils-outline" type="button" :disabled="cfg.quotes.groups.length >= QUOTE_GROUP_MAX"
@@ -6661,7 +7388,7 @@ onUnmounted(() => {
 
     <!-- [用量] 用量与账本：用量口径（记账 / 令牌）+ 趋势 + 明细 + 额度 + 校准。
          口径原先在「挂件行为」卡片里，与它影响的图表分家，现在挪到图表上方 -->
-    <section v-if="activeTab === 'usage'" class="card">
+    <section v-if="cardOn('usage', 'usage')" class="card" data-search="usage">
       <div class="card-head">
         <h2>用量与账本</h2>
         <div class="head-actions">
@@ -6894,7 +7621,7 @@ onUnmounted(() => {
     <!-- [用量] 提醒与通知：四类自动提醒（峰谷切换 / 低余额 / 今日预算 / 余额大幅波动）+ 计时通知 + 提醒文案。
          原先开关挤在「挂件行为」那张 106 行的卡里、文案挂在「外观 → 文案」卡里，调一类提醒要跳两个 Tab，
          现在按「提醒」这个主题收成一张卡，文案作为卡内折叠 -->
-    <section v-if="activeTab === 'usage'" class="card">
+    <section v-if="cardOn('usage', 'notify')" class="card" data-search="notify">
       <h2>提醒与通知</h2>
 
       <label class="field row check">
@@ -7151,7 +7878,7 @@ onUnmounted(() => {
     </section>
 
     <!-- [用量] 多厂商模型：注册表存配置、余额存运行时快照；挂件菜单里可切换主显示的是哪一个 -->
-    <section v-if="activeTab === 'usage'" class="card">
+    <section v-if="cardOn('usage', 'models')" class="card" data-search="models">
       <div class="card-head">
         <h2>模型与余额</h2>
         <div class="head-actions">
@@ -7312,7 +8039,7 @@ onUnmounted(() => {
     </section>
 
     <!-- [窗口] 挂件窗口：显隐、位置与窗口属性（使用说明 / 故障排查已挪到「帮助」组） -->
-    <section v-if="activeTab === 'window'" class="card">
+    <section v-if="cardOn('window', 'window')" class="card" data-search="window">
       <h2>挂件窗口</h2>
       <label class="field row">
         <span class="label">进入插件时</span>
@@ -7418,7 +8145,7 @@ onUnmounted(() => {
     <!-- [帮助] 使用帮助：使用说明 / 快捷键绑定 / 挂件故障排查。
          这些原先都堆在「挂件窗口」卡尾（一次性配置 + 排查 + 说明），日常要调的窗口项被埋在一堆说明下面。
          这里叫「挂件故障排查」以区别 dsh 卡里的「dsh 故障排查」—— 前者是插件自身日志，后者是 dsh 子进程日志 -->
-    <section v-if="activeTab === 'help'" class="card">
+    <section v-if="cardOn('help', 'help')" class="card" data-search="help">
       <h2>使用帮助</h2>
       <p class="hint">给「显示/隐藏挂件」绑定一个全局快捷键（想给「鼠标穿透」也绑一个，见「窗口」组）。</p>
       <div class="btn-row">
@@ -7465,7 +8192,7 @@ onUnmounted(() => {
     </section>
 
     <!-- [数据] 数据与隐私：按项清除 + 备份与恢复 -->
-    <section v-if="activeTab === 'data'" class="card">
+    <section v-if="cardOn('data', 'privacy')" class="card" data-search="privacy">
       <h2>数据与隐私</h2>
       <p class="hint">API Key 与平台 Token 通过 uTools 加密存储，账本、窗口位置与导入的素材（形象 / 气泡图 / 音效）也只保存在本机，不会上传到任何第三方服务器。</p>
       <p class="hint">卸载 uTools 插件不会自动删除这些数据，需要彻底清除时请勾选下方要清除的内容（<strong>清除前建议先导出一份备份</strong>，见下方「备份与恢复」）：</p>
@@ -7540,7 +8267,7 @@ onUnmounted(() => {
     </section>
 
     <!-- [开发者] DeepSeek Harness（dsh） -->
-    <section v-if="activeTab === 'dev'" class="card dsh-card">
+    <section v-if="cardOn('dev', 'dshMain')" class="card dsh-card" data-search="dshMain">
       <div class="card-head">
         <h2 class="card-toggle" @click="dshMainFold = !dshMainFold">
           <span class="caret">{{ dshMainFold ? '▾' : '▸' }}</span>DeepSeek Harness（dsh）
@@ -7553,7 +8280,7 @@ onUnmounted(() => {
 
       <label class="field row">
         <span class="label">状态</span>
-        <span class="ver">{{ dshStateText }}<span v-if="dsh.nodeVersion"> · Node {{ dsh.nodeVersion }}</span><span v-if="dshLatestTip" class="tag tag-new">{{ dshLatestTip }}</span></span>
+        <span class="ver">{{ dshStateText }}<span v-if="dsh.nodeVersion"> · Node {{ dsh.nodeVersion }}</span><span v-if="dshHasUpdateTip" class="tag tag-new">{{ dshHasUpdateTip }}</span></span>
       </label>
       <div class="btn-row">
         <button class="utils-btn utils-primary" :disabled="dsh.running || dsh.external || !!dsh.portOther || dshBusy" @click="dshDo('start')">启动</button>
@@ -7568,14 +8295,16 @@ onUnmounted(() => {
            版本下拉原先在「高级选项」里，一次「装指定版本」要横跨三个折叠区才走完 -->
       <div class="field row dsh-update-row">
         <span class="label">更新版本</span>
+        <!-- select 自身就显示选中项，不必再往 label 里拼「已选」；这里只标「已安装」，
+             用户不展开下拉也能一眼看出当前实装的是哪一版（判断要不要更新的基准） -->
         <select v-model="cfg.dshVersion" @change="patchCfg({ dshVersion: cfg.dshVersion })">
           <option v-for="o in dshVersionOptions" :key="o.v" :value="o.v">{{ o.label }}</option>
         </select>
         <!-- 既无全局也无插件安装时实际走的是安装流程，按钮文案别再写「更新」误导。
-             「有新版」标记用的是与标题 dshLatestTip 同一个 dsh.hasUpdate，不另算一套：
-             没有它时按钮和「没更新」时长得完全一样，用户得回头读标题小字才知道要不要点 -->
+             按钮上**不挂**任何版本 / 更新标签：「有没有新版、会装到哪一版」已由上方状态行与
+             下方「实际使用」行各说一次，按钮上再挂一次就是同屏第三遍，正是先前读起来自相矛盾的来源 -->
         <button class="secondary utils-btn utils-secondary" :disabled="dshBusy" @click="dshDo('update')">
-          {{ dsh.resolved || dsh.globalVersion ? '更新' : '安装' }}<span v-if="dsh.hasUpdate" class="tag tag-new">有新版</span>
+          {{ dsh.resolved || dsh.globalVersion ? '更新' : '安装' }}
         </button>
       </div>
       <!-- 安装 / 更新的终态横幅：紧贴「更新版本」行，用户点完不用往下滚就能看到结果。
@@ -7599,11 +8328,13 @@ onUnmounted(() => {
         <div v-if="dshFolds.versions" class="guide">
           <label class="field row">
             <span class="label">实际使用</span>
-            <span class="ver">{{ dsh.resolved || '未安装' }}<span v-if="dsh.resolved && dsh.source" class="tag">{{ dsh.source === 'global' ? '全局' : '插件目录' }}</span></span>
+            <!-- 合并展示：版本号 + 「已是最新 / 有新版本：x.y.z」。
+                 原先只写版本号，用户得回头看上面的状态行才知道有没有更新，且拿不到「更新会装到哪一版」 -->
+            <span class="ver">{{ dshCurText }}</span>
           </label>
           <label class="field row">
             <span class="label">全局安装</span>
-            <span class="ver">{{ dsh.globalVersion || '无' }}<span v-if="dsh.globalVersion && !dsh.globalWritable" class="tag">只读，更新会弹一次 UAC</span></span>
+            <span class="ver">{{ dsh.globalVersion || '无' }}<span v-if="dsh.globalVersion && !dsh.globalWritable" class="tag">只读，更新会弹一次{{ IS_WIN ? 'UAC' : '提权' }}</span></span>
           </label>
           <label class="field row">
             <span class="label">插件目录</span>
@@ -7611,9 +8342,57 @@ onUnmounted(() => {
           </label>
           <label class="field row">
             <span class="label">npm latest</span>
-            <!-- 不再挂「点更新会装到这个版本」的 tag：那是常驻说明，且下方 dshVerMismatch
-                 已按实际情况给出对比句（两者不同才出现），比常驻标签更准也更省视觉噪音 -->
-            <span class="ver">{{ dshLatestText }}</span>
+            <!-- 只留版本号 + 与实装的一致性结论（dshLatestLabel）：「点更新会装到这个版本」是常驻说明，
+                 已由下方的 dshVerMismatch（两者不同才出现）按实际情况给出对比句，比常驻标签更准也更省视觉噪音。
+                 版本号本身既是事实也是对照基准（上面「实际使用」可能比它旧），不能省 -->
+            <span class="ver">{{ dshLatestText }}<template v-if="dshLatestLabel"> · {{ dshLatestLabel }}</template></span>
+          </label>
+          <!-- 版本说明。入口**不依赖取数结果**：只要版本列表已查到就渲染折叠行，
+               点开才去取说明。反过来（有结果才给入口）会让用户永远看不到这一块。
+               已是最新时不摆折叠行，直接一行结论。
+               按钮**不塞进 .field.row**：那一行的右侧位是给「实际使用 / npm latest」这类**只读值**用的，
+               在这里会显成一个与其他行右对齐文本齐平的胶囊、看着像值不像按钮。
+               与「运行详情」「dsh 故障排查」同款：独占一行、挂 .link-btn.utils-btn.utils-secondary -->
+          <button v-if="dshNotesRow && !dshNotesLatest" class="link-btn utils-btn utils-secondary notes-toggle" @click="dshToggleNotes">
+            {{ dshFolds.notes ? '收起版本说明' : '版本说明' }}<template v-if="dshNotesSummary"> · {{ dshNotesSummary }}</template>
+          </button>
+          <div v-if="dshFolds.notes && !dshNotesLatest" class="guide notes-box">
+            <div v-if="dshHasNotes">
+              <div v-for="sec in dshNotes.sections" :key="sec.title" class="notes-sec">
+                <div class="notes-sec-title">{{ sec.title }}（{{ sec.items.length }}）</div>
+                <div v-for="(it, i) in sec.items" :key="sec.title + '#' + i" class="notes-item">
+                  <span class="notes-item-text">· {{ it.text }}</span>
+                  <!-- 右标来源版本：区间内多条 release 并成一节，不标就分不清这条是哪版起的 -->
+                  <span v-if="it.from" class="notes-item-from">{{ it.from }}</span>
+                </div>
+              </div>
+              <!-- 实装版本早于列表下界（列表只留最近 N 个）时区间是残缺的，如实说明，不假装完整 -->
+              <p v-if="dshNotes.truncated" class="hint notes-trunc">仅覆盖最近 {{ dshNotes.truncated.listMax }} 个版本</p>
+              <!-- 外链交给底座打开（复用 openDoc，走 services.openExternal），不拼平台命令 -->
+              <button v-if="dshNotes.url" class="link-btn utils-btn utils-secondary" @click="openDoc(dshNotes.url)">在浏览器查看完整发布页</button>
+            </div>
+            <!-- 取数中：轻提示，以及一个可重试的按钮（网络抖动时不用等轮询兜底） -->
+            <p v-else-if="dsh.notesBusy" class="hint notes-busy">正在获取说明…</p>
+            <!-- 取失败：如实说，并给重试入口。这是「没拿到答案」，与「已是最新」是两回事。
+                 同样只认属于当前版本的结论 —— 换版本后旧那条失败提示会一直挂着误导人 -->
+            <div v-else-if="dshNotes && dshNotes.ok === false && dshNotesFresh()" class="notes-sec">
+              <p class="hint notes-trunc">获取版本说明失败：{{ dshNotes.reason || '未知原因' }}</p>
+              <button class="link-btn utils-btn utils-secondary" @click="dshLoadNotes(true)">重试</button>
+            </div>
+            <!-- 区间非空、但正文一条都解析不出来（上游改了 markdown 结构 / 那几个版本没写 release 正文）。
+                 必须有这一档收尾：否则会一路落到下面的「正在获取说明…」，取数明明已经结束却一直转圈 ——
+                 用户看到的就是「卡住了」。如实说没有可展示的条目并给发布页入口，比装作还在加载有用 -->
+            <div v-else-if="dshNotes && dshNotesOk && dshNotesFresh() && !dshNotes.empty" class="notes-sec">
+              <p class="hint notes-trunc">这 {{ dshNotes.versions ? dshNotes.versions.length : 0 }} 个版本没有可显示的说明条目。</p>
+              <button v-if="dshNotes.url" class="link-btn utils-btn utils-secondary" @click="openDoc(dshNotes.url)">在浏览器查看完整发布页</button>
+            </div>
+            <!-- 还没取过（首次展开）：主动取一次 -->
+            <p v-else class="hint notes-busy">正在获取说明…</p>
+          </div>
+          <!-- 已是最新：查过且区间为空。给一句明确的结论 -->
+          <label v-else-if="dshNotesLatest" class="field row">
+            <span class="label">版本说明</span>
+            <span class="hint notes-latest">已是最新版本</span>
           </label>
           <label class="field row">
             <span class="label">最近命令</span>
@@ -7716,7 +8495,7 @@ onUnmounted(() => {
               @change="dshSetPort"
             />
           </label>
-          <p class="hint">3080 落在 Windows/Hyper-V 的<strong>动态端口保留段</strong>里，被系统预留时 dsh 会直接 bind 失败（报 <code>EADDRINUSE</code>）。这里换成别的端口（如 4080）即可绕开；填非法值（0 / 超出 1–65535）会退回 3080。</p>
+          <p class="hint">3080 <template v-if="IS_WIN">落在 Windows/Hyper-V 的<strong>动态端口保留段</strong>里，被系统预留时</template><template v-else>若被其它程序占用</template> dsh 会直接 bind 失败（报 <code>EADDRINUSE</code>）。这里换成别的端口（如 4080）即可绕开；填非法值（0 / 超出 1–65535）会退回 3080。</p>
           <label class="field row">
             <span class="label">npm 注册源</span>
             <select v-model="cfg.dshRegistry" @change="patchCfg({ dshRegistry: cfg.dshRegistry })">
@@ -7758,7 +8537,7 @@ onUnmounted(() => {
       </template>
     </section>
     <!-- [dsh] dsh 只读诊断：五项本地检查，纯只读、不改任何配置、不联网 -->
-    <section v-if="activeTab === 'dev'" class="card dsh-card">
+    <section v-if="cardOn('dev', 'dshDiagnose')" class="card dsh-card" data-search="dshDiagnose">
       <div class="card-head">
         <h2 class="card-toggle" @click="toggleDevCard('diagnose')">
           <span class="caret">{{ devFolds.diagnose ? '▾' : '▸' }}</span>dsh 环境诊断
@@ -7840,7 +8619,7 @@ onUnmounted(() => {
       </template>
     </section>
     <!-- [dsh] dsh 配置转储：一次 CLI 读取，摊开 patch 分层与生效/默认树差异，纯只读、不改配置、不联网 -->
-    <section v-if="activeTab === 'dev'" class="card dsh-card">
+    <section v-if="cardOn('dev', 'dshDump')" class="card dsh-card" data-search="dshDump">
       <div class="card-head">
         <h2 class="card-toggle" @click="toggleDevCard('dshDump')">
           <span class="caret">{{ devFolds.dshDump ? '▾' : '▸' }}</span>dsh 配置转储
@@ -7946,7 +8725,7 @@ onUnmounted(() => {
          这张卡全量、为了搬运。所以不复用那张卡，也不共用回执。
          位置紧邻「诊断 / 转储」：这三张同属「只读、不改 dsh 任何状态」的取证族，
          而下面的开关 / 市场会写配置或装插件 —— 把只读族与写入族分开，翻页时更好找。 -->
-    <section v-if="activeTab === 'dev'" class="card dsh-card">
+    <section v-if="cardOn('dev', 'dshExport')" class="card dsh-card" data-search="dshExport">
       <div class="card-head">
         <h2 class="card-toggle" @click="toggleDevCard('dshExport')">
           <span class="caret">{{ devFolds.dshExport ? '▾' : '▸' }}</span>dsh 全量导出
@@ -8052,7 +8831,7 @@ onUnmounted(() => {
       </template>
     </section>
     <!-- [dsh] dsh 本地用量统计：读 ~/.dsh 下 dsh-usage 的账本与会话投影缓存，纯本地、不联网 -->
-    <section v-if="activeTab === 'dev'" class="card dsh-card">
+    <section v-if="cardOn('dev', 'dshUsage')" class="card dsh-card" data-search="dshUsage">
       <div class="card-head">
         <h2 class="card-toggle" @click="toggleDevCard('dshUsage')">
           <span class="caret">{{ devFolds.dshUsage ? '▾' : '▸' }}</span>dsh 用量统计
@@ -8166,7 +8945,7 @@ onUnmounted(() => {
          合并理由：两卡改的是**同一个文件、同一个 profile、同一套快照**，差别只在粒度与候选范围。
          而候选范围不一致是会让人迷路的 —— E2 只列 patch 里已有的 12 条，用户想禁的第三方插件
          往往不在其中，在 E2 卡里根本找不到，得切到 E3 卡才行，而 E2 卡完全没提示这一点。 -->
-    <section v-if="activeTab === 'dev'" class="card dsh-card">
+    <section v-if="cardOn('dev', 'dshIsolate')" class="card dsh-card" data-search="dshIsolate">
       <div class="card-head">
         <h2 class="card-toggle" @click="toggleDevCard('dshIsolate')">
           <span class="caret">{{ devFolds.dshIsolate ? '▾' : '▸' }}</span>dsh 插件开关
@@ -8464,7 +9243,7 @@ onUnmounted(() => {
          所以这张反过来必须显式声明会联网，且**默认一个请求都不发**：
          展开只读一次本地已装状态，要点「进入市场」+「加载目录」才出站（见 dshMarketRevealed）。
          联网警示在「进入市场」前后各留一份（文案不同）—— 出站点在后面，不能只在入口说一次。 -->
-    <section v-if="activeTab === 'dev'" class="card dsh-card">
+    <section v-if="cardOn('dev', 'dshMarket')" class="card dsh-card" data-search="dshMarket">
       <div class="card-head">
         <h2 class="card-toggle" @click="toggleDevCard('dshMarket')">
           <span class="caret">{{ devFolds.dshMarket ? '▾' : '▸' }}</span>dsh 插件市场
@@ -9123,8 +9902,8 @@ onUnmounted(() => {
     <!-- [dsh] Codex 本地会话统计：读 ~/.codex/sessions 的 rollout JSONL，纯本地、不联网。
          上方 7 张卡都属于 dsh，这张不是 —— 用一条纯分界线隔开即可，不写字：
          写字会和紧邻的卡标题「Codex 会话统计」重复，反而更啰嗦。 -->
-    <hr v-if="activeTab === 'dev'" class="group-sep">
-    <section v-if="activeTab === 'dev'" class="card dsh-card">
+    <hr v-if="!searchActive && activeTab === 'dev'" class="group-sep">
+    <section v-if="cardOn('dev', 'codex')" class="card dsh-card" data-search="codex">
       <div class="card-head">
         <h2 class="card-toggle" @click="toggleDevCard('codex')">
           <span class="caret">{{ devFolds.codex ? '▾' : '▸' }}</span>Codex 会话统计
@@ -9224,7 +10003,7 @@ onUnmounted(() => {
     </section>
 
     <!-- [帮助] 关于与更新 -->
-    <section v-if="activeTab === 'help'" class="card">
+    <section v-if="cardOn('help', 'about')" class="card" data-search="about">
       <h2>关于与更新</h2>
       <!-- 上游要求衍生版必须标注「个人衍生版」：既避免被误认成官方版，也说明售后归属 -->
       <p class="hint">本插件是 <strong>个人衍生版</strong>，移植自 <a href="#" @click.prevent="openDoc('https://github.com/MeteorNOX/DeepSeek-Balance-Whale-Widget')">MeteorNOX/DeepSeek-Balance-Whale-Widget</a>（MIT License）。<strong>非官方版本，与 DeepSeek、uTools 官方均无关联</strong>，无官方支持与售后 —— 上游作者不对本衍生版负责，问题请走下方反馈入口。</p>
@@ -9258,9 +10037,9 @@ onUnmounted(() => {
       </div>
     </section>
 
-    <!-- [帮助] GitHub 加速（hosts 方案）：已抽成独立组件，显隐仍由本页的 Tab 决定 -->
+    <!-- [帮助] GitHub 加速（hosts 方案）：已抽成独立组件，显隐仍由本页的 Tab / 搜索态决定 -->
     <AccelView
-      v-if="activeTab === 'help'"
+      v-if="cardOn('help', 'ghAccel')"
       :cfg="cfg"
       :services="services"
       :active-tab="activeTab"
@@ -9300,6 +10079,7 @@ onUnmounted(() => {
       @save="onGuideSave"
       @test="onGuideTest"
       @skip="onGuideSkip"
+      @browse-skins="onGuideBrowseSkins"
       @doc="openDoc"
     />
   </div>
@@ -9406,12 +10186,64 @@ h1 {
   font-size: 12px;
   color: var(--fg-faint);
 }
+/* 卡片搜索：与 Tab 条同处吸顶区。输入框沿用各卡表单的观感（--input-bg / --line），
+   type=search 在各平台自带清空叉，这里不再自绘 */
+.search-row {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+.search-input {
+  flex: 1;
+  padding: 5px 10px;
+  font-size: 13px;
+  color: var(--fg);
+  background: var(--input-bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.search-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.search-clear {
+  flex: none;
+}
+/* 命中卡片一览：一张卡一行，标出它本来的分组 —— 搜索结果是跨组混排的，不给来源就找不到北 */
+.search-hits {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0 2px 12px;
+}
+/* 命中标签是按钮（点击滚到对应卡片）：压掉按钮默认样式，hover 时描边高亮，给出可点提示 */
+.search-hit-tag {
+  padding: 2px 8px;
+  font-size: 11px;
+  font-family: inherit;
+  color: var(--fg-dim);
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: 999px;
+  cursor: pointer;
+}
+.search-hit-tag:hover {
+  color: var(--fg);
+  border-color: var(--accent);
+}
+.search-empty {
+  color: var(--fg-dim);
+  font-size: 13px;
+  line-height: 1.7;
+}
 .card {
   background: var(--card-bg);
   border: 1px solid var(--card-border);
   border-radius: 12px;
   padding: 16px;
   margin-bottom: 16px;
+  /* 点搜索命中标签滚到卡片时，吸顶的 .tab-bar 会盖住卡头；这里预留出它的高度，让卡顶落在它下方 */
+  scroll-margin-top: 96px;
 }
 .card h2 {
   margin: 0 0 12px;
@@ -10860,6 +11692,50 @@ input[type='checkbox'] {
 .dsh-result-close:hover {
   color: var(--fg);
 }
+/* 「版本说明」折叠按钮：与「运行详情」「dsh 故障排查」同款 —— 独占一行、挂
+   .link-btn.utils-btn.utils-secondary，连下划线一并保留（那两个也没去掉，去掉反而与本块其余按钮不一致）。
+   这里只治外边距：那两个按钮在 .fold 里（.fold > .link-btn 给了 margin-top:0），
+   本按钮直接落在卡片流里、没有 .fold 包着，得自己把 .link-btn 那个「独立成行」的 10px 收掉 */
+.notes-toggle {
+  margin-top: 0;
+}
+/* 说明正文：复用 .guide 的容器底色与边框，只补条目排版 */
+.notes-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.notes-sec-title {
+  font-weight: 600;
+  color: var(--fg);
+}
+.notes-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-top: 2px;
+  color: var(--fg-dim);
+}
+/* 条目文字可换行收缩，来源版本作为右标不换行、不抢宽（与 .ver 同一处理思路） */
+.notes-item-text {
+  flex: 1;
+  min-width: 0;
+  word-break: break-word;
+}
+.notes-item-from {
+  flex: none;
+  color: var(--fg-faint);
+  font-size: 11px;
+}
+/* truncated 提示与「正在获取」：沿用 .hint 的字号，只去掉其在 .guide 内多余的上下外边距 */
+.notes-trunc,
+.notes-busy {
+  margin: 0;
+}
+/* 「已是最新版本」：占 .field.row 的右侧位，与相邻行的版本号/命令文本对齐 */
+.notes-latest {
+  margin: 0;
+}
 .link-btn {
   margin-top: 10px;
   padding: 0;
@@ -11387,6 +12263,37 @@ input[type='checkbox'] {
   line-height: 1.5;
   text-align: center;
   background: rgba(83, 107, 169, 0.85);
+  color: #fff;
+}
+/* 未下载的远程形象：整格压暗 + 缩略图降饱和，一眼看出「还没下来」，
+   但缩略图仍可见 —— 让用户在下手前看得见长什么样 */
+.skin-cell.is-remote .skin-cell-img {
+  opacity: 0.45;
+  filter: grayscale(0.7);
+}
+.skin-cell.is-remote .skin-cell-tag {
+  background: rgba(0, 0, 0, 0.45);
+}
+/* 「正在使用的那张已移出插件包、还没下载回来」：标签改成警示色，并且不再被
+   .is-remote 的压暗覆盖 —— 这张是用户最该看见和点的一张 */
+.skin-cell-tag.warn {
+  background: rgba(200, 120, 30, 0.92);
+}
+.skin-cell.is-remote .skin-cell-tag.warn {
+  background: rgba(200, 120, 30, 0.92);
+}
+/* 下载角标：未装格右上角，与「已装」的删除按钮同位置，切换时不跳 */
+.skin-cell-badge {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  padding: 1px 4px;
+  font-size: 10px;
+  line-height: 1.4;
+  /* 「下载全部」4 字比原来的「下载」长，不换行免得撑破格子 */
+  white-space: nowrap;
+  border-radius: 4px;
+  background: rgba(83, 107, 169, 0.9);
   color: #fff;
 }
 .skin-cell-add {

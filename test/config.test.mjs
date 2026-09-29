@@ -96,6 +96,7 @@ const PATCH_FIXTURES = {
   menuGroups: { menuGroups: { look: true } }, menuGroupsRev: { menuGroupsRev: 7 },
   ghAccelOn: { ghAccelOn: true }, ghAccelIps: { ghAccelIps: [{ domain: 'github.com', ip: '1.2.3.4' }] },
   ghAccelRefreshedAt: { ghAccelRefreshedAt: 1700000000000 }, ghAccelSrc: { ghAccelSrc: { doh: false } },
+  skinPackSrc: { skinPackSrc: 'https://example.com/' },
   notifySystemOn: { notifySystemOn: false }, notifyMailOn: { notifyMailOn: true },
   mailFrom: { mailFrom: 'a@b.c' }, mailTo: { mailTo: 'd@e.f' },
   mailFromName: { mailFromName: '改过的发件名' }, mailSubjectPrefix: { mailSubjectPrefix: '[改]' },

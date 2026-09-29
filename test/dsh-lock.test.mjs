@@ -121,14 +121,36 @@ test('profile 名非法（含 @ 或 /）→ 直接拒绝，不落到任意路径
 })
 
 test('$DSH_HOME 指向不存在的目录 → 回退 ~/.dsh，仍不抛、不误报孤儿', () => {
-  // ⚠️ 这里不能断言 reason==='no-profile-dir'：homeDir 的候选表是「env 优先 + 回退 ~/.dsh」，
-  //    只有当**两个候选都不存在**时才会返回 ''。测试机上 ~/.dsh 通常真实存在（本机开发环境），
-  //    所以该分支无法在单测里稳定构造。真正该钉住的是「不抛异常 + 不误报孤儿」。
-  process.env[ENV_KEY] = path.join(os.tmpdir(), 'whale-nonexistent-' + Date.now())
-  const r = dsh.dshLockStale('web')
-  assert.equal(r.stale, false, '不存在的 DSH_HOME 绝不能报出孤儿锁')
-  assert.equal(typeof r.ok, 'boolean')
-  assert.ok(r.reason !== 'orphan')
+  // 这个用例要钉的边界是「env 候选不存在时不许静默取到别处的锁」。
+  // 但 homeDir 的候选表是「env 优先 + **回退 ~/.dsh**」，只要测试机上 ~/.dsh 真实存在
+  // （本机开发环境几乎必然存在），就会回退到它 —— 于是能不能过取决于开发机上
+  // ~/.dsh/profiles/web/package.json.lock 有没有一把死锁，三平台结果不一致。
+  //
+  // 所以必须把回退那一项也隔离掉：临时清空 HOME/USERPROFILE 让 os.homedir() 定位到一个
+  // 空目录。只动 HOME 系变量（Windows 上 os.homedir() 读 USERPROFILE，其次 HOMEDRIVE+HOMEPATH），
+  // 不碰 ENV_KEY —— ENV_KEY 才是指向不存在目录的那一项，正是本用例的输入。
+  const homeBak = {}
+  const homeKeys = ['HOME', 'USERPROFILE', 'HOMEDRIVE', 'HOMEPATH']
+  const emptyHome = fs.mkdtempSync(path.join(os.tmpdir(), 'whale-lock-emptyhome-'))
+  try {
+    for (const k of homeKeys) homeBak[k] = process.env[k]
+    process.env.HOME = emptyHome
+    process.env.USERPROFILE = emptyHome
+    delete process.env.HOMEDRIVE
+    delete process.env.HOMEPATH
+    process.env[ENV_KEY] = path.join(os.tmpdir(), 'whale-nonexistent-' + Date.now())
+    const r = dsh.dshLockStale('web')
+    // 两个候选都不存在 → 定位不到 profile 目录，这是最干净的分支；此时既不该抛也不该报孤儿
+    assert.equal(r.stale, false, '不存在的 DSH_HOME 绝不能报出孤儿锁')
+    assert.equal(typeof r.ok, 'boolean')
+    assert.ok(r.reason !== 'orphan')
+  } finally {
+    for (const k of homeKeys) {
+      if (homeBak[k] === undefined) delete process.env[k]
+      else process.env[k] = homeBak[k]
+    }
+    try { fs.rmSync(emptyHome, { recursive: true, force: true }) } catch (_) {}
+  }
 })
 
 test('清理孤儿锁：确实删除文件并回报 cleared=true', () => {

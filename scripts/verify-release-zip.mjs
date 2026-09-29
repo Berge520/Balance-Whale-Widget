@@ -5,10 +5,12 @@
  *
  * 由 scripts/release.mjs 在 Release 建好后调用，也可以手动跑（需要先 gh release download）。
  *
- * 核对三件事，任一不过退出码非 0：
+ * 核对四件事，任一不过退出码非 0：
  *   1. plugin.json 在 zip 顶层（uTools 开发者工具要入口目录指向解压后的目录）
  *   2. plugin.json 的 version 与本次发布的版本一致（防 prebuild 同步漏掉 / 拿错产物）
  *   3. preload 关键文件在位（preload 不参与 Vite 打包，原样复制，缺了插件起不来）
+ *   4. 三个素材包（内置形象 skins-pack + 共享角色 assets-skins + 共享音效 assets-sounds）
+ *      都在 Release 资产里（已移出插件包，靠它们按需下载；漏了 = 对应下载功能 404）
  */
 import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs'
@@ -26,9 +28,10 @@ if (!zipDir || !zipName || !expectVersion) {
 mkdirSync(zipDir, { recursive: true })
 
 // gh 在 Windows 上是 .cmd，不带 shell 会 ENOENT；带上 shell 就不能再传参数数组
-// （Node 24 起报 DEP0190），所以整条命令拼成字符串
+// （Node 24 起报 DEP0190），所以整条命令拼成字符串。
+// 同时拉 zip 与素材包（两个 -p）：素材包也是要核对的资产，见下方 packName。
 const dl = spawnSync(
-  ['gh', 'release', 'download', `v${expectVersion}`, '-p', '*.zip', '-D', `"${zipDir}"`, '--clobber'].join(' '),
+  ['gh', 'release', 'download', `v${expectVersion}`, '-p', '*.zip', '-p', '*.whaleassets', '-D', `"${zipDir}"`, '--clobber'].join(' '),
   { stdio: 'inherit', shell: true }
 )
 if (dl.status !== 0) {
@@ -48,6 +51,18 @@ if (strayZips.length) {
 if (!existsSync(zipPath)) {
   console.error(`[verify-release-zip] ✗ 下载目录里没有 ${zipName}`)
   process.exit(1)
+}
+
+// 内置形象素材包：插件包内已不含那些可下载形象（v1.9.0 起仅 1 张），用户点「下载形象」时是从
+// releases/latest/download/skins-pack.whaleassets 拉的。这个资产漏传 / 名字写错，
+// 功能会整体 404，而 zip 本身完全正常 —— 所以必须单独核对它与那份 sha256。
+// 共享素材（上游 QQ 群角色图 / 音效）同理，源地址指向 assets-*.whaleassets。
+const packNames = ['skins-pack.whaleassets', 'assets-skins.whaleassets', 'assets-sounds.whaleassets']
+for (const name of packNames) {
+  if (!existsSync(path.join(zipDir, name))) {
+    console.error(`[verify-release-zip] ✗ Release 里没有素材包 ${name}；对应下载功能会 404`)
+    process.exit(1)
+  }
 }
 
 // 解压优先 unzip，Windows 上没有就退回 tar（Win10+ 自带 bsdtar，能解 zip）。
@@ -98,10 +113,21 @@ for (const rel of mustHave) {
   if (!existsSync(path.join(outDir, rel))) errors.push(`缺少 ${rel}`)
 }
 
+// 内置资源缩略图必须随包（设置页按 './whale-pack/thumbs/<id>.webp' 加载）。
+// 曾因整目录排除 whale-pack/ 导致这批缩略图 404 —— 但设置页与它不在同一个 chunk，
+// zip 本身依然「结构正确」，所以专门钉一条。
+if (!existsSync(path.join(outDir, 'whale-pack', 'thumbs'))) {
+  errors.push('缺少 whale-pack/thumbs/；设置页「内置资源」缩略图会显示不出来')
+}
+// 反过来：那 0.94MB 的素材包本体与构建中间产物不该被塞回插件包（否则瘦身白做）
+for (const rel of ['whale-pack/skins-pack.whaleassets', 'whale-pack/manifest.json']) {
+  if (existsSync(path.join(outDir, rel))) errors.push(`不该随包：${rel}`)
+}
+
 if (errors.length) {
   console.error('[verify-release-zip] ✗ 核对失败：')
   for (const e of errors) console.error(`  - ${e}`)
   process.exit(1)
 }
 
-console.log(`[verify-release-zip] ✓ plugin.json 顶层且版本 ${expectVersion}，${mustHave.length} 个关键文件在位`)
+console.log(`[verify-release-zip] ✓ plugin.json 顶层且版本 ${expectVersion}，${mustHave.length} 个关键文件在位，素材包 ${packNames.join(' / ')} 在 Release 里`)
