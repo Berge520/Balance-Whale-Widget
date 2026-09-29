@@ -58,30 +58,28 @@ const SKIN_PACK_MAX_BYTES = 4 * 1024 * 1024
 // ──────────────────────────────────────────────
 // 共享素材（上游 QQ 群分享的角色图 / 音效，可在线下载）
 // ──────────────────────────────────────────────
-// 来源见 PROVENANCE.md 第二节第 4 小节：上游交流 QQ 群分享的角色图 36 张（原图直包，约 40.6MB）
-// 与音效 45 个（约 2.7MB）。同样打包挂 Release、按需下载，不进插件包。
-// 打包脚本 scripts/build-assets-pack.py（输入 assets-src/，产物 resources/，均不进仓库）。
+// 来源见 PROVENANCE.md 第二节第 4 小节：上游交流 QQ 群分享的角色图 36 张（约 40.6MB）
+// 与音效 45 个（约 2.7MB）。
+//
+// v1.9.0 起改为**按需单张下载**：由 scripts/export-shared-assets.mjs 把 assets-src/ 的
+// 中文原名素材按 `id.ext` 重命名导出到 public/shared/（入库，走 raw 直链），点哪张下哪张
+// —— 原先 40MB 整包经 GitHub Release 下载太慢，且用户多半只想要其中几张。
+// 注释里的 v1.9.0 是「该随本次发布」的归属口径，随版本号一起更新；历史事实（如上面
+// 「上游 QQ 群」的来源描述）不动。
 //
 // 与「内置形象」（SKIN_PACK_*）的区别：那是本插件自带的官方形象、按文件名匹配
-// （v1.8.0 起随包 1 张 + 可下载 1 张）；这里是从第三方素材整包导入的「角色图 + 音效库」，
-// 按 id 匹配、落两条不同链路（见 lib/assets-packs.js 文件头）。
-const SHARED_PACK_ORIGIN_BASE = 'https://github.com/Berge520/Balance-Whale-Widget/releases/latest/download/'
-const SHARED_SKIN_PACK_ORIGIN = SHARED_PACK_ORIGIN_BASE + 'assets-skins.whaleassets'
-const SHARED_SOUND_PACK_ORIGIN = SHARED_PACK_ORIGIN_BASE + 'assets-sounds.whaleassets'
-// 兜底源：仓库 main 分支的 raw 直链（理由同 SKIN_PACK_RAW_MAIN）。这两个大件默认被
-// .gitignore 排除（40MB + 2.7MB 入库会撑爆 git 历史），所以**通常并不存在**，走到这一步
-// 会拿到 404 —— 只有发布者主动把包提交进 main 时才成一条真兜底。放候选链最后，代价仅一次 404。
-const SHARED_SKIN_PACK_RAW_MAIN = 'https://raw.githubusercontent.com/Berge520/Balance-Whale-Widget/main/resources/assets-skins.whaleassets'
-const SHARED_SOUND_PACK_RAW_MAIN = 'https://raw.githubusercontent.com/Berge520/Balance-Whale-Widget/main/resources/assets-sounds.whaleassets'
+// （v1.8.0 起随包 1 张 + 可下载 1 张）；这里是第三方共享素材，按 id 匹配、落两条不同链路
+// （见 lib/assets-packs.js 文件头）。
+//
+// raw 直链基址：public/shared/ 下的 <id>.png / <id>.<ext>，单张最大约 2.6MB，不触 jsDelivr
+// 20MB 上限（jsDelivr 源待实测通过后再加，见 lib/assets-packs.js#sourceChain）。
+const SHARED_RAW_BASE = 'https://raw.githubusercontent.com/Berge520/Balance-Whale-Widget/main/public/shared/'
 // 默认加速前缀（与内置形象同款 ghfast.top）；末尾必须带 '/'，拼接规则是「前缀 + 真源」直连
 const SHARED_PACK_DEFAULT_PREFIX = 'https://ghfast.top/'
-// 整包 sha256（由 build-assets-pack.py 打印）。内容变更时必须同步更新
-const SHARED_SKIN_PACK_SHA256 = '7fb86936c5593cc18a14687970a5fe892e422adf7ee88ade83bd2efdfe368a77'
-const SHARED_SOUND_PACK_SHA256 = '4fe46970887cfb8972092a42e1d3348df0234d295562c355f1e6ef0f11458ead'
-// 单个源的超时：形象包 40MB 走代理可能慢，给足 180s（候选链最多试 3 个源，最坏累加）
-const SHARED_PACK_TIMEOUT_MS = 180000
-// 体积上限：形象包约 40.6MB，给 64MB 余量，既容得下也拦得住代理返回 HTML 错误页
-const SHARED_PACK_MAX_BYTES = 64 * 1024 * 1024
+// 单个源的超时：单张最大 2.6MB，30s 足够；候选链最多试 3 个源，最坏累加 90s
+const SHARED_PACK_TIMEOUT_MS = 30000
+// 单张体积上限：最大单张约 2.6MB，给 8MB 余量，既容得下也拦得住代理返回 HTML 错误页
+const SHARED_PACK_MAX_BYTES = 8 * 1024 * 1024
 
 // 共享角色图清单：id → { name, file, sha256, size }。id 是打包时生成的 ASCII 短名
 // （中文名含全角括号，通不过 skins.js 的 id 白名单，故原名留作展示 name）。
@@ -488,14 +486,8 @@ module.exports = {
   SKIN_PACK_TIMEOUT_MS,
   SKIN_PACK_MAX_BYTES,
   SKIN_PACK_SKINS,
-  SHARED_PACK_ORIGIN_BASE,
-  SHARED_SKIN_PACK_ORIGIN,
-  SHARED_SOUND_PACK_ORIGIN,
-  SHARED_SKIN_PACK_RAW_MAIN,
-  SHARED_SOUND_PACK_RAW_MAIN,
+  SHARED_RAW_BASE,
   SHARED_PACK_DEFAULT_PREFIX,
-  SHARED_SKIN_PACK_SHA256,
-  SHARED_SOUND_PACK_SHA256,
   SHARED_PACK_TIMEOUT_MS,
   SHARED_PACK_MAX_BYTES,
   SHARED_SKIN_PACK_SKINS,

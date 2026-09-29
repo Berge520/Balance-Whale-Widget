@@ -57,10 +57,10 @@
 
 ### 4. 上游 QQ 群分享素材（可下载资源，不随包）
 
-`resources/` 下另有**一批经用户下载方式提供**的素材（形象 36 张 / 音效 45 个），由本项目维护者从**上游交流 QQ 群**中获取。这批**不随插件包分发**，而是打包挂 GitHub Release，由用户按需下载到本地（见 `scripts/build-assets-pack.py`）。
+`public/shared/` 下另有**一批经用户下载方式提供**的素材（形象 36 张 / 音效 45 个），由本项目维护者从**上游交流 QQ 群**中获取。这批**不随插件包分发**（`vite.config.js` 的 `SKIP_PUBLIC_DIRS` 排除 `shared`），而是随仓库入库，由用户按需**单张**下载到本地（见 `public/preload/lib/assets-packs.js`）。
 
 - **权利状态**：与第 2 小节同性质 —— 来源为第三方分享，**无法举证原始权利归属**，按 as-is 提供，仅用于运行本插件；不声明为本项目原创，也不授予再许可，适用第四节的 Takedown 承诺。
-- **未入库的原始素材**：打包**输入**（约 44MB 的角色图与音频原文件）不进本仓库（见 `.gitignore` 的 `assets-src/` 与 `resources/skins-src/`）—— 既避免仓库体积膨胀，也不把来源不明的原文件纳入版本历史；仓库内只保留打包**产物**（`resources/` 下的素材包与缩略图）。
+- **入库与命名**：素材原文件按 `id.ext`（ASCII 短哈希 / 序号）重命名后入库 `public/shared/skins/` 与 `public/shared/sounds/`，避开中文路径与全角括号在 CDN / raw 链接上的兼容性问题（见 `scripts/export-shared-assets.mjs`）。原始素材源（`assets-src/`、`resources/skins-src/`）仍不进仓库。
 - **UI 标注**：设置页对这类可下载资源标注「来源：上游 QQ 群分享，按原样提供」，与「内置资源」区分，避免用户误以为是本项目原创。
 
 ### 5. 格式与压缩（第 1–2 小节的 13 张内置形象图）

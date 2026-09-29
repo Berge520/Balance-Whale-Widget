@@ -1,6 +1,6 @@
 <script lang="ts" setup>
 import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
-import type { AssetsApplyResult, AssetsExportResult, AssetsPreviewResult, BackupPreviewResult, BubbleMeta, CodexSummaryResult, CodexWindow, CodexWindows, DshBackupListResult, DshBackupSnapshot, DshDiagnoseFinding, DshDiagnoseItem, DshDiagnoseResult, DshDumpResult, DshExportPreviewResult, DshHostCompatCheckResult, DshHostCompatVerdict, DshIsolateCandidate, DshIsolateCandidatesResult, DshIsolatePlan, DshMarketCatalogResult, DshMarketInstallResult, DshMarketInstalledEntry, DshMarketPingEntry, DshMarketPlugin, DshMarketRegistryLatestEntry, DshMarketRegistryLatestResult, DshMarketStatusResult, DshMarketUninstallResult, DshMarketUpdateEntry, DshPatchItem, DshPatchListResult, DshUsageResult, LedgerDetailDay, LedgerDetailEntry, ModelUsageRow, SharedSkinList, SharedSoundItem, SharedSoundList, SkinGallery, SkinMeta, SkinPackList, SoundMeta, SoundRole, WhaleMailSecrets, WhaleModel, WhaleModelRow, WhaleModelTemplate, WhalePriceModel, WhaleServices, WhaleTokenPrice } from './types/services'
+import type { AssetsApplyResult, AssetsExportResult, AssetsPreviewResult, BackupPreviewResult, BubbleMeta, CodexSummaryResult, CodexWindow, CodexWindows, DshBackupListResult, DshBackupSnapshot, DshDiagnoseFinding, DshDiagnoseItem, DshDiagnoseResult, DshDumpResult, DshExportPreviewResult, DshHostCompatCheckResult, DshHostCompatVerdict, DshIsolateCandidate, DshIsolateCandidatesResult, DshIsolatePlan, DshMarketCatalogResult, DshMarketInstallResult, DshMarketInstalledEntry, DshMarketPingEntry, DshMarketPlugin, DshMarketRegistryLatestEntry, DshMarketRegistryLatestResult, DshMarketStatusResult, DshMarketUninstallResult, DshMarketUpdateEntry, DshPatchItem, DshPatchListResult, DshUsageResult, DownloadProgress, LedgerDetailDay, LedgerDetailEntry, ModelUsageRow, SharedSkinList, SharedSoundItem, SharedSoundList, SkinGallery, SkinMeta, SkinPackList, SoundMeta, SoundRole, WhaleMailSecrets, WhaleModel, WhaleModelRow, WhaleModelTemplate, WhalePriceModel, WhaleServices, WhaleTokenPrice } from './types/services'
 import SkinCropper from './components/SkinCropper.vue'
 import SoundTrimmer from './components/SoundTrimmer.vue'
 import FirstRunGuide from './components/FirstRunGuide.vue'
@@ -53,12 +53,12 @@ const SKIN_PACK_SKINS = [
   { id: 'DSniang02', size: 74578 },
 ]
 
-// 共享角色（36 张，上游 QQ 群素材，挂 Release 按需下）。与宿主 lib/constants.js 的
+// 共享角色（36 张，上游 QQ 群素材，入库 public/shared/ 按需单张下）。与宿主 lib/constants.js 的
 // SHARED_SKIN_PACK_SKINS 同值（scripts/check-shared.mjs 逐项比对 id 与展示名）——
 // 这里只留展示要用的 id/name，sha256 与体积由宿主那侧说了算。
 // 落盘 id 是打包时生成的 ASCII 短哈希（如 s34330e4aba），中文原名只作展示。
 // 缩略图随插件包分发，路径 './resources/thumbs/<id>.webp'（见 vite.config.js 的
-// copyResourcesExceptSkip：只拷 thumbs/，两个 .whaleassets 大件留给 Release）。
+// copyResourcesExceptSkip：只拷 thumbs/，大图入库 public/shared/ 按需单张下）。
 // 不写 TS 类型标注：check-shared.mjs 用「声明名 + 等号」这个 marker 定位数组字面量
 // （jsLiteral 找 marker 之后的第一个 [/{），加了 `: Array<{...}>` 会让它命中类型里的
 // `{`，抽不出清单、整条比对静默跳过——那等于闸门失效。也正因如此，注释里不要出现
@@ -4056,7 +4056,7 @@ function dshMarketTickStop() {
   dshMarketTicking.value = false
 }
 // 卸载时务必停表：定时器持有组件闭包，不停会一直空跑
-onUnmounted(() => { dshMarketTickStop() })
+onUnmounted(() => { dshMarketTickStop(); dlTickStop() })
 
 // 有新输出就滚到底：npm 的输出是追加式的，用户要看的是最新那几行；
 // 不自动滚的话进度区会一直停在最早那段，看起来像「卡住了」
@@ -5387,6 +5387,55 @@ function doPreviewBuiltin(url: string) {
 function skinPackThumb(id: string) {
   return './whale-pack/thumbs/' + encodeURIComponent(id) + '.webp'
 }
+
+// —— 素材包下载进度（三张资源卡片共用一份快照）——
+// 宿主没有推送通道，沿用 dsh 那套「同步只读快照 + 前端轮询」（见 dshMarketTick）。
+// 为什么要轮询而不是等 Promise：下载 40.6MB 的共享角色包时用户要的是**过程中**的字节数，
+// 而 await 只有结束那一刻才有结果 —— 用户原话「看不见下载进度，一直显示正在下载」。
+const dlProgress = ref<DownloadProgress | null>(null)
+let dlTickTimer = 0
+// 250ms 一下：进度条要跟得上，又不能太密（宿主快照是纯内存读，但每次都要跨模块拷一份对象）
+const DL_TICK_MS = 250
+// 终态（done / failed）保留多久。保留是为了让用户看清「经哪个源、下了多大」，
+// 过期后清掉，否则下次进设置页进度区还杵着一条早就结束的记录
+const DL_DONE_KEEP_MS = 8000
+// 快照时间戳与本地时钟可能有微妙偏差（宿主与设置页各算各的 Date.now），
+// 判「是否过期」时留一点宽限，避免刚下完就把终态判没了
+const DL_CLOCK_SLACK_MS = 2000
+function dlTick() {
+  let s: DownloadProgress | null = null
+  try {
+    s = services.downloadProgress?.() || null
+  } catch (err) { /* 预期分支：宿主快照读不到就当作没有进度，不影响下载本身 */ }
+  if (s && (s.phase === 'done' || s.phase === 'failed')
+    && Date.now() - Number(s.at || 0) > DL_DONE_KEEP_MS + DL_CLOCK_SLACK_MS) {
+    s = null
+  }
+  dlProgress.value = s
+  // 没有进度在跑就停表，省得空转（下次开下载时再起）
+  if (!s || s.phase === 'done' || s.phase === 'failed') dlTickStop()
+}
+function dlTickStart() {
+  dlTick()
+  if (!dlTickTimer) dlTickTimer = window.setInterval(dlTick, DL_TICK_MS)
+}
+function dlTickStop() {
+  if (dlTickTimer) { window.clearInterval(dlTickTimer); dlTickTimer = 0 }
+}
+// 进度条百分比：总量未知时回 null（模板据此显示不确定进度条，而不是假装 0%）
+const dlPercent = computed<number | null>(() => {
+  const s = dlProgress.value
+  if (!s || !s.totalKnown || !(s.total > 0)) return null
+  return Math.max(0, Math.min(100, Math.round((Number(s.received) || 0) / s.total * 100)))
+})
+// 已下载 / 总量文案。总量未知时只报已下载（不说谎）
+const dlAmountText = computed<string>(() => {
+  const s = dlProgress.value
+  if (!s) return ''
+  const got = fmtBytes(Number(s.received) || Number(s.bytes) || 0)
+  return s.totalKnown && s.total > 0 ? `${got} / ${fmtBytes(s.total)}` : got
+})
+
 const skinPackList = ref<SkinPackList | null>(null)
 const skinPackBusy = ref(false)
 const skinPackFlash: Flash = useFlash()
@@ -5433,6 +5482,7 @@ async function doDownloadSkinPacks() {
   skinPackFlash.msg = ''
   skinPackFlash.err = false
   skinPackBusy.value = true
+  dlTickStart()
   try {
     // 把用户自填的加速前缀交给宿主排进候选链最前（空串 = 只用内置链：ghfast.top → 直连兜底）
     const r = await services.downloadSkinPacks?.(cfg.skinPackSrc || '')
@@ -5494,8 +5544,39 @@ async function doDownloadSharedSkins() {
   sharedSkinFlash.msg = ''
   sharedSkinFlash.err = false
   sharedSkinBusy.value = true
+  dlTickStart()
   try {
-    const r = await services.downloadSharedSkins?.(cfg.skinPackSrc || '')
+    // 单张下载：把没装的逐张串行拉下来（点「下载全部」才走这里；单张走 doSharedSkinCell）
+    const todo = sharedSkinItems.value.filter(it => !it.installed)
+    const failed: string[] = []
+    for (const it of todo) {
+      const r = await services.downloadSharedSkin?.(it.id, cfg.skinPackSrc || '')
+      if (!r || !r.ok) { failed.push(it.name + '：' + ((r && r.error) || '下载失败')); break }
+    }
+    refreshSkin()
+    refreshSharedSkins()
+    if (failed.length) {
+      sharedSkinFlash.msg = failed[0]
+      sharedSkinFlash.err = true
+      return
+    }
+    const n = todo.length
+    sharedSkinFlash.msg = n ? `已下载 ${n} 张共享角色` : '共享角色已是最新，无需重复下载'
+    sharedSkinFlash.err = false
+  } finally {
+    sharedSkinBusy.value = false
+  }
+}
+// 点缩略图：未装 → 下这一张（下完自动切到这张）；已装 → 直接选用
+async function doSharedSkinCell(id: string) {
+  if (sharedSkinInstalled.value[id]) { doUseSkin(id); return }
+  if (sharedSkinBusy.value) return
+  sharedSkinFlash.msg = ''
+  sharedSkinFlash.err = false
+  sharedSkinBusy.value = true
+  dlTickStart()
+  try {
+    const r = await services.downloadSharedSkin?.(id, cfg.skinPackSrc || '')
     refreshSkin()
     refreshSharedSkins()
     if (!r || !r.ok) {
@@ -5503,19 +5584,12 @@ async function doDownloadSharedSkins() {
       sharedSkinFlash.err = true
       return
     }
-    const n = (r.installed || []).length
-    sharedSkinFlash.msg = n ? `已下载 ${n} 张共享角色`
-      : (r.errors && r.errors.length ? `部分角色未能写入：${r.errors[0]}` : '共享角色已是最新，无需重复下载')
-    sharedSkinFlash.err = !!(r.errors && r.errors.length)
+    sharedSkinFlash.msg = `已下载「${r.name || id}」`
+    sharedSkinFlash.err = false
+    doUseSkin(id)
   } finally {
     sharedSkinBusy.value = false
   }
-}
-// 点缩略图：未装 → 下整包（下完自动切到这张）；已装 → 直接选用
-async function doSharedSkinCell(id: string) {
-  if (sharedSkinInstalled.value[id]) { doUseSkin(id); return }
-  await doDownloadSharedSkins()
-  if (sharedSkinInstalled.value[id]) doUseSkin(id)
 }
 
 // —— 共享音效库（45 个，与共享角色同一个包来源，但落 sounds 的 shared 槽位） ——
@@ -5539,8 +5613,38 @@ async function doDownloadSharedSounds() {
   sharedSoundFlash.msg = ''
   sharedSoundFlash.err = false
   sharedSoundBusy.value = true
+  dlTickStart()
   try {
-    const r = await services.downloadSharedSounds?.(cfg.skinPackSrc || '')
+    // 单段下载：把没装的逐段串行拉下来（「下载全部」按钮走这里；单段走 doDownloadSharedSound）
+    const todo = sharedSoundItems.value.filter(it => !it.installed)
+    const failed: string[] = []
+    for (const it of todo) {
+      const r = await services.downloadSharedSound?.(it.id, cfg.skinPackSrc || '')
+      if (!r || !r.ok) { failed.push(it.name + '：' + ((r && r.error) || '下载失败')); break }
+    }
+    refreshSounds()
+    refreshSharedSounds()
+    if (failed.length) {
+      sharedSoundFlash.msg = failed[0]
+      sharedSoundFlash.err = true
+      return
+    }
+    const n = todo.length
+    sharedSoundFlash.msg = n ? `已下载 ${n} 段音效（存进「共享音效库」，可到下面选用）` : '共享音效已是最新，无需重复下载'
+    sharedSoundFlash.err = false
+  } finally {
+    sharedSoundBusy.value = false
+  }
+}
+// 点某段共享音效的下载按钮：只拉这一段
+async function doDownloadSharedSound(it: SharedSoundItem) {
+  if (sharedSoundBusy.value || it.installed) return
+  sharedSoundFlash.msg = ''
+  sharedSoundFlash.err = false
+  sharedSoundBusy.value = true
+  dlTickStart()
+  try {
+    const r = await services.downloadSharedSound?.(it.id, cfg.skinPackSrc || '')
     refreshSounds()
     refreshSharedSounds()
     if (!r || !r.ok) {
@@ -5548,10 +5652,8 @@ async function doDownloadSharedSounds() {
       sharedSoundFlash.err = true
       return
     }
-    const n = (r.installed || []).length
-    sharedSoundFlash.msg = n ? `已下载 ${n} 段音效（存进「共享音效库」，可到下面选用）`
-      : (r.errors && r.errors.length ? `部分音效未能写入：${r.errors[0]}` : '共享音效已是最新，无需重复下载')
-    sharedSoundFlash.err = !!(r.errors && r.errors.length)
+    sharedSoundFlash.msg = `已下载「${r.name || it.name}」`
+    sharedSoundFlash.err = false
   } finally {
     sharedSoundBusy.value = false
   }
@@ -7175,6 +7277,21 @@ onUnmounted(() => {
                     : `下载全部 ${SKIN_PACK_SKINS.length} 张（约 ${fmtBytes(skinPackBytes)}）` }}
             </button>
           </div>
+          <div v-if="dlProgress && dlProgress.pack === 'skins'" class="dl-box">
+            <div class="dl-track" :class="{ indet: dlPercent === null }">
+              <div class="dl-bar" :class="{ indet: dlPercent === null, done: dlProgress.phase === 'done', err: dlProgress.phase === 'failed' }"
+                   :style="dlPercent === null ? undefined : { width: dlPercent + '%' }"></div>
+            </div>
+            <div class="dl-line">
+              <span class="dl-label">{{ dlProgress.label }}</span>
+              <span class="dl-amt">{{ dlAmountText }}</span>
+              <span v-if="dlPercent !== null" class="dl-pct">{{ dlPercent }}%</span>
+            </div>
+            <div v-if="dlProgress.url" class="dl-src">
+              <span class="dl-src-tag">下载源</span>
+              <a class="dl-src-url" :href="dlProgress.url" target="_blank" rel="noreferrer" :title="dlProgress.url">{{ dlProgress.url }}</a>
+            </div>
+          </div>
           <p class="hint">
             <strong>一次操作下载的是整包</strong>：形象打包在同一个 Release 文件里，没有按张分片，所以无论点缩略图还是点上面按钮，
             都会把未下载的那几张一起下回来（已下载的自动跳过，不重复占体积），下完自动切到你点的那张。
@@ -7205,8 +7322,8 @@ onUnmounted(() => {
       </div>
     </section>
 
-    <!-- [资源] 共享角色：上游 QQ 群素材（36 张），挂 Release 按需下，不随插件包分发。
-         与「内置形象」同样是整包下载（点任意一张 = 下整个形象包），缩略图随包带上以便下载前预览 -->
+    <!-- [资源] 共享角色：上游 QQ 群素材（36 张），v1.9.0 起按需单张下载（走 raw 直链，不再整包）。
+         点缩略图 = 下这一张；顶上按钮 = 逐张串行把未下载的补齐 -->
     <section v-if="cardOn('assets', 'assetsSharedSkins')" class="card" data-search="assetsSharedSkins">
       <div class="card-head">
         <h2>共享角色</h2>
@@ -7221,12 +7338,27 @@ onUnmounted(() => {
           </button>
         </div>
       </div>
+      <div v-if="dlProgress && dlProgress.pack === 'shared-skins'" class="dl-box">
+        <div class="dl-track" :class="{ indet: dlPercent === null }">
+          <div class="dl-bar" :class="{ indet: dlPercent === null, done: dlProgress.phase === 'done', err: dlProgress.phase === 'failed' }"
+               :style="dlPercent === null ? undefined : { width: dlPercent + '%' }"></div>
+        </div>
+        <div class="dl-line">
+          <span class="dl-label">{{ dlProgress.label }}</span>
+          <span class="dl-amt">{{ dlAmountText }}</span>
+          <span v-if="dlPercent !== null" class="dl-pct">{{ dlPercent }}%</span>
+        </div>
+        <div v-if="dlProgress.url" class="dl-src">
+          <span class="dl-src-tag">下载源</span>
+          <a class="dl-src-url" :href="dlProgress.url" target="_blank" rel="noreferrer" :title="dlProgress.url">{{ dlProgress.url }}</a>
+        </div>
+      </div>
       <div class="skin-grid">
         <div v-for="s in sharedSkinItems" :key="'sh-' + s.id" class="skin-cell"
              :class="{ active: cfg.skin === s.id, 'is-remote': !sharedSkinInstalled[s.id] }">
           <button class="skin-cell-pick" type="button"
                   :title="sharedSkinInstalled[s.id] ? `${sharedSkinNames[s.id] || s.id}（已下载，点选用）`
-                    : `${sharedSkinNames[s.id] || s.id}（未下载，点一下下载整包，下完自动切到这张）`"
+                    : `${sharedSkinNames[s.id] || s.id}（未下载，点一下下载这张，下完自动切到这张）`"
                   @click="doSharedSkinCell(s.id)">
             <img class="skin-cell-img" :src="sharedSkinThumb(s.id)" :alt="sharedSkinNames[s.id] || s.id" />
           </button>
@@ -7234,16 +7366,16 @@ onUnmounted(() => {
             <button class="skin-op danger" type="button" title="从本地删除这张（可重新下载）"
                     @click.stop="doRemoveSkin(s.id)">删</button>
           </span>
-          <!-- 与内置形象同款说明：单张点击实际会下整包，写「下载」会让人以为只下这一张 -->
-          <span v-else class="skin-cell-badge">下载全部</span>
+          <!-- 单张点击只下这一张，但 40MB 整包时代留下的「下载全部」措辞要改成「下载」 -->
+          <span v-else class="skin-cell-badge">下载</span>
           <span class="skin-cell-tag">{{ sharedSkinNames[s.id] || s.id }}</span>
         </div>
       </div>
       <p v-if="!sharedSkinItems.length" class="hint">暂无可下载的共享角色。</p>
       <p class="hint">
-        这些角色来自上游 QQ 群分享，<strong>不随插件包分发</strong>，改为按需从 GitHub Release 下载。
-        <strong>一次操作下载的是整包</strong>（所有角色打在一个文件里，没有按张分片），所以点任意一张缩略图或点上面按钮，
-        都会把未下载的一起下回来（已下载的自动跳过），下完自动切到你点的那张。
+        这些角色来自上游 QQ 群分享，<strong>不随插件包分发</strong>，改为按需从 GitHub 直链下载。
+        <strong>点缩略图只下载这一张</strong>（约 1~2MB），下完自动切到这张；
+        点上方的按钮会把还没下载的<strong>逐张</strong>下回来（已下载的自动跳过）。
         已下载的可悬停「删」单张，删了能重新下载；下载回来的角色存本地，不占「导入的形象」的 20 张配额。
       </p>
       <p v-if="sharedSkinFlash.msg" class="msg" :class="msgCls(sharedSkinFlash)">{{ sharedSkinFlash.msg }}</p>
@@ -7266,6 +7398,21 @@ onUnmounted(() => {
           </button>
         </div>
       </div>
+      <div v-if="dlProgress && dlProgress.pack === 'shared-sounds'" class="dl-box">
+        <div class="dl-track" :class="{ indet: dlPercent === null }">
+          <div class="dl-bar" :class="{ indet: dlPercent === null, done: dlProgress.phase === 'done', err: dlProgress.phase === 'failed' }"
+               :style="dlPercent === null ? undefined : { width: dlPercent + '%' }"></div>
+        </div>
+        <div class="dl-line">
+          <span class="dl-label">{{ dlProgress.label }}</span>
+          <span class="dl-amt">{{ dlAmountText }}</span>
+          <span v-if="dlPercent !== null" class="dl-pct">{{ dlPercent }}%</span>
+        </div>
+        <div v-if="dlProgress.url" class="dl-src">
+          <span class="dl-src-tag">下载源</span>
+          <a class="dl-src-url" :href="dlProgress.url" target="_blank" rel="noreferrer" :title="dlProgress.url">{{ dlProgress.url }}</a>
+        </div>
+      </div>
       <div class="field row sound-seg" v-for="it in sharedSoundItems" :key="'shs-' + it.id">
         <span class="sound-file" :title="it.name">{{ it.name }}</span>
         <span class="asset-meta">{{ fmtBytes(it.size) }}{{ sharedSoundInstalled[it.id] ? ' · 已下载' : '' }}</span>
@@ -7281,10 +7428,13 @@ onUnmounted(() => {
                   :disabled="!sharedSoundUseRole[it.id]" @click="doUseSharedSound(it)">选用</button>
         </template>
         <span v-else class="asset-meta">未下载</span>
+        <button v-if="!sharedSoundInstalled[it.id]" class="export-btn utils-btn utils-primary" type="button"
+                :disabled="sharedSoundBusy" @click="doDownloadSharedSound(it)">下载</button>
       </div>
       <p v-if="!sharedSoundItems.length" class="hint">暂无可下载的共享音效。</p>
       <p class="hint">
-        这些音效来自上游 QQ 群分享，<strong>不随插件包分发</strong>，改为按需从 GitHub Release 下载。
+        这些音效来自上游 QQ 群分享，<strong>不随插件包分发</strong>，改为按需从 GitHub 直链下载。
+        <strong>点某段右侧的「下载」只下载这一段</strong>；点上方的按钮会把还没下载的<strong>逐段</strong>下回来。
         下载后先进「共享音效库」这个素材池，<strong>不会自动播放</strong> —— 从下拉里选一个音效段（按压 / 释放 / 四类提醒音）再点「选用」，
         才会把这段加进那个槽位（可多段，挂件随机播一条）。这样不会一装几十段、随机播到哪段全看运气。
       </p>
@@ -11633,6 +11783,84 @@ input[type='checkbox'] {
 /* 有新版本时结果行可点，直接去插件市场更新 */
 .msg.clickable {
   cursor: pointer;
+  text-decoration: underline;
+}
+
+/* ── 素材包下载进度（内置形象 / 共享角色 / 共享音效三张卡共用一套样式） ──
+   条子固定 8px 高：40.6MB 的角色包在慢网下要下好几分钟，进度条要够显眼又不能顶开版式 */
+.dl-box {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--track);
+}
+.dl-track {
+  position: relative;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--track);
+  overflow: hidden;
+}
+.dl-bar {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  /* 宽度每 250ms 跳一档，加过渡把台阶磨平，否则看起来像在抖 */
+  transition: width 0.25s linear;
+}
+.dl-bar.done { background: var(--ok); }
+.dl-bar.err { background: var(--err); }
+/* 总量未知（加速代理回 Transfer-Encoding: chunked，拿不到 Content-Length）：
+   不谎报百分比，改成来回扫的滑块表示「在动，但说不准还有多久」 */
+.dl-bar.indet {
+  width: 35%;
+  transition: none;
+  animation: dl-slide 1.1s ease-in-out infinite;
+}
+@keyframes dl-slide {
+  0% { margin-left: -35%; }
+  100% { margin-left: 100%; }
+}
+.dl-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-top: 6px;
+  font-size: 12px;
+}
+.dl-label { flex: 0 0 auto; }
+/* 字节数用等宽：数字每 250ms 变一次，比例字体下宽度会跳，整行跟着抖 */
+.dl-amt {
+  flex: 0 1 auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  opacity: 0.85;
+}
+.dl-pct {
+  flex: 0 0 auto;
+  margin-left: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  opacity: 0.85;
+}
+/* 下载源一行：URL 很长（github.com/.../releases/download/...），必须能断行 + 可复制 */
+.dl-src {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-top: 4px;
+  font-size: 11px;
+}
+.dl-src-tag {
+  flex: 0 0 auto;
+  opacity: 0.7;
+}
+.dl-src-url {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: inherit;
+  opacity: 0.75;
+  word-break: break-all;
   text-decoration: underline;
 }
 /* 安装 / 更新的终态横幅：整块底色 + 左侧粗色条，做成「一眼就能看出成败」的强度。

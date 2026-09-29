@@ -12,14 +12,15 @@
  *   3. 跑四关：lint → typecheck → test → build（与 ci.yml / release.yml 完全同一套命令）
  *   4. 用 README「### <版本>」章节当正文，建 release commit
  *   5. push main → 等 CI 绿 → 打附注 tag → push tag
- *   6. 等 Release 工作流绿 → 补传三个素材包附件 → 核对 Release 与 zip 资产
+ *   6. 等 Release 工作流绿 → 补传内置形象包附件 → 核对 Release 与 zip 资产
  *
  * 为什么这些步骤不交给 CI 而留在本地：版本号单一来源是 package.json 的 version，
  * 而 tag 是「这一版确实要发」的显式动作；本地先跑同一套四关，能保证「本地能过 = CI 能过」
  * （ci.yml 的注释也是这个口径）。README 章节进 commit body 是为了让 git log 与
  * 对外的版本记录口径一致，不用两处各写一遍。
- * 三个素材包附件同样只能在本地传：它们在 .gitignore 里被排除，CI 从零检出拿不到文件
+ * 内置形象包附件同样只能在本地传：它在 .gitignore 里被排除，CI 从零检出拿不到文件
  * （把上传放进 release.yml 曾导致 gh release create 报文件不存在）。
+ * 共享角色 / 音效自 v1.9.0 起改为 public/shared/ 单张直链（入库），不再需要补传。
  *
  * 边界：uTools 市场的 .upx 仍需人工在开发者工具里打包上传，脚本只到 GitHub Release 为止。
  */
@@ -294,18 +295,16 @@ run('gh', ['run', 'watch', relRun, '--exit-status', '--interval', '15'])
 console.log('  ✓ Release 工作流全绿')
 
 // ── 6b. 补传素材包附件 ──
-// 三个素材包（内置形象 skins-pack + 共享角色 assets-skins + 共享音效 assets-sounds）
-// 在 .gitignore 里被排除，CI 从零检出拿不到文件，所以 release.yml 只建 Release + 挂 zip，
-// 附件必须在这里由本地补传 —— 发布者本地才有那两个大件。
-// 顺序不能挪到核对之后：verify-release-zip.mjs 会检查它们确实在 Release 里。
+// 只剩「内置形象 skins-pack」一个包：v1.9.0 起共享角色 / 音效改为 public/shared/ 单张直链
+// （入库、走 raw，不再挂 Release），故那两件不再上传。
+// 内置形象包在 .gitignore 里被排除，CI 从零检出拿不到文件，所以 release.yml 只建 Release + 挂 zip，
+// 附件必须在这里由本地补传 —— 发布者本地才有这个包。
+// 顺序不能挪到核对之后：verify-release-zip.mjs 会检查它确实在 Release 里。
 // 文件名要与 constants.js 里的 URL 一字不差（源地址是 releases/latest/download/<文件名>）。
 step('上传素材包附件')
 // 先与 constants.js 的整包哈希比对：素材包改了却忘更新常量 = 用户下载后校验必失败。
-// 三处（内置 / 共享角色 / 共享音效）走同一条逻辑，常量名对应 constants.js 的导出。
 const packs = [
   ['public/whale-pack/skins-pack.whaleassets', 'SKIN_PACK_SHA256', 'scripts/build-skin-pack.py'],
-  ['resources/assets-skins.whaleassets', 'SHARED_SKIN_PACK_SHA256', 'scripts/build-assets-pack.py'],
-  ['resources/assets-sounds.whaleassets', 'SHARED_SOUND_PACK_SHA256', 'scripts/build-assets-pack.py'],
 ]
 // constants.js 是宿主 preload 的 CommonJS 模块，用 createRequire 取导出值
 const req = createRequire(path.join(root, 'package.json'))

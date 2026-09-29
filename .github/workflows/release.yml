@@ -6,7 +6,7 @@
 # plugin.json 与 lib/constants.js，所以这里只校验 tag 与 package.json）。
 #
 # 边界：uTools 市场发布仍需人工（开发者工具里打包 .upx 上传）；
-# 三个素材包附件也由 scripts/release.mjs 在本地补传（它们不入库，CI 拿不到），
+# 内置形象包附件由 scripts/release.mjs 在本地补传（它不入库，CI 拿不到），
 # 这里只负责「校验版本 → 跑检查 → 构建 → 打包 zip → 建 Release + 变更说明」。
 # 变更说明用 gh 的 --generate-notes（GitHub 按 commit / PR 自动生成），
 # README 的「版本记录」仍是人工整理的对外口径，两者互不替代。
@@ -67,13 +67,13 @@ jobs:
           cd dist
           zip -qr "../balance-whale-widget-${GITHUB_REF_NAME}.zip" .
 
-      # 建 Release 只挂 zip。三个素材包（内置形象 skins-pack + 共享角色 assets-skins +
-      # 共享音效 assets-sounds）**不在这里上传**：它们在 .gitignore 里被排除，CI 从零检出
-      # 根本拿不到文件（曾经把上传放进 CI，结果 gh release create 直接报文件不存在）。
-      # 素材包由 scripts/release.mjs 在本地补传（发布者本地才有那两个大件），
-      # 随后 verify-release-zip.mjs 核对它们确实在 Release 里。
-      # 之所以能从插件包移出：它们是 releases/latest/download/<文件名> 的远程附件，
-      # 源地址写在 lib/constants.js（SKIN_PACK_URL / SHARED_*_URL），latest 恒指向最新一版。
+      # 建 Release 只挂 zip。内置形象包（skins-pack）**不在这里上传**：它在 .gitignore 里
+      # 被排除，CI 从零检出根本拿不到文件（曾经把上传放进 CI，结果 gh release create
+      # 直接报文件不存在）。该包由 scripts/release.mjs 在本地补传，随后 verify-release-zip.mjs
+      # 核对它确实在 Release 里。共享角色 / 音效自 v1.9.0 起改为 public/shared/ 单张直链
+      # （入库），不再作为 Release 附件。
+      # 之所以能从插件包移出：它是 releases/latest/download/<文件名> 的远程附件，
+      # 源地址写在 lib/constants.js（SKIN_PACK_URL），latest 恒指向最新一版。
       - name: 建 Release
         env:
           GH_TOKEN: ${{ github.token }}

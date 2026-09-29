@@ -8,17 +8,17 @@ import vue from '@vitejs/plugin-vue'
 // './whale-pack/thumbs/<id>.webp' 显示缩略图，让用户下载前就能看见长什么样。
 const SKIP_PUBLIC_FILES = new Set(['whale-pack/skins-pack.whaleassets', 'whale-pack/manifest.json'])
 
-// resources/ 是仓库里的素材源目录（scripts/build-assets-pack.py 的产物），**大部分不该进插件包**：
-//   - assets-skins.whaleassets / assets-sounds.whaleassets 是发 Release 的远程附件（40MB + 2.7MB），
-//     随包等于把「按需下载」白做了；
+// public/shared/ 是「共享素材」的单张下载源（scripts/export-shared-assets.mjs 导出，
+// 角色 36 张约 40.6MB + 音效 45 段约 2.7MB），**整个目录都不进插件包**：
+// 它入库的唯一目的是让用户从 raw / jsDelivr 按 URL 单张取；
+// 若随插件包分发，插件体积白涨 43MB，等于把「按需下载」这件事作废。
+const SKIP_PUBLIC_DIRS = new Set(['shared'])
+
+// resources/ 是仓库里的素材源目录，**大部分不该进插件包**：
 //   - manifest.json 是打包核对用的中间产物；
 //   - thumbs/（36 张缩略图，约 404KB）**必须进包** —— 设置页「共享角色」网格用相对路径
 //     './resources/thumbs/<id>.webp' 显示缩略图，让用户下载前就能看见长什么样。
-const SKIP_RESOURCES_FILES = new Set([
-  'assets-skins.whaleassets',
-  'assets-sounds.whaleassets',
-  'manifest.json',
-])
+const SKIP_RESOURCES_FILES = new Set(['manifest.json'])
 
 // 把仓库根的 resources/ 拷进 dist/resources/，按上面清单排除大件
 function copyResourcesExceptSkip(outDir) {
@@ -63,6 +63,7 @@ function copyPublicExceptSkip(outDir) {
         for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
           const childRel = rel ? rel + '/' + ent.name : ent.name
           if (SKIP_PUBLIC_FILES.has(childRel)) continue
+          if (ent.isDirectory() && rel === '' && SKIP_PUBLIC_DIRS.has(ent.name)) continue
           const from = path.join(dir, ent.name)
           const to = path.join(outDir, childRel)
           if (ent.isDirectory()) {

@@ -9,8 +9,9 @@
  *   1. plugin.json 在 zip 顶层（uTools 开发者工具要入口目录指向解压后的目录）
  *   2. plugin.json 的 version 与本次发布的版本一致（防 prebuild 同步漏掉 / 拿错产物）
  *   3. preload 关键文件在位（preload 不参与 Vite 打包，原样复制，缺了插件起不来）
- *   4. 三个素材包（内置形象 skins-pack + 共享角色 assets-skins + 共享音效 assets-sounds）
- *      都在 Release 资产里（已移出插件包，靠它们按需下载；漏了 = 对应下载功能 404）
+ *   4. 内置形象素材包（skins-pack.whaleassets）在 Release 资产里
+ *      （已移出插件包，靠它按需下载；漏了 = 下载形象功能 404）
+ *      注：共享角色 / 音效自 v1.9.0 起改为 public/shared/ 单张直链（入库），不再是 Release 资产
  */
 import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs'
@@ -56,8 +57,7 @@ if (!existsSync(zipPath)) {
 // 内置形象素材包：插件包内已不含那些可下载形象（v1.8.0 起仅 1 张），用户点「下载形象」时是从
 // releases/latest/download/skins-pack.whaleassets 拉的。这个资产漏传 / 名字写错，
 // 功能会整体 404，而 zip 本身完全正常 —— 所以必须单独核对它与那份 sha256。
-// 共享素材（上游 QQ 群角色图 / 音效）同理，源地址指向 assets-*.whaleassets。
-const packNames = ['skins-pack.whaleassets', 'assets-skins.whaleassets', 'assets-sounds.whaleassets']
+const packNames = ['skins-pack.whaleassets']
 for (const name of packNames) {
   if (!existsSync(path.join(zipDir, name))) {
     console.error(`[verify-release-zip] ✗ Release 里没有素材包 ${name}；对应下载功能会 404`)

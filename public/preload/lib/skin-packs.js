@@ -40,6 +40,7 @@ const {
 } = require('./constants')
 const { log, logErr } = require('./log')
 const skins = require('./skins')
+const dlp = require('./download-progress')
 
 const MAGIC = 'WHALEASSET1'
 const KIND = 'balance-whale-widget-assets'
@@ -128,25 +129,60 @@ function labelOf(url) {
   return '自定义加速源'
 }
 
+// 把响应体流式读成 Buffer，边读边累加字节数。
+//
+// ── 为什么不用 `res.arrayBuffer()` ──
+// 那样一次性读完，中间没有任何可上报的时点，设置页只能干显「正在下载…」（用户实测反馈：
+// 「看不见下载进度，一直显示正在下载」）。改成读 res.body 的 reader 逐块累加，
+// 才有 received / total 可报。整包 0.9MB 不大，但链路一致更重要。
+//
+// ── 为什么 Content-Length 缺失也要能跑 ──
+// 走加速代理时响应可能被重新分块（Transfer-Encoding: chunked），拿不到 Content-Length。
+// 这时 total 记 0、由读侧显示「不确定进度条」，而不是谎报百分比。
+async function readBodyWithProgress(res, onChunk) {
+  const lenHeader = Number(res.headers && res.headers.get ? res.headers.get('content-length') : 0)
+  const total = lenHeader > 0 ? lenHeader : 0
+  // 没有可读流（单测注入的假响应 / 老实现）时退回一次性读取，保证兼容
+  if (!res.body || typeof res.body.getReader !== 'function') {
+    const buf = Buffer.from(await res.arrayBuffer())
+    if (onChunk) onChunk(buf.length, total)
+    return buf
+  }
+  const reader = res.body.getReader()
+  const chunks = []
+  let received = 0
+  for (;;) {
+    const step = await reader.read()
+    if (step.done) break
+    const c = Buffer.from(step.value)
+    chunks.push(c)
+    received += c.length
+    if (onChunk) onChunk(received, total)
+  }
+  return Buffer.concat(chunks)
+}
+
 // 从单个源取包并做全部前置校验。任何一步不过都抛错（供候选链顺延到下一个源）。
 // 返回 { buf, parsed }。
 async function fetchPackFrom(url, fetchImpl) {
   const res = await fetchImpl(url, { signal: AbortSignal.timeout(SKIN_PACK_TIMEOUT_MS) })
   if (!res.ok) throw new Error('HTTP ' + res.status + ' ' + (res.statusText || ''))
-  const buf = Buffer.from(await res.arrayBuffer())
+  const buf = await readBodyWithProgress(res, (received, total) => dlp.progress(received, total))
   if (!buf.length) throw new Error('下载到空内容')
   if (buf.length > SKIN_PACK_MAX_BYTES) throw new Error('素材包异常大（' + buf.length + ' 字节）')
 
   // ① 整包校验：代理返回 HTML 错误页 / 截断都能在这里被挡下
+  dlp.phase('verify')
   const digest = sha256(buf)
   if (SKIN_PACK_SHA256 && digest !== SKIN_PACK_SHA256) {
     logErr('[whale][skin-packs] 素材包校验失败', 'got ' + digest)
     throw new Error('素材包校验失败（内容与预期不符）')
   }
 
+  dlp.phase('install', { label: '正在解包…' })
   const parsed = parsePack(buf)
   if (parsed.error) throw new Error(parsed.error)
-  return { buf: buf, parsed: parsed }
+  return { buf: buf, parsed: parsed, url: url }
 }
 
 // 下载并安装整个素材包。返回：
@@ -161,6 +197,9 @@ async function downloadSkinPacks(opts) {
   const fetchImpl = typeof o.fetchImpl === 'function' ? o.fetchImpl : fetch
   const chain = sourceChain(o.prefix)
   running = true
+  // 进度起始总量取「清单里这批的预期字节」——比 Content-Length 更贴近用户预期
+  // （用户要下的是「剩余 N 张」，不是「这个容器文件多大」），服务端给了真值会覆盖它
+  dlp.begin('skins', SKIN_PACK_SKINS.reduce((n, s) => n + (Number(s.size) || 0), 0))
   try {
     // ── 取包：候选链逐个试，任一源取到合法包即停 ──
     // 「合法」含 sha256 过关 —— 代理返 HTML / 半截包会在 fetchPackFrom 里被判失败并顺延下一源，
@@ -170,6 +209,7 @@ async function downloadSkinPacks(opts) {
     for (const url of chain) {
       const label = labelOf(url)
       try {
+        dlp.source(url, label)
         pack = await fetchPackFrom(url, fetchImpl)
         attempts.push(label + '：成功')
         break
@@ -182,6 +222,9 @@ async function downloadSkinPacks(opts) {
     if (!pack) return { ok: false, error: '所有下载源都失败 —— ' + attempts.join('；') }
     const buf = pack.buf
     const parsed = pack.parsed
+    // 取包阶段（含校验 / 解包）已过，接下来是逐张写盘：进度条在这段不再涨字节，
+    // 故把阶段改写出来，免得用户看着 100% 的条以为卡死
+    dlp.phase('install', { label: '正在写入形象…', total: buf.length })
 
     // 逐张落盘：按清单里 name 主干匹配 SKIN_PACK_SKINS 拿 id 与 sha256
     const byFile = {}
@@ -214,8 +257,9 @@ async function downloadSkinPacks(opts) {
       }
     }
     log('[whale][skin-packs] 素材包已下载', {
-      bytes: buf.length, installed: installed.length, skipped: skipped.length, errors: errors.length,
+      bytes: buf.length, source: pack.url, installed: installed.length, skipped: skipped.length, errors: errors.length,
     })
+    dlp.end(true, buf.length)
     if (!installed.length && errors.length) {
       return { ok: false, error: '形象写入失败：' + errors[0], installed: installed, skipped: skipped }
     }
@@ -225,9 +269,14 @@ async function downloadSkinPacks(opts) {
       skipped: skipped,
       total: SKIN_PACK_SKINS.length,
       errors: errors,
+      // 回传实际命中的源与落地字节：设置页结果提示里能写明「经 ghfast.top 下载 0.9 MB」，
+      // 用户遇到「慢 / 下不动」时立刻知道该换哪个源
+      source: pack.url,
+      bytes: buf.length,
     }
   } catch (err) {
     const why = errMsg(err)
+    dlp.end(false, 0)
     logErr('[whale][skin-packs] 下载素材包失败', why)
     return { ok: false, error: why }
   } finally {
@@ -235,4 +284,7 @@ async function downloadSkinPacks(opts) {
   }
 }
 
-module.exports = { listSkinPacks, downloadSkinPacks, _parsePack: parsePack, _sourceChain: sourceChain }
+module.exports = {
+  listSkinPacks, downloadSkinPacks,
+  _parsePack: parsePack, _sourceChain: sourceChain, _readBodyWithProgress: readBodyWithProgress,
+}

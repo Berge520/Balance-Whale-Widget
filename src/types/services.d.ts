@@ -1142,6 +1142,9 @@ export interface SkinPackDownloadResult {
   // 逐张失败的原因（一张坏不连累整包）
   errors?: string[]
   error?: string
+  // 本次实际命中的下载源 URL 与落地字节数（供结果提示写明「经哪个源下了多大」）
+  source?: string
+  bytes?: number
 }
 
 // 共享素材（角色图 36 张 / 音效库 45 个，上游 QQ 群素材，挂 Release 按需下）
@@ -1174,6 +1177,9 @@ export type SharedSoundList = SharedPackList<SharedSoundItem>
 
 export interface SharedPackDownloadResult {
   ok: boolean
+  // 单张下载（downloadSharedSkin / downloadSharedSound）的命中项：id + 展示名
+  id?: string
+  name?: string
   // 本次真正落盘的项目（形象是 id，音效是 id）
   installed?: string[]
   // 已装过而跳过的项、以及清单里对不上的项
@@ -1182,6 +1188,28 @@ export interface SharedPackDownloadResult {
   // 逐项失败的原因（一项坏不连累整包）
   errors?: string[]
   error?: string
+  // 本次实际命中的下载源 URL 与落地字节数
+  source?: string
+  bytes?: number
+}
+
+// 素材包下载进度快照（三条资源卡片共用一条只读通道，见宿主 lib/download-progress.js）
+export interface DownloadProgress {
+  // 'skins' | 'shared-skins' | 'shared-sounds'
+  pack: string
+  // connect / download / verify / install / done / failed
+  phase: string
+  // 已读字节 / 总量（totalKnown 为 false 时 total 不可信，读侧应显「不确定进度」）
+  received: number
+  total: number
+  totalKnown: boolean
+  // 当前尝试的下载源（候选链换源时会变）与人话标签
+  url: string
+  label: string
+  // 完成后落地的整包字节数（下载中为 0）
+  bytes: number
+  // 最后一次更新的时间戳（读侧据此忽略过期的终态）
+  at: number
 }
 
 export interface SkinImportResult {
@@ -1771,14 +1799,17 @@ export interface WhaleServices {
   // 下载并安装整包（已装过的跳过写盘）；成功后宿主会把新形象推给挂件。
   // prefix 是用户自填的加速前缀（'' = 只用内置候选链：默认 ghfast + 直连兜底）
   downloadSkinPacks(prefix?: string): Promise<SkinPackDownloadResult>
-  // —— 共享素材（角色图 36 张 / 音效库 45 个，上游 QQ 群素材，挂 Release 按需下） ——
+  // —— 共享素材（角色图 36 张 / 音效库 45 个，上游 QQ 群素材，v1.9.0 起按需单张下载） ——
   // 可下载清单 + 已装状态（缩略图是设置页内嵌静态资源 resources/thumbs，不走这条 IPC）
   listSharedSkins(): SharedSkinList
   listSharedSounds(): SharedSoundList
-  // 下载并安装整包共享角色（与内置形象同链路，装完推给挂件）
-  downloadSharedSkins(prefix?: string): Promise<SharedPackDownloadResult>
-  // 下载并安装整包音效库到 shared 槽位（素材池，不参与实播，故不推给挂件）
-  downloadSharedSounds(prefix?: string): Promise<SharedPackDownloadResult>
+  // 下载并安装单张共享角色（与内置形象同链路，装完推给挂件）
+  downloadSharedSkin(id: string, prefix?: string): Promise<SharedPackDownloadResult>
+  // 下载并安装单个共享音效到 shared 槽位（素材池，不参与实播，故不推给挂件）
+  downloadSharedSound(id: string, prefix?: string): Promise<SharedPackDownloadResult>
+  // 素材包下载进度快照：只读内存、零副作用，供设置页下载期间 1Hz 轮询。
+  // 返回 null 表示从未下载过；下载结束后快照仍保留终态一小段时间（含命中源与体积）
+  downloadProgress(): DownloadProgress | null
   // 把共享库的一段「选用」到某个实播槽位（file 是共享库里那段的文件名）
   useSharedSound(file: string, role: string): { ok: boolean; role?: string; name?: string; error?: string }
   // 试听共享库里的一段：按名取一段 data URL（shared 槽位不在 getSoundData 里）

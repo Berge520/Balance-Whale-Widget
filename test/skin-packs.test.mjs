@@ -305,6 +305,64 @@ test('sourceChain：空白 / 非字符串的自填被忽略，仍回落到内置
   assert.deepEqual(sourceChain(null), expect)
 })
 
+// ── 分块读取 + 进度上报（readBodyWithProgress）────────────────────────────
+// 进度回显的前提是「边下边报」，不能再走 res.arrayBuffer() 的一次性黑盒读取。
+
+const { _readBodyWithProgress: readBodyWithProgress } = skinPacks
+
+// 造一个可读流响应：把 chunks 逐块吐出，模拟 fetch 的 res.body.getReader()。
+// content-length 不给（undefined）时用于验证「总量未知」的退化路径。
+function streamRes(chunks, contentLength) {
+  let i = 0
+  return {
+    ok: true,
+    status: 200,
+    headers: { get: (k) => (String(k).toLowerCase() === 'content-length' ? contentLength : null) },
+    body: {
+      getReader: () => ({
+        read: async () => (i < chunks.length ? { done: false, value: chunks[i++] } : { done: true }),
+      }),
+    },
+  }
+}
+
+test('readBodyWithProgress：逐块累加并拼回完整内容', async () => {
+  const parts = [Buffer.from('abc'), Buffer.from('de'), Buffer.from('fgh')]
+  const buf = await readBodyWithProgress(streamRes(parts, 8), null)
+  assert.equal(buf.toString(), 'abcdefgh')
+})
+
+test('readBodyWithProgress：每读一块回调一次，received 单调递增且末次等于总长', async () => {
+  const parts = [Buffer.from('abc'), Buffer.from('de'), Buffer.from('fgh')]
+  const seen = []
+  await readBodyWithProgress(streamRes(parts, 8), (received, total) => seen.push([received, total]))
+  assert.deepEqual(seen, [[3, 8], [5, 8], [8, 8]])
+})
+
+test('readBodyWithProgress：无 Content-Length 时 total 报 0（读侧据此显示不确定进度条）', async () => {
+  const seen = []
+  await readBodyWithProgress(streamRes([Buffer.from('xx')], null), (received, total) => seen.push([received, total]))
+  assert.deepEqual(seen, [[2, 0]])
+})
+
+test('readBodyWithProgress：拿不到可读流时退回一次性读取（兼容单测假响应），仍回调一次', async () => {
+  const junk = Buffer.from('no-stream-here')
+  const seen = []
+  const res = {
+    ok: true, status: 200,
+    headers: { get: () => String(junk.length) },
+    arrayBuffer: async () => junk.buffer.slice(junk.byteOffset, junk.byteOffset + junk.length),
+  }
+  const buf = await readBodyWithProgress(res, (received, total) => seen.push([received, total]))
+  assert.equal(buf.toString(), 'no-stream-here')
+  assert.deepEqual(seen, [[junk.length, junk.length]])
+})
+
+test('readBodyWithProgress：onChunk 省略时不报错（防御性调用）', async () => {
+  const buf = await readBodyWithProgress(streamRes([Buffer.from('q')], 1), undefined)
+  assert.equal(buf.toString(), 'q')
+})
+
 test('downloadSkinPacks：首源失败自动顺延下一个（代理挂了走直连兜底）', async () => {
   const seen = []
   const r = await downloadSkinPacks({

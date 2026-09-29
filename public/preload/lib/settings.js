@@ -48,6 +48,7 @@ const sounds = require('./sounds')
 const skins = require('./skins')
 const skinPacks = require('./skin-packs')
 const assetsPacks = require('./assets-packs')
+const dlp = require('./download-progress')
 const bubbles = require('./bubbles')
 const codex = require('./codex')
 const dshUsage = require('./dsh-usage')
@@ -2663,7 +2664,7 @@ module.exports = {
     if (r && r.ok) sendToWidget('whale:skin', skins.getSkinData())
     return r
   },
-  // —— 共享素材（角色图 36 张 + 音效库 45 个，上游 QQ 群素材，挂 Release 按需下）——
+  // —— 共享素材（角色图 36 张 + 音效库 45 个，上游 QQ 群素材，v1.9.0 起改为按需单张下载）——
   // 可下载清单 + 已装状态。缩略图是设置页内嵌静态资源（resources/thumbs），宿主不搬运
   listSharedSkins() {
     return assetsPacks.listSharedSkins()
@@ -2671,16 +2672,24 @@ module.exports = {
   listSharedSounds() {
     return assetsPacks.listSharedSounds()
   },
-  // 下载并安装整包共享角色（与内置形象同链路落盘，装完把形象数据推给挂件）
-  async downloadSharedSkins(prefix) {
-    const r = await assetsPacks.downloadSharedSkins({ prefix: prefix })
-    if (r && r.ok) sendToWidget('whale:skin', skins.getSkinData())
+  // 下载并安装单张共享角色（与内置形象同链路落盘，装完把形象数据推给挂件）
+  async downloadSharedSkin(id, prefix) {
+    const r = await assetsPacks.downloadSharedSkin(id, { prefix: prefix })
+    if (r && r.ok && !r.skipped) sendToWidget('whale:skin', skins.getSkinData())
     return r
   },
-  // 下载并安装整包音效库到 shared 槽位。shared 不参与实播，无需推给挂件
+  // 下载并安装单个共享音效到 shared 槽位。shared 不参与实播，无需推给挂件
   // （用户「选用」到实播槽位时走 useSharedSound 才推）
-  async downloadSharedSounds(prefix) {
-    return assetsPacks.downloadSharedSounds({ prefix: prefix })
+  async downloadSharedSound(id, prefix) {
+    return assetsPacks.downloadSharedSound(id, { prefix: prefix })
+  },
+  // —— 素材包下载进度（三张资源卡片共用一条只读快照）——
+  // ⚠️ 与 dshProgress 同款：必须零副作用、纯读内存。设置页下载期间 1Hz 轮询，
+  //    任何「顺手查一下磁盘 / 探一下端口」的实现都会被放大成每秒一次白工。
+  //    返回 null = 从未下载过。下载结束后快照仍保留（含终态），由设置页按时间窗口忽略，
+  //    这样「下完了」的最终结果（命中源、落地体积）还能被看到一瞬。
+  downloadProgress() {
+    return dlp.snapshot()
   },
   // 把共享库的一段「选用」到某个实播槽位，推新音频给挂件
   useSharedSound(file, role) {

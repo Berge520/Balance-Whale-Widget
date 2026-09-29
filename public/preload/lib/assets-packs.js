@@ -1,39 +1,35 @@
 /*
- * 「共享素材」在线下载（CommonJS）：共享角色图（36 张）与音效库（45 个）。
+ * 「共享素材」在线下载（CommonJS）：共享角色图（36 张）与音效库（45 个），**按需单张**。
+ *
+ * ── 为什么单张而不是整包（v1.9.0 起）──
+ * 原先整包（形象 40.6MB / 音效 2.7MB）挂 GitHub Release 下载，国内经代理仍慢得离谱，
+ * 而用户多半只要其中几张。改为：源图由 scripts/export-shared-assets.mjs 按 `id.ext` 重命名
+ * 导出到 public/shared/（入库），走 raw 直链按需取单张（最大约 2.6MB），点哪张下哪张。
+ * 整包链路（容器解析 / 整包 sha256）随之删除。
  *
  * ── 与 skin-packs.js 的关系（为什么另外写一份而不是并进去）──
- * skin-packs.js 只服务「内置形象按需下载」这一件事：清单写死在 constants、按**文件名**匹配、
- * 只落形象。这里是「共享素材」，两类素材（形象 + 音效）、按 **id** 匹配、落两条不同链路
- * （skins.installBuiltin / sounds.installBuiltin），且两个包体积差着一个数量级
- * （形象 40MB vs 内置 0.9MB），上限与超时都得各算各的。硬合并会让两份清单与两条写入链路
- * 在同一函数里打架，分开更清爽。共用的只有容器解析（parsePack）与候选链 —— 那两个才是真能复用的。
- *
- * ── 素材包格式 ──
- * 与 assets.js / skin-packs.js 完全同源：[11 字节魔数][4 字节清单长度 uint32LE][JSON 清单][平铺字节]。
- * 由 scripts/build-assets-pack.py 生成（离线跑，产物挂 Release）。
+ * skin-packs.js 只服务「内置形象按需下载」：清单写死、按**文件名**匹配、只落形象。
+ * 这里是「共享素材」，两类素材（形象 + 音效）、按 **id** 匹配、落两条不同链路
+ * （skins.installBuiltin / sounds.installBuiltin）。共用的只有候选链与流式读体。
  *
  * ── 校验 ──
- * ① 整包 sha256（SHARED_SKIN_PACK_SHA256 / SHARED_SOUND_PACK_SHA256）—— 防代理返残缺/被篡改的字节；
- * ② 逐项 sha256（清单里的 sha256 字段）—— 某项坏了只跳过它，不连累整包。
+ * 逐张 sha256（constants 清单里的 sha256 字段）—— 防代理返残缺/被篡改的字节，
+ * 也防「下到一半被截断」的单张。整包级校验已随整包链路一并去掉。
  *
  * ── 下载源（候选链）──
- * 与 skin-packs.js 同款：用户自填前缀 → 内置默认前缀（ghfast.top）→ 真源直连，逐个试、
- * 任一源取到合法包（含整包 sha256 过关）即停。
+ * 用户自填前缀 → 内置默认前缀（ghfast.top）→ raw 直连，逐个试、任一源取到合法字节即停。
+ * jsDelivr 源待实测通过后再并入（见 sourceChain 注释）。
  */
 const crypto = require('crypto')
 const {
-  SHARED_SKIN_PACK_ORIGIN, SHARED_SOUND_PACK_ORIGIN,
-  SHARED_SKIN_PACK_RAW_MAIN, SHARED_SOUND_PACK_RAW_MAIN, SHARED_PACK_DEFAULT_PREFIX,
-  SHARED_SKIN_PACK_SHA256, SHARED_SOUND_PACK_SHA256,
-  SHARED_SKIN_PACK_SKINS, SHARED_SOUND_LIB, SHARED_PACK_TIMEOUT_MS, SHARED_PACK_MAX_BYTES,
+  SHARED_RAW_BASE, SHARED_PACK_DEFAULT_PREFIX,
+  SHARED_SKIN_PACK_SKINS, SHARED_SOUND_LIB,
+  SHARED_PACK_TIMEOUT_MS, SHARED_PACK_MAX_BYTES,
 } = require('./constants')
 const { log, logErr } = require('./log')
 const skins = require('./skins')
 const sounds = require('./sounds')
-
-const MAGIC = 'WHALEASSET1'
-const KIND = 'balance-whale-widget-assets'
-const HEAD_BYTES = MAGIC.length + 4
+const dlp = require('./download-progress')
 
 // 内存状态：进行中的下载（防重复点击，也让设置页能显示「正在下」）。重载插件即中断。
 let running = false
@@ -84,88 +80,86 @@ function listSharedSounds() {
   }
 }
 
-// 解析容器：只做结构与边界校验。返回 { manifest, dataStart } 或 { error }
-function parsePack(buf) {
-  if (!buf || buf.length <= HEAD_BYTES) return { error: '素材包太小，可能没下完整' }
-  if (buf.slice(0, MAGIC.length).toString('latin1') !== MAGIC) {
-    return { error: '这不是小鲸鱼素材包（可能是代理返回的错误页）' }
-  }
-  const jsonLen = buf.readUInt32LE(MAGIC.length)
-  const jsonStart = HEAD_BYTES
-  const dataStart = jsonStart + jsonLen
-  if (jsonLen <= 0 || dataStart > buf.length) return { error: '素材包已损坏（清单长度异常）' }
-  let manifest = null
-  try {
-    manifest = JSON.parse(buf.slice(jsonStart, dataStart).toString('utf8'))
-  } catch (err) {
-    return { error: '素材包已损坏（清单解析失败）：' + errMsg(err) }
-  }
-  if (!manifest || manifest.kind !== KIND) return { error: '这不是小鲸鱼素材包' }
-  const dataLen = buf.length - dataStart
-  // 清单项写在 manifest.skins 里（与 assets.js / skin-packs.js 同源格式，由
-  // scripts/build-assets-pack.py 的 pack() 生成）—— 形象包与音效包都用这一个字段承载，
-  // 二者的区别只在每个 item 的 id 能匹配到哪份 constants 清单。
-  const list = Array.isArray(manifest.skins) ? manifest.skins : []
-  const bad = (it) => !it || !(Number(it.off) >= 0) || !(Number(it.len) > 0)
-    || Number(it.off) + Number(it.len) > dataLen
-  if (list.some(bad)) return { error: '素材包已损坏（文件数据越界）' }
-  return { manifest: { items: list }, dataStart: dataStart }
+// 单张文件的真源 URL：<基址><kind>/<id>.<ext>。kind 为 'skins' | 'sounds'，
+// id 是 ASCII 短名（中文原名含全角括号，raw 直链需 percent-encode 且各 CDN 兼容性不一，
+// 故导出时按 id.ext 重命名，清单里的 name 仅作展示）。
+function fileUrl(kind, id, ext) {
+  return SHARED_RAW_BASE + kind + '/' + id + '.' + ext
 }
 
-// 候选下载源链：用户自填前缀（若有）→ 内置默认前缀 → 真源直连 → raw 及其加速 / 自填包装。
-// 与 skin-packs.js#sourceChain 同规则，真源（origin）与兜底（rawMain）各随形象包 / 音效包传进来。
-// raw 兜底同样是 github 域名、国内同样不稳，故也补「默认前缀 / 用户自填」包装的两条。
-function sourceChain(prefix, origin, rawMain) {
+// 候选下载源链：用户自填前缀（若有）→ 内置默认前缀 → 真源直连。
+// 与 skin-packs.js#sourceChain 同规则，只是目标是单张文件而非整包。
+// jsDelivr 源（cdn.jsdelivr.net/gh/<owner>/<repo>@main/public/shared/...）待实测通过后再并入。
+function sourceChain(prefix, origin) {
   const out = []
   const push = (u) => { if (u && !out.includes(u)) out.push(u) }
   const p = typeof prefix === 'string' ? prefix.trim() : ''
   if (p) push(p + origin)
   push(SHARED_PACK_DEFAULT_PREFIX + origin)
   push(origin)
-  if (rawMain) {
-    push(rawMain)
-    push(SHARED_PACK_DEFAULT_PREFIX + rawMain)
-    if (p) push(p + rawMain)
-  }
   return out
 }
 
-function labelOf(url, origin, rawMain) {
-  if (rawMain && url === rawMain) return 'main 分支 raw 直连'
-  if (url === origin) return '直连 github.com'
-  if (rawMain && url.indexOf(rawMain) >= 0 && url.indexOf(SHARED_PACK_DEFAULT_PREFIX) === 0) return 'main 分支 raw 走默认加速 ghfast.top'
+function labelOf(url, origin) {
+  if (url === origin) return '直连 raw.githubusercontent.com'
   if (url.indexOf(origin) >= 0 && url.indexOf(SHARED_PACK_DEFAULT_PREFIX) === 0) return '默认加速 ghfast.top'
   return '自定义加速源'
 }
 
-// 从单个源取包并做全部前置校验。任何一步不过都抛错（供候选链顺延到下一个源）。
-async function fetchPackFrom(url, wantSha, fetchImpl) {
-  const res = await fetchImpl(url, { signal: AbortSignal.timeout(SHARED_PACK_TIMEOUT_MS) })
-  if (!res.ok) throw new Error('HTTP ' + res.status + ' ' + (res.statusText || ''))
-  const buf = Buffer.from(await res.arrayBuffer())
-  if (!buf.length) throw new Error('下载到空内容')
-  if (buf.length > SHARED_PACK_MAX_BYTES) throw new Error('素材包异常大（' + buf.length + ' 字节）')
-
-  const digest = sha256(buf)
-  if (wantSha && digest !== wantSha) {
-    logErr('[whale][assets-packs] 素材包校验失败', 'got ' + digest)
-    throw new Error('素材包校验失败（内容与预期不符）')
+// 流式读取响应体，边读边把字节数写进进度。
+// ⚠️ 与 skin-packs.js#readBodyWithProgress 是同一份逻辑的两份拷贝 —— 刻意不抽公共模块：
+//    两条链路的进度「总量语义」不同（这里用 Content-Length，那边用清单预期字节），
+//    抽出来反而要传一堆开关。真要合并时注意别把上限校验（SHARED_PACK_MAX_BYTES）弄丢。
+async function readBodyWithProgress(res, onChunk) {
+  const lenHeader = Number(res.headers && res.headers.get ? res.headers.get('content-length') : 0)
+  const total = lenHeader > 0 ? lenHeader : 0
+  if (!res.body || typeof res.body.getReader !== 'function') {
+    const buf = Buffer.from(await res.arrayBuffer())
+    if (onChunk) onChunk(buf.length, total)
+    return buf
   }
-  const parsed = parsePack(buf)
-  if (parsed.error) throw new Error(parsed.error)
-  return { buf: buf, parsed: parsed }
+  const reader = res.body.getReader()
+  const chunks = []
+  let received = 0
+  for (;;) {
+    const step = await reader.read()
+    if (step.done) break
+    const c = Buffer.from(step.value)
+    chunks.push(c)
+    received += c.length
+    if (onChunk) onChunk(received, total)
+  }
+  return Buffer.concat(chunks)
 }
 
-// 走候选链取包。返回 { buf, parsed } 或抛错（错误里含每个源的失败原因）
-async function fetchWithChain(prefix, origin, rawMain, wantSha, fetchImpl) {
-  const chain = sourceChain(prefix, origin, rawMain)
+// 从单个源取单张字节并校验。任何一步不过都抛错（供候选链顺延到下一个源）。
+async function fetchFrom(url, wantSha, fetchImpl) {
+  const res = await fetchImpl(url, { signal: AbortSignal.timeout(SHARED_PACK_TIMEOUT_MS) })
+  if (!res.ok) throw new Error('HTTP ' + res.status + ' ' + (res.statusText || ''))
+  const buf = await readBodyWithProgress(res, (received, total) => dlp.progress(received, total))
+  if (!buf.length) throw new Error('下载到空内容')
+  if (buf.length > SHARED_PACK_MAX_BYTES) throw new Error('文件异常大（' + buf.length + ' 字节）')
+
+  dlp.phase('verify')
+  const digest = sha256(buf)
+  if (wantSha && digest !== wantSha) {
+    logErr('[whale][assets-packs] 单张校验失败', url, 'got ' + digest)
+    throw new Error('校验失败（内容与预期不符）')
+  }
+  return { buf: buf, url: url }
+}
+
+// 走候选链取单张。返回 { buf, url } 或抛错（错误里含每个源的失败原因）
+async function fetchWithChain(prefix, origin, wantSha, fetchImpl) {
+  const chain = sourceChain(prefix, origin)
   const attempts = []
   for (const url of chain) {
-    const label = labelOf(url, origin, rawMain)
+    const label = labelOf(url, origin)
     try {
-      const pack = await fetchPackFrom(url, wantSha, fetchImpl)
+      dlp.source(url, label)
+      const got = await fetchFrom(url, wantSha, fetchImpl)
       attempts.push(label + '：成功')
-      return { pack: pack, attempts: attempts }
+      return { item: got, attempts: attempts }
     } catch (err) {
       const why = errMsg(err)
       attempts.push(label + '：' + why)
@@ -175,113 +169,73 @@ async function fetchWithChain(prefix, origin, rawMain, wantSha, fetchImpl) {
   throw new Error('所有下载源都失败 —— ' + attempts.join('；'))
 }
 
-// 下载并安装整包共享角色图。
+// 下载并安装单张共享角色图。已装的不重复写入。
 // opts.fetchImpl 可注入（单测）；opts.prefix 是用户自填的加速前缀（'' = 只用内置链）。
-// 已装的不重复写入（清单里对上的跳过）。
-async function downloadSharedSkins(opts) {
+async function downloadSharedSkin(id, opts) {
+  const meta = SHARED_SKIN_PACK_SKINS.filter((s) => s.id === id)[0]
+  if (!meta) return { ok: false, error: '没有这个共享角色：' + String(id || '') }
+  if (installedSkinIds()[meta.id]) return { ok: true, id: meta.id, name: meta.name, skipped: true }
+
   const o = opts && typeof opts === 'object' ? opts : {}
   if (running) return { ok: false, error: '正在下载中，请稍候' }
   const fetchImpl = typeof o.fetchImpl === 'function' ? o.fetchImpl : fetch
   running = true
+  dlp.begin('shared-skins', Number(meta.size) || 0)
+  dlp.phase('connect', { label: '正在连接下载源…' })
   try {
-    const res = await fetchWithChain(o.prefix, SHARED_SKIN_PACK_ORIGIN, SHARED_SKIN_PACK_RAW_MAIN, SHARED_SKIN_PACK_SHA256, fetchImpl)
-    const buf = res.pack.buf
-    const parsed = res.pack.parsed
-
-    const byId = {}
-    for (const s of SHARED_SKIN_PACK_SKINS) byId[s.id] = s
-    const already = installedSkinIds()
-
-    const installed = []
-    const skipped = []
-    const errors = []
-    for (const it of parsed.manifest.items) {
-      const meta = byId[String(it.id || '')]
-      if (!meta) { skipped.push(String(it.id || '')); continue }
-      if (already[meta.id]) { skipped.push(meta.id); continue }
-      const data = buf.slice(parsed.dataStart + Number(it.off), parsed.dataStart + Number(it.off) + Number(it.len))
-      const got = sha256(data)
-      if (meta.sha256 && got !== meta.sha256) {
-        logErr('[whale][assets-packs] 单张校验失败', meta.id + ': ' + got)
-        errors.push(meta.id + '（校验失败）')
-        continue
-      }
-      const ext = String(it.ext || 'png').toLowerCase()
-      const r = skins.installBuiltin(meta.id, ext, data, null)
-      if (r && r.ok) installed.push(meta.id)
-      else {
-        errors.push(meta.id + '（' + ((r && r.error) || '写入失败') + '）')
-        if (r && r.error) logErr('[whale][assets-packs] 安装失败', meta.id + ': ' + r.error)
-      }
+    const origin = fileUrl('skins', meta.id, 'png')
+    const res = await fetchWithChain(o.prefix, origin, meta.sha256, fetchImpl)
+    dlp.phase('install', { label: '正在写入角色…', total: res.item.buf.length })
+    const r = skins.installBuiltin(meta.id, 'png', res.item.buf, null)
+    if (!r || !r.ok) {
+      const why = (r && r.error) || '写入失败'
+      dlp.end(false, res.item.buf.length)
+      logErr('[whale][assets-packs] 安装共享角色失败', meta.id + ': ' + why)
+      return { ok: false, error: '角色写入失败：' + why }
     }
-    log('[whale][assets-packs] 共享角色包已下载', {
-      bytes: buf.length, installed: installed.length, skipped: skipped.length, errors: errors.length,
-    })
-    if (!installed.length && errors.length) {
-      return { ok: false, error: '角色写入失败：' + errors[0], installed: installed, skipped: skipped }
-    }
-    return { ok: true, installed: installed, skipped: skipped, total: SHARED_SKIN_PACK_SKINS.length, errors: errors }
+    log('[whale][assets-packs] 共享角色已下载', { id: meta.id, bytes: res.item.buf.length, source: res.item.url })
+    dlp.end(true, res.item.buf.length)
+    return { ok: true, id: meta.id, name: meta.name, source: res.item.url, bytes: res.item.buf.length }
   } catch (err) {
     const why = errMsg(err)
-    logErr('[whale][assets-packs] 下载共享角色包失败', why)
+    dlp.end(false, 0)
+    logErr('[whale][assets-packs] 下载共享角色失败', meta.id + ': ' + why)
     return { ok: false, error: why }
   } finally {
     running = false
   }
 }
 
-// 下载并安装整包音效库（追加到 sounds 的 shared 槽位，同名覆盖）
-async function downloadSharedSounds(opts) {
+// 下载并安装单个共享音效（追加到 sounds 的 shared 槽位，同名覆盖）。
+async function downloadSharedSound(id, opts) {
+  const meta = SHARED_SOUND_LIB.filter((s) => s.id === id)[0]
+  if (!meta) return { ok: false, error: '没有这个共享音效：' + String(id || '') }
+  if (installedSoundNames()[meta.name]) return { ok: true, id: meta.id, name: meta.name, skipped: true }
+
   const o = opts && typeof opts === 'object' ? opts : {}
   if (running) return { ok: false, error: '正在下载中，请稍候' }
   const fetchImpl = typeof o.fetchImpl === 'function' ? o.fetchImpl : fetch
-  // o.wantSha 仅供单测注入小体积合成包时放宽整包校验；生产调用不传，仍以常量为准
-  const wantSha = typeof o.wantSha === 'string' ? o.wantSha : SHARED_SOUND_PACK_SHA256
   running = true
+  dlp.begin('shared-sounds', Number(meta.size) || 0)
+  dlp.phase('connect', { label: '正在连接下载源…' })
   try {
-    const res = await fetchWithChain(o.prefix, SHARED_SOUND_PACK_ORIGIN, SHARED_SOUND_PACK_RAW_MAIN, wantSha, fetchImpl)
-    const buf = res.pack.buf
-    const parsed = res.pack.parsed
-
-    const byId = {}
-    for (const s of SHARED_SOUND_LIB) byId[s.id] = s
-    // 已装的跳过不重写：音效按「名」去重（落盘走 saveOne 的同名覆盖），与
-    // listSharedSounds 的 installed 判据同源。漏了这条会让重复下载把 45 段的
-    // 导入时间全部刷新、skipped 恒为空，状态显示与实际不符。
-    const already = installedSoundNames()
-
-    const installed = []
-    const skipped = []
-    const errors = []
-    for (const it of parsed.manifest.items) {
-      const meta = byId[String(it.id || '')]
-      if (!meta) { skipped.push(String(it.id || '')); continue }
-      if (already[meta.name]) { skipped.push(meta.name); continue }
-      const data = buf.slice(parsed.dataStart + Number(it.off), parsed.dataStart + Number(it.off) + Number(it.len))
-      const got = sha256(data)
-      if (meta.sha256 && got !== meta.sha256) {
-        logErr('[whale][assets-packs] 单个音效校验失败', meta.id + ': ' + got)
-        errors.push(meta.name + '（校验失败）')
-        continue
-      }
-      const ext = String(it.ext || meta.ext || 'mp3').toLowerCase()
-      const r = sounds.installBuiltin(meta.name, ext, data)
-      if (r && r.ok) installed.push(meta.id)
-      else {
-        errors.push(meta.name + '（' + ((r && r.error) || '写入失败') + '）')
-        if (r && r.error) logErr('[whale][assets-packs] 安装音效失败', meta.name + ': ' + r.error)
-      }
+    const origin = fileUrl('sounds', meta.id, meta.ext)
+    const res = await fetchWithChain(o.prefix, origin, meta.sha256, fetchImpl)
+    dlp.phase('install', { label: '正在写入音效…', total: res.item.buf.length })
+    const r = sounds.installBuiltin(meta.name, meta.ext, res.item.buf)
+    if (!r || !r.ok) {
+      const why = (r && r.error) || '写入失败'
+      dlp.end(false, res.item.buf.length)
+      logErr('[whale][assets-packs] 安装共享音效失败', meta.name + ': ' + why)
+      return { ok: false, error: '音效写入失败：' + why }
     }
-    log('[whale][assets-packs] 共享音效包已下载', {
-      bytes: buf.length, installed: installed.length, skipped: skipped.length, errors: errors.length,
-    })
-    if (!installed.length && errors.length) {
-      return { ok: false, error: '音效写入失败：' + errors[0], installed: installed, skipped: skipped }
-    }
-    return { ok: true, installed: installed, skipped: skipped, total: SHARED_SOUND_LIB.length, errors: errors }
+    log('[whale][assets-packs] 共享音效已下载', { id: meta.id, bytes: res.item.buf.length, source: res.item.url })
+    dlp.end(true, res.item.buf.length)
+    return { ok: true, id: meta.id, name: meta.name, source: res.item.url, bytes: res.item.buf.length }
   } catch (err) {
     const why = errMsg(err)
-    logErr('[whale][assets-packs] 下载共享音效包失败', why)
+    dlp.end(false, 0)
+    logErr('[whale][assets-packs] 下载共享音效失败', meta.id + ': ' + why)
     return { ok: false, error: why }
   } finally {
     running = false
@@ -307,6 +261,6 @@ function readSharedSoundData(name) {
 }
 
 module.exports = {
-  listSharedSkins, listSharedSounds, downloadSharedSkins, downloadSharedSounds, readSharedSoundData,
-  _parsePack: parsePack, _sourceChain: sourceChain,
+  listSharedSkins, listSharedSounds, downloadSharedSkin, downloadSharedSound, readSharedSoundData,
+  _fileUrl: fileUrl, _sourceChain: sourceChain, _readBodyWithProgress: readBodyWithProgress,
 }
