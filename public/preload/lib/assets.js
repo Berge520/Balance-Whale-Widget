@@ -71,7 +71,7 @@ function exportAssets() {
     if (at < 0) continue
     const thumbAt = push(it.thumb)
     skinList.push({
-      name: it.name, ext: it.ext, at: it.at, current: it.current === true,
+      id: it.id, name: it.name, ext: it.ext, at: it.at, current: it.current === true, builtin: it.builtin === true,
       off: at, len: it.data.length,
       thumbOff: thumbAt < 0 ? 0 : thumbAt, thumbLen: thumbAt < 0 ? 0 : it.thumb.length,
     })
@@ -224,7 +224,7 @@ function applyAssets(opts) {
 
   if (o.skins === true) {
     for (const it of m.skins) {
-      const r = skins.importBuffer(it.name, String(it.ext || '').toLowerCase(), slice(it.off, it.len), slice(it.thumbOff, it.thumbLen), it.at)
+      const r = skins.importBuffer(it.name, String(it.ext || '').toLowerCase(), slice(it.off, it.len), slice(it.thumbOff, it.thumbLen), it.at, it.id, it.builtin === true)
       if (r && r.ok) skinAdded++
       else {
         skinSkipped++

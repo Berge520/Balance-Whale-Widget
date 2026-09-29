@@ -46,6 +46,23 @@ balance-whale-widget-*.zip
 # 手动另存进仓库的这几类文件不要提交
 *.whaleassets
 
+# ── 素材源（不进仓库）──
+# 上游 QQ 群分享的原始素材（角色图 / 音频），是 build-assets-pack.py 的输入、
+# 不是插件产物：**本体近 44MB，且来源为第三方分享**，入库会同时撑爆仓库与放大版权风险。
+# 素材改为打包挂 Release 由用户按需下载（见 scripts/build-assets-pack.py）。
+# 发布者本地保留一份即可；打包脚本产出（resources/ 下的 .whaleassets 与缩略图）另行提交。
+assets-src/
+
+# ── 素材包产物（保留缩略图，排除大件）──
+# resources/ 由 build-assets-pack.py 生成：两个 .whaleassets 是发 Release 的远程附件本身，
+# 随仓库入库等于把 43MB 二进制塞进 git 历史（而它们本就是「让用户去 Release 下」的东西）；
+# manifest.json 是打包核对用的中间产物，运行时用不到。
+# skins-src/ 是 build-skin-pack.py 的输入（与 assets-src/ 同类的素材源，发布者本地保留即可）。
+# 只有 thumbs/（36 张缩略图，约 404KB）要入库 —— 它随插件包分发，供设置页下载前预览。
+resources/*.whaleassets
+resources/manifest.json
+resources/skins-src/
+
 # ── 临时 / 手动备份 ──
 # 改 preload 前先存一份 `api.js.bak` 是常见习惯（preload 不热更、改完要在 uTools 里
 # 重载插件才生效，改坏了好回退），这类文件容易忘了删就跟着提交

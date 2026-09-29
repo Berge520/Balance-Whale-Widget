@@ -49,13 +49,18 @@ function readFileUrl(file, ext) {
   return 'data:' + (MIME[ext] || 'image/png') + ';base64,' + buf.toString('base64')
 }
 
-// 单项归一化：id 只允许安全字符（会拼进文件名），扩展名必须在白名单内
+// 单项归一化：id 只允许安全字符（会拼进文件名），扩展名必须在白名单内。
+// builtin 标记：内置可下载形象落进画廊时带 true（见 lib/skin-packs.js），用于
+// ① 不计入 MAX_ITEMS 配额（用户自己导入 20 张不该被官方图挤掉）② 展示时区分「官方」角标。
+// 用户自己导入的项没有这个字段，一律按 false 处理。
 function normItem(v) {
   if (!v || typeof v !== 'object') return null
   const id = String(v.id || '')
   if (!/^[A-Za-z0-9_-]{1,40}$/.test(id)) return null
   if (typeof v.ext !== 'string' || OK_EXT.indexOf(v.ext) < 0) return null
-  return { id: id, name: String(v.name || '').slice(0, 120), ext: v.ext, at: Number(v.at) || 0 }
+  const one = { id: id, name: String(v.name || '').slice(0, 120), ext: v.ext, at: Number(v.at) || 0 }
+  if (v.builtin === true) one.builtin = true
+  return one
 }
 
 // 读存储并归一化。老格式（单张 { name, ext, at }）在这里就地迁移成一项 ——
@@ -69,10 +74,16 @@ function readRaw() {
     return one ? { items: [one], current: LEGACY_ID } : { items: [], current: '' }
   }
   const items = []
+  // 配额只数「用户自己导入的」（builtin 不算）：官方可下载形象（内置包 + 共享角色）全落这里，
+  // 若计入配额，用户导入几张就装不下官方图了。总量仍受数组长度保护（不会无限增长）。
+  let own = 0
   for (const it of raw.items) {
     const one = normItem(it)
-    if (one && !items.some((x) => x.id === one.id)) items.push(one)
-    if (items.length >= MAX_ITEMS) break
+    if (one && !items.some((x) => x.id === one.id)) {
+      if (!one.builtin && own >= MAX_ITEMS) continue
+      if (!one.builtin) own++
+      items.push(one)
+    }
   }
   const current = items.some((x) => x.id === raw.current) ? String(raw.current) : (items[0] ? items[0].id : '')
   return { items: items, current: current }
@@ -97,7 +108,7 @@ function listSkins() {
         thumb = readFileUrl(it.id + '.' + it.ext, it.ext)
         if (thumb) fallbackBudget -= size
       }
-      return { id: it.id, name: it.name, ext: it.ext, at: it.at, size: size, thumb: thumb }
+      return { id: it.id, name: it.name, ext: it.ext, at: it.at, size: size, thumb: thumb, builtin: it.builtin === true }
     }),
   }
 }
@@ -165,15 +176,35 @@ function writeThumb(id, dataUrl) {
 }
 
 // 新增一项并把「当前形象」切过去（导了图却还在用内置形象会很困惑）。
-// write 由各导入路径提供：有的复制文件，有的写内存里的字节
-function addItem(name, ext, write, thumb) {
+// write 由各导入路径提供：有的复制文件，有的写内存里的字节。
+// opts.keepCurrent：true 时不切「当前形象」（素材包/官方图导入用 —— 会在画廊里一次进好几张，
+//   不该把用户正在用的那张顶掉）。opts.id / opts.builtin：官方可下载形象用固定 id 落盘
+//   （id = 形象名，保证「已下载」判定与去重），并打上官方标记。
+function addItem(name, ext, write, thumb, opts) {
+  const o = opts && typeof opts === 'object' ? opts : {}
   const raw = readRaw()
-  if (raw.items.length >= MAX_ITEMS) {
+  // 固定 id：已存在同 id 的项时直接复用（重复下载），不新增
+  if (o.id) {
+    const exist = raw.items.filter((x) => x.id === o.id)[0]
+    if (exist) {
+      try { write(o.id) } catch (err) {
+        logErr('[whale][skins] 覆盖形象失败', o.id, err && err.message)
+        return { ok: false, error: '保存图片失败：' + ((err && err.message) || err) }
+      }
+      writeThumb(o.id, thumb)
+      if (o.builtin === true && exist.builtin !== true) { exist.builtin = true; writeRaw(raw) }
+      dataCache = null
+      return { ok: true, id: o.id, name: exist.name, ext: ext, existed: true }
+    }
+  }
+  // 配额只数「用户自己导入的」：官方图不算，否则用户导入几张就装不下官方那 12 张
+  const ownCount = raw.items.filter((x) => x.builtin !== true).length
+  if (!o.id && ownCount >= MAX_ITEMS) {
     return { ok: false, error: '最多保留 ' + MAX_ITEMS + ' 张形象，请先删掉不用的' }
   }
   const dir = skinsDir()
   try { fs.mkdirSync(dir, { recursive: true }) } catch (err) {}
-  const id = newId()
+  const id = o.id || newId()
   try {
     write(id)
   } catch (err) {
@@ -182,8 +213,10 @@ function addItem(name, ext, write, thumb) {
   }
   writeThumb(id, thumb)
   const safeName = String(name || ('形象.' + ext)).slice(0, 120)
-  raw.items.unshift({ id: id, name: safeName, ext: ext, at: Date.now() })
-  raw.current = id
+  const item = { id: id, name: safeName, ext: ext, at: Date.now() }
+  if (o.builtin === true) item.builtin = true
+  raw.items.unshift(item)
+  if (o.keepCurrent !== true) raw.current = id
   writeRaw(raw)
   dataCache = null
   return { ok: true, id: id, name: safeName, ext: ext }
@@ -278,6 +311,19 @@ function removeSkin(id) {
   return { ok: true, current: raw.current, left: raw.items.length }
 }
 
+// 已装的内置可下载形象 id 列表（供设置页判断「哪些已下载」，避免重复下载）
+function builtinIds() {
+  return readRaw().items.filter((x) => x.builtin === true).map((x) => x.id)
+}
+
+// 装一个内置形象（供 lib/skin-packs.js 调用）：固定 id、打官方标记、不动当前形象。
+// 缩略图直接落 PNG 字节（官方图不带用户裁剪，缩略图由设置页按需展示）
+function installBuiltin(id, ext, buf, thumbBuf) {
+  return addItem(id, ext, (fid) => fs.writeFileSync(path.join(skinsDir(), fid + '.' + ext), buf),
+    thumbBuf && thumbBuf.length ? 'data:image/png;base64,' + thumbBuf.toString('base64') : '',
+    { id: id, builtin: true, keepCurrent: true })
+}
+
 // 清除全部自定义形象（供设置页「清除选中数据」调用）
 function clearAll() {
   try { fs.rmdirSync(skinsDir()) } catch (err) {}
@@ -287,7 +333,9 @@ function clearAll() {
 }
 
 // 导出用：画廊每张的原图与缩略图字节（素材包打包用）。文件缺失的项跳过，
-// 不因一张坏图让整包导不出去；current 一并带上，导入方可据此把「正在用的那张」置前
+// 不因一张坏图让整包导不出去；current 一并带上，导入方可据此把「正在用的那张」置前。
+// builtin 也要带上：内置可下载形象（有固定 id）在别的机器导入后仍是「内置」，
+// 否则会被当成用户自建图占配额（见 addItem 的 ownCount）
 function exportItems() {
   const raw = readRaw()
   const out = []
@@ -296,22 +344,24 @@ function exportItems() {
     try { data = fs.readFileSync(path.join(skinsDir(), it.id + '.' + it.ext)) } catch (err) { continue }
     let thumb = null
     try { thumb = fs.readFileSync(path.join(skinsDir(), it.id + '.thumb.png')) } catch (err) {}
-    out.push({ name: it.name, ext: it.ext, at: it.at, data: data, thumb: thumb, current: it.id === raw.current })
+    out.push({ id: it.id, name: it.name, ext: it.ext, at: it.at, data: data, thumb: thumb, current: it.id === raw.current, builtin: it.builtin === true })
   }
   return out
 }
 
 // 素材包导入：字节直接落成一个**新**画廊项（id 重新生成，不覆盖已有形象 ——
-// 素材包是「补充」而不是「替换」）。导入前正在用的那张保持不动，除非画廊原本是空的。
-function importBuffer(name, ext, buf, thumbBuf, at) {
+// 素材包是「补充」而不是「替换」）。keepCurrent:true 让导入不改变正在用的那张 ——
+// 与下载链路（installBuiltin）一致：一次导入会进好几张，把用户当前形象顶掉很突兀
+// （画廊原本为空时 addItem 仍会自然落到第一项，无须特判）。
+// id 与 builtin 透传：内置可下载形象是固定 id，带上才能在导入侧识别成「内置」、不占自建配额
+function importBuffer(name, ext, buf, thumbBuf, at, id, builtin) {
   if (OK_EXT.indexOf(ext) < 0) return { ok: false, error: '不支持的图片格式：' + ext }
   if (!buf || !buf.length) return { ok: false, error: '图片数据为空' }
   if (buf.length > MAX_BYTES) return { ok: false, error: '图片过大（限 5MB）' }
-  const before = readRaw().current
   const thumb = thumbBuf && thumbBuf.length ? 'data:image/png;base64,' + thumbBuf.toString('base64') : ''
   const r = addItem(name || ('形象.' + ext), ext,
-    (id) => fs.writeFileSync(path.join(skinsDir(), id + '.' + ext), buf), thumb)
-  if (r.ok && before) setCurrent(before)
+    (iid) => fs.writeFileSync(path.join(skinsDir(), iid + '.' + ext), buf), thumb,
+    { id: id, builtin: builtin === true, keepCurrent: true })
   if (r.ok && Number(at) > 0) {
     // addItem 里写的是当下时间，导入素材包时沿用原导入时间（展示更真实）
     const raw = readRaw()
@@ -335,6 +385,8 @@ function getSkinData() {
 module.exports = {
   importSkin, importSkinFromPath, pickImageFile, importSkinFromData,
   removeSkin, setCurrent, pinSkin, clearAll, getSkinData, listSkins, readMeta,
+  // 内置可下载形象（lib/skin-packs.js）用
+  builtinIds, installBuiltin,
   // 素材包（assets.js）用
   exportItems, importBuffer,
 }

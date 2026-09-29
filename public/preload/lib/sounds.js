@@ -1,7 +1,8 @@
 /*
  * 自定义音效（CommonJS）：导入/删除/读取按压、释放两段交互音，以及四类提醒各自的提醒音。
+ * 另有 shared 槽位承载「共享音效库」（从 Release 下载的公共素材，见 ROLES 注释）。
  *
- * 每个槽位是「音效组」——可以导入多段，挂件每次随机播一条（听久了不腻）。
+ * 每个实播槽位是「音效组」——可以导入多段，挂件每次随机播一条（听久了不腻）。
  * 文件复制进 uTools 用户数据目录（userData/whale-sounds/），不存源路径——
  * 源文件被删/移动就失效（桌面端踩过这个坑），这里以复制为准。
  * 元信息落 dbStorage（K.sounds），音频本体在推给挂件时读成 base64 data URL
@@ -21,10 +22,16 @@ const MIME = { mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', m4a: 'audi
 // 音效槽位。press / release 是「音色」的两段（有内置回落，见挂件页 SOUND_FILES）；
 // low / budget / peak / pass 是四类提醒各自的提醒音 —— **没有内置回落，留空即静音**，
 // 不打扰是默认，想要声音才去导一段。
-const ROLES = ['press', 'release', 'low', 'budget', 'peak', 'pass']
+// shared 是「共享音效库」的落地槽位：从 Release 下载的全集音效都进这里，**不直接作为上述
+// 任一实播槽位**（否则一装就是几十段，随机播到哪段全看运气）。用户在设置页从这里「选用」到
+// press/release/… 某个槽位，才真正参与播放（见 useSharedSound）。
+const ROLES = ['press', 'release', 'low', 'budget', 'peak', 'pass', 'shared']
+// 实播槽位：与「音色 / 提醒」直接挂钩的那六个（shared 只是素材库，不算）
+const PLAY_ROLES = ['press', 'release', 'low', 'budget', 'peak', 'pass']
 const ROLE_LABEL = {
   press: '按压音效', release: '释放音效',
   low: '低余额提醒音', budget: '预算提醒音', peak: '峰谷提醒音', pass: '穿透提醒音',
+  shared: '共享音效库',
 }
 
 // base64 data URL 缓存：导入/删除/重载插件前有效，元信息变化时置空
@@ -40,6 +47,17 @@ function soundsDir() {
 // 音频体积（读取时派生，不落存储）：设置页「自定义素材」卡片要显示占多大；文件缺失回 0
 function fileSize(file) {
   try { return fs.statSync(path.join(soundsDir(), file)).size } catch (err) { return 0 }
+}
+
+// 扩展名 → MIME（试听 data URL 用）。未知扩展名回 mp3，与 getSoundData 同口径
+function mimeOf(ext) {
+  return MIME[String(ext || '').toLowerCase()] || 'audio/mpeg'
+}
+
+// 按文件名读一段音频字节（供 lib/assets-packs.js 试听共享音效用；文件缺失回 null）。
+// 不缓存：试听是低频动作，缓存反而会在下载 / 选用后变脏
+function readSoundBuffer(file) {
+  try { return fs.readFileSync(path.join(soundsDir(), file)) } catch (err) { return null }
 }
 
 // 文件名必须落在本槽位的命名空间内：老结构是 <role>.<ext>，音效组追加的是 <role>-<n>.<ext>。
@@ -243,7 +261,8 @@ function clearAll() {
 function exportItems() {
   const meta = readMeta()
   const out = []
-  for (const role of ROLES) {
+  // 只导出实播槽位：shared 素材池是「可重新下载的公共素材」，跟着用户素材包走会平白胖 2.7MB
+  for (const role of PLAY_ROLES) {
     for (const m of meta[role]) {
       let data = null
       try { data = fs.readFileSync(path.join(soundsDir(), m.file)) } catch (err) { continue }
@@ -264,13 +283,40 @@ function importBuffer(role, name, ext, buf, at) {
   return saveOne(role, name || (role + '.' + e), e, buf, { at: at, replace: true })
 }
 
+// 装一段「共享音效库」音效（供 lib/assets-packs.js 调用）：落进 shared 槽位、同名覆盖。
+// 与 importBuffer 的区别只在语义（这是「素材库」而不是「实播槽位」），实现同款走 saveOne
+function installBuiltin(name, ext, buf) {
+  const e = String(ext || '').toLowerCase()
+  if (OK_EXT.indexOf(e) < 0) return { ok: false, error: '不支持的音频格式：' + ext }
+  if (!buf || !buf.length) return { ok: false, error: '音频数据为空' }
+  if (buf.length > MAX_BYTES) return { ok: false, error: '音频过大（限 5MB）' }
+  return saveOne('shared', name, e, buf, { replace: true })
+}
+
+// 把共享库里的一段「选用」到某个实播槽位（press/release/low/budget/peak/pass）：
+// 读共享库那段音频字节，按实播槽位再存一份（追加、不改动共享库本身）。
+// 这样共享库是「素材池」、实播槽位是「已选」，两者互不干扰 —— 删除实播槽位那段不影响素材池。
+function useSharedSound(file, role) {
+  if (PLAY_ROLES.indexOf(role) < 0) return { ok: false, error: '未知音效段' }
+  const meta = readMeta()
+  const src = meta.shared.filter((x) => x.file === file)[0]
+  if (!src) return { ok: false, error: '共享库中没有这段音效' }
+  let buf = null
+  try { buf = fs.readFileSync(path.join(soundsDir(), src.file)) } catch (err) {
+    logErr('[whale][sounds] 读取共享音效失败', src.file, err && err.message)
+    return { ok: false, error: '读取音效失败：' + ((err && err.message) || err) }
+  }
+  return saveOne(role, src.name, src.ext, buf)
+}
+
 // 音频本体 → base64 data URL 数组（挂件随机取一条 new Audio(dataURL) 播放）。
 // 文件丢失（用户手动清理了 userData）时按缺失处理，挂件侧回退内置音色 / 提醒音静音。
 function getSoundData() {
   if (dataCache) return dataCache
   const meta = readMeta()
   const out = {}
-  for (const role of ROLES) {
+  // 只推「实播槽位」：shared 是素材池（几十段），全推给挂件等于每次都搬几 MB 无用 base64
+  for (const role of PLAY_ROLES) {
     const list = []
     for (const m of meta[role]) {
       try {
@@ -289,7 +335,9 @@ function getSoundData() {
 
 module.exports = {
   importSound, pickSoundFile, importSoundFromData,
-  removeSound, clearAll, getSoundData, readMeta, ROLES,
+  removeSound, clearAll, getSoundData, readMeta, ROLES, PLAY_ROLES, ROLE_LABEL,
+  // 共享音效库（lib/assets-packs.js / 设置页「选用」用）
+  installBuiltin, useSharedSound, readSoundBuffer, mimeOf,
   // 素材包（assets.js）用
   exportItems, importBuffer,
 }
