@@ -5,7 +5,8 @@
 # 免得 Release 里的产物和版本号各说各话（prebuild 会把 package.json 的版本同步进
 # plugin.json 与 lib/constants.js，所以这里只校验 tag 与 package.json）。
 #
-# 边界：uTools 市场发布仍需人工（开发者工具里打包 .upx 上传），
+# 边界：uTools 市场发布仍需人工（开发者工具里打包 .upx 上传）；
+# 三个素材包附件也由 scripts/release.mjs 在本地补传（它们不入库，CI 拿不到），
 # 这里只负责「校验版本 → 跑检查 → 构建 → 打包 zip → 建 Release + 变更说明」。
 # 变更说明用 gh 的 --generate-notes（GitHub 按 commit / PR 自动生成），
 # README 的「版本记录」仍是人工整理的对外口径，两者互不替代。
@@ -66,45 +67,18 @@ jobs:
           cd dist
           zip -qr "../balance-whale-widget-${GITHUB_REF_NAME}.zip" .
 
-      # 内置形象素材包：v1.9.0 起精简为 1 张（约 73KB）已移出插件包，改为用户按需下载，
-      # 源地址固定指向 releases/latest/download/skins-pack.whaleassets（见 lib/constants.js
-      # 的 SKIN_PACK_URL）。**必须随每次 Release 重新上传**：latest 指向最新一版，
-      # 漏传会让最新版的下载入口 404 —— 且文件名要一字不差。
-      # 包内已含 sha256 双重校验（整包 SKIN_PACK_SHA256 + 逐张），传输被代理篡改也会被挡下。
-      - name: 素材包产物核对
-        run: |
-          # 与 constants.js 的整包哈希比对：素材包改了却忘更新常量 = 用户下载后校验必失败。
-          # $3 是 constants.js 里那份哈希的常量名（同一条逻辑，内置形象与共享素材各跑一遍）。
-          check_pack() {
-            local pack="$1" const="$2" script="$3"
-            if [ ! -f "$pack" ]; then
-              echo "缺少素材包 $pack；请先跑 python $script 生成并提交" >&2
-              exit 1
-            fi
-            local want got
-            want="$(node -p "require('./public/preload/lib/constants.js').$const")"
-            got="$(sha256sum "$pack" | cut -d' ' -f1)"
-            if [ "$want" != "$got" ]; then
-              echo "$pack 的 sha256 与 constants.js 不一致：常量 $want，实际 $got" >&2
-              echo "请重跑 $script 并把 $const 更新为打印值" >&2
-              exit 1
-            fi
-          }
-          check_pack "public/whale-pack/skins-pack.whaleassets" "SKIN_PACK_SHA256" "scripts/build-skin-pack.py"
-          # 共享素材（上游 QQ 群角色图 36 张 + 音效 45 个）：同样挂 Release 按需下载，
-          # 源地址固定指向 releases/latest/download/assets-*.whaleassets。
-          # **必须随每次 Release 重新上传**（latest 指向最新版），且文件名与 constants.js 一字不差。
-          check_pack "resources/assets-skins.whaleassets" "SHARED_SKIN_PACK_SHA256" "scripts/build-assets-pack.py"
-          check_pack "resources/assets-sounds.whaleassets" "SHARED_SOUND_PACK_SHA256" "scripts/build-assets-pack.py"
-
+      # 建 Release 只挂 zip。三个素材包（内置形象 skins-pack + 共享角色 assets-skins +
+      # 共享音效 assets-sounds）**不在这里上传**：它们在 .gitignore 里被排除，CI 从零检出
+      # 根本拿不到文件（曾经把上传放进 CI，结果 gh release create 直接报文件不存在）。
+      # 素材包由 scripts/release.mjs 在本地补传（发布者本地才有那两个大件），
+      # 随后 verify-release-zip.mjs 核对它们确实在 Release 里。
+      # 之所以能从插件包移出：它们是 releases/latest/download/<文件名> 的远程附件，
+      # 源地址写在 lib/constants.js（SKIN_PACK_URL / SHARED_*_URL），latest 恒指向最新一版。
       - name: 建 Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release create "$GITHUB_REF_NAME" \
             "balance-whale-widget-${GITHUB_REF_NAME}.zip" \
-            "public/whale-pack/skins-pack.whaleassets" \
-            "resources/assets-skins.whaleassets" \
-            "resources/assets-sounds.whaleassets" \
             --title "$GITHUB_REF_NAME" \
             --generate-notes

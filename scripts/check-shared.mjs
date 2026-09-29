@@ -430,7 +430,7 @@ const CHECKS = [
       { file: APP_VUE, pick: skinIdsFromArray('const LEGACY_BUILTIN_SKINS =') },
     ],
   },
-  // 可下载形象清单（v1.9.0 起精简为 1 张）：宿主 constants 的 SKIN_PACK_SKINS（对象数组，
+  // 可下载形象清单（v1.8.0 起精简为 1 张）：宿主 constants 的 SKIN_PACK_SKINS（对象数组，
   // 含 sha256）与设置页的字面量副本（id 数组）同值。设置页那份决定资源页列出哪些可下载，
   // 宿主那份决定下载后落到画廊的 id 校验，两边不一致会出现「设置页点了下载、宿主不认」。
   {

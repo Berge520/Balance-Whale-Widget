@@ -8,7 +8,7 @@
   改为打包挂 GitHub Release，用户按需下载（与 skins-pack.whaleassets 同一套路）。
 
 与 build-skin-pack.py 的区别：
-  - 那个打「内置可下载形象」（v1.9.0 起 1 张），是插件自带资源的瘦身；
+  - 那个打「内置可下载形象」（v1.8.0 起 1 张），是插件自带资源的瘦身；
   - 这个打「上游分享素材」，是纯粹的可选扩展内容，**不随包**，
     因此产物落在 resources/ 而不是 public/ —— public/ 会被 Vite 原样拷进插件包。
 

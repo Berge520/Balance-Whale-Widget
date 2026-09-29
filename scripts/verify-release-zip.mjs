@@ -53,7 +53,7 @@ if (!existsSync(zipPath)) {
   process.exit(1)
 }
 
-// 内置形象素材包：插件包内已不含那些可下载形象（v1.9.0 起仅 1 张），用户点「下载形象」时是从
+// 内置形象素材包：插件包内已不含那些可下载形象（v1.8.0 起仅 1 张），用户点「下载形象」时是从
 // releases/latest/download/skins-pack.whaleassets 拉的。这个资产漏传 / 名字写错，
 // 功能会整体 404，而 zip 本身完全正常 —— 所以必须单独核对它与那份 sha256。
 // 共享素材（上游 QQ 群角色图 / 音效）同理，源地址指向 assets-*.whaleassets。

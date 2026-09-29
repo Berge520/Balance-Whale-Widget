@@ -23,7 +23,7 @@ const MAX_SCALE = 2.5
 // 可选下载的内置形象（v1.7.x 起随包只留默认那一张）
 // ──────────────────────────────────────────────
 // 13 张内置形象原先全部随包分发（约 1.07MB，占插件包 39%）。现在只留 DEFAULT_SKIN
-// 那张随包，其余打成一个素材包挂在 GitHub Release 上，用户按需下载（v1.9.0 起该可下载包
+// 那张随包，其余打成一个素材包挂在 GitHub Release 上，用户按需下载（v1.8.0 起该可下载包
 // 从 12 张精简为 1 张 DSniang02 —— 原 12 张里 11 张与「共享角色包」同图，见下方清单注释）。
 //
 // 为什么用 assets.js 的自定义容器格式而不是 zip：宿主 preload 跑在渲染进程，只有 Node
@@ -47,12 +47,12 @@ const SKIN_PACK_URL = SKIN_PACK_DEFAULT_PREFIX + SKIN_PACK_ORIGIN
 const SKIN_PACK_RAW_MAIN = 'https://raw.githubusercontent.com/Berge520/Balance-Whale-Widget/main/public/whale-pack/skins-pack.whaleassets'
 // 自填前缀长度上限：正常加速站前缀几十字符，200 足够，也拦住整段粘贴
 const SKIN_PACK_PREFIX_MAX = 200
-// 素材包本体的 sha256（v1.9.0 起仅 1 张 DSniang02，约 73KB）。下载后先校验再解析，
+// 素材包本体的 sha256（v1.8.0 起仅 1 张 DSniang02，约 73KB）。下载后先校验再解析，
 // 防代理返回残缺/被篡改的字节。素材包内容变更时必须同步更新 —— 由 scripts/build-skin-pack.py 打印。
-const SKIN_PACK_SHA256 = 'e645c69b72d8ff59ab63deabe00e15297bad27ae07f46f471c67535024d9418a'
+const SKIN_PACK_SHA256 = '4703377acecb4a8ab699416216e2e65e00e15ca2966652efda9210062b02cd83'
 // 单个源的超时。走候选链时每个源各算一次，多个源都卡满才会累加到数倍 —— 见 downloadSkinPacks
 const SKIN_PACK_TIMEOUT_MS = 60000
-// 体积上限：v1.9.0 起仅 1 张图约 73KB，给 4MB 余量即可拦住代理返回 HTML 错误页这类异常
+// 体积上限：v1.8.0 起仅 1 张图约 73KB，给 4MB 余量即可拦住代理返回 HTML 错误页这类异常
 const SKIN_PACK_MAX_BYTES = 4 * 1024 * 1024
 
 // ──────────────────────────────────────────────
@@ -63,7 +63,7 @@ const SKIN_PACK_MAX_BYTES = 4 * 1024 * 1024
 // 打包脚本 scripts/build-assets-pack.py（输入 assets-src/，产物 resources/，均不进仓库）。
 //
 // 与「内置形象」（SKIN_PACK_*）的区别：那是本插件自带的官方形象、按文件名匹配
-// （v1.9.0 起随包 1 张 + 可下载 1 张）；这里是从第三方素材整包导入的「角色图 + 音效库」，
+// （v1.8.0 起随包 1 张 + 可下载 1 张）；这里是从第三方素材整包导入的「角色图 + 音效库」，
 // 按 id 匹配、落两条不同链路（见 lib/assets-packs.js 文件头）。
 const SHARED_PACK_ORIGIN_BASE = 'https://github.com/Berge520/Balance-Whale-Widget/releases/latest/download/'
 const SHARED_SKIN_PACK_ORIGIN = SHARED_PACK_ORIGIN_BASE + 'assets-skins.whaleassets'
@@ -179,7 +179,7 @@ const SHARED_SOUND_LIB = [
 // id 沿用图片文件名主干（与原来的内置形象 id 一致，用户升级后认的还是同一个名字），
 // name 是展示名（与 id 同值 —— 原先下拉里就显示 id）。
 //
-// v1.9.0 起从 12 张精简为 1 张：其余 11 张与「共享角色包」是同图重复（那批本是用户从
+// v1.8.0 起从 12 张精简为 1 张：其余 11 张与「共享角色包」是同图重复（那批本是用户从
 // QQ 群挑一部分转 webp 单独打包，原图同时也在共享角色包里整包分发），且内置版还是重压的
 // 低质量 webp，故一律改由共享角色包提供，这里只留真正独有的 DSniang02。
 // 已下载过旧 11 张的老用户不受影响：落盘文件留在自定义画廊，配置值走 LEGACY_BUILTIN_SKINS

@@ -47,7 +47,7 @@ const LEGACY_BUILTIN_SKINS = [
 
 // 可下载的内置形象（同值副本：宿主 lib/constants.js 的 SKIN_PACK_SKINS，由 check-shared.mjs
 // 比对 id 清单；size 供界面显示「共约 x MB」，缩略图是下面 THUMB_* 内嵌的静态资源）。
-// v1.9.0 起从 12 张精简为 1 张：其余 11 张与「共享角色包」是同图重复（那批本是用户从 QQ 群
+// v1.8.0 起从 12 张精简为 1 张：其余 11 张与「共享角色包」是同图重复（那批本是用户从 QQ 群
 // 挑一部分转 webp 单独打包，原图同时也在共享角色包里整包分发），一律改由共享角色包提供。
 const SKIN_PACK_SKINS = [
   { id: 'DSniang02', size: 74578 },
@@ -5381,7 +5381,7 @@ function doPreviewBuiltin(url: string) {
 }
 
 // —— 可下载的内置形象（v1.7.x 起随包只留默认那张，其余挂 Release 按需下） ——
-// 缩略图是构建期生成的静态资源（public/whale-pack/thumbs/<id>.webp；v1.9.0 起精简到 1 张
+// 缩略图是构建期生成的静态资源（public/whale-pack/thumbs/<id>.webp；v1.8.0 起精简到 1 张
 // 约 4KB，随插件包分发、但不含素材包本体），不下载也能看见长什么样 —— 让用户「下手前有数」。
 // 走 Vite 的相对路径加载（大件 skins-pack.whaleassets 与 manifest.json 已在 vite.config.js 里排除）。
 function skinPackThumb(id: string) {
@@ -7145,7 +7145,7 @@ onUnmounted(() => {
               <img class="skin-cell-img" :src="builtinSkinUrl(s)" :alt="s" :title="s" />
               <span class="skin-cell-tag">{{ s }}</span>
             </div>
-            <!-- 可下载的那批（v1.9.0 起只剩 1 张）：未装灰底 + 下载角标（缩略图是设置页内嵌的，不下载也能看见长什么样）；
+            <!-- 可下载的那批（v1.8.0 起只剩 1 张）：未装灰底 + 下载角标（缩略图是设置页内嵌的，不下载也能看见长什么样）；
                  已装则与「导入的形象」共用一套展示（缩略图从画廊来），可选用 / 可删 -->
             <div v-for="s in skinPackItems" :key="'p-' + s.id" class="skin-cell"
                  :class="{ active: cfg.skin === s.id, 'is-remote': !skinPackInstalled[s.id] }">

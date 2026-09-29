@@ -2,9 +2,9 @@ import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 
 // 素材包目录（public/whale-pack/）里只有**大件**不该进插件包：
-//   - skins-pack.whaleassets 是发 Release 的远程附件本身（v1.9.0 起 1 张约 73KB），随包等于白减体积；
+//   - skins-pack.whaleassets 是发 Release 的远程附件本身（v1.8.0 起 1 张约 73KB），随包等于白减体积；
 //   - manifest.json 是做核对用的中间产物，运行时用不到。
-// 但 thumbs/（v1.9.0 起 1 张缩略图，约 4KB）必须进包：设置页「内置资源」折叠区用相对路径
+// 但 thumbs/（v1.8.0 起 1 张缩略图，约 4KB）必须进包：设置页「内置资源」折叠区用相对路径
 // './whale-pack/thumbs/<id>.webp' 显示缩略图，让用户下载前就能看见长什么样。
 const SKIP_PUBLIC_FILES = new Set(['whale-pack/skins-pack.whaleassets', 'whale-pack/manifest.json'])
 

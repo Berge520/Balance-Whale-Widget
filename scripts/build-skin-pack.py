@@ -5,7 +5,7 @@
 为什么要有这个脚本：
   v1.7.x 起 13 张内置形象只保留 DSniang1 随包分发（约 39KB），其余改为按需下载，
   目的是把 zip 从约 2.7MB 压到约 1.7MB。
-  v1.9.0 起进一步精简：原先打包的 12 张里有 11 张与「共享角色包」（resources/assets-skins
+  v1.8.0 起进一步精简：原先打包的 12 张里有 11 张与「共享角色包」（resources/assets-skins
   .whaleassets 的 36 张）是**同一张图的重复** —— 那批本是用户在 QQ 群里挑一部分转 webp
   单独打包，而原图同时也在共享角色包里整包分发。重复项里内置版还是重压的低质量 webp，
   共享版则是原图。故内置包只留真正独有的 DSniang02（带思考气泡的蓝发角色），
@@ -42,7 +42,7 @@ except ImportError:
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # 源图目录：**不在 public/ 下** —— public/ 会被 Vite 拷进插件包，源图不该随包分发
-# （那等于把「按需下载」白做）。v1.9.0 起源图存这里，与 resources/ 的其他产物同处一地。
+# （那等于把「按需下载」白做）。v1.8.0 起源图存这里，与 resources/ 的其他产物同处一地。
 SRC = os.path.join(ROOT, 'resources', 'skins-src')
 OUT = os.path.join(ROOT, 'public', 'whale-pack')
 THUMB_DIR = os.path.join(OUT, 'thumbs')
@@ -51,7 +51,7 @@ THUMB_DIR = os.path.join(OUT, 'thumbs')
 KEEP = 'DSniang1.webp'
 # 只打包「内置可下载形象」。命名约定不足以筛选（public/whale/ 下还有 rua.webp 气泡动图等
 # 非形象资源），故用本集合做白名单。
-# v1.9.0 起从 12 张精简为 1 张：其余 11 张与共享角色包同图（见文件头说明），
+# v1.8.0 起从 12 张精简为 1 张：其余 11 张与共享角色包同图（见文件头说明），
 # 一律改由共享角色包提供，这里只留真正独有的 DSniang02。
 SKIN_IDS = {
     'DSniang02',
@@ -60,7 +60,7 @@ SKIN_IDS = {
 # 只有原文件名吃不下 skins.js 的 id 白名单（`/^[A-Za-z0-9_-]{1,40}$/`）时才在此登记 ——
 # 如「无稽之谈改」这类中文名，落盘 id 取拼音首字母，与 glby/ciya/liuy 同风格。
 # 漏登记的后果：该张能写进磁盘、却会在 readRaw 归一化时被静默丢弃（画廊少一张、且反复重下）。
-# v1.9.0 起 12 张仅剩 DSniang02，其文件名已是合法 ASCII，故当前为空表（保留结构备用）。
+# v1.8.0 起 12 张仅剩 DSniang02，其文件名已是合法 ASCII，故当前为空表（保留结构备用）。
 RENAME = {}
 # 缩略图最长边：设置页网格里是约 64px 的格子，96 给高分屏留余量
 THUMB_MAX = 96
@@ -141,7 +141,7 @@ def main():
     pack_manifest = {
         'kind': KIND,
         'schema': SCHEMA,
-        'appVersion': '1.9.0',
+        'appVersion': '1.8.0',
         'exportedAt': 'builtin-skin-pack-v2',
         'skins': skin_list,
         'sounds': [],

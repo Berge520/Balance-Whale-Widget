@@ -419,7 +419,7 @@ function normTimerNote(v) {
   return String(v == null ? '' : v).replace(/\s+/g, ' ').trim().slice(0, TIMER_NOTE_MAX)
 }
 // 随包分发的内置形象：v1.7.x 起只留默认那张（约 39KB），其余改为用户按需从 GitHub
-// Release 下载 —— 目的是把插件包从约 2.7MB 压到约 1.7MB。（v1.9.0 起可下载包再从 12 张
+// Release 下载 —— 目的是把插件包从约 2.7MB 压到约 1.7MB。（v1.8.0 起可下载包再从 12 张
 // 精简为 1 张 DSniang02，其余 11 张与共享角色包同图、改由共享角色包提供。）
 // 下载回来的形象进「自定义画廊」（whale:skins，带 builtin 标记），不走这里的白名单，
 // 所以 normSkin 不认识它们也能正常切换（它们对应 skin: 'custom'）。
