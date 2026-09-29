@@ -16,7 +16,7 @@ let winFocusable = false // 当前窗口的 focusable 设置（仅创建时可�
 
 function floatingUrl() {
   // uTools createBrowserWindow 的 url 必须是「插件包内的本地 html 相对路径」，
-  // 它按插件根目录（dev=public/，打包=dist/）做文件存在性校验；
+  // 它按插件根目录（`plugin.json` 无 development 字段，开发与打包都是 dist/）做文件存在性校验；
   // 传 dev-server 的 http://localhost 地址会被判为「html 文件不存在」。
   // floating.html 位于插件根目录，其相对资源 ./whale/... 也随包存在，直接用相对路径。
   return 'floating.html'
@@ -666,7 +666,7 @@ function pushInit() {
     sounds: getSoundData(),
     // 自定义挂件形象本体（base64 data URL；未导入时为空串，页面回退内置形象）
     skin: getSkinData(),
-    // 自定义气泡图片本体（base64 data URL 数组；空数组时页面回退内置 rua.gif）
+    // 自定义气泡图片本体（base64 data URL 数组；空数组时页面回退内置 rua.webp）
     bubbles: getBubbleData(),
     // 多厂商模型列表（含内置 DeepSeek 那条）+ 主显示模型
     models: getModelsPayload(),
