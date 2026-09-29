@@ -40,6 +40,8 @@ const emit = defineEmits<{
   (e: 'save', payload: { apiKey: string; platformToken: string; enterMode: string }): void
   (e: 'test', payload: { apiKey: string; platformToken: string }): void
   (e: 'skip'): void
+  // 「去挑形象」：跳到设置页「资源」Tab 的形象区（App.vue 负责切 Tab / 滚动 / 展开）
+  (e: 'browseSkins'): void
   (e: 'doc', url: string): void
 }>()
 
@@ -159,12 +161,19 @@ function onTest() {
         </div>
       </template>
 
-      <!-- 第三步：回执 -->
+      <!-- 第三步：回执 + 可选「挑选形象」。不做成第四步 —— 引导主线在「保存」时已结束，
+           再多一步会让「填 Key」这件事看起来没完没了。这里只是顺带的岔路，
+           跳过去（「先这样，开始使用」）不影响任何功能：形象随时能在「资源」Tab 补 |
+           组件刻意不依赖形象下载的实现（那是 App.vue 的活儿），只 emit 一个「带我去看看」 -->
       <template v-else>
         <p class="lead" :class="{ bad: !hasKey }">
           <template v-if="hasKey">配置已保存，挂件马上就能读到余额。桌面上的小鲸鱼就是它，点它会有菜单。</template>
           <template v-else>没有填 API Key，设置已保存，但挂件还读不到余额。可在<strong>数据</strong> Tab 里补上。</template>
         </p>
+        <div class="extra">
+          <span class="extra-title">想换个形象？</span>
+          <span class="extra-desc">插件包只带了默认那张；另有 1 张可以下载，在「资源」Tab 里挑。现在不挑也行，随时都能去。</span>
+        </div>
       </template>
 
       <p v-if="flashMsg" class="msg" :class="{ ok: !flashErr, err: flashErr }">{{ flashMsg }}</p>
@@ -196,10 +205,11 @@ function onTest() {
           <button class="ghost utils-btn utils-outline" type="button" @click="step = 0">上一步</button>
         </template>
 
-        <!-- 第三步：只收尾 -->
+        <!-- 第三步：只收尾。可选岔路有两条出路：「去挑形象」跳到「资源」Tab 的形象区，
+             留在原地点「先这样，开始使用」也完全不影响功能 -->
         <template v-else>
-          <button class="utils-btn utils-primary" type="button" @click="emit('skip')">开始使用</button>
-          <button class="ghost utils-btn utils-outline" type="button" @click="emit('skip')">关闭</button>
+          <button v-if="hasKey" class="utils-btn utils-secondary" type="button" @click="emit('browseSkins')">去挑形象</button>
+          <button class="utils-btn utils-primary" type="button" @click="emit('skip')">{{ hasKey ? '先这样，开始使用' : '开始使用' }}</button>
         </template>
       </div>
     </div>
@@ -322,6 +332,27 @@ function onTest() {
 }
 .lead.bad {
   color: var(--err, #d9534f);
+}
+/* 完成页的可选「挑选形象」区块：做成虚线框的岔路提示，视觉上明显比正文轻，
+   避免让「引导已完成」这件事被误读成「还有一步必须做」 */
+.extra {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 12px 0 4px;
+  padding: 10px 12px;
+  border: 1px dashed var(--border, rgba(83, 107, 169, 0.32));
+  border-radius: 10px;
+  background: rgba(83, 107, 169, 0.05);
+}
+.extra-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+.extra-desc {
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--fg-dim);
 }
 .field {
   display: block;

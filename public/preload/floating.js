@@ -46,7 +46,7 @@ ipcRenderer.on('whale:dsh', (event, data) => emit('dsh', data))
 ipcRenderer.on('whale:sounds', (event, data) => emit('sounds', data))
 // 自定义挂件形象本体（base64 data URL；导入/删除后宿主重推，空串表示无自定义形象）
 ipcRenderer.on('whale:skin', (event, data) => emit('skin', data))
-// 自定义气泡图片本体（base64 data URL 数组；导入/删除后宿主重推，空数组表示回退内置 rua.gif）
+// 自定义气泡图片本体（base64 data URL 数组；导入/删除后宿主重推，空数组表示回退内置 rua.webp）
 ipcRenderer.on('whale:bubbles', (event, data) => emit('bubbles', data))
 // 多厂商模型列表（含内置 DeepSeek 那条）+ 主显示模型
 ipcRenderer.on('whale:models', (event, data) => emit('models', data))

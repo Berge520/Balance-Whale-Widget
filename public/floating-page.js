@@ -14,31 +14,24 @@
   var TIMER_AT_DEFAULT = '07:30'; // 定时刻默认值（与宿主 store.js 的 defaultConfig 同值）
   var TIMER_BREAK_DEFAULT = 5;    // 到点后「休息 N 分钟」的默认档位
   var TIMER_NOTE_MAX = 60;        // 到点留言长度上限（留言只在设置页编辑，与那里输入框的 maxLength、宿主清洗同值）
-  // 内置挂件形象（相对插件根目录；用哪张由设置页的 skin 值决定）。
+  // 随包分发的内置挂件形象（相对插件根目录；用哪张由设置页的 skin 值决定）。
   // 键 = public/whale/ 下的图片文件名，加形象时这里加一行、设置页「形象」下拉加一个 option；
-  // 宿主 store.js 的 normSkin 另有一份同值的合法值清单，三处要一起改。
-  // 统一用 WebP（有损 q90，带 alpha）：这 13 张原为 PNG 共 10.8MB，占插件包体积的 94%，
+  // 宿主 store.js 的 BUILTIN_SKINS 另有一份同值的合法值清单，三处要一起改。
+  // 统一用 WebP（有损 q90，带 alpha）：这批原为 PNG 共 10.8MB，占插件包体积的 94%，
   // 转 WebP 后约 1.0MB（形象 id 不含扩展名，故三处副本不受影响）。
-  // 用户导入的自定义形象仍是 PNG（见 lib/skins.js），走 data URL，与本表无关。
+  // v1.7.x 起只留默认这一张随包（约 39KB），其余改为用户按需下载 ——
+  // 下载回来的形象落进自定义画廊、走 data URL 推送（见 lib/skin-packs.js），不进本表：
+  // 本表是**相对路径**表，读不到 userData 下的文件（见 lib/skins.js 文件头记的坑）。
+  // 用户导入的自定义形象仍是 PNG，同样走 data URL，与本表无关。
   var BUILTIN_SKINS = {
-    liuy: './whale/liuy.webp',
-    black: './whale/black.webp',
-    ciya: './whale/ciya.webp',
     DSniang1: './whale/DSniang1.webp',
-    DSniang02: './whale/DSniang02.webp',
-    DSniang3: './whale/DSniang3.webp',
-    DSniang4: './whale/DSniang4.webp',
-    DSniang5: './whale/DSniang5.webp',
-    DSniang6: './whale/DSniang6.webp',
-    DSniang7: './whale/DSniang7.webp',
-    glby: './whale/glby.webp',
-    Jian: './whale/Jian.webp',
-    '无稽之谈改': './whale/无稽之谈改.webp',
   };
   var DEFAULT_SKIN = 'DSniang1'; // 默认形象，也是配置里非法值 / v1.5.0 老值 'whale' 的落点
   var BUILTIN_SKIN_IDS = Object.keys(BUILTIN_SKINS);
   var IMG_URL = BUILTIN_SKINS[DEFAULT_SKIN];
-  var GIF_URL = './whale/rua.gif';
+  // 内置气泡动图（动 WebP：与旧 rua.gif 逐帧像素一致、体积小 ~34KB）。变量名与 CSS 类
+  // 仍叫 gif，指的是「这张内置动图」这个概念，不是文件格式
+  var GIF_URL = './whale/rua.webp';
   // 气泡配色预设：floating.css 里气泡颜色全部走 CSS 变量，换主题只重写变量、不重建 DOM。
   // 「低余额」的红色是状态色，不随主题变（见 .dshwv-low）
   var THEMES = {
@@ -702,9 +695,9 @@
   gifEl.draggable = false;
   var gifFailed = false;
   // 当前 gifEl.src 对应的「原始值」：img.src 读出来是绝对 URL（相对路径会被解析成 file://…），
-  // 拿它跟 './whale/rua.gif' 比对永远不相等，只能自己记一份
+  // 拿它跟 './whale/rua.webp' 比对永远不相等，只能自己记一份
   var gifSrcSet = GIF_URL;
-  // 换图：自定义气泡图与内置 rua.gif 共用这一个 <img>。图变了才重设 src 并复位失败标记，
+  // 换图：自定义气泡图与内置 rua.webp 共用这一个 <img>。图变了才重设 src 并复位失败标记，
   // 否则每次抽到同一张都会重新发起加载（data URL 也会白解码一遍）
   function setGifSrc(url) {
     var u = url || GIF_URL;
@@ -782,7 +775,7 @@
   var customSounds = { press: [], release: [], low: [], budget: [], peak: [], pass: [] };
   var customSkin = '';         // 宿主推送的自定义形象 base64 data URL（whale:skin，空串=未导入）
   // 宿主推送的自定义气泡图片（whale:bubbles，base64 data URL 数组）。与形象不同，这里没有
-  // 「当前用哪张」：抽到「动图组」时从里面随机取一张，空数组则回退内置 rua.gif
+  // 「当前用哪张」：抽到「动图组」时从里面随机取一张，空数组则回退内置 rua.webp
   var customBubbles = [];
   var skinId = DEFAULT_SKIN;   // 当前形象：BUILTIN_SKINS 的键，或 'custom'（用户导入）
   var themeId = 'default';     // 当前气泡配色：'default' | 'dark' | 'sakura'
@@ -984,7 +977,7 @@
     return arr[i];
   }
   // 随机抽一张自定义气泡图（不连续重复，复用 pickOne 的 WeakMap 机制）；没导入时回空串，
-  // 调用方据此回退内置 rua.gif
+  // 调用方据此回退内置 rua.webp
   function pickBubbleUrl() {
     if (!customBubbles.length) return '';
     return pickOne(customBubbles) || '';
@@ -1189,7 +1182,7 @@
   function textGroupLines(list, style) {
     return function () { return singleCenter(style, renderLinePlaceholders(pickOne(list)), '', style === 'A'); };
   }
-  // 图片组 → 抽签项：抽一张自定义气泡图（没导入过时回空串，渲染层据此回退内置 rua.gif）
+  // 图片组 → 抽签项：抽一张自定义气泡图（没导入过时回空串，渲染层据此回退内置 rua.webp）
   function imageGroupLines() { return { gif: true, src: pickBubbleUrl() }; }
   // 组配置 → 抽签项列表。card 是内置的余额 / 时段卡（内容按当前数据现算，文本不可编辑）；
   // 文本组没有有效台词就整组丢掉（清空 = 这组不出现，与宿主 normQuotes 口径一致）；
@@ -1756,7 +1749,7 @@
   }
   function applyBubbleLines(lines) {
     if (lines && lines.gif) {
-      // 有自定义气泡图就用它，否则回退内置 rua.gif（lines.src 为空串 = 用内置）
+      // 有自定义气泡图就用它，否则回退内置 rua.webp（lines.src 为空串 = 用内置）
       setGifSrc(lines.src);
       if (gifFailed) {
         lines = singleCenter('A', pickOne(QUOTES.gifFail), '', true);

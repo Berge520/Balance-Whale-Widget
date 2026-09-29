@@ -46,6 +46,8 @@ const backup = require('./backup')
 const assets = require('./assets')
 const sounds = require('./sounds')
 const skins = require('./skins')
+const skinPacks = require('./skin-packs')
+const assetsPacks = require('./assets-packs')
 const bubbles = require('./bubbles')
 const codex = require('./codex')
 const dshUsage = require('./dsh-usage')
@@ -1840,6 +1842,11 @@ module.exports = {
   dshListVersions() {
     return dsh.listVersions()
   },
+  // 取「实装版本 → 目标版本」区间的更新说明（结果经快照的 notes 字段回传）。
+  // 独立成一条：版本列表可以从磁盘缓存立刻回显，说明要联网，两者不该互相等。
+  dshLoadNotes(force) {
+    return dsh.loadNotes(force === true)
+  },
   dshClearLog() {
     return dsh.clearLog()
   },
@@ -2644,6 +2651,47 @@ module.exports = {
     if (r && r.ok) sendToWidget('whale:skin', skins.getSkinData())
     return r
   },
+  // —— 可选下载的内置形象（v1.7.x 起随包只留默认那张，其余挂 Release 按需下）——
+  // 可下载清单 + 已装状态：设置页形象区据此渲染灰底 / 角标 / 已装
+  listSkinPacks() {
+    return skinPacks.listSkinPacks()
+  },
+  // 下载并安装整包：成功后把新形象（若是当前使用的那张）推给挂件。
+  // 传入用户自填的加速前缀（空 = 只用内置候选链），宿主不在这里读配置 —— 设置页已持有 cfg
+  async downloadSkinPacks(prefix) {
+    const r = await skinPacks.downloadSkinPacks({ prefix: prefix })
+    if (r && r.ok) sendToWidget('whale:skin', skins.getSkinData())
+    return r
+  },
+  // —— 共享素材（角色图 36 张 + 音效库 45 个，上游 QQ 群素材，挂 Release 按需下）——
+  // 可下载清单 + 已装状态。缩略图是设置页内嵌静态资源（resources/thumbs），宿主不搬运
+  listSharedSkins() {
+    return assetsPacks.listSharedSkins()
+  },
+  listSharedSounds() {
+    return assetsPacks.listSharedSounds()
+  },
+  // 下载并安装整包共享角色（与内置形象同链路落盘，装完把形象数据推给挂件）
+  async downloadSharedSkins(prefix) {
+    const r = await assetsPacks.downloadSharedSkins({ prefix: prefix })
+    if (r && r.ok) sendToWidget('whale:skin', skins.getSkinData())
+    return r
+  },
+  // 下载并安装整包音效库到 shared 槽位。shared 不参与实播，无需推给挂件
+  // （用户「选用」到实播槽位时走 useSharedSound 才推）
+  async downloadSharedSounds(prefix) {
+    return assetsPacks.downloadSharedSounds({ prefix: prefix })
+  },
+  // 把共享库的一段「选用」到某个实播槽位，推新音频给挂件
+  useSharedSound(file, role) {
+    const r = sounds.useSharedSound(file, role)
+    if (r && r.ok) sendToWidget('whale:sounds', sounds.getSoundData())
+    return r
+  },
+  // 试听共享库里的一段（shared 槽位不在 getSoundData 里，得按名单独取一段 data URL）
+  readSharedSoundData(name) {
+    return assetsPacks.readSharedSoundData(name)
+  },
   // —— 自定义气泡图片（点鲸鱼时随机显示一张，无「当前用哪张」概念） ——
   // 列表：元信息 + 缩略图 data URL，供设置页网格展示
   listBubbles() {
@@ -2818,7 +2866,7 @@ module.exports = {
       }
     }
     if (o.bubbles) {
-      // 气泡图没有「当前用哪张」的概念，删光即自动回退内置 rua.gif，不必改配置
+      // 气泡图没有「当前用哪张」的概念，删光即自动回退内置 rua.webp，不必改配置
       try { bubbles.clearAll() } catch (err) { logErr('[whale][settings] 清除自定义气泡图失败', err && err.message) }
     }
     if (o.window) {
@@ -2827,6 +2875,9 @@ module.exports = {
       try { utools.dbStorage.removeItem(K.dshVersions) } catch (err) {}
       // 「查过版本」标记与版本列表同进退：清了列表却留着标记，设置页会以为已查过而不再自动查
       try { utools.dbStorage.removeItem(K.dshVersionsQueried) } catch (err) {}
+      // 说明正文缓存也一并清：它按版本号索引，版本列表都清了，留着这份正文没有意义
+      // （正文写完虽不可变，但用户点「清除」的意图就是「别再留着这些缓存了」，不该偷偷保留）
+      try { utools.dbStorage.removeItem(K.dshNotes) } catch (err) {}
       resetAnchorCache()
     }
     resetBalanceCache()
@@ -2843,7 +2894,7 @@ module.exports = {
     if (o.skins) {
       try { sendToWidget('whale:skin', skins.getSkinData()) } catch (err) { logErr('[whale][settings] 重置后推送形象失败', err && err.message) }
     }
-    // 同理：气泡图被清除后推空数组，挂件立刻回退内置 rua.gif
+    // 同理：气泡图被清除后推空数组，挂件立刻回退内置 rua.webp
     if (o.bubbles) {
       try { sendToWidget('whale:bubbles', bubbles.getBubbleData()) } catch (err) { logErr('[whale][settings] 重置后推送气泡失败', err && err.message) }
     }

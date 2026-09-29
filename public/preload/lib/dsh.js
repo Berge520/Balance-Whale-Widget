@@ -19,6 +19,7 @@ const { log, logErr } = require('./log')
 const { readConfig } = require('./store')
 const { K, NEWEST_VERSION, DSH_PORT_DEFAULT } = require('./constants')
 const { homeDir } = require('./util')
+const { getNotes } = require('./dsh-notes')
 
 const DSH_TAIL = 'web' // dsh 的 Web UI 子命令
 const DSH_HOST = '127.0.0.1'
@@ -47,8 +48,21 @@ const state = {
   reinstall: false,   // 更新前先删掉插件目录里的 dsh，强制重装
   noOpen: true,       // 启动时带 --no-open（不自动开浏览器，用「打开页面」按钮打开）
   port: DSH_PORT_DEFAULT, // Web UI 监听端口（可在设置页改；改动要重启 dsh 才生效）
-  versions: { at: 0, latest: '', list: [] }, // 「查询版本」结果（落库缓存，重载插件后仍在）
+  // 「查询版本」结果（落库缓存，重载插件后仍在）。
+  // times 是「版本号 → 发布时间戳(ms)」，从 npm 的 time 字段取。**这是判定版本先后的唯一依据**：
+  // dsh 官方并不按 semver 递增发布 —— 实测 0.1.5-rc.3 发布于 0.1.6-alpha.2 **之后**、
+  // 还大量跳号（无 0.1.4），semver 比较会把后发的旧分支补丁判成「更旧」。list 保持 npm 返回顺序（即发布序）。
+  versions: { at: 0, latest: '', list: [], times: {} },
   versionsLoaded: false,
+  // 版本说明（区间聚合 / 单版本，见 dsh-notes.js）。notes 是 tag → markdown 的内存缓存，跨次查询复用，
+  // 只补区间里缺的那几个版本。**正文另有一份持久副本**（whale:dshNotes，见 dsh-notes.js 的 loadCached）：
+  // 上游固定吐 380KB 全量、单次往返 ~2.9s，正文写完又不可变，落库后重载插件也能秒开。
+  // 这里落的只是「上游正文」那层；聚合结果（data）仍然只活在内存 —— 它随所选区间变，存下来会自相矛盾。
+  notes: { at: 0, data: null, notes: new Map() },
+  notesBusy: false,
+  // 取数在飞期间又被请求过一次（被 notesBusy 挡掉）→ settle 后按**当前**版本补跑一趟。
+  // 不补就会出现「选老版本后永远停在正在获取说明…」（详见 loadNotes）
+  notesDirty: false,
   // 本次 listVersions 的结论：'hit' 真打了一次 npm 并拿到版本 | 'empty' 查到了但没版本。
   // 界面靠它判定「本次查询已收尾」，不能用「提示文案被清掉」当信号 —— dshFlash 与启停动作共用
   versionsCode: '',
@@ -400,16 +414,29 @@ function canWriteDir(dir) {
     if (tmp) { try { fs.rmSync(tmp, { recursive: true, force: true }) } catch (err) {} }
   }
 }
-// 提权结束用的 powershell 绝对路径（找不到就退回 PATH 里的 powershell）
+// 提权用的 powershell 绝对路径（Windows）。找不到就退回 PATH 里的 powershell。
+// ⚠️ 仅 Windows 有意义：非 Windows 没有 powershell，调用方一律先判 WIN 再走这里。
 function psExe() {
   const root = process.env.SystemRoot || process.env.windir || 'C:\\Windows'
   const p = path.join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
   try { if (fs.existsSync(p)) return p } catch (err) {}
   return 'powershell'
 }
-// 提权失败的原因：UAC 被取消（用户点了「否」）还是 npm 在管理员权限下仍然失败
+// 提权可执行文件（跨平台）：Windows 走 powershell（配合 -Verb RunAs 的 UAC 弹窗），
+// macOS/Linux 走 sudo / pkexec。返回 { exe, kind }，kind ∈ 'uac' | 'posix'。
+// 选 pkexec 而非 sudo 的判据见 elevateInstall 的注释：需要图形化提权弹窗时 sudo 会占终端。
+function elevateTool() {
+  if (WIN) return { exe: psExe(), kind: 'uac' }
+  for (const cand of ['/usr/bin/pkexec', '/usr/local/bin/pkexec']) {
+    try { if (fs.existsSync(cand)) return { exe: cand, kind: 'posix' } } catch (err) {}
+  }
+  return { exe: 'sudo', kind: 'posix' }
+}
+// 提权失败的原因：用户取消了弹窗（Windows 的 UAC「否」/ POSIX 的 sudo 输错密码）还是提权后 npm 仍失败
 function elevateWhy(info) {
-  if (info && info.canceled) return '：UAC 提权被取消（弹窗里点了「否」），可重试并在弹窗点「是」'
+  if (info && info.canceled) return WIN
+    ? '：UAC 提权被取消（弹窗里点了「否」），可重试并在弹窗点「是」'
+    : '：提权被取消（sudo/pkexec 未授权），可重试并输入密码'
   return '：管理员权限下 npm 安装失败（原因见上方日志）'
 }
 // 以管理员权限跑一次 npm（UAC 弹窗）；用于全局安装目录只对管理员可写的情况
@@ -427,6 +454,21 @@ function elevateWhy(info) {
 //    退出码经 VBS 的 WScript.Quit 透传给 powershell，再经 -Wait -PassThru 回到这里。
 //    ⚠️ 别退回 `cmd /c start /min`：/min 只是最小化，仍会在任务栏闪出一个窗口。
 function elevateInstall(npmExe, args, onDone) {
+  // 非 Windows：走 sudo / pkexec 直接跑 npm。没有 UAC 的黑窗问题（提权器自己接管交互），
+  // 也不需要 VBS 那层「套娃」规避 —— 直接 spawn 提权器 + npm 参数即可。
+  if (!WIN) {
+    const tool = elevateTool()
+    pushLog('改用 ' + tool.exe + ' 提权安装（可能需要在系统弹窗 / 终端里授权）')
+    execFile(tool.exe, [npmExe].concat(args), { timeout: 30 * 60 * 1000, encoding: 'buffer' }, (err, so, se) => {
+      const t = (decodeOut(so) + decodeOut(se)).trim()
+      if (t) pushLog(t)
+      const canceled = !!t && /cancel|incorrect password|no password|not authorized|dismissed|已取消|授权失败/i.test(t)
+      const code = err && err.code !== undefined ? err.code : 0
+      if (err) pushLog('提权安装未成功（退出码 ' + code + (canceled ? '，提权被取消' : '，管理员权限下 npm 仍失败') + '）')
+      if (onDone) onDone(err, { code: code, canceled: canceled })
+    })
+    return
+  }
   const q = (s) => "'" + String(s).replace(/'/g, "''") + "'"
   const cq = (s) => '"' + String(s) + '"'
   const stamp = 'whale-elev-' + process.pid + '-' + Date.now()
@@ -563,7 +605,7 @@ function probePort(cb, force) {
   })
 }
 // 结束外部 dsh：命令返回码 + 复查，如实反馈；
-// 普通权限被拒（拒绝访问）时自动改用管理员权限再杀一次（会弹一次 UAC）
+// 普通权限被拒（拒绝访问）时自动改用管理员权限再杀一次：Windows 弹 UAC，macOS/Linux 走 sudo/pkexec
 //
 // probePort 复查只认**配置端口**：改过端口后，要结束的外部进程停在旧端口上（留档 extRun*），
 // 拿配置端口探当然探不到，会被误判成「已结束」。所以复查分两种口径：
@@ -603,14 +645,27 @@ function stopExternal(pid, done, runPort) {
     setTimeout(() => {
       recheck((still) => {
         if (!still) { report(0); return }
-        if (WIN && !elevated) {
+        if (!elevated) {
           elevated = true
-          pushLog('普通权限被拒绝（拒绝访问），改用管理员权限结束：请在 UAC 弹窗中点「是」')
-          const ps = 'Start-Process -FilePath taskkill -ArgumentList \'/pid\',\'' + still + '\',\'/T\',\'/F\' -Verb RunAs'
-          execFile(psExe(), ['-NoProfile', '-Command', ps], opts, (err, so, se) => {
+          // 普通权限杀不掉 → 提权再杀一次。Windows 走 UAC（User 点「是」），
+          // macOS/Linux 走 sudo/pkexec（可能要输密码）。
+          if (WIN) {
+            pushLog('普通权限被拒绝（拒绝访问），改用管理员权限结束：请在 UAC 弹窗中点「是」')
+            const ps = 'Start-Process -FilePath taskkill -ArgumentList \'/pid\',\'' + still + '\',\'/T\',\'/F\' -Verb RunAs'
+            execFile(psExe(), ['-NoProfile', '-Command', ps], opts, (err, so, se) => {
+              const out = (decodeOut(so) + decodeOut(se)).trim()
+              if (out) pushLog(out)
+              if (err) pushLog('提权结束命令返回错误（可能取消了 UAC）：' + ((err && err.code) !== undefined ? err.code : '未知'))
+              verify(1500, 10)
+            })
+            return
+          }
+          const tool = elevateTool()
+          pushLog('普通权限被拒绝（拒绝访问），改用 ' + tool.exe + ' 提权结束：请授权后重试')
+          execFile(tool.exe, ['kill', '-TERM', String(still)], opts, (err, so, se) => {
             const out = (decodeOut(so) + decodeOut(se)).trim()
             if (out) pushLog(out)
-            if (err) pushLog('提权结束命令返回错误（可能取消了 UAC）：' + ((err && err.code) !== undefined ? err.code : '未知'))
+            if (err) pushLog('提权结束命令返回错误（可能取消了提权）：' + ((err && err.code) !== undefined ? err.code : '未知'))
             verify(1500, 10)
           })
           return
@@ -912,6 +967,28 @@ function isNewer(a, b) {
   return false
 }
 
+// 「a 是否比 b 更新」——**优先按发布时间**，时间拿不到才退回 semver（isNewer）。
+//
+// 为什么不能只靠 semver：dsh 官方不按 semver 递增发布。实测（npm time 字段，2026-09-29 查）：
+//   0.1.6-alpha.2  发布于 09-17
+//   0.1.5-rc.3     发布于 09-22  ← 时间上**晚于**上面那版，版本号却更低
+// 这是给旧分支补发补丁的产物。semver 会判 0.1.6-alpha.2 更新（0.1.6 > 0.1.5），与事实相反 ——
+// 后果：用户实装 0.1.6-alpha.2 时，插件会把后发的 0.1.5-rc.3 当成「更旧」而拒绝更新 / 算错区间。
+// 官方还大量跳号（0.0.1-rc.5 前无 rc.3/rc.4、整个 0.1.4 不存在），semver 的单调假设根本不成立。
+//
+// 回退的意义：老版本缓存（times 为空）或上游没给 time 时不能判崩，退回 semver 至少保持原行为。
+function newerByTime(a, b) {
+  const x = String(a || '').trim(), y = String(b || '').trim()
+  if (!x) return false
+  if (!y) return true
+  const t = state.versions && state.versions.times
+  const tx = t && t[x], ty = t && t[y]
+  if (tx && ty) return tx > ty        // 两个都有发布时间 → 按时间
+  if (tx && !ty) return true          // 有时间的那个更新（另一方查不到，视作更旧）
+  if (!tx && ty) return false
+  return isNewer(x, y)                // 都没有 → 退回 semver
+}
+
 // ──────────────────────────────────────────────
 // 对外操作
 // ──────────────────────────────────────────────
@@ -990,21 +1067,34 @@ function installVersion() {
   if (state.version === NEWEST_VERSION) return maxVersion(state.versions && state.versions.list) || 'latest'
   return state.version || 'latest'
 }
-// 已查到的版本列表里最大的那个（含 alpha / rc 等预发布）。
-// 不能拿 list[list.length-1] 顶替：list 是 npm 的发布顺序、不是版本序，
-// 后期补发的旧分支补丁会排在更后面，取末位会装到比 latest 还旧的版本。
-// 比较复用 isNewer；列表长 60 以内，O(n²) 足够。
+// 已查到的版本列表里最新的那个（含 alpha / rc 等预发布）。
+// 「最新」按**发布时间**判定，与 newerByTime 同口径 —— 不能用 semver：dsh 给旧分支补发补丁时，
+// 版本号更低的反而更晚发布（0.1.5-rc.3 晚于 0.1.6-alpha.2），semver 最大值会选错。
+// 有 times 时直接取发布时间最晚的那个；没有（旧缓存 / 上游无 time）退回 semver 最大值。
 function maxVersion(list) {
   const arr = Array.isArray(list) ? list : []
+  const t = state.versions && state.versions.times
   let best = ''
-  for (const v of arr) { if (!best || isNewer(v, best)) best = v }
+  for (const v of arr) { if (!best || newerByTime(v, best)) best = v }
+  // times 存在但 arr 里一个都命中（异常数据）：退回纯 semver，至少给出一个结果
+  if (best && t && !t[best]) {
+    let s = ''
+    for (const v of arr) { if (!s || isNewer(v, s)) s = v }
+    return s || best
+  }
   return best
 }
-// 目标版本（未固定版本时）：'newest' 看列表最大值，否则看 latest 标签。
-// 供「更新」的幂等判断与「有新版本」提示共用，避免两处各写一套哨兵分支。
+// 目标版本：'newest' 看列表最大值，固定版本就用它自己，否则看 latest 标签。
+// 与 installVersion 同一个口径 —— 两处必须一致：installVersion 决定「更新时装哪一版」，
+// targetVersion 决定「版本说明算哪一段」，若前者认固定版本而后者不认，用户选了 0.1.7-rc.1，
+// 说明却按 latest（0.1.7-rc.2）算，界面拿 cfg.dshVersion 算出的键与宿主对不上 → 永远「正在获取说明…」。
+// ⚠️ 这里曾经写成 `return (state.versions && state.versions.latest) || ''`，把**固定版本整个丢掉**：
+//    实装 0.1.7-alpha.2、下拉选 0.0.1-rc.1 时，界面按 0.0.1-rc.1 算键、宿主按 latest 算，
+//    两边必然不同 —— 只有恰好选到 latest 那一版（0.1.7-rc.2）才碰巧对上，
+//    所以现象是「只有 rc.2 能取到说明，其他版本全卡在正在获取说明…」（2026-09-28 用户实测）。
 function targetVersion() {
   if (state.version === NEWEST_VERSION) return maxVersion(state.versions && state.versions.list)
-  return (state.versions && state.versions.latest) || ''
+  return state.version || ((state.versions && state.versions.latest) || '')
 }
 // 包名（@版本）
 function pkgSpec(v) { return DSH_PKG + '@' + (v || installVersion()) }
@@ -1369,9 +1459,10 @@ function installDsh(done, busyKind) {
   }
   // 全局安装目录常只对管理员可写：先探测，不可写就直接提权，免得白跑一遍再抛 EPERM
   const globalBase = target === 'global' ? path.dirname(path.dirname(g.pkgDir)) : ''
-  if (target === 'global' && WIN && !canWriteDir(globalBase)) {
+  if (target === 'global' && !canWriteDir(globalBase)) {
     triedElevate = true
-    pushLog('全局安装目录 ' + globalBase + ' 普通用户不可写（需要管理员权限），改用管理员权限安装：请在 UAC 弹窗点「是」')
+    pushLog('全局安装目录 ' + globalBase + ' 普通用户不可写（需要管理员权限），改用管理员权限安装：'
+      + (WIN ? '请在 UAC 弹窗点「是」' : '请在系统弹窗 / 终端里授权'))
     elevateInstall(node.npm, args, (elevErr, info) => {
       const v2 = afterVersion()
       // 提权分支同样不能只看「没报错 + 读得到版本」：必须回读校验（可能是别的包）
@@ -1394,12 +1485,13 @@ function installDsh(done, busyKind) {
     const after = afterVersion()
     // ⚠️ 退出码 0 不再是「成功」的充分条件：还要回读磁盘确认装的是对的包、且读得到版本
     if (code === 0 && after) { succeedIfVerified(code, after); return }
-    // npm 的 EPERM/EACCES：Windows 上多半是「目录只对管理员可写」或「文件正被占用」
+    // npm 的 EPERM/EACCES：多半是「目录只对管理员可写」或「文件正被占用」
     const denied = /EPERM|EACCES|operation not permitted|拒绝访问/i.test(state.log.slice(-30).join('\n'))
-    if (target === 'global' && denied && !triedElevate && WIN) {
+    if (target === 'global' && denied && !triedElevate) {
       triedElevate = true
       state.busy = busyKind || 'install'
-      pushLog('全局安装目录 ' + globalBase + ' 普通用户不可写，改用管理员权限重试：请在 UAC 弹窗点「是」')
+      pushLog('全局安装目录 ' + globalBase + ' 普通用户不可写，改用管理员权限重试：'
+        + (WIN ? '请在 UAC 弹窗点「是」' : '请在系统弹窗 / 终端里授权'))
       elevateInstall(node.npm, args, (elevErr, info) => {
         const v2 = afterVersion()
         if (!elevErr && v2) succeedIfVerified(0, v2)
@@ -1411,7 +1503,8 @@ function installDsh(done, busyKind) {
     const restored = restoreManifests(manifestSnaps)
     if (restored.length) pushLog('已回滚清单到安装前：' + restored.join('、'))
     if (denied && target === 'global') {
-      fail(code, '：全局安装目录需要管理员权限。可在 UAC 弹窗点「是」重试、以管理员身份运行 uTools，'
+      fail(code, '：全局安装目录需要管理员权限。'
+        + (WIN ? '可在 UAC 弹窗点「是」重试、以管理员身份运行 uTools，' : '可用 sudo 运行 uTools / 授权提权弹窗重试，')
         + '或先卸载全局 dsh（npm uninstall -g ' + DSH_PKG + '）并删掉它，让插件装到插件数据目录')
       return
     }
@@ -1715,8 +1808,12 @@ function runPnpm(args) {
     const timer = setTimeout(() => {
       pushLog('pnpm 超过 ' + Math.round(PNPM_TIMEOUT_MS / 60000) + ' 分钟未退出，已强制结束（可能是网络不通或 profile 锁被占用）')
       try { child.kill() } catch (err) {}
-      // Windows 下 cmd 包了一层，child.kill() 未必连子进程一起收 —— 再按 pid 兜一次
-      if (WIN && child.pid) { try { execFile('taskkill', ['/pid', String(child.pid), '/T', '/F'], () => {}) } catch (err) {} }
+      // child.kill() 未必连子进程一起收：Windows 下 cmd 包了一层，POSIX 下 pnpm 会派生 node 子进程
+      // —— 再按 pid 兜一次。Windows 用 taskkill /T，POSIX 用负 pid 杀整个进程组
+      if (child.pid) {
+        if (WIN) { try { execFile('taskkill', ['/pid', String(child.pid), '/T', '/F'], () => {}) } catch (err) {} }
+        else { try { execFile('kill', ['-TERM', '-' + child.pid], () => {}) } catch (err) {} }
+      }
       finish({ code: -1, ok: false, out: out, err: 'pnpm 超时未退出' })
     }, PNPM_TIMEOUT_MS)
     child.on('error', (err) => {
@@ -1796,7 +1893,8 @@ function loadVersions() {
   try {
     const c = utools.dbStorage.getItem(K.dshVersions)
     if (c && typeof c === 'object' && Array.isArray(c.list) && c.list.length) {
-      state.versions = { at: Number(c.at) || 0, latest: String(c.latest || ''), list: c.list.map(String).slice(-60) }
+      const times = c.times && typeof c.times === 'object' ? c.times : {}
+      state.versions = { at: Number(c.at) || 0, latest: String(c.latest || ''), list: c.list.map(String).slice(-60), times: times }
     }
   } catch (err) {}
 }
@@ -1825,8 +1923,10 @@ function listVersions() {
   }
   state.error = ''
   state.busy = 'versions'
-  // 一次拿到全部版本 + latest 标签（最新发布的不一定是 latest 标签指向的稳定版）
-  const args = ['view', DSH_PKG, 'versions', 'dist-tags', '--json'].concat(regArgs())
+  // 一次拿到全部版本 + latest 标签（最新发布的不一定是 latest 标签指向的稳定版）+ 各版发布时间。
+  // 必须带 time：dsh 不按 semver 递增发布（旧分支补发的补丁版本号更低却更晚），
+  // 判定先后的唯一可靠依据是发布时间，见 newerByTime。
+  const args = ['view', DSH_PKG, 'versions', 'dist-tags', 'time', '--json'].concat(regArgs())
   setCmd(exe + ' ' + args.join(' '))
   let out = ''
   let child = null
@@ -1852,6 +1952,7 @@ function listVersions() {
     }
     let list = []
     let tag = ''
+    let times = {}
     try {
       const j = JSON.parse(String(out).trim() || '{}')
       if (Array.isArray(j)) list = j.map(String)
@@ -1859,6 +1960,14 @@ function listVersions() {
         if (Array.isArray(j.versions)) list = j.versions.map(String)
         const tags = j['dist-tags'] && typeof j['dist-tags'] === 'object' ? j['dist-tags'] : {}
         tag = tags.latest ? String(tags.latest) : ''
+        // time 形如 { created:.., modified:.., "1.0.0":"2026-..", .. }，只留「版本 → 时间戳」。
+        // created / modified 这两个键不是版本号，跳过。解析失败的时间戳丢该项（newerByTime 会退回 semver）。
+        const t = j.time && typeof j.time === 'object' ? j.time : {}
+        for (const k of Object.keys(t)) {
+          if (k === 'created' || k === 'modified') continue
+          const ms = Date.parse(t[k])
+          if (Number.isFinite(ms)) times[k] = ms
+        }
       }
     } catch (err) { list = [] }
     if (!list.length && !tag) {
@@ -1875,13 +1984,88 @@ function listVersions() {
       at: Date.now(),
       latest: tag || list[list.length - 1] || '',
       list: list.slice(-60),
+      times: times,
     }
     state.versionsCode = 'hit'
     saveVersions()
     saveVersionsQueried()
     pushLog('可用版本 ' + list.length + ' 个，latest 标签：' + (state.versions.latest || '未知'))
     broadcast() // 版本列表 / 「有新版本」提示落库后推一次
+    // 这里**不**顺手捞说明：说明是用户点开「版本说明」才需要的，查询版本本身不该带一趟网络。
+    // 先前在这里调 loadNotes(true)，等于用户点一次「查询可用版本」就白打一趟 380KB 的 ungh.cc
+    // （实测 2.9s），而多数时候他根本不展开那一块。改由前端 dshToggleNotes 在展开时按需发起。
   })
+  return snapshot()
+}
+
+// 取版本说明并做聚合（见 dsh-notes.js）：所选比实装新时是「实装 → 目标」区间，否则只看所选那一版。
+//
+// 三个刻意的取舍：
+//  · **与版本查询挂钩**：说明是针对「某个区间」算的，区间随 versions 变；versions.at 是
+//    「上次查询版本的时刻」，说明缓存按它失效 —— 否则会出现「版本号是最新的、说明还是旧的」。
+//  · **实装即最新时直接返回空、一个请求都不发**：没有将发生的变更就没有说明可看。
+//    这在网络不稳的环境下是最有效的一省（大多数时间用户就处在这个状态）。
+//  · 失败**不写 state.error**：说明只是附注，不能把版本行/更新按钮一起标红。
+function loadNotes(force) {
+  // 必须和其余对外操作一样先同步配置：target 取自 state.version（= cfg.dshVersion），
+  // 而这个动作**不由版本下拉触发** —— 用户改完 cfg.dshVersion 就直接点展开，中间没有任何操作
+  // 会顺带 syncConfig()，于是这里读到的是**上一次操作时的旧版本**。
+  // 后果：界面拿 cfg.dshVersion 算 resolvedTarget、宿主拿旧 state.version 算另一个，两边对不上
+  // → dshNotesFresh 恒 false → 卡在「正在获取说明…」（用户实测：每换一版都要重卡一次）。
+  // 漏这一行的原因是 loadNotes 夹在 install / snapshot 之间，看着像内部函数 —— 它是 IPC 入口
+  // （settings.js 的 dshLoadNotes），与 listVersions 同级，同步配置不能省。
+  syncConfig()
+  const act = globalDsh() || (cliEntry() ? { source: 'plugin', version: installedVersion() } : null)
+  const installed = act ? act.version : ''
+  const list = state.versions.list || []
+  const target = targetVersion() || state.versions.latest || ''
+  // 上界与实装取谁大（同 dsh-notes.js 的 hi）：所选版本比实装新时，说明覆盖整个区间，
+  // 上界会随实装版本一起走 —— 那种情形下实装变了确实得重算，键里必须带上它；
+  // 所选版本不高于实装时（单版本模式）上界恒定等于所选版本，实装变不变都一样。
+  const resolvedTarget = newerByTime(target, installed) ? installed + '->' + target : target
+  const n = state.notes
+  // 说明是「所选版本那一版/那一段」的，实装版本变了没有不说**不能**当借口：
+  // 实装 0.1.7-alpha.2、所选也是 0.1.7-alpha.2 时区间恒为空，但单版本模式要给这一版自己的说明。
+  // 所以这里只认「有没有所选版本」，不再要求 installed 存在。
+  if (!target) { n.data = null; return snapshot() }
+  // 版本列表换过（重新查询过）→ 说明跟着重算，避免两者不同源。
+  // 注意比较用的是 resolvedTarget 而不是 target：单版本模式下 target 就是所选版本、
+  // 而看的是那一版自己，实装版本换了不影响这份说明，不该因为实装版本变了就重打一趟网络。
+  // ⚠️ 字段名必须是 resolvedTarget —— 落库那两处写的就是这个名字（见下方 n.data = ...），
+  //    这里写成 n.data.resolved 会恒取到 undefined、短路永不成立，等于每次调用都重打一趟网络
+  if (!force && n.data && n.data.resolvedTarget === resolvedTarget && n.at >= state.versions.at) {
+    return snapshot()
+  }
+  // 已经有一趟在飞：**记下「settle 后还要再核对一次」**，不能就这么丢掉这次请求。
+  // 光 return 会造成一个静默死局（用户实测：选老版本后一直卡在「正在获取说明…」）：
+  //   在飞的那趟是按**上一组**版本发的 → 落地后 n.data.target 仍是旧值 → 界面判定「过期」；
+  //   而此刻目标版本已经稳定、watch 不会再触发 → 没有任何一方会再发起取数，永远停在「正在获取」。
+  // 置位后由 settle 分支补一次 —— 届时 notesBusy 已清、新目标也读得到，正好补上被丢掉的那趟。
+  if (state.notesBusy) { state.notesDirty = true; return snapshot() }
+  state.notesBusy = true
+  state.notesDirty = false
+  broadcast()
+  getNotes({ installed: installed, target: target, list: list, times: (state.versions && state.versions.times) || null, notes: n.notes })
+    .then((r) => {
+      state.notesBusy = false
+      n.at = Date.now()
+      // resolvedTarget 一并带上：它是「这份说明算的是哪一段」的稳定标识，
+      // 界面拿它判新鲜度，从而不必再自己复刻一遍 isNewer 口径（宿主的口径只此一处）
+      n.data = Object.assign({ installed: installed, target: target, resolvedTarget: resolvedTarget }, r)
+      broadcast()
+    })
+    .catch((err) => {
+      state.notesBusy = false
+      logErr('[whale][dsh] 取版本说明失败', (err && err.message) || err)
+      n.at = Date.now()
+      n.data = { ok: false, installed: installed, target: target, resolvedTarget: resolvedTarget, reason: (err && err.message) || String(err) }
+      broadcast()
+    })
+    .then(() => {
+      // 期间有请求被 busy 挡掉过 → 用**当前**的实装 / 目标版本补跑。传 false 是有意的：
+      // 补跑只该补「刚才没发成的那趟」，若版本其实没变就不必再打一趟网络（新鲜度判定会拦住）
+      if (state.notesDirty) { state.notesDirty = false; loadNotes(false) }
+    })
   return snapshot()
 }
 
@@ -2018,9 +2202,12 @@ function snapshot() {
     registry: state.registry,
     version: state.version,
     resolved: act ? act.version : '',
-    // 已查询到目标版本且比当前用的新（界面提示「有新版本」）。
-    // 目标版本随所选版本变：固定版本时按原先只比 latest 的口径不变，'newest' 时改比列表最大值。
-    hasUpdate: !!(act && targetVersion() && isNewer(targetVersion(), act.version)),
+    // 已查询到 npm latest 且比当前用的新（界面提示「有新版本」）。
+    // **只比 npm latest，不比 targetVersion()**：targetVersion() 会优先返回用户手选的固定版本，
+    // 拿它比会得到「实装 0.1.7-alpha.2、下拉也选 0.1.7-alpha.2 → 没有新版」这种结论 ——
+    // 而 npm latest 明明是 0.1.7-rc.2。用户选哪个版本只是「更新时装成哪一版」，
+    // 不该反过来改写「npm 上有没有新版」这个事实（同 dsh-notes.js hi 的踩坑）。
+    hasUpdate: !!(act && state.versions && state.versions.latest && newerByTime(state.versions.latest, act.version)),
     // 用哪一份：'global'（全局安装，优先）/ 'plugin'（插件目录）/ ''（都没有）
     source: act ? act.source : '',
     globalVersion: gv ? gv.version : '',
@@ -2030,6 +2217,10 @@ function snapshot() {
     reinstall: state.reinstall,
     prefix: dshPrefix(),
     versions: state.versions,
+    // 版本说明（区间聚合 / 单版本结果，见 dsh-notes.js）。data 为 null = 还没取或没有可看的说明；
+    // 界面据此决定要不要显示说明行 —— empty / ok:false 时整行不出现，不占位也不报错
+    notes: state.notes.data,
+    notesBusy: state.notesBusy,
     // 版本查询结论码（见 state.versionsCode）。每次 listVersions 覆盖一次，
     // 界面据此收掉「正在查询」并决定是否再挂「重试」入口
     versionsCode: state.versionsCode,
@@ -2125,6 +2316,7 @@ module.exports = {
   restart,
   update,
   listVersions,
+  loadNotes,
   clearLog,
   removePluginDsh,
   cleanNpxCaches,
@@ -2160,8 +2352,11 @@ module.exports = {
   // 定位 pnpm 可执行文件（profile 的依赖树由 pnpm 维护，装/卸插件必须走它）。
   // 导出：单测要验证「找不到 pnpm 时返回空串、不偷偷退回 npm」这条边界
   resolvePnpm,
-  // 提权用 powershell 绝对路径（hosts.js 的 UAC 写 hosts 复用）
+  // 提权用 powershell 绝对路径（仅 Windows；hosts.js 的 UAC 写 hosts 复用）
   psExe,
+  // 提权可执行文件（跨平台）：Windows=powershell/UAC，macOS/Linux=pkexec 或 sudo。
+  // 与 psExe 一样被 hosts.js 复用（那边非 Windows 已由 !WIN 门禁挡在前面，暂不接）
+  elevateTool,
   // 校验某个目录里是否有 node 可执行文件（设置页选择目录时用）
   nodeInDir(dir) { return !!hasNode(dir) },
   // 一次性 CLI 读取（lib/dsh-dump.js）复用的底层能力：这些都是通用工具，

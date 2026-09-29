@@ -645,6 +645,12 @@ async function readBody(res) {
   return buf
 }
 
+// gzip 魔数（1f 8b）。用来区分「镜像真的坏了」与「宿主 undici 污染了全局 fetch」——
+// 见 loadFromMirror 里的守卫注释。
+function isGzip(buf) {
+  return buf.length >= 2 && buf[0] === 0x1f && buf[1] === 0x8b
+}
+
 // 带校验器的一次 GET。返回 { notModified: true } 或 { body, etag, lastModified }
 //
 // 校验器二者只发一个：同时发 etag 与 last-modified 时，某些代理会挑它不喜欢的那条，
@@ -715,6 +721,18 @@ async function loadFromMirror(registry, fetchImpl, signal) {
   if (!tarRes.ok) throw new Error('镜像 tarball HTTP ' + tarRes.status)
   const gz = Buffer.from(await tarRes.arrayBuffer())
   if (gz.length > MAX_BYTES) throw new Error('镜像 tarball 超过体积上限')
+  // ⚠️ 宿主 undici 污染守卫（上游 dsh-market #742，2026-09 修）：宿主进程若已加载 undici 8
+  //    （`web_fetch` 这类工具会触发），Node 22 的**全局 fetch** 会把 gzip 体的 content-encoding
+  //    丢掉、且不再自动解压 —— 于是这里拿到的仍是 gzip 原始字节，gunzipSync 直接抛
+  //    「incorrect header check」。现象与「镜像坏了」一模一样，光看报错分不出是谁的锅。
+  //    只在这一步判定并标注，不改链路：Node 24 + 无 undici 8 的环境实测正常（见下）。
+  //    真踩上时的解法是绕开全局 fetch 自带解压（与上游同路），改起来动静大，故只留痕。
+  if (!isGzip(gz)) {
+    const hint = '响应体不是 gzip（前两字节 0x' + gz.slice(0, 2).toString('hex') + '）'
+      + '，疑似宿主 undici 污染全局 fetch（Node ' + process.version + '，上游 #742）'
+    logErr('[whale][dsh-market] 镜像 tarball 解压前置校验失败', hint)
+    throw new Error('镜像 tarball ' + hint)
+  }
   const tar = zlib.gunzipSync(gz)
   const text = untarOne(tar, 'package/plugins.json')
   if (!text) throw new Error('镜像 tarball 里没有 plugins.json')
