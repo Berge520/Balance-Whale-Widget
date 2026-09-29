@@ -17,12 +17,12 @@
  * 也防「下到一半被截断」的单张。整包级校验已随整包链路一并去掉。
  *
  * ── 下载源（候选链）──
- * 用户自填前缀 → 内置默认前缀（ghfast.top）→ raw 直连，逐个试、任一源取到合法字节即停。
- * jsDelivr 源待实测通过后再并入（见 sourceChain 注释）。
+ * jsDelivr CDN → 用户自填前缀 → 内置默认前缀（ghfast.top）→ raw 直连，逐个试、任一源取到合法字节即停。
+ * 顺序按实测速度排（jsDelivr 比 raw 直连快约 8 倍且能拿下最大单张，见 sourceChain 注释）。
  */
 const crypto = require('crypto')
 const {
-  SHARED_RAW_BASE, SHARED_PACK_DEFAULT_PREFIX,
+  SHARED_RAW_BASE, SHARED_CDN_BASE, SHARED_PACK_DEFAULT_PREFIX,
   SHARED_SKIN_PACK_SKINS, SHARED_SOUND_LIB,
   SHARED_PACK_TIMEOUT_MS, SHARED_PACK_MAX_BYTES,
 } = require('./constants')
@@ -87,12 +87,16 @@ function fileUrl(kind, id, ext) {
   return SHARED_RAW_BASE + kind + '/' + id + '.' + ext
 }
 
-// 候选下载源链：用户自填前缀（若有）→ 内置默认前缀 → 真源直连。
+// 候选下载源链：jsDelivr CDN → 用户自填前缀（若有）→ 内置默认前缀（ghfast）→ 真源直连。
+// 顺序按 2026-09-29 实测速度排：jsDelivr 633KB/s（最大单张 4.2s）远快于 raw 直连（同文件 60s 超时）
+// 与 ghfast（约 81KB/s），故放第一位；raw 直连保留作最后兜底（CDN 未预热/单节点故障时仍有路可走）。
 // 与 skin-packs.js#sourceChain 同规则，只是目标是单张文件而非整包。
-// jsDelivr 源（cdn.jsdelivr.net/gh/<owner>/<repo>@main/public/shared/...）待实测通过后再并入。
 function sourceChain(prefix, origin) {
   const out = []
   const push = (u) => { if (u && !out.includes(u)) out.push(u) }
+  // jsDelivr 的域名与真源不同，用 origin 的路径部分（public/shared/...）拼到 CDN 基址上
+  const rel = origin.slice(SHARED_RAW_BASE.length)
+  push(SHARED_CDN_BASE + rel)
   const p = typeof prefix === 'string' ? prefix.trim() : ''
   if (p) push(p + origin)
   push(SHARED_PACK_DEFAULT_PREFIX + origin)
@@ -101,6 +105,7 @@ function sourceChain(prefix, origin) {
 }
 
 function labelOf(url, origin) {
+  if (url.indexOf(SHARED_CDN_BASE) === 0) return 'jsDelivr CDN'
   if (url === origin) return '直连 raw.githubusercontent.com'
   if (url.indexOf(origin) >= 0 && url.indexOf(SHARED_PACK_DEFAULT_PREFIX) === 0) return '默认加速 ghfast.top'
   return '自定义加速源'
@@ -262,5 +267,6 @@ function readSharedSoundData(name) {
 
 module.exports = {
   listSharedSkins, listSharedSounds, downloadSharedSkin, downloadSharedSound, readSharedSoundData,
-  _fileUrl: fileUrl, _sourceChain: sourceChain, _readBodyWithProgress: readBodyWithProgress,
+  _fileUrl: fileUrl, _sourceChain: sourceChain, _labelOf: labelOf,
+  _readBodyWithProgress: readBodyWithProgress,
 }

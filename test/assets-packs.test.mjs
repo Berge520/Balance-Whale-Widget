@@ -46,8 +46,11 @@ const {
 } = assetsPacks
 const {
   SHARED_SKIN_PACK_SKINS, SHARED_SOUND_LIB,
-  SHARED_RAW_BASE, SHARED_PACK_DEFAULT_PREFIX,
+  SHARED_RAW_BASE, SHARED_CDN_BASE, SHARED_PACK_DEFAULT_PREFIX,
 } = constants
+
+// 单张 URL 对应的 CDN 地址：把真源基址整段换成 CDN 基址
+const cdnOf = (origin) => SHARED_CDN_BASE + origin.slice(SHARED_RAW_BASE.length)
 
 // ── URL 拼接（fileUrl）────────────────────────────────────────────────────
 // 单张真源统一是 <基址><kind>/<id>.<ext>，id 是 ASCII 短名（原图中文名含全角括号，
@@ -79,21 +82,25 @@ test('fileUrl：清单一律以 .png 落角色、扩展名取自清单落音效'
 })
 
 // ── 候选链（sourceChain）────────────────────────────────────────────────
-// 顺序约定：用户自填（可选） → 内置默认前缀（ghfast.top） → 真源直连（raw.githubusercontent.com）。
-// 单张链路只走 raw（不再有 Release 整包源），所以链条比整包版本短、且没有 raw 的额外包装项。
-// jsDelivr 源待实测通过后再并入。
+// 顺序约定：jsDelivr CDN → 用户自填（可选） → 内置默认前缀（ghfast.top） → 真源直连。
+// jsDelivr 放首位是实测结论（633KB/s，比 raw 直连快约 8 倍）；真源直连永远垫底，
+// 保证 CDN 未预热或代理全挂时仍有路可走。单张链路不再有 Release 整包源。
 
-test('sourceChain：无自填时是「默认前缀 → 真源直连」两条，末位是直连', () => {
+const { _labelOf: labelOf } = assetsPacks
+
+test('sourceChain：无自填时是「jsDelivr → ghfast → 真源直连」三条，末位是直连', () => {
   const origin = fileUrl('skins', 'shark', 'png')
   const chain = sourceChain('', origin)
-  assert.deepEqual(chain, [SHARED_PACK_DEFAULT_PREFIX + origin, origin])
+  assert.deepEqual(chain, [cdnOf(origin), SHARED_PACK_DEFAULT_PREFIX + origin, origin])
+  assert.equal(chain[0], cdnOf(origin), '首位应是 jsDelivr CDN（实测最快）')
   assert.equal(chain[chain.length - 1], origin, '末位应是真源直连，保证加速前缀全挂时还能拿到')
 })
 
-test('sourceChain：自填前缀排在最前', () => {
+test('sourceChain：自填前缀排在 jsDelivr 之后、内置前缀之前', () => {
   const origin = fileUrl('sounds', 'click', 'mp3')
   const chain = sourceChain('https://my-proxy.example/', origin)
   assert.deepEqual(chain, [
+    cdnOf(origin),
     'https://my-proxy.example/' + origin,
     SHARED_PACK_DEFAULT_PREFIX + origin,
     origin,
@@ -103,15 +110,23 @@ test('sourceChain：自填前缀排在最前', () => {
 test('sourceChain：自填与内置前缀相同时去重（不重复打同一个源）', () => {
   const origin = fileUrl('skins', 'shark', 'png')
   const chain = sourceChain(SHARED_PACK_DEFAULT_PREFIX, origin)
-  assert.deepEqual(chain, [SHARED_PACK_DEFAULT_PREFIX + origin, origin])
+  assert.deepEqual(chain, [cdnOf(origin), SHARED_PACK_DEFAULT_PREFIX + origin, origin])
 })
 
 test('sourceChain：空白 / 非字符串的自填被忽略，仍回落到内置链', () => {
   const origin = fileUrl('skins', 'shark', 'png')
-  const expect = [SHARED_PACK_DEFAULT_PREFIX + origin, origin]
+  const expect = [cdnOf(origin), SHARED_PACK_DEFAULT_PREFIX + origin, origin]
   for (const bad of ['   ', undefined, null, 42, {}]) {
     assert.deepEqual(sourceChain(bad, origin), expect)
   }
+})
+
+test('labelOf：jsDelivr 源标成 CDN，真源标成直连，ghfast 标成默认加速', () => {
+  const origin = fileUrl('skins', 'shark', 'png')
+  assert.equal(labelOf(cdnOf(origin), origin), 'jsDelivr CDN')
+  assert.equal(labelOf(origin, origin), '直连 raw.githubusercontent.com')
+  assert.equal(labelOf(SHARED_PACK_DEFAULT_PREFIX + origin, origin), '默认加速 ghfast.top')
+  assert.equal(labelOf('https://my-proxy.example/' + origin, origin), '自定义加速源')
 })
 
 // ── 分块读取 + 进度上报（readBodyWithProgress）────────────────────────────
@@ -235,7 +250,7 @@ test('downloadSharedSkin：单张成功后落进 skins 的 builtin 槽位', asyn
   const saved = meta.sha256
   meta.sha256 = sha(bytes)
   try {
-    const { impl } = fetchStub({ [origin]: bytes })
+    const { impl } = fetchStub({ [cdnOf(origin)]: bytes })
     const r = await downloadSharedSkin(meta.id, { fetchImpl: impl, prefix: '' })
     assert.equal(r.ok, true, r.error)
     assert.equal(r.id, meta.id)
@@ -251,18 +266,19 @@ test('downloadSharedSkin：sha256 不符时顺延下一个源，命中可用源�
   const meta = SHARED_SKIN_PACK_SKINS[2]
   const good = Buffer.alloc(Number(meta.size) || 8, 5)
   const origin = fileUrl('skins', meta.id, 'png')
-  const badFromDefault = Buffer.alloc(good.length, 9) // 同长度但内容不同 → 校验必败
+  const badFromCdn = Buffer.alloc(good.length, 9) // 同长度但内容不同 → 校验必败
   const saved = meta.sha256
   meta.sha256 = sha(good)
   try {
     const { impl, calls } = fetchStub({
-      [SHARED_PACK_DEFAULT_PREFIX + origin]: badFromDefault,
+      [cdnOf(origin)]: badFromCdn,
       [origin]: good,
     })
     const r = await downloadSharedSkin(meta.id, { fetchImpl: impl, prefix: '' })
     assert.equal(r.ok, true, r.error)
-    assert.equal(r.source, origin, '应命中真源直连')
-    assert.equal(calls.length, 2, '应先试默认前缀再试直连')
+    assert.equal(r.source, origin, '应命中真源直连（jsDelivr 校验失败后顺延）')
+    assert.equal(calls.length, 3, '应依次试 jsDelivr → ghfast → 直连，前两个都不给字节')
+    assert.equal(calls[0], cdnOf(origin), '首个请求应是 jsDelivr')
   } finally {
     meta.sha256 = saved
   }
@@ -273,13 +289,14 @@ test('downloadSharedSkin：sha256 与内容不符时，所有源都不接受（�
   const origin = fileUrl('skins', meta.id, 'png')
   const bytes = Buffer.alloc(Number(meta.size) || 8, 4) // 与清单 sha256 必不符
   const { impl, calls } = fetchStub({
+    [cdnOf(origin)]: bytes,
     [SHARED_PACK_DEFAULT_PREFIX + origin]: bytes,
     [origin]: bytes,
   })
   const r = await downloadSharedSkin(meta.id, { fetchImpl: impl, prefix: '' })
   assert.equal(r.ok, false)
   assert.match(r.error, /校验失败/)
-  assert.equal(calls.length, 2, '两个源都应试过并因校验失败被拒')
+  assert.equal(calls.length, 3, '三个源都应试过并因校验失败被拒')
   assert.ok(!listSharedSkins().items.find((x) => x.id === meta.id).installed, '校验失败不应落盘')
 })
 
@@ -322,7 +339,7 @@ test('downloadSharedSound：单段成功后落进 sounds 的 shared 槽位', asy
   const saved = meta.sha256
   meta.sha256 = sha(bytes)
   try {
-    const { impl } = fetchStub({ [origin]: bytes })
+    const { impl } = fetchStub({ [cdnOf(origin)]: bytes })
     const r = await downloadSharedSound(meta.id, { fetchImpl: impl, prefix: '' })
     assert.equal(r.ok, true, r.error)
     assert.equal(r.name, meta.name)

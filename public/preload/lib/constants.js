@@ -72,8 +72,13 @@ const SKIN_PACK_MAX_BYTES = 4 * 1024 * 1024
 // （见 lib/assets-packs.js 文件头）。
 //
 // raw 直链基址：public/shared/ 下的 <id>.png / <id>.<ext>，单张最大约 2.6MB，不触 jsDelivr
-// 20MB 上限（jsDelivr 源待实测通过后再加，见 lib/assets-packs.js#sourceChain）。
+// 20MB 上限
 const SHARED_RAW_BASE = 'https://raw.githubusercontent.com/Berge520/Balance-Whale-Widget/main/public/shared/'
+// jsDelivr CDN 基址（候选链首选源）。与 SHARED_RAW_BASE 路径一致，只换域名前缀。
+// 2026-09-29 实测（本机、2.67MB 最大单张）：jsDelivr 633KB/s 仅 4.2s，
+// 而 raw 直连同文件 60s 超时、ghfast 约 81KB/s —— 差 8 倍，故放第一位。
+// ⚠️ jsDelivr 对刚 push 的内容有缓存延迟（数分钟~数小时），期间会 404，靠后续候选兜底。
+const SHARED_CDN_BASE = 'https://cdn.jsdelivr.net/gh/Berge520/Balance-Whale-Widget@main/public/shared/'
 // 默认加速前缀（与内置形象同款 ghfast.top）；末尾必须带 '/'，拼接规则是「前缀 + 真源」直连
 const SHARED_PACK_DEFAULT_PREFIX = 'https://ghfast.top/'
 // 单个源的超时：单张最大 2.6MB，30s 足够；候选链最多试 3 个源，最坏累加 90s
@@ -487,6 +492,7 @@ module.exports = {
   SKIN_PACK_MAX_BYTES,
   SKIN_PACK_SKINS,
   SHARED_RAW_BASE,
+  SHARED_CDN_BASE,
   SHARED_PACK_DEFAULT_PREFIX,
   SHARED_PACK_TIMEOUT_MS,
   SHARED_PACK_MAX_BYTES,
