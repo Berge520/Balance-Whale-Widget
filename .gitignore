@@ -43,8 +43,11 @@ whale-backup-*.json
 # 本地在仓库根 zip 出来的这份别提交
 balance-whale-widget-*.zip
 # 自定义素材：导入的形象 / 气泡图 / 音效正常落在 <userData>/whale-*/，
-# 手动另存进仓库的这几类文件不要提交
+# 手动另存进仓库的这几类文件不要提交。
+# 例外：public/whale-pack/ 下的内置包**随插件分发**（不是用户手动另存的素材），必须入库，
+# 否则 CI 从零检出时读不到包体、单测与打包全挂。
 *.whaleassets
+!public/whale-pack/*.whaleassets
 
 # ── 素材源（不进仓库）──
 # 上游 QQ 群分享的原始素材（角色图 / 音频），是 build-assets-pack.py 的输入、
