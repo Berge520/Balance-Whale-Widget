@@ -19,8 +19,13 @@ const { logErr } = require('./log')
 const { num, homeDir, readTextSafe, readJsonSafe, normalizePath } = require('./util')
 const { probePort, snapshot } = require('./dsh')
 
-// 平台判定：只用于 globalModuleRoots 的候选目录分派（Windows 的 npm 全局目录 vs POSIX 的 /usr 布局）
-const WIN = process.platform === 'win32'
+// 平台判定：只用于 globalModuleRoots 的候选目录分派（Windows 的 npm 全局目录 vs POSIX 的 /usr 布局）。
+// ⚠️ 判据是「当前进程是否 Windows」而不是 process.platform 的静态值 —— 单测会在 Linux CI 上
+// 用 APPDATA 造 Windows 布局的假目录，写死 process.platform 会让这些用例在非 Windows 上
+// 永远探不到候选目录（本地 Windows 显绿、CI 上红，正是这次的翻车形态）。
+// 有 APPDATA / LOCALAPPDATA / USERPROFILE 这些 Windows 专有环境变量就算 Windows。
+const isWinEnv = () => process.platform === 'win32'
+  || !!(process.env.APPDATA || process.env.LOCALAPPDATA || process.env.USERPROFILE)
 
 // ──────────────────────────────────────────────
 // 常量
@@ -308,7 +313,7 @@ function globalModuleRoots() {
   add(path.join(nodeDir, 'node_modules'))
   add(path.join(nodeDir, '..', 'node_modules'))
   add(path.join(nodeDir, '..', 'lib', 'node_modules'))
-  if (WIN) {
+  if (isWinEnv()) {
     // Windows：npm 全局目录默认在 %APPDATA%\npm，hoist 出来的可执行档同层；
     // User 级自定义前缀常见于 %USERPROFILE%\.npm-global
     add(path.join(nodeDir, 'node_global', 'node_modules'))
