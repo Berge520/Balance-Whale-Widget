@@ -5145,18 +5145,46 @@ async function onSkinCropConfirm(p: { dataUrl: string; name: string }) {
     skinFlash.msg = '导入失败：' + String(err?.message || err)
   }
 }
-// 随机换一个已装内置形象；「自定义」是用户自己导入的那张，不在抽签范围里。
-// 抽签池 = 随包那张 + 从「内置形象」区下载回来的（后者带 builtin 标记），
-// 所以下载过的形象也进随机 —— 不下载就只有一张，抽不出别的（保持原样）。
-// 抽到当前这张时再抽一次（只有一张时抽不出来，那就保持原样）
-const randomSkinPool = computed(() => BUILTIN_SKINS.concat(
-  skinGallery.value.items.filter(it => it.builtin).map(it => it.id),
-))
+// 随机换一张形象。抽签池 = 画廊里所有「勾选了参与随机」的项（含用户自己导入的），
+// 加上随包内置那张（它不在画廊里，但永远可用）。
+// 修复点：旧版池子只含「带 builtin 标记的官方图」，用户一张没下载时池里只剩当前这张，
+// 排掉后为空、点随机毫无反应 —— 现在自定义图默认也参与（random 缺省 true），池子不会空。
+// randomSkinPool 只做展示（卡片上显示「随机池 N 张」），实际抽签用 allSkinChoices。
+// 展示口径与用户能勾选的格子对齐：只数画廊里参与随机的项 —— 内置那张不在画廊里、没有勾选框，
+// 若把它算进计数，用户数格子会数不上，以为数字不对。
+const randomSkinPool = computed(() => skinGallery.value.items.filter(it => it.random !== false).map(it => it.id))
+// 抽签用全集：内置 id 去重后合并画廊里参与随机的项
+const allSkinChoices = computed(() => {
+  const out = BUILTIN_SKINS.slice()
+  for (const it of skinGallery.value.items) {
+    if (it.random !== false && out.indexOf(it.id) < 0) out.push(it.id)
+  }
+  return out
+})
 function doRandomSkin() {
-  const pool = randomSkinPool.value.filter(s => s !== cfg.skin)
-  const pick = pool.length ? pool[Math.floor(Math.random() * pool.length)] : cfg.skin
+  const pool = allSkinChoices.value.filter(s => s !== cfg.skin)
+  if (!pool.length) {
+    // 池子只剩当前这张：要么总共只有一张，要么其它张都被取消了参与随机 —— 明确说明而非静默不动
+    skinFlash.msg = allSkinChoices.value.length <= 1
+      ? '只有一张形象可随机，先多下载或导入几张'
+      : '其它形象都没勾选「参与随机」，去画廊里勾上'
+    skinFlash.err = true
+    return
+  }
+  skinFlash.msg = ''
+  skinFlash.err = false
+  const pick = pool[Math.floor(Math.random() * pool.length)]
   cfg.skin = pick
   patchCfg({ skin: pick })
+  // 抽到画廊里的图时，把「当前使用」也同步过去，否则切回内置后画廊的「使用中」角标会对不上
+  if (skinGallery.value.items.some(it => it.id === pick)) {
+    services.setSkinCurrent?.(pick)
+    refreshSkin()
+  }
+  const label = pick === 'custom' ? '自定义' : (
+    skinGallery.value.items.filter(it => it.id === pick)[0]?.name || pick
+  )
+  skinFlash.msg = '已随机到「' + label + '」'
 }
 
 // 换用画廊里的某一张（顺带把「形象」切到自定义，否则点了没反应）
@@ -5188,6 +5216,21 @@ function doPinSkin(id: string) {
   } catch (err: any) {
     skinFlash.err = true
     skinFlash.msg = '置顶失败：' + String(err?.message || err)
+  }
+}
+// 勾选 / 取消「参与随机」：只影响抽签池，不改变正在使用的那张
+function doToggleSkinRandom(id: string, on: boolean) {
+  try {
+    const r = services.setSkinRandom?.(id, on)
+    if (!r || !r.ok) {
+      skinFlash.err = true
+      skinFlash.msg = '设置失败：' + ((r && r.error) || '未知错误')
+      return
+    }
+    refreshSkin()
+  } catch (err: any) {
+    skinFlash.err = true
+    skinFlash.msg = '设置失败：' + String(err?.message || err)
   }
 }
 function doRemoveSkin(id: string) {
@@ -5509,9 +5552,8 @@ async function doSkinPackCell(id: string) {
 }
 
 // —— 共享素材（角色图 36 张 + 音效库 45 个，上游 QQ 群素材，挂 Release 按需下） ——
-// 与上面「可下载的内置形象」是同一套模式，但两类素材各一个大包（形象 40.6MB / 音效 2.7MB），
-// 且都按**整包**下（点任意一张缩略图 = 下整个形象包）。所以这里做的是「透明化」而不是
-// 假装能单张下：格子上直接标明「点任意一张 = 下载整包」，点了就如实提示在整包下。
+// v1.9.0 起与「可下载的内置形象」同一套单张下载：点缩略图只下这一张（走 raw 直链），
+// 顶上按钮才逐张串行补齐。不再有「点任意一张 = 下整包」的语义。
 function sharedSkinThumb(id: string) {
   return './resources/thumbs/' + encodeURIComponent(id) + '.webp'
 }
@@ -5546,22 +5588,23 @@ async function doDownloadSharedSkins() {
   sharedSkinBusy.value = true
   dlTickStart()
   try {
-    // 单张下载：把没装的逐张串行拉下来（点「下载全部」才走这里；单张走 doSharedSkinCell）
+    // 单张下载：把没装的逐张串行拉下来（点「下载全部」才走这里；单张走 doSharedSkinCell）。
+    // 单张失败不 break —— 一个源抖动不该拖垮剩余全部，继续下完再把失败项聚合上报。
     const todo = sharedSkinItems.value.filter(it => !it.installed)
     const failed: string[] = []
     for (const it of todo) {
       const r = await services.downloadSharedSkin?.(it.id, cfg.skinPackSrc || '')
-      if (!r || !r.ok) { failed.push(it.name + '：' + ((r && r.error) || '下载失败')); break }
+      if (!r || !r.ok) failed.push(it.name + '：' + ((r && r.error) || '下载失败'))
     }
     refreshSkin()
     refreshSharedSkins()
+    const okCount = todo.length - failed.length
     if (failed.length) {
-      sharedSkinFlash.msg = failed[0]
+      sharedSkinFlash.msg = `已下载 ${okCount} 张，${failed.length} 张失败 —— ${failed[0]}`
       sharedSkinFlash.err = true
       return
     }
-    const n = todo.length
-    sharedSkinFlash.msg = n ? `已下载 ${n} 张共享角色` : '共享角色已是最新，无需重复下载'
+    sharedSkinFlash.msg = todo.length ? `已下载 ${todo.length} 张共享角色` : '共享角色已是最新，无需重复下载'
     sharedSkinFlash.err = false
   } finally {
     sharedSkinBusy.value = false
@@ -5615,22 +5658,23 @@ async function doDownloadSharedSounds() {
   sharedSoundBusy.value = true
   dlTickStart()
   try {
-    // 单段下载：把没装的逐段串行拉下来（「下载全部」按钮走这里；单段走 doDownloadSharedSound）
+    // 单段下载：把没装的逐段串行拉下来（「下载全部」按钮走这里；单段走 doDownloadSharedSound）。
+    // 单段失败不 break，继续下完再聚合上报失败项。
     const todo = sharedSoundItems.value.filter(it => !it.installed)
     const failed: string[] = []
     for (const it of todo) {
       const r = await services.downloadSharedSound?.(it.id, cfg.skinPackSrc || '')
-      if (!r || !r.ok) { failed.push(it.name + '：' + ((r && r.error) || '下载失败')); break }
+      if (!r || !r.ok) failed.push(it.name + '：' + ((r && r.error) || '下载失败'))
     }
     refreshSounds()
     refreshSharedSounds()
+    const okCount = todo.length - failed.length
     if (failed.length) {
-      sharedSoundFlash.msg = failed[0]
+      sharedSoundFlash.msg = `已下载 ${okCount} 段，${failed.length} 段失败 —— ${failed[0]}`
       sharedSoundFlash.err = true
       return
     }
-    const n = todo.length
-    sharedSoundFlash.msg = n ? `已下载 ${n} 段音效（存进「共享音效库」，可到下面选用）` : '共享音效已是最新，无需重复下载'
+    sharedSoundFlash.msg = todo.length ? `已下载 ${todo.length} 段音效（存进「共享音效库」，可到下面选用）` : '共享音效已是最新，无需重复下载'
     sharedSoundFlash.err = false
   } finally {
     sharedSoundBusy.value = false
@@ -6958,7 +7002,7 @@ onUnmounted(() => {
                   :value="cfg.skin">{{ cfg.skin }}（未下载）</option>
           <option value="custom">自定义</option>
         </select>
-        <button class="export-btn utils-btn utils-outline" type="button" title="随机换一个已装内置形象" @click="doRandomSkin()">随机</button>
+        <button class="export-btn utils-btn utils-outline" type="button" title="从所有勾选了「参与随机」的形象里随机换一张" @click="doRandomSkin()">随机</button>
       </label>
       <p v-if="cfg.skin === 'custom' && !skinMeta" class="hint">
         还没有导入形象，去「资源」页加一张后这里才有「自定义」可用（当前会回退为「默认形象」）。
@@ -6969,6 +7013,8 @@ onUnmounted(() => {
       <p v-else-if="skinMeta" class="hint">
         当前使用：{{ skinMeta.name }}（{{ assetSize(skinMeta) }}）。
       </p>
+      <!-- 随机按钮的反馈：skinFlash 原本只在「资源」页画廊渲染，用户停在「外观」页按随机会看不到结果 -->
+      <p v-if="skinFlash.msg" class="msg" :class="msgCls(skinFlash)">{{ skinFlash.msg }}</p>
 
       <div class="fold">
         <button class="link-btn utils-btn utils-secondary" @click="lookFolds.bubble = !lookFolds.bubble">{{ lookFolds.bubble ? '收起气泡与文案' : '气泡与文案（主题 · 峰谷 · 报时 · 点按播放）' }}</button>
@@ -7123,11 +7169,12 @@ onUnmounted(() => {
       </div>
     </section>
 
-    <!-- [资源] 导入的形象：画廊（点缩略图切换、置顶、删除） -->
+    <!-- [资源] 导入的形象：画廊（点缩略图切换、置顶、删除、勾选参与随机） -->
     <section v-if="cardOn('assets', 'assetsSkins')" class="card" data-search="assetsSkins">
       <div class="card-head">
         <h2>导入的形象</h2>
         <div class="head-actions">
+          <button class="export-btn utils-btn utils-outline" type="button" @click="doRandomSkin()">随机一张</button>
           <button class="export-btn utils-btn utils-outline" type="button" @click="doImportSkin()">导入图片…</button>
         </div>
       </div>
@@ -7140,10 +7187,16 @@ onUnmounted(() => {
             <img v-if="it.thumb" class="skin-cell-img" :src="it.thumb" :alt="it.name" />
             <span v-else class="skin-cell-none">无预览</span>
           </button>
+          <span v-if="it.builtin" class="skin-cell-badge">官方</span>
           <span class="skin-cell-ops">
             <button class="skin-op" type="button" title="置顶" @click.stop="doPinSkin(it.id)">置顶</button>
             <button class="skin-op danger" type="button" title="删除这张" @click.stop="doRemoveSkin(it.id)">删</button>
           </span>
+          <label class="skin-cell-rand" :title="it.random !== false ? '已参与随机抽签，点击取消' : '未参与随机，点击加入'">
+            <input type="checkbox" :checked="it.random !== false"
+                   @change="doToggleSkinRandom(it.id, ($event.target as HTMLInputElement).checked)" />
+            <span>随机</span>
+          </label>
           <span v-if="it.id === skinGallery.current" class="skin-cell-tag">使用中</span>
         </div>
         <button class="skin-cell skin-cell-add" type="button" title="导入图片" @click="doImportSkin()">
@@ -7153,6 +7206,7 @@ onUnmounted(() => {
       </div>
       <p v-if="skinMeta" class="hint">
         当前使用：{{ skinMeta.name }}（{{ assetSize(skinMeta) }} · {{ assetAt(skinMeta) }}）；点缩略图切换，最多保留 20 张。
+        画廊里勾选「随机」的共 {{ randomSkinPool.length }} 张（随包内置那张始终参与），「随机一张」会从它们里挑。
       </p>
       <p v-else class="hint">
         还没有导入形象。点「导入图片…」加一张，支持 png / jpg / webp / gif / apng（动图不裁剪，保留动画）。
@@ -7253,7 +7307,7 @@ onUnmounted(() => {
                  :class="{ active: cfg.skin === s.id, 'is-remote': !skinPackInstalled[s.id] }">
               <button class="skin-cell-pick" type="button"
                       :title="skinPackInstalled[s.id] ? `${s.id}（已下载，点选用）`
-                        : `${s.id}（未下载，点一下下载整包，下完自动切到这张）`"
+                        : `${s.id}（未下载，点一下下载，下完自动切到这张）`"
                       @click="doSkinPackCell(s.id)">
                 <img class="skin-cell-img" :src="skinPackThumb(s.id)" :alt="s.id" />
               </button>
@@ -7261,8 +7315,8 @@ onUnmounted(() => {
                 <button class="skin-op danger" type="button" title="从本地删除这张（可重新下载）"
                         @click.stop="doRemoveSkin(s.id)">删</button>
               </span>
-              <!-- 角标写「下载全部」而非「下载」：单张点击实际会下整包，写「下载」会让人以为只下这一张 -->
-              <span v-else class="skin-cell-badge">下载全部</span>
+              <!-- 角标写「下载」：v1.8.0 起这批只剩 1 张，「下载全部」显得莫名其妙 -->
+              <span v-else class="skin-cell-badge">下载</span>
               <span class="skin-cell-tag">{{ s.id }}</span>
               <span v-if="skinInUseMissing && s.id === cfg.skin" class="skin-cell-tag warn">正在使用 · 未下载</span>
             </div>
@@ -7274,7 +7328,8 @@ onUnmounted(() => {
               {{ skinPackBusy ? '正在下载…'
                 : skinPackAllInstalled ? '已全部下载'
                   : skinPackInstalledAny ? `下载剩余 ${SKIN_PACK_SKINS.length - skinPackInstalledCount} 张（约 ${fmtBytes(skinPackRemainBytes)}）`
-                    : `下载全部 ${SKIN_PACK_SKINS.length} 张（约 ${fmtBytes(skinPackBytes)}）` }}
+                      : (SKIN_PACK_SKINS.length === 1 ? `下载（约 ${fmtBytes(skinPackBytes)}）`
+                         : `下载全部 ${SKIN_PACK_SKINS.length} 张（约 ${fmtBytes(skinPackBytes)}）`) }}
             </button>
           </div>
           <div v-if="dlProgress && dlProgress.pack === 'skins'" class="dl-box">
@@ -12492,6 +12547,41 @@ input[type='checkbox'] {
   text-align: center;
   background: rgba(83, 107, 169, 0.85);
   color: #fff;
+}
+/* 「官方」角标：官方下载形象与用户自建图的区分，压在左上角（右上角已被操作条占用） */
+.skin-cell-badge {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  padding: 0 4px;
+  font-size: 10px;
+  line-height: 1.5;
+  border-radius: 4px;
+  background: rgba(83, 107, 169, 0.85);
+  color: #fff;
+  pointer-events: none;
+}
+/* 「参与随机」勾选：压在缩略图左下角，与底部「使用中」标签错开（标签有随机时才显示） */
+.skin-cell-rand {
+  position: absolute;
+  left: 2px;
+  bottom: 16px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 3px;
+  font-size: 10px;
+  line-height: 1.5;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.5);
+  color: #fff;
+  cursor: pointer;
+}
+.skin-cell-rand input {
+  margin: 0;
+  width: 11px;
+  height: 11px;
+  cursor: pointer;
 }
 /* 未下载的远程形象：整格压暗 + 缩略图降饱和，一眼看出「还没下来」，
    但缩略图仍可见 —— 让用户在下手前看得见长什么样 */

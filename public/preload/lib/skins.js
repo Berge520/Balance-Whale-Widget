@@ -53,6 +53,8 @@ function readFileUrl(file, ext) {
 // builtin 标记：内置可下载形象落进画廊时带 true（见 lib/skin-packs.js），用于
 // ① 不计入 MAX_ITEMS 配额（用户自己导入 20 张不该被官方图挤掉）② 展示时区分「官方」角标。
 // 用户自己导入的项没有这个字段，一律按 false 处理。
+// random 标记：是否参与「随机」抽签。**缺省视为 true**（老记录 / 新装项默认都参与），
+// 只有用户显式关掉时才是 false —— 这样「随机」不会因为升级后字段缺失而突然抽不到东西。
 function normItem(v) {
   if (!v || typeof v !== 'object') return null
   const id = String(v.id || '')
@@ -60,6 +62,7 @@ function normItem(v) {
   if (typeof v.ext !== 'string' || OK_EXT.indexOf(v.ext) < 0) return null
   const one = { id: id, name: String(v.name || '').slice(0, 120), ext: v.ext, at: Number(v.at) || 0 }
   if (v.builtin === true) one.builtin = true
+  if (v.random === false) one.random = false
   return one
 }
 
@@ -108,7 +111,12 @@ function listSkins() {
         thumb = readFileUrl(it.id + '.' + it.ext, it.ext)
         if (thumb) fallbackBudget -= size
       }
-      return { id: it.id, name: it.name, ext: it.ext, at: it.at, size: size, thumb: thumb, builtin: it.builtin === true }
+      return {
+        id: it.id, name: it.name, ext: it.ext, at: it.at, size: size, thumb: thumb,
+        builtin: it.builtin === true,
+        // 缺省 true：老记录没有该字段时，设置页应显示为「参与随机」
+        random: it.random !== false,
+      }
     }),
   }
 }
@@ -192,7 +200,11 @@ function addItem(name, ext, write, thumb, opts) {
         return { ok: false, error: '保存图片失败：' + ((err && err.message) || err) }
       }
       writeThumb(o.id, thumb)
-      if (o.builtin === true && exist.builtin !== true) { exist.builtin = true; writeRaw(raw) }
+      // 重复下载官方图时补正元信息：名字从 id 短哈希升成中文原名（旧记录），或补上 builtin 标记
+      let dirty = false
+      if (o.builtin === true && exist.builtin !== true) { exist.builtin = true; dirty = true }
+      if (o.displayName && exist.name !== o.displayName) { exist.name = String(o.displayName).slice(0, 120); dirty = true }
+      if (dirty) writeRaw(raw)
       dataCache = null
       return { ok: true, id: o.id, name: exist.name, ext: ext, existed: true }
     }
@@ -295,6 +307,17 @@ function pinSkin(id) {
   return { ok: true }
 }
 
+// 开关「是否参与随机抽签」。存 false 才写字段（缺省即参与），保持存储精简
+function setRandom(id, on) {
+  const raw = readRaw()
+  const one = raw.items.filter((x) => x.id === id)[0]
+  if (!one) return { ok: false, error: '形象不存在' }
+  if (on === false) one.random = false
+  else delete one.random
+  writeRaw(raw)
+  return { ok: true, id: id, random: on !== false }
+}
+
 // 删除一张（文件与元信息一并清掉）。删的是当前形象时，当前位交给剩下的第一张；
 // 一张都不剩则 current 置空，由设置页把配置里的形象回退成内置
 function removeSkin(id) {
@@ -316,12 +339,15 @@ function builtinIds() {
   return readRaw().items.filter((x) => x.builtin === true).map((x) => x.id)
 }
 
-// 装一个内置形象（供 lib/skin-packs.js 调用）：固定 id、打官方标记、不动当前形象。
-// 缩略图直接落 PNG 字节（官方图不带用户裁剪，缩略图由设置页按需展示）
-function installBuiltin(id, ext, buf, thumbBuf) {
-  return addItem(id, ext, (fid) => fs.writeFileSync(path.join(skinsDir(), fid + '.' + ext), buf),
+// 装一个内置形象（供 lib/skin-packs.js / lib/assets-packs.js 调用）：固定 id、打官方标记、不动当前形象。
+// 缩略图直接落 PNG 字节（官方图不带用户裁剪，缩略图由设置页按需展示）。
+// displayName：共享角色带中文原名（如「神里绫华」），画廊里显示它而不是 id 短哈希；
+//   内置包不带则回落到 id。已存在同 id 的项时，一并把名字补正（旧记录当时只存了 id）。
+function installBuiltin(id, ext, buf, thumbBuf, displayName) {
+  const name = String(displayName || id).slice(0, 120)
+  return addItem(name, ext, (fid) => fs.writeFileSync(path.join(skinsDir(), fid + '.' + ext), buf),
     thumbBuf && thumbBuf.length ? 'data:image/png;base64,' + thumbBuf.toString('base64') : '',
-    { id: id, builtin: true, keepCurrent: true })
+    { id: id, builtin: true, keepCurrent: true, displayName: name })
 }
 
 // 清除全部自定义形象（供设置页「清除选中数据」调用）
@@ -384,7 +410,7 @@ function getSkinData() {
 
 module.exports = {
   importSkin, importSkinFromPath, pickImageFile, importSkinFromData,
-  removeSkin, setCurrent, pinSkin, clearAll, getSkinData, listSkins, readMeta,
+  removeSkin, setCurrent, pinSkin, setRandom, clearAll, getSkinData, listSkins, readMeta,
   // 内置可下载形象（lib/skin-packs.js）用
   builtinIds, installBuiltin,
   // 素材包（assets.js）用

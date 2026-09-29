@@ -90,4 +90,89 @@ test('importBuffer 拒绝不支持的格式与空数据', () => {
   assert.equal(importBuffer('x.png', 'png', Buffer.alloc(0), null).ok, false)
 })
 
+// ── 「参与随机」开关（setRandom）──────────────────────────────────────────
+// 语义约定：random 字段缺失 = 参与（默认），只有显式关掉才存 false。
+// 这样升级后老记录不会因为字段缺失而突然全部退出随机池（用户会以为随机坏了）。
+
+test('setRandom：新装项默认参与随机（random 字段缺失即 true）', () => {
+  reset()
+  const a = importBuffer('mine.webp', 'webp', PNG, null)
+  const item = listSkins().items.filter((x) => x.id === a.id)[0]
+  assert.equal(item.random, true, '未设置过时应视为参与随机')
+})
+
+test('setRandom：关掉后存 false，listSkins 如实回报', () => {
+  reset()
+  const a = importBuffer('mine.webp', 'webp', PNG, null)
+  const r = skins.setRandom(a.id, false)
+  assert.equal(r.ok, true)
+  assert.equal(r.random, false)
+  assert.equal(listSkins().items.filter((x) => x.id === a.id)[0].random, false)
+})
+
+test('setRandom：重新打开时删掉字段（缺省即参与，存储保持精简）', () => {
+  reset()
+  const a = importBuffer('mine.webp', 'webp', PNG, null)
+  skins.setRandom(a.id, false)
+  // 直接从存储里看：关掉时应有 random:false
+  assert.equal(store.get(K.skins).items[0].random, false)
+  skins.setRandom(a.id, true)
+  assert.equal('random' in store.get(K.skins).items[0], false, '打开时应把字段删掉而非存 true')
+  assert.equal(listSkins().items.filter((x) => x.id === a.id)[0].random, true)
+})
+
+test('setRandom：改开关不影响「当前形象」，也不动其它项', () => {
+  reset()
+  const a = importBuffer('a.webp', 'webp', PNG, null)
+  const b = importBuffer('b.webp', 'webp', PNG, null)
+  const curBefore = listSkins().current
+  skins.setRandom(a.id, false)
+  assert.equal(listSkins().current, curBefore, '改开关不该换掉当前使用的形象')
+  assert.equal(listSkins().items.filter((x) => x.id === b.id)[0].random, true, '不该波及别的项')
+})
+
+test('setRandom：id 不存在时返回失败而非静默成功', () => {
+  reset()
+  importBuffer('mine.webp', 'webp', PNG, null)
+  const r = skins.setRandom('no-such-id', false)
+  assert.equal(r.ok, false)
+  assert.match(r.error, /不存在/)
+})
+
+// ── 官方图显示名（installBuiltin 的 displayName）─────────────────────────
+// 共享角色下载回来时带中文原名，画廊里应显示它而不是 id 短哈希（s34330e4aba 这种没人看得懂）。
+
+test('installBuiltin：带 displayName 时画廊显示中文原名而非 id', () => {
+  reset()
+  const r = skins.installBuiltin('s34330e4aba', 'png', PNG, null, '神里绫华')
+  assert.equal(r.ok, true)
+  const item = listSkins().items.filter((x) => x.id === 's34330e4aba')[0]
+  assert.equal(item.name, '神里绫华')
+  assert.equal(item.builtin, true)
+})
+
+test('installBuiltin：不带 displayName 时回落到 id（内置包行为不变）', () => {
+  reset()
+  skins.installBuiltin('DSniang02', 'webp', PNG, null)
+  assert.equal(listSkins().items.filter((x) => x.id === 'DSniang02')[0].name, 'DSniang02')
+})
+
+test('installBuiltin：重复下载同一 id 时把旧记录的 id 名补正为中文原名', () => {
+  reset()
+  // 模拟旧版本下载的项：只有 id 当名字，没有中文名
+  skins.installBuiltin('s34330e4aba', 'png', PNG, null)
+  assert.equal(listSkins().items[0].name, 's34330e4aba')
+  // 新版重新下载同一张 → 名字被补正（不需要用户先删掉再下）
+  skins.installBuiltin('s34330e4aba', 'png', PNG, null, '神里绫华')
+  assert.equal(listSkins().items.filter((x) => x.id === 's34330e4aba')[0].name, '神里绫华')
+  assert.equal(listSkins().items.length, 1, '补正不新增一项')
+})
+
+test('installBuiltin：重复下载不改动「当前形象」（仍在用自己那张）', () => {
+  reset()
+  const mine = importBuffer('mine.webp', 'webp', PNG, null)
+  skins.installBuiltin('s34330e4aba', 'png', PNG, null, '神里绫华')
+  assert.equal(listSkins().current, mine.id)
+})
+
 test.after(() => { fs.rmSync(TMP, { recursive: true, force: true }) })

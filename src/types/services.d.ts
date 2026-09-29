@@ -1107,9 +1107,11 @@ export interface SkinMeta {
 // 画廊里的一张：元信息 + 缩略图。缩略图缺失（老数据/生成失败）时小图回落到原图，大图为空串
 export interface SkinGalleryItem extends SkinMeta {
   thumb: string
-  // 由「内置形象按需下载」装进来的那张（lib/skin-packs.js）：不占 20 张导入配额，
-  // 设置页据此与用户自己导入的区分展示
+  // 由「内置形象按需下载」装进来的那张（lib/skin-packs.js / lib/assets-packs.js）：不占 20 张导入配额，
+  // 设置页据此显示「官方」角标并与用户自己导入的区分
   builtin: boolean
+  // 是否参与「随机」抽签（缺省 true）。false 表示用户显式取消了这张的参与资格
+  random: boolean
 }
 
 export interface SkinGallery {
@@ -1792,6 +1794,8 @@ export interface WhaleServices {
   setSkinCurrent(id: string): { ok: boolean; current?: string; error?: string }
   // 把某一张移到画廊最前（不改变当前使用的那张）
   pinSkin(id: string): { ok: boolean; error?: string }
+  // 开关某一张是否参与「随机」抽签（不影响当前使用的那张）
+  setSkinRandom(id: string, on: boolean): { ok: boolean; id?: string; random?: boolean; error?: string }
   removeSkin(id: string): { ok: boolean; current?: string; left?: number; error?: string }
   // —— 可选下载的内置形象（v1.7.x 起随包只留默认那张，其余挂 Release 按需下） ——
   // 可下载清单 + 已装状态（缩略图与清单是设置页内嵌的静态资源，不走这条 IPC）

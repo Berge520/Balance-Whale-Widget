@@ -191,7 +191,7 @@ async function downloadSharedSkin(id, opts) {
     const origin = fileUrl('skins', meta.id, 'png')
     const res = await fetchWithChain(o.prefix, origin, meta.sha256, fetchImpl)
     dlp.phase('install', { label: '正在写入角色…', total: res.item.buf.length })
-    const r = skins.installBuiltin(meta.id, 'png', res.item.buf, null)
+    const r = skins.installBuiltin(meta.id, 'png', res.item.buf, null, meta.name)
     if (!r || !r.ok) {
       const why = (r && r.error) || '写入失败'
       dlp.end(false, res.item.buf.length)

@@ -2647,6 +2647,10 @@ module.exports = {
   pinSkin(id) {
     return skins.pinSkin(id)
   },
+  // 开关某一张是否参与「随机」抽签（不影响当前使用的那张）
+  setSkinRandom(id, on) {
+    return skins.setRandom(id, on !== false)
+  },
   removeSkin(id) {
     const r = skins.removeSkin(id)
     if (r && r.ok) sendToWidget('whale:skin', skins.getSkinData())
