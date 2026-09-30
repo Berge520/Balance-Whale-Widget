@@ -138,12 +138,15 @@ const assetFolds = reactive({ builtin: false })
 // desc 是分组说明：凭据、备份这类「不常用但找不到会着急」的项靠它暴露位置；
 // 它得与卡片实际**顺序和数量**对得上（按错顺序写、漏掉某张卡，用户按描述找就会找不到）。
 const TABS = [
-  { key: 'look', label: '外观', desc: '大小 · 形象与音色 · 文案' },
-  { key: 'assets', label: '资源', desc: '素材总览 · 形象画廊 · 气泡图 · 音效 · 素材包' },
+  { key: 'look', label: '外观', desc: '大小 · 形象 · 气泡与音效 · 文案' },
+  // desc 只列**真实存在的卡片**、且用卡片标题的原词：此前写「形象画廊」（卡名是「导入的形象」）、
+  // 又把「素材包」当并列卡列出（它其实是「资源概览」卡里的导出/导入入口，不是独立卡）→ 用户按描述找不到。
+  { key: 'assets', label: '资源', desc: '资源概览 · 导入的形象 · 导入的气泡图 · 导入的音效 · 内置资源 · 共享形象 · 共享音效' },
   { key: 'usage', label: '用量', desc: '趋势与账本 · 提醒与通知 · 模型余额' },
   { key: 'window', label: '窗口', desc: '显隐 · 位置 · 透明度 · 穿透' },
   { key: 'data', label: '数据', desc: '凭据设置 · 清除数据 · 备份与恢复' },
-  { key: 'help', label: '帮助', desc: '使用说明 · 故障排查 · 关于与更新' },
+  // 此前漏了本组的「GitHub 加速」卡（描述只列了 3 项、实际 3 张卡却少列一张）→ 用户找不到加速
+  { key: 'help', label: '帮助', desc: '使用说明 · GitHub 加速 · 故障排查 · 关于与更新' },
   // desc 是 Tab 栏下方的静态说明，得与卡片的实际顺序、数量对得上：
   // 原先只列「dsh / dsh 用量 / Codex」三项，而这一页实际有 8 张卡，用户按描述找
   // 「插件开关」「插件市场」会以为不在这里。按实际顺序列全，并把非 dsh 的 Codex 单独隔开
@@ -168,20 +171,26 @@ function normSearch(s: string) {
 // 卡片索引：key 与模板上的 data-search 一一对应。额外收一批「同义词 / 别称 / 英文名」——
 // 用户不一定记得界面上的措辞（如搜「穿透」得能命中「挂件窗口」，搜「token」得能命中「DeepSeek 凭据」）。
 const SEARCH_INDEX: Record<string, { label: string; tab: TabKey; keys: string }> = {
-  credentials: { label: 'DeepSeek 凭据（API Key / 平台 Token）', tab: 'data', keys: 'apikey api key 密钥 token 令牌 凭据 授权' },
+  credentials: { label: 'DeepSeek 凭据（API Key / 平台 Token）', tab: 'data', keys: 'apikey api key 密钥 token 令牌 凭据 授权 余额 认证' },
   look: { label: '挂件外观', tab: 'look', keys: '形象 皮肤 音色 音效 大小 缩放 气泡 主题 报时 点按 播放' },
-  assetsOverview: { label: '资源概览', tab: 'assets', keys: '素材 占用 体积 清除 未使用 素材包 导出 导入 备份' },
+  assetsOverview: { label: '资源概览', tab: 'assets', keys: '素材 占用 体积 清除 未使用 素材包 导出 导入' },
   assetsSkins: { label: '导入的形象', tab: 'assets', keys: '形象 皮肤 图片 缩略图 置顶 删除 导入' },
   assetsBubbles: { label: '导入的气泡图', tab: 'assets', keys: '气泡 图 动图 gif 图片 导入 删除' },
   assetsSounds: { label: '导入的音效', tab: 'assets', keys: '音效 声音 按压 释放 提醒音 试听 导入 删除' },
   assetsBuiltin: { label: '内置资源', tab: 'assets', keys: '内置 形象 音色 对照 预览' },
+  // 这两张卡此前漏登记：模板里有 data-search="assetsSharedSkins/SharedSounds"，
+  // 但 SEARCH_INDEX 没登记 → 搜「共享」「角色」找不到，且搜索态下这两张卡永不渲染
+  // （cardOn 走 searchHits，不在索引里就等于命中不了）。别再漏。
+  assetsSharedSkins: { label: '共享形象', tab: 'assets', keys: '共享 角色 形象 下载 选用 预览 缩略图' },
+  assetsSharedSounds: { label: '共享音效', tab: 'assets', keys: '共享 音效 声音 下载 选用 试听 角色' },
   quotes: { label: '文案', tab: 'look', keys: '台词 文案 台词库 提醒文案 随机 权重 报时 动图' },
   usage: { label: '用量与账本', tab: 'usage', keys: '用量 趋势 账本 历史 区间 导出 csv 导入 校准 额度 单价 模型占比 明细' },
   notify: { label: '提醒与通知', tab: 'usage', keys: '提醒 通知 系统通知 邮件 smtp 预算 低余额 波动 免打扰 计时 倒计时 休息' },
-  models: { label: '模型与余额', tab: 'usage', keys: '模型 余额 提供商 厂商 刷新 api key 额度 主显示' },
+  models: { label: '模型与余额', tab: 'usage', keys: '模型 余额 提供商 厂商 刷新 api key 额度 主显示 密钥 凭据 token' },
   window: { label: '挂件窗口', tab: 'window', keys: '窗口 显隐 位置 复位 透明度 穿透 吸附 翻转 避让 任务栏 间距' },
   help: { label: '使用帮助', tab: 'help', keys: '帮助 快捷键 使用说明 故障排查 日志 新手引导' },
-  privacy: { label: '数据与隐私', tab: 'data', keys: '清除 数据 隐私 备份 恢复 重置' },
+  privacy: { label: '数据与隐私', tab: 'data', keys: '清除 数据 隐私 重置 卸载' },
+  backup: { label: '备份与恢复', tab: 'data', keys: '备份 恢复 导出 导入 json 迁移 密码 加密 凭据' },
   dshMain: { label: 'DeepSeek Harness（dsh）', tab: 'dev', keys: 'dsh harness 启动 重启 结束 更新 版本 端口 注册源 node 日志' },
   dshDiagnose: { label: 'dsh 环境诊断', tab: 'dev', keys: 'dsh 诊断 环境 检查 排障 patch 冲突 端口占用' },
   dshDump: { label: 'dsh 配置转储', tab: 'dev', keys: 'dsh 配置 转储 dump 分层 默认树 差异' },
@@ -220,7 +229,59 @@ function clearSearch() {
 // 点命中标签 → 滚到那张卡。卡片在搜索结果里按 SEARCH_INDEX 顺序渲染，标签与之同序，
 // 故直接按 key 找模板上的 data-search（跨 Tab 渲染出的卡都在 DOM 里，能选到）。
 // 滚动用 scrollIntoView({block:'start'}) 把卡顶到视口顶部；吸顶的 .tab-bar 会挡住卡头，
-// 故用 scroll-margin-top 预留出它的高度（见 .card 样式），不必在这里手算偏移。
+// 故用 scroll-margin-top 预留出它的高度。高度不写死：吸顶区是「Tab 行 + 搜索框 + desc」
+// 三段之和，随 desc 换行（窄窗口）而变，写死一个数就会露头或留一大截空白 ——
+// 由下面的 ResizeObserver 实测后写进 --tab-bar-h，.card 的 scroll-margin-top 读它。
+const tabBarEl = ref<HTMLElement | null>(null)
+let tabBarRO: ResizeObserver | null = null
+onMounted(() => {
+  if (typeof ResizeObserver === 'undefined' || !tabBarEl.value) return
+  tabBarRO = new ResizeObserver((entries) => {
+    const h = entries[0]?.contentRect.height || 0
+    // +8 是吸顶条与卡顶之间留的一道缝，不然卡头会紧贴吸顶条下沿
+    document.documentElement.style.setProperty('--tab-bar-h', `${Math.round(h) + 8}px`)
+  })
+  tabBarRO.observe(tabBarEl.value)
+})
+// 点面板以外的地方收起卡头下拉（面板本身没做全屏遮罩，靠这个兜底）。
+// 用捕获阶段监听：面板内的点击也要先判定一次 —— 点空白处直接关，点面板内则不动。
+// 面板上的按钮各自 click 里已把 rndMenu 置空，这里主要处理「点其它地方」。
+onMounted(() => {
+  document.addEventListener('click', onDocClickForRndMenu, true)
+  document.addEventListener('mousemove', onDocMoveForRndMenu, true)
+})
+onUnmounted(() => {
+  document.removeEventListener('click', onDocClickForRndMenu, true)
+  document.removeEventListener('mousemove', onDocMoveForRndMenu, true)
+})
+function onDocClickForRndMenu(e: MouseEvent) {
+  if (!rndMenu.value) return
+  const t = e.target as HTMLElement | null
+  if (t && t.closest && t.closest('.rnd-menu')) return
+  rndMenu.value = ''
+}
+// 面板里「全部 N 张」是一族低频的整批动作，平时用不着；常驻展开会让面板比缩略图还高。
+// 收成「全部 N 张 ›」悬停展开：它没有自己的开关语义（点它不需要先满足什么条件），
+// 只是把一组动作挪到旁边，悬停比点击少一个「展开了没点动作怎么收」的状态。
+// 用「延迟 220ms 再收」而不是立刻收：面板与触发项之间有一道缝隙、手指也会划偏，
+// 立刻收会出现「还没移进去就没了」。移进面板或回到触发项都会把这笔定时清掉。
+// 触发项与面板同在一个 .rnd-menu-sub 里，所以指针在这两者之间移动时判定为「仍在菜单内」。
+function onDocMoveForRndMenu(e: MouseEvent) {
+  if (!rndMenu.value) return
+  const t = e.target as HTMLElement | null
+  const over = t && t.closest ? t.closest('.rnd-menu-sub') : null
+  if (over === rndSubHover.value) return
+  rndSubHover.value = over as HTMLElement | null
+  if (rndSubTimer) { clearTimeout(rndSubTimer); rndSubTimer = null }
+  // 指针落在这一族里就展开：不能等「已用过」才开 —— 子面板就挂在本区内，
+  // 若进区不置 true，指针停下时这条分支永远走不到开的那一步，面板根本没有打开的路径。
+  if (over) { rndSubOpen.value = true; return }
+  // 离开这一族 → 延迟 220ms 再收（缝隙 / 划偏的容错），期间指针移回来会清掉这笔定时
+  rndSubTimer = setTimeout(() => { rndSubOpen.value = false; rndSubTimer = null }, 220)
+}
+onUnmounted(() => {
+  if (tabBarRO) { tabBarRO.disconnect(); tabBarRO = null }
+})
 function scrollToCard(key: string) {
   const el = document.querySelector(`[data-search="${key}"]`)
   if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
@@ -368,6 +429,8 @@ const cfg = reactive({
   // 形象素材包下载源：用户自填的加速前缀（如 'https://ghfast.top/'），空 = 只用内置候选链
   // （默认 ghfast.top → 直连 github.com 兜底）。与 ghAccelSrc 无关，只作用于「按需下载形象」
   skinPackSrc: '',
+  // 「随机」抽签是否把随包内置形象算进池子（默认算）。关掉后池子只剩用户勾选参与随机的项
+  randomIncludeBuiltin: true,
   // 通知渠道：系统通知（默认开）+ 邮件通知（默认关，需先配 SMTP）。
   // 邮件的收发件人/显示名/主题前缀属于「配置」进这里；服务器、账号、授权码属于凭据，走 mail 表单
   notifySystemOn: true,
@@ -4838,7 +4901,7 @@ function onOpacityCommit() {
   services.saveConfig?.({ opacity: cfg.opacity })
 }
 // —— 自定义音效（按压/释放两段 + 四类提醒各一组，文件复制进本地数据目录） ——
-// 每个槽位是「音效组」：可导入多段，挂件每次随机播一条
+// 每个槽位只保留一段：再导入就是替换掉旧的（挂件端不再有「随机播」这回事）
 // 同值副本：preload 不参与打包，设置页读不到宿主常量（见 public/preload/lib/sounds.js 的 ROLES / ROLE_LABEL）
 const SOUND_ROLES: SoundRole[] = ['press', 'release', 'low', 'budget', 'peak', 'pass']
 // 四类提醒各自的提醒音：留空 = 静音（没有内置回落，不打扰是默认），导入后跟随音效开关与音量
@@ -4866,17 +4929,21 @@ const soundData = ref(blankSoundMap<string[]>([]))
 const soundFlash: Flash = useFlash()
 // 试听实例放在模块级：再点「试听」先停掉上一个，避免两段音频叠在一起
 let previewAudio: HTMLAudioElement | null = null
+// 当前实例的收尾回调（自然放完 / 被停掉时调用），见 playAudioUrl
+let previewOnDone: (() => void) | null = null
 // 波形裁剪弹层：非空时显示（选文件 → 裁剪 → 确认后才落盘）
 const soundTrim = ref<{ dataUrl: string; name: string; role: SoundRole } | null>(null)
 // 模板里取某个槽位的元信息：直接写 soundsMeta[r] 的索引访问收窄不稳，统一走这个小函数
 function soundMetaOf(role: SoundRole): SoundMeta[] {
   return soundsMeta.value[role] || []
 }
-// 槽位概览文案：一段就报名字，多段报「首个 等 N 段」
+// 槽位概览文案：报该槽位当前那段的名字（空则回空串）。
+// 每个槽位最多一段，所以不再有「首个 等 N 段」的分支 —— 那种写法在两段同名时会拼成
+// 字面量「来财 等 2 段」，读着像一个叫「来财等2段」的音效，是块旧伤。
+// 为兼容用户升级前存下的多段数据（旧 meta 里可能仍有 2 段），这里只取第一段展示。
 function soundLabel(role: SoundRole): string {
   const list = soundMetaOf(role)
-  if (!list.length) return ''
-  return list.length === 1 ? list[0].name : `${list[0].name} 等 ${list.length} 段`
+  return list.length ? list[0].name : ''
 }
 function refreshSounds() {
   const m = services.getSounds?.()
@@ -4888,27 +4955,43 @@ function refreshSounds() {
   if (d) for (const r of SOUND_ROLES) nextData[r] = d[r] || []
   soundData.value = nextData
 }
+// 停止试听。onDone 是当前实例的收尾回调（见 playAudioUrl）：停掉时也要调用，
+// 否则「试听中」的状态标记会留在界面上，按钮一直显示「停止」。
 function stopPreviewSound() {
-  if (!previewAudio) return
-  try { previewAudio.pause() } catch (err) {}
+  const el = previewAudio
+  if (!el) return
   previewAudio = null
+  const done = previewOnDone
+  previewOnDone = null
+  try { el.pause() } catch (err) {}
+  if (done) done()
 }
-// 试听一段音频（自定义音效与内置音色共用）：错误写进传入的消息态，各自卡片里显示
-function playAudioUrl(url: string, flash: Flash) {
+// 试听一段音频（自定义音效与内置音色共用）：错误写进传入的消息态，各自卡片里显示。
+// onDone 在自然放完 / 被 stopPreviewSound 打断时各调一次，供调用方清「正在播哪一段」的标记。
+function playAudioUrl(url: string, flash: Flash, onDone?: () => void) {
   stopPreviewSound()
   try {
     const el = new Audio(url)
     el.volume = Math.min(1, Math.max(0, cfg.vol))
     previewAudio = el
-    el.onended = () => { if (previewAudio === el) previewAudio = null }
+    previewOnDone = onDone || null
+    // 只有「当前实例」才清状态：用户连点两段时，先一段的 ended 会晚于 stopPreviewSound 触发，
+    // 不加这层判断会把后一段的状态标记误清掉，按钮刚亮又灭。
+    el.onended = () => {
+      if (previewAudio === el) { previewAudio = null; previewOnDone = null }
+      if (onDone) onDone()
+    }
     // play() 是 Promise：解码失败或被自动播放策略拦下时给个提示，不要静默
     el.play().catch((err: any) => {
       flash.err = true
       flash.msg = '试听失败：' + String(err?.message || err)
+      if (previewAudio === el) { previewAudio = null; previewOnDone = null }
+      if (onDone) onDone()
     })
   } catch (err: any) {
     flash.err = true
     flash.msg = '试听失败：' + String(err?.message || err)
+    if (onDone) onDone()
   }
 }
 // 试听某一段（idx 是该槽位音效组里的第几段）
@@ -5042,12 +5125,104 @@ const skinMeta = computed<SkinMeta | null>(() => {
   const g = skinGallery.value
   return g.items.filter((it) => it.id === g.current)[0] || null
 })
+// 当前选中的那些（「置顶 / 删除 / 参与随机」三个卡头动作的作用对象）。
+// 与 skinGallery.current（正在使用的那张）是两回事：选中只是「接下来要操作它们」，
+// 单击缩略图 = 切换选中，双击 = 切换使用 —— 这样动作不必每张图各挂一套按钮。
+const skinPicked = ref<string[]>([])
+// 选中项被删掉 / 列表刷新后可能已不存在，用它安全回退（返回值即「仍存在的选中项」，交给宿主时不会带脏 id）
+const pickedSkinned = computed(() => {
+  const ids = skinPicked.value
+  return skinGallery.value.items.filter(it => ids.indexOf(it.id) >= 0)
+})
 const skinFlash: Flash = useFlash()
+// 缩略图加载失败的格子（键是 item.id）：宿主把缩略图读成 data URL 给出后，浏览器端仍可能解码失败
+// （落盘文件被外部删掉、data URL 被截断、动图格式浏览器不认）。不记这一笔的话，img 加载失败就是一块空白格 ——
+// 用户看到「这张没有预览」却不知道其实坏在读取环节，这正是一堆格子显示「无预览」的观感来源
+const thumbBroken = reactive<Record<string, boolean>>({})
+// 「导入的形象」卡片底部操作说明的展开态：默认收起，把「当前使用 + 随机规则」压成一行，
+// 免得 30+ 格的画廊下面再堆三行说明
+const skinHintOpen = ref(false)
+// 卡头「整理」下拉的展开态。值就是**当前展开的那个下拉的名字**，空串 = 全收起。
+//
+// 早先这里是布尔 rndMenuOpen，而卡头上有「选中操作」「随机设置」两个下拉 —— 一个布尔
+// 同时控制两个面板，点任意一个两个都展开；箭头又各自渲染自己的表达式，于是并排出现
+// 两个面板、箭头方向还相反，看着像两个互不相干的菜单各自抽风。
+// 现在只有一个下拉，仍保留「带名字」的形式而不用布尔：以后若再加第二个下拉，
+// 直接写第二个名字即可，天然互斥，不会再退化成上面那种双开。
+const rndMenu = ref<'' | 'organize'>('')
+// 「全部 N 张」那一族的悬停展开态（见 onDocMoveForRndMenu）。只在打开「整理」时重置，
+// 不随指针每次划过都清 —— 指针在别的菜单项上掠过不该把用户已经展开的那段收掉。
+const rndSubOpen = ref(false)
+const rndSubHover = ref<HTMLElement | null>(null)
+// 是否用过这一族里的动作：用过一次就当长期偏好，之后开「整理」默认替用户展一瞬（见 toggleRndMenu）
+const rndSubUsed = ref(false)
+// 是否已经看过这一族的展开态（含自动展的那一瞬）：只自动展一次，
+// 让「全部参与随机」这些入口的存在可见 —— 之后改由用户自己悬停，不再自动打断
+const rndSubSeen = ref(false)
+let rndSubTimer: ReturnType<typeof setTimeout> | null = null
+// 面板坐标（fixed，相对视口）。面板之所以不用 absolute 挂在卡头下沿，见 .rnd-menu-panel 的样式注释：
+// 吸顶的 .tab-bar 自成一格层叠上下文，会把卡头里的下拉切掉一半。
+// 右边缘与卡头按钮右对齐、上边缘贴按钮下沿 —— 用按钮自己的 rect 算，而不是面板的（面板还没渲染）。
+const rndPanelPos = ref<{ right: number; top: number; minWidth: number }>({ right: 0, top: 0, minWidth: 0 })
+function toggleRndMenu(e: MouseEvent) {
+  if (rndMenu.value) { rndMenu.value = ''; return }
+  const btn = (e.currentTarget as HTMLElement).getBoundingClientRect()
+  rndPanelPos.value = {
+    right: Math.max(8, window.innerWidth - btn.right),
+    top: btn.bottom + 4,
+    // 面板至少与按钮同宽：菜单项比按钮窄时悬停高亮会比按钮还短，看着像没对齐
+    minWidth: btn.width,
+  }
+  rndMenu.value = 'organize'
+  rndSubOpen.value = false
+  if (rndSubTimer) { clearTimeout(rndSubTimer); rndSubTimer = null; return }
+  // 只自动展一次：没看过就让这一族替用户亮一瞬（1.2s），之后收起交给悬停。
+  // 用过里面动作的（rndSubUsed）也走这条 —— 已经用得上的人更该一眼看到入口。
+  // 看过之后（rndSubSeen）不再自动展，否则每次开面板都自己弹一下，比常驻展开更烦。
+  if (rndSubSeen.value) return
+  // 用 setTimeout(0) 等 DOM 出来再量高度，否则元素还没插入
+  rndSubTimer = setTimeout(() => {
+    rndSubOpen.value = true
+    rndSubSeen.value = true
+    rndSubTimer = setTimeout(() => { rndSubOpen.value = false; rndSubTimer = null }, 1200)
+  }, 0)
+}
+// 这一族里的动作用过就记下来（下次开「整理」仍替用户亮一瞬），随后照常收起面板
+function doBatchRandom(mode: 'all' | 'none' | 'keepCurrent') {
+  rndSubUsed.value = true
+  doBatchSkinRandom(mode)
+  rndMenu.value = ''
+}
+function onThumbError(key: string) {
+  thumbBroken[key] = true
+}
 // 裁剪弹层：非空时显示（选图片 → 裁剪 → 确认后才落盘）
 const skinCrop = ref<{ dataUrl: string; name: string } | null>(null)
 function refreshSkin() {
   const g = services.listSkins?.()
   skinGallery.value = g && Array.isArray(g.items) ? g : { current: '', items: [] }
+  // 重新拉过一轮列表，之前那批「坏图」标记要清掉 —— 否则补上缩略图 / 重新导入同 id 后仍显示坏图提示
+  for (const k of Object.keys(thumbBroken)) delete thumbBroken[k]
+  backfillMissingThumbs()
+}
+// 懒补缩略图（老数据升级用）：v1.9.x 早先版本下载共享角色时没落缩略图，listSkins 只能回落读原图
+// （0.9~2.7MB 一张，8MB 回落预算撑不过 4 张），后面的项全显示「无预览」。
+// 设置页手上有打包好的 resources/thumbs/<id>.webp，哪张缺就补哪张 —— 补完再刷新一次列表，
+// 让回落那几张换成几 KB 的缩略图。只跑一轮（补完 refreshSkin 再进来时列表里已都有 thumb，直接返回）。
+// 不打 flash / 不报错：这是后台自愈动作，读不到资源就算了（回落原图仍能显示），不该打扰用户。
+const backfillingThumbs = ref(false)
+function backfillMissingThumbs() {
+  const missing = skinGallery.value.items.filter(it => !it.thumb && it.builtin === true)
+  if (!missing.length || backfillingThumbs.value) return
+  backfillingThumbs.value = true
+  Promise.all(missing.map(async (it) => {
+    const url = await sharedSkinThumbDataUrl(it.id)
+    if (url) services.setSkinThumb?.(it.id, url)
+  })).then(() => {
+    backfillingThumbs.value = false
+    const g = services.listSkins?.()
+    if (g && Array.isArray(g.items)) skinGallery.value = g
+  })
 }
 // 缩略图（等比缩到 128px 内、PNG data URL）：画廊网格要同时显示多张，直接读原图（动图可能好几 MB）
 // 既慢又占内存；宿主 preload 跑在渲染进程，没有 canvas / nativeImage 可用，只能在这里生成后传过去。
@@ -5145,17 +5320,17 @@ async function onSkinCropConfirm(p: { dataUrl: string; name: string }) {
     skinFlash.msg = '导入失败：' + String(err?.message || err)
   }
 }
-// 随机换一张形象。抽签池 = 画廊里所有「勾选了参与随机」的项（含用户自己导入的），
-// 加上随包内置那张（它不在画廊里，但永远可用）。
-// 修复点：旧版池子只含「带 builtin 标记的官方图」，用户一张没下载时池里只剩当前这张，
-// 排掉后为空、点随机毫无反应 —— 现在自定义图默认也参与（random 缺省 true），池子不会空。
-// randomSkinPool 只做展示（卡片上显示「随机池 N 张」），实际抽签用 allSkinChoices。
-// 展示口径与用户能勾选的格子对齐：只数画廊里参与随机的项 —— 内置那张不在画廊里、没有勾选框，
-// 若把它算进计数，用户数格子会数不上，以为数字不对。
+// 随机换一张形象。抽签池 = 画廊里所有「未取消参与随机」的项（含用户自己导入的），
+// 再加上随包内置那张 —— 但内置是否参与由「内置形象也参与随机」开关决定（默认参与）。
+// randomSkinPool 只做展示（卡片提示里显示参与随机的张数）：只数画廊项，
+// 内置那张不在画廊里，若算进计数用户会数不上。
 const randomSkinPool = computed(() => skinGallery.value.items.filter(it => it.random !== false).map(it => it.id))
-// 抽签用全集：内置 id 去重后合并画廊里参与随机的项
+// 抽签用全集：内置 id（仅在开关打开时）去重后合并画廊里参与随机的项
 const allSkinChoices = computed(() => {
-  const out = BUILTIN_SKINS.slice()
+  const out: string[] = []
+  if (cfg.randomIncludeBuiltin !== false) {
+    for (const s of BUILTIN_SKINS) if (out.indexOf(s) < 0) out.push(s)
+  }
   for (const it of skinGallery.value.items) {
     if (it.random !== false && out.indexOf(it.id) < 0) out.push(it.id)
   }
@@ -5164,27 +5339,47 @@ const allSkinChoices = computed(() => {
 function doRandomSkin() {
   const pool = allSkinChoices.value.filter(s => s !== cfg.skin)
   if (!pool.length) {
-    // 池子只剩当前这张：要么总共只有一张，要么其它张都被取消了参与随机 —— 明确说明而非静默不动
+    // 池子只剩当前这张：要么总共只有一张，要么其它张都退出了随机池 —— 明确说明而非静默不动。
+    // 文案与整理面板里「全部参与随机」对齐，让用户知道去哪加回来。
+    const galleryCount = skinGallery.value.items.length
     skinFlash.msg = allSkinChoices.value.length <= 1
-      ? '只有一张形象可随机，先多下载或导入几张'
-      : '其它形象都没勾选「参与随机」，去画廊里勾上'
+      ? (cfg.randomIncludeBuiltin === false
+        ? '随机池是空的：内置形象没参与、画廊里也没有参与随机的项，用「整理 → 全部参与随机」加回来'
+        : '只有一张形象可随机，先多下载或导入几张')
+      : `其它 ${galleryCount - 1} 张都未参与随机，用「整理 → 全部参与随机」加回来`
     skinFlash.err = true
     return
   }
   skinFlash.msg = ''
   skinFlash.err = false
   const pick = pool[Math.floor(Math.random() * pool.length)]
-  cfg.skin = pick
-  patchCfg({ skin: pick })
-  // 抽到画廊里的图时，把「当前使用」也同步过去，否则切回内置后画廊的「使用中」角标会对不上
+  // 顺序要紧：先让宿主把 current 切到 pick，成功后再写配置。
+  // 反过来（先写 cfg.skin 再切）一旦 setSkinCurrent 失败，配置说用 A、宿主 current 还是 B，
+  // 挂件仍显示 B、刷新后选择器又被拉回旧值 —— 这正是「随机了挂件不换 / 又变回内置」的根因。
   if (skinGallery.value.items.some(it => it.id === pick)) {
-    services.setSkinCurrent?.(pick)
+    const r = services.setSkinCurrent?.(pick)
+    if (!r || !r.ok) {
+      skinFlash.err = true
+      skinFlash.msg = '随机失败：' + ((r && r.error) || '无法切换形象')
+      return
+    }
     refreshSkin()
+    cfg.skin = 'custom'
+    patchCfg({ skin: cfg.skin })
+  } else {
+    // 抽到内置：直接把配置切到那个内置 id（无需动宿主 current）
+    cfg.skin = pick
+    patchCfg({ skin: pick })
   }
   const label = pick === 'custom' ? '自定义' : (
     skinGallery.value.items.filter(it => it.id === pick)[0]?.name || pick
   )
   skinFlash.msg = '已随机到「' + label + '」'
+}
+// 开关：内置（随包）形象是否也算进随机池。只影响后续抽签，不动当前这张。
+function onToggleIncludeBuiltin(on: boolean) {
+  cfg.randomIncludeBuiltin = on
+  patchCfg({ randomIncludeBuiltin: on })
 }
 
 // 换用画廊里的某一张（顺带把「形象」切到自定义，否则点了没反应）
@@ -5208,29 +5403,224 @@ function doUseSkin(id: string) {
     skinFlash.msg = '切换失败：' + String(err?.message || err)
   }
 }
-// 置顶：只调整画廊顺序，不改变正在使用的那张
-function doPinSkin(id: string) {
-  try {
-    services.pinSkin?.(id)
-    refreshSkin()
-  } catch (err: any) {
-    skinFlash.err = true
-    skinFlash.msg = '置顶失败：' + String(err?.message || err)
-  }
+// 点缩略图 = 切换选中（卡头「整理」面板里「选中的 N 张」那一段作用于这批），再点一次取消选中。
+// 与「切换使用」分开：切换改走双击（见 doUseSkinPick），这样每张图不必再挂按钮。
+// 多选：图片够多时「删掉这几张旧图」要比一张张点快得多，所以选中态是个集合而非单个。
+function pickSkin(id: string) {
+  const i = skinPicked.value.indexOf(id)
+  if (i >= 0) skinPicked.value.splice(i, 1)
+  else skinPicked.value.push(id)
 }
-// 勾选 / 取消「参与随机」：只影响抽签池，不改变正在使用的那张
-function doToggleSkinRandom(id: string, on: boolean) {
+// 双击缩略图 = 切换使用（原来单击干的事）
+function doUseSkinPick(id: string) {
+  skinPicked.value = [id]
+  doUseSkin(id)
+}
+// 整理面板「使用选中的」：单击选中后承接「切换使用」，不必再双击。
+// 双选时取最后点中的那张（skinPicked 是数组，取末位即最近一次选择，符合「刚点的那张」直觉）
+function doUsePicked() {
+  const picked = pickedSkinned.value
+  if (!picked.length) { skinFlash.err = true; skinFlash.msg = '先点一下缩略图选中它，再切换使用'; return }
+  doUseSkinPick(picked[picked.length - 1].id)
+}
+// 卡头「移到最前 / 移到最后」：把选中的这几张按画廊顺序整体搬到一端。
+// 置底的落点写 items.length 而不是 length-1：doMoveSkins 内部是「先剔除再插到第 want 个」，
+// 剔除后列表短了一截，传入原先的总长度会被它夹到 rest.length（即真正的末尾）。
+function doPinPicked() {
+  const picked = pickedSkinned.value
+  if (!picked.length) { skinFlash.err = true; skinFlash.msg = '先点几张缩略图选中它们，再置顶'; return }
+  doMoveSkins(picked.map(it => it.id), 0, 'top')
+}
+function doBottomPicked() {
+  const picked = pickedSkinned.value
+  if (!picked.length) { skinFlash.err = true; skinFlash.msg = '先点几张缩略图选中它们，再置底'; return }
+  doMoveSkins(picked.map(it => it.id), skinGallery.value.items.length, 'bottom')
+}
+// 卡头「删除」：一次删掉选中的这几张，删完清空选中
+function doRemovePicked() {
+  const picked = pickedSkinned.value
+  if (!picked.length) { skinFlash.err = true; skinFlash.msg = '先点几张缩略图选中它们，再删除'; return }
+  doRemoveSkins(picked.map(it => it.id))
+  skinPicked.value = []
+}
+// 参与随机点名的「应用」：把选中的这几张一次性设为参与 / 不参与
+// （与「整理」下拉里「全部」那段的批量动作同源，都走 setSkinRandomBatch 一次写盘）
+function applyPickedRandom(on: boolean) {
+  const picked = pickedSkinned.value
+  if (!picked.length) { skinFlash.err = true; skinFlash.msg = '先点几张缩略图选中它们，再点这里'; return }
+  const map: Record<string, boolean> = {}
+  for (const it of picked) map[it.id] = on
   try {
-    const r = services.setSkinRandom?.(id, on)
+    const r = services.setSkinRandomBatch?.(map)
     if (!r || !r.ok) {
       skinFlash.err = true
-      skinFlash.msg = '设置失败：' + ((r && r.error) || '未知错误')
+      skinFlash.msg = '应用失败：' + ((r && r.error) || '未知错误')
       return
     }
     refreshSkin()
+    skinFlash.err = false
+    skinFlash.msg = `已把 ${picked.length} 张设为${on ? '参与' : '不参与'}随机（现共 `
+      + `${skinGallery.value.items.filter(it => it.random !== false).length} / ${skinGallery.value.items.length} 张参与）`
   } catch (err: any) {
     skinFlash.err = true
-    skinFlash.msg = '设置失败：' + String(err?.message || err)
+    skinFlash.msg = '应用失败：' + String(err?.message || err)
+  }
+}
+// 调整画廊顺序（可批量）：把 ids 里的项按原相对顺序整体搬到 index 落点，不影响正在使用的那张。
+// 调用方：置顶（index=0）/ 置底（index=items.length）/ 拖拽（落点下标），见 doPinPicked /
+// doBottomPicked / onSkinDrop。
+// 关键：**本地先重排（乐观更新），不调 refreshSkin()**。
+// 每动一次就整屏重建列表的话，会闪一下、悬停态丢失，鼠标停的位置还可能换成另一张，根本没法连点。
+// 这里只把 items 数组重新排一次 —— Vue 以 it.id 为 key 复用 DOM，只有顺序变化被 patch。
+// 宿主成功即完事；失败才回滚 + 重新拉列表兜底。
+// （宿主 moveSkin 还支持 'up' / 'down' 上下挪一格，但前端已改用拖拽排序，不再产生这两个值）
+//
+// label 只影响提示文案：同一个「没变化」的结果，置顶说「已经在最前一张」、置底说「已经在最后一张」，
+// 不传就退化成中性说法（拖拽落点用）。
+function doMoveSkins(ids: string[], index: number, label?: 'top' | 'bottom') {
+  skinFlash.msg = ''
+  skinFlash.err = false
+  const before = skinGallery.value.items
+  const set: Record<string, boolean> = {}
+  // 允许传进「已被删掉 / 不在列表里」的 id，这里顺手滤掉，省得宿主为一个脏 id 整批失败
+  for (const id of ids) if (before.some(it => it.id === id)) set[id] = true
+  const movingCount = Object.keys(set).length
+  if (!movingCount) return
+  // 先筛出要搬的那批（保持画廊顺序），再把剩下的与它们拼接 —— 单张置顶 / 批量置顶共用这一段
+  const moving = before.filter(it => set[it.id])
+  const rest = before.filter(it => !set[it.id])
+  const want = Math.max(0, Math.min(Number(index) || 0, rest.length))
+  if (moving.length === before.length) {
+    skinFlash.msg = '选中的就是全部，无需调整'
+    return
+  }
+  const next = rest.slice(0, want).concat(moving, rest.slice(want))
+  // 顺序没变就别白写盘（如单张已在该位置）
+  if (next.every((it, i) => it.id === before[i].id)) {
+    skinFlash.msg = movingCount > 1 ? '顺序已是这样，无需调整'
+      : label === 'top' ? '已经在最前一张'
+      : label === 'bottom' ? '已经在最后一张'
+      : '位置没有变化'
+    return
+  }
+  // 乐观更新：先动本地数组，用户立刻看到新顺序
+  skinGallery.value = { ...skinGallery.value, items: next }
+  try {
+    const r = services.moveSkins?.(moving.map(it => it.id), want)
+    if (!r || !r.ok) {
+      skinFlash.err = true
+      skinFlash.msg = '调整顺序失败：' + ((r && r.error) || '未知错误')
+      refreshSkin()  // 回滚成宿主真值
+      return
+    }
+    // 宿主把落点夹回合法范围后可能与本地算的不同（并发改动），以宿主返回的 index 为准校一次
+    if (typeof r.index === 'number' && r.index !== want) refreshSkin()
+    const name = moving[0]?.name || '形象'
+    if (movingCount === 1) {
+      skinFlash.msg = label === 'bottom' ? `已把「${name}」移到最后` : `已置顶「${name}」`
+    } else {
+      skinFlash.msg = label === 'bottom' ? `已把 ${movingCount} 张移到最后` : `已把 ${movingCount} 张移到最前`
+    }
+  } catch (err: any) {
+    skinFlash.err = true
+    skinFlash.msg = '调整顺序失败：' + String(err?.message || err)
+    refreshSkin()
+  }
+}
+// —— 拖拽排序 ——
+// draggingId 是被拖的那张（拖拽中给源格半透明、给落点格一条插入指示线）。
+// 落点用「鼠标在目标格左半 / 右半」决定插到它前面还是后面，符合列表拖拽的通用直觉。
+const draggingId = ref('')
+const dragOverId = ref('')
+const dragOverAfter = ref(false)
+function onSkinDragStart(id: string, e: DragEvent) {
+  draggingId.value = id
+  if (e.dataTransfer) {
+    e.dataTransfer.effectAllowed = 'move'
+    e.dataTransfer.setData('text/plain', id)  // Firefox 需要设了 data 才会真正启动拖拽
+  }
+}
+function onSkinDragOver(it: { id: string }, e: DragEvent) {
+  if (!draggingId.value || draggingId.value === it.id) return
+  e.preventDefault()  // 不 preventDefault 就不会触发 drop
+  if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'
+  const box = (e.currentTarget as HTMLElement).getBoundingClientRect()
+  dragOverId.value = it.id
+  dragOverAfter.value = e.clientX > box.left + box.width / 2
+}
+function onSkinDragEnd() {
+  draggingId.value = ''
+  dragOverId.value = ''
+  dragOverAfter.value = false
+}
+function onSkinDrop(it: { id: string }, e: DragEvent) {
+  e.preventDefault()
+  const id = draggingId.value
+  const after = dragOverAfter.value
+  onSkinDragEnd()
+  if (!id || id === it.id) return
+  // 目标格的下标 ± 1 得到「插到哪」；doMoveSkins 内部会再夹一次范围
+  const items = skinGallery.value.items
+  const targetIdx = items.findIndex(x => x.id === it.id)
+  if (targetIdx < 0) return
+  const want = after ? targetIdx + 1 : targetIdx
+  doMoveSkins([id], want)
+}
+// 批量改「参与随机」：mode = all（全启用）/ none（全停用）/ keepCurrent（只留当前使用那张）。
+// 走宿主的 setSkinRandomBatch —— 整张清单只读改写盘一次；逐张改会做 N 次全量读改写盘
+// （37 张 = 37 次），这里不再那么干。
+function doBatchSkinRandom(mode: 'all' | 'none' | 'keepCurrent') {
+  rndMenu.value = ''
+  skinFlash.msg = ''
+  skinFlash.err = false
+  const items = skinGallery.value.items
+  if (!items.length) return
+  const map: Record<string, boolean> = {}
+  for (const it of items) {
+    if (mode === 'all') map[it.id] = true
+    else if (mode === 'none') map[it.id] = false
+    else map[it.id] = it.id === skinGallery.value.current
+  }
+  try {
+    const r = services.setSkinRandomBatch?.(map)
+    if (!r || !r.ok) {
+      skinFlash.err = true
+      skinFlash.msg = '批量设置失败：' + ((r && r.error) || '未知错误')
+      return
+    }
+    refreshSkin()
+    skinFlash.msg = mode === 'all' ? '已全部设为参与随机'
+      : mode === 'none' ? '已全部取消随机' : '已只保留当前使用那张参与随机'
+  } catch (err: any) {
+    skinFlash.err = true
+    skinFlash.msg = '批量设置失败：' + String(err?.message || err)
+  }
+}
+// 一次删掉多张（卡头「删除」作用于选中的那批）：走宿主 removeSkins —— 一趟读改写盘删完，
+// 逐张调 removeSkin 会做 N 次全量读改写盘，删 10 张就是 10 趟。
+function doRemoveSkins(ids: string[]) {
+  skinFlash.msg = ''
+  skinFlash.err = false
+  try {
+    const r = services.removeSkins?.(ids)
+    if (!r || !r.ok) {
+      skinFlash.err = true
+      skinFlash.msg = '删除失败：' + ((r && r.error) || '未知错误')
+      return
+    }
+    skinFlash.msg = `已删除 ${r.removed ?? ids.length} 张形象`
+    refreshSkin()
+    // 删掉的可能正是「共享角色」那些格（画廊与共享网格是同一批文件的两个视图），
+    // 不跟着刷一下，共享区仍显示「已装」、按钮还是「删」——用户会以为没删掉。
+    refreshSharedSkins()
+    // 一张都不剩了还停在「自定义」就无图可显示，回退内置形象
+    if (!skinGallery.value.items.length && cfg.skin === 'custom') {
+      cfg.skin = DEFAULT_SKIN
+      patchCfg({ skin: cfg.skin })
+    }
+  } catch (err: any) {
+    skinFlash.err = true
+    skinFlash.msg = '删除失败：' + String(err?.message || err)
   }
 }
 function doRemoveSkin(id: string) {
@@ -5245,6 +5635,9 @@ function doRemoveSkin(id: string) {
     }
     skinFlash.msg = '已删除该形象'
     refreshSkin()
+    // 删掉的可能正是「共享角色」那一格（画廊与共享网格是同一批文件的两个视图），
+    // 不跟着刷一下，共享区仍显示「已装」、按钮还是「删」——用户会以为没删掉。
+    refreshSharedSkins()
     // 一张都不剩了还停在「自定义」就无图可显示，回退内置形象
     if (!skinGallery.value.items.length && cfg.skin === 'custom') {
       cfg.skin = DEFAULT_SKIN
@@ -5347,6 +5740,21 @@ function assetAt(m: { at?: number } | null) {
   const p2 = (x: number) => String(x).padStart(2, '0')
   return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}`
 }
+// 同一天的日期在列表里是纯噪声（同一槽位的几段多半是同一天导入的），只留时分。
+// 隔天的才带上「昨天 / MM-DD」。用来在多个同名段之间分辨「哪个是刚加的那个」。
+function assetAtShort(m: { at?: number } | null) {
+  const t = Number(m && m.at) || 0
+  if (!t) return ''
+  const d = new Date(t)
+  const now = new Date()
+  const p2 = (x: number) => String(x).padStart(2, '0')
+  const hm = `${p2(d.getHours())}:${p2(d.getMinutes())}`
+  const sameDay = d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate()
+  if (sameDay) return `今天 ${hm}`
+  const y = new Date(now.getTime() - 86400000)
+  const isYday = d.getFullYear() === y.getFullYear() && d.getMonth() === y.getMonth() && d.getDate() === y.getDate()
+  return isYday ? `昨天 ${hm}` : `${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${hm}`
+}
 // 全部清除：形象 + 气泡图 + 六段音效（与「数据与隐私」里的按项清除同源，但只清素材、不动其它数据）。
 // 清完把形象/音色从「自定义」回退为内置，避免停在「自定义」却无素材可用
 function doClearAssets() {
@@ -5399,7 +5807,48 @@ function doClearAssets() {
 // 素材包容器格式与导入语义见 public/preload/lib/assets.js；这里只做界面编排。
 // 素材包不落配置（导完就完事），所以不涉及「配置四处同步铁律」。
 const assetsFold = reactive({ open: false })
+// 三个素材大卡的折叠状态：网格一屏铺几十格很占地方，默认收起，点标题展开。
+// 与「素材包 / 数据目录」那两个 .fold 分开管 —— 它们是卡片内的子块，这几个是整卡收起
+const galleryFolds = reactive({ skins: false, sharedSkins: false, sharedSounds: false })
+// 卡片实际是否展开 = 用户手动状态 或 搜索态。搜索会把跨 Tab 的命中卡渲染出来，
+// 这时若还收着，用户搜到「共享角色」却只看到一行「共 N 张，点标题展开」—— 等于搜索失效。
+// 只在搜索期强制展开，不写回 galleryFolds：退出搜索后仍尊重用户原来的折叠选择。
+function galleryOpen(key: 'skins' | 'sharedSkins' | 'sharedSounds') {
+  return searchActive.value || galleryFolds[key]
+}
 const assetsFlash: Flash = useFlash()
+// 素材落盘目录（形象 / 音效 / 气泡）。路径由宿主给（只有它知道 userData 在哪），这里只接展开展示。
+// 惰性取：点「数据目录」时才问宿主，免得每次进资源页都多打一次 IPC
+const dataDirs = ref<{ skins: string; sounds: string; bubbles: string } | null>(null)
+const dataDirsOpen = ref(false)
+function toggleDataDirs() {
+  dataDirsOpen.value = !dataDirsOpen.value
+  if (dataDirsOpen.value && !dataDirs.value) {
+    try {
+      const r = services.dataDirs?.()
+      dataDirs.value = r || null
+    } catch {
+      dataDirs.value = null
+    }
+  }
+}
+function openDataDir(p: string) {
+  if (!p) return
+  assetsFlash.msg = ''
+  assetsFlash.err = false
+  try {
+    // openDir 是同步的 shellOpenPath，失败走返回值而不是抛异常 —— 只看 catch 的话，
+    // 目录不存在 / 被占用这类真失败会静默吞掉，用户点了「打开」以为没反应
+    const r = services.openDir?.(p)
+    if (!r || !r.ok) {
+      assetsFlash.err = true
+      assetsFlash.msg = '打开目录失败，可手动复制上面的路径到文件管理器'
+    }
+  } catch (err: any) {
+    assetsFlash.err = true
+    assetsFlash.msg = '打开目录失败：' + String(err?.message || err)
+  }
+}
 const assetsBusy = ref(false)
 const assetsPack = ref<AssetsPreviewResult | null>(null)
 const assetsPicks = reactive({ skins: true, sounds: true, bubbles: true })
@@ -5410,7 +5859,7 @@ const assetsAnyItem = computed(() => (assetsPicks.skins && !!assetsPack.value?.h
 // 内置音色（同值副本：public/floating-page.js 的 SOUND_FILES，加一组要两处一起改）
 const BUILTIN_SOUND_SETS: Array<{ key: string; label: string; press: string; release: string }> = [
   { key: 'duck', label: '小黄鸭', press: './whale/Ya1.mp3', release: './whale/Ya2.mp3' },
-  { key: 'fx1', label: '音效1', press: './whale/D1.mp3', release: './whale/D2.mp3' },
+  { key: 'fx1', label: '音效 1', press: './whale/D1.mp3', release: './whale/D2.mp3' },
 ]
 // 内置形象图片路径：同值副本（public/floating-page.js 的 BUILTIN_SKINS），一律 .webp
 function builtinSkinUrl(id: string) {
@@ -5557,6 +6006,26 @@ async function doSkinPackCell(id: string) {
 function sharedSkinThumb(id: string) {
   return './resources/thumbs/' + encodeURIComponent(id) + '.webp'
 }
+// 把打包好的缩略图（resources/thumbs/<id>.webp，几 KB）读成 data URL 交给宿主落盘。
+// 为什么必须由设置页给：宿主（preload）定位不到插件目录 —— 它只有 utools.getPath('userData')，
+// 而相对路径 './resources/...' 只有渲染进程能解析。不给的话下载回来的共享角色没有缩略图，
+// 画廊只能回落读原图（0.9~2.7MB 一张），很快耗光 listSkins 的 8MB 回落预算，后面全显示「无预览」。
+// 读失败（资源缺失 / 不是有效图片）一律返回 ''：宁可这张暂时没缩略图（回落原图仍能显示），
+// 也不能因为读图失败把整张角色图的下载带崩。
+async function sharedSkinThumbDataUrl(id: string): Promise<string> {
+  try {
+    const res = await fetch(sharedSkinThumb(id))
+    if (!res.ok) return ''
+    const buf = await res.arrayBuffer()
+    if (!buf.byteLength) return ''
+    let bin = ''
+    const bytes = new Uint8Array(buf)
+    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i])
+    return 'data:image/webp;base64,' + btoa(bin)
+  } catch (err) {
+    return ''
+  }
+}
 const sharedSkinList = ref<SharedSkinList | null>(null)
 const sharedSkinBusy = ref(false)
 const sharedSkinFlash: Flash = useFlash()
@@ -5593,11 +6062,14 @@ async function doDownloadSharedSkins() {
     const todo = sharedSkinItems.value.filter(it => !it.installed)
     const failed: string[] = []
     for (const it of todo) {
-      const r = await services.downloadSharedSkin?.(it.id, cfg.skinPackSrc || '')
+      const r = await services.downloadSharedSkin?.(it.id, cfg.skinPackSrc || '',
+        await sharedSkinThumbDataUrl(it.id))
       if (!r || !r.ok) failed.push(it.name + '：' + ((r && r.error) || '下载失败'))
+      // 逐张刷新：整批跑完才刷的话，前面下好的几张在界面上一直灰着（亮不起来），
+      // 用户会以为「下载全部」没生效。单张耗时不高，这点重复开销换即时反馈值得。
+      refreshSharedSkins()
+      refreshSkin()
     }
-    refreshSkin()
-    refreshSharedSkins()
     const okCount = todo.length - failed.length
     if (failed.length) {
       sharedSkinFlash.msg = `已下载 ${okCount} 张，${failed.length} 张失败 —— ${failed[0]}`
@@ -5619,7 +6091,8 @@ async function doSharedSkinCell(id: string) {
   sharedSkinBusy.value = true
   dlTickStart()
   try {
-    const r = await services.downloadSharedSkin?.(id, cfg.skinPackSrc || '')
+    const r = await services.downloadSharedSkin?.(id, cfg.skinPackSrc || '',
+      await sharedSkinThumbDataUrl(id))
     refreshSkin()
     refreshSharedSkins()
     if (!r || !r.ok) {
@@ -5637,7 +6110,7 @@ async function doSharedSkinCell(id: string) {
 
 // —— 共享音效库（45 个，与共享角色同一个包来源，但落 sounds 的 shared 槽位） ——
 // shared 是「素材池」，不直接参与实播 —— 用户在下面从池子里「选用」到某个实播槽位才生效，
-// 否则一装几十段、挂件随机播到哪段全看运气。
+// 否则一装几十段、把原本选好的音效挤掉。
 const sharedSoundList = ref<SharedSoundList | null>(null)
 const sharedSoundBusy = ref(false)
 const sharedSoundFlash: Flash = useFlash()
@@ -5645,6 +6118,18 @@ const sharedSoundItems = computed(() => sharedSoundList.value?.items || [])
 const sharedSoundInstalledCount = computed(() => sharedSoundItems.value.filter(it => it.installed).length)
 const sharedSoundAllInstalled = computed(() => !!sharedSoundItems.value.length && sharedSoundInstalledCount.value >= sharedSoundItems.value.length)
 const sharedSoundTotalBytes = computed(() => Number(sharedSoundList.value?.totalSize || 0))
+// 列表按「是否已下载」分组渲染（见模板注释）：混排时两类行的控件数差 3 个，列对不齐。
+// 未下载那组默认收起 —— 45 段全列出来会把已下载的部分推到屏外。
+const sharedSoundInstalledItems = computed(() => sharedSoundItems.value.filter(it => it.installed))
+const sharedSoundPendingItems = computed(() => sharedSoundItems.value.filter(it => !it.installed))
+const sharedSoundPendingOpen = ref(false)
+// 正在试听的共享音效 id（null = 没在放）。用于把那一行的按钮切成「停止」并高亮。
+// 按 id 而不是 file：id 是列表项的稳定标识，refreshSharedSounds 后不变。
+const previewingSharedId = ref<string | null>(null)
+// 「删」的二次确认：值 = 已点过一次待确认的那一项 id。第一次点只切按钮文案，
+// 再点才真删；3 秒不点自动复原（timer 见 doRemoveSharedSound）。
+const removeConfirmId = ref<string | null>(null)
+let removeConfirmTimer: ReturnType<typeof setTimeout> | null = null
 const sharedSoundRemainBytes = computed(() => Number(sharedSoundList.value?.totalSize || 0)
   - sharedSoundItems.value.reduce((n, it) => n + (it.installed ? (Number(it.size) || 0) : 0), 0))
 function refreshSharedSounds() {
@@ -5665,9 +6150,10 @@ async function doDownloadSharedSounds() {
     for (const it of todo) {
       const r = await services.downloadSharedSound?.(it.id, cfg.skinPackSrc || '')
       if (!r || !r.ok) failed.push(it.name + '：' + ((r && r.error) || '下载失败'))
+      // 同上：逐段刷新，让下好的那几段立刻变亮
+      refreshSharedSounds()
+      refreshSounds()
     }
-    refreshSounds()
-    refreshSharedSounds()
     const okCount = todo.length - failed.length
     if (failed.length) {
       sharedSoundFlash.msg = `已下载 ${okCount} 段，${failed.length} 段失败 —— ${failed[0]}`
@@ -5702,21 +6188,69 @@ async function doDownloadSharedSound(it: SharedSoundItem) {
     sharedSoundBusy.value = false
   }
 }
+// 从共享音效库删一段：按落盘文件名（it.file）定位，name 不唯一。
+// 宿主会连「从这段选用出去的实播槽位副本」一起清掉（clearedRoles），否则用户删了池里这段、
+// 槽位那份照旧在响，看着就是「删了没删干净」。
+// 误点代价高（删完只能重新下载），所以先要一次二次确认：第一次点把按钮切成「确认删」，
+// 3 秒内不再点就自己复原（见 removeConfirmId / removeConfirmTimer）。
+function doRemoveSharedSound(it: SharedSoundItem) {
+  if (removeConfirmId.value !== it.id) {
+    removeConfirmId.value = it.id
+    if (removeConfirmTimer) clearTimeout(removeConfirmTimer)
+    removeConfirmTimer = setTimeout(() => { removeConfirmId.value = null }, 3000)
+    return
+  }
+  if (removeConfirmTimer) { clearTimeout(removeConfirmTimer); removeConfirmTimer = null }
+  removeConfirmId.value = null
+  sharedSoundFlash.msg = ''
+  sharedSoundFlash.err = false
+  const r = services.removeSharedSound?.(it.file || '')
+  if (!r || !r.ok) {
+    sharedSoundFlash.msg = (r && r.error) || '删除失败'
+    sharedSoundFlash.err = true
+    return
+  }
+  refreshSharedSounds()
+  refreshSounds()
+  // 清掉这一段残留的「选用到哪个槽位」选中值：不清的话，用户再下载回同一 id，
+  // 下拉框会带着上次的选择复现（看着像「删了没删干净」，而且一点「选用」就写进实播槽位）
+  delete sharedSoundUseRole[it.id]
+  // 试听中的正是这一段的话，停掉：音频已删，继续放着像没删成功
+  if (previewingSharedId.value === it.id) stopPreviewSound()
+  const cleared = (r.clearedRoles || [])
+  sharedSoundFlash.msg = `已删除「${it.name}」`
+    + (cleared.length ? `，并清掉了它在${cleared.map((x) => SOUND_ROLE_LABEL[x] || x).join(' / ')}上的选用` : '')
+}
 // 共享库里的一段「选用」到实播槽位。成功后刷新音效元信息（实播槽位多了一段）
 const sharedSoundUseRole = reactive<Record<string, SoundRole>>({})
-// 已下载状态按 id 记（shared 槽位没有「当前用哪段」，只有装没装）
-const sharedSoundInstalled = computed<Record<string, boolean>>(() => {
-  const out: Record<string, boolean> = {}
-  for (const it of sharedSoundItems.value) out[it.id] = it.installed === true
-  return out
-})
 async function doUseSharedSound(it: SharedSoundItem) {
   const role = sharedSoundUseRole[it.id]
-  if (!role) { sharedSoundFlash.msg = '先选一个音效段再点「选用」'; sharedSoundFlash.err = true; return }
-  const r = services.useSharedSound?.(it.name, role)
+  // 这里不需要「没选槽位」的兜底：按钮 :disabled="!sharedSoundUseRole[it.id]"，没选就点不动。
+  // 原先留了一句提示文案，属于永远触发不到的死代码，已删（真要兜底也应是改按钮语义，不是加提示）。
+  if (!role) return
+  // 传 it.file 而不是 it.name：宿主 useSharedSound(file) 是按「落盘文件名」在 meta.shared 里定位的
+  // （name 不唯一，同名的会误伤，见 SharedSoundItem.file 与 services.d.ts 的签名注释）。
+  // 这里原先传 name，与宿主查找键对不上 → 恒走「共享库中没有这段音效」分支，选用永远失败。
+  const r = services.useSharedSound?.(it.file, role)
   refreshSounds()
   if (r && r.ok) {
-    sharedSoundFlash.msg = `已把「${it.name}」加入${SOUND_ROLE_LABEL[role] || role}`
+    // 「按压 / 释放」是音色的两段，只在「音色 = 自定义」时才参与播放
+    // （挂件侧 floating-page.js 的 applySoundSet 有此前置判断）。
+    // 不在这里顺手把音色切过去的话，用户在这张卡里选用了却听不到任何变化 ——
+    // 数据写对了、也推给挂件了，只是没被消费，看着像「选用没生效」。
+    // 只对这两类切：四类提醒音与音色无关，不能因为选了提醒音就把用户的音色改掉；
+    // 关闭音效开关时也不切（切了也放不出声，反而让用户以为设置乱了）。
+    let switched = false
+    if (cfg.soundOn && cfg.soundSet !== 'custom' && (role === 'press' || role === 'release')) {
+      cfg.soundSet = 'custom'
+      patchCfg({ soundSet: 'custom' })
+      switched = true
+    }
+    sharedSoundFlash.msg = `已把「${it.name}」选用到${SOUND_ROLE_LABEL[role] || role}`
+      + (switched ? '，并把「音色」切到了「自定义」' : '')
+    // 选用成功就把这一行的下拉复位：不清的话，下一段再点「选用」时残留着上次的槽位，
+    // 一点就顶掉；而且「已选用到 press」的提示挂在那儿，用户容易把残留值当成「这段已选用」。
+    delete sharedSoundUseRole[it.id]
     sharedSoundFlash.err = false
   } else {
     sharedSoundFlash.msg = (r && r.error) || '选用失败'
@@ -5724,17 +6258,21 @@ async function doUseSharedSound(it: SharedSoundItem) {
   }
 }
 // 试听共享库里的一段。shared 槽位不在 soundData（宿主只推实播槽位），
-// 按名从宿主临时取一段 data URL 来播
+// 按落盘文件名从宿主临时取一段 data URL 来播（同名的段靠 file 区分，按 name 会误取第一条）。
+// 再点正在放的那一段 = 停止：45 段的池子里试听是高频动作，没有停止态的话第二次点击是
+// 「停掉再从头放」，听感上像没响应；previewingSharedId 让按钮显示成「停止」并高亮当前那段。
 function doPreviewSharedSound(it: SharedSoundItem) {
   sharedSoundFlash.msg = ''
   sharedSoundFlash.err = false
-  const r = services.readSharedSoundData?.(it.name)
+  if (previewingSharedId.value === it.id) { stopPreviewSound(); return }
+  const r = services.readSharedSoundData?.(it.file)
   if (!r || !r.ok || !r.url) {
     sharedSoundFlash.msg = (r && r.error) || '没有可试听的音效'
     sharedSoundFlash.err = true
     return
   }
-  playAudioUrl(r.url, sharedSoundFlash)
+  previewingSharedId.value = it.id
+  playAudioUrl(r.url, sharedSoundFlash, () => { previewingSharedId.value = null })
 }
 // 导入素材的总占用与段数：单个文件缺失时 size 为 0，不影响其它项的统计
 const importedSoundCount = computed(() => SOUND_ROLES.reduce((n, r) => n + soundsMeta.value[r].length, 0))
@@ -6419,8 +6957,7 @@ function clearSelectedData() {
     dataFlash.msg = '清除失败：' + String(err?.message || err)
   }
 }
-// —— 备份与恢复（数据与隐私卡片）——
-const backupFolds = reactive({ open: false })
+// —— 备份与恢复（「数据」页独立卡片）——
 const backupWithSecrets = ref(false)
 const backupPassword = ref('')
 const backupBusy = ref(false)
@@ -6738,6 +7275,8 @@ function applyConfig(c: any) {
   }
   // 形象下载源前缀：宿主已归一化（非法串回空），这里只做类型兜底
   cfg.skinPackSrc = typeof c.skinPackSrc === 'string' ? c.skinPackSrc : ''
+  // 内置形象是否参与随机：缺省 true（老配置没有该字段时按「参与」处理，与升级前一致）
+  cfg.randomIncludeBuiltin = c.randomIncludeBuiltin !== false
   // 通知渠道：系统通知默认开（沿用旧行为）；邮件通知的服务器/授权码不在这里（走 secrets）
   cfg.notifySystemOn = c.notifySystemOn !== false
   cfg.notifyMailOn = c.notifyMailOn === true
@@ -6881,7 +7420,7 @@ onUnmounted(() => {
     <p class="sub">桌面透明置顶小窗 · 显示 DeepSeek 余额</p>
 
     <!-- 顶部 Tab：一次只显示一组卡片 -->
-    <nav class="tab-bar">
+    <nav class="tab-bar" ref="tabBarEl">
       <div class="tab-row">
         <button v-for="t in TABS" :key="t.key" type="button" class="tab"
                 :class="{ 'tab-on': !searchActive && activeTab === t.key }" @click="clearSearch(); activeTab = t.key">{{ t.label }}</button>
@@ -7000,9 +7539,16 @@ onUnmounted(() => {
                否则 select 显示空白；下载回来之前挂件回退默认形象显示，不误导 -->
           <option v-if="!BUILTIN_SKINS.includes(cfg.skin) && cfg.skin !== 'custom' && LEGACY_BUILTIN_SKINS.includes(cfg.skin)"
                   :value="cfg.skin">{{ cfg.skin }}（未下载）</option>
-          <option value="custom">自定义</option>
+          <!-- 「自定义」只是个语义占位，真正用哪张由宿主 current 决定。
+               直接显示「自定义」用户会以为没生效，这里映射成实际形象名 -->
+          <option value="custom">{{ skinMeta ? '自定义 · ' + skinMeta.name : '自定义' }}</option>
         </select>
         <button class="export-btn utils-btn utils-outline" type="button" title="从所有勾选了「参与随机」的形象里随机换一张" @click="doRandomSkin()">随机</button>
+      </label>
+      <label class="field row check">
+        <span class="label">内置形象也参与随机 <em>（关掉后随机池只剩你勾选「参与随机」的形象）</em></span>
+        <input type="checkbox" :checked="cfg.randomIncludeBuiltin !== false"
+               @change="onToggleIncludeBuiltin(($event.target as HTMLInputElement).checked)" />
       </label>
       <p v-if="cfg.skin === 'custom' && !skinMeta" class="hint">
         还没有导入形象，去「资源」页加一张后这里才有「自定义」可用（当前会回退为「默认形象」）。
@@ -7071,7 +7617,7 @@ onUnmounted(() => {
             <span class="label">音色</span>
             <select v-model="cfg.soundSet" :disabled="!cfg.soundOn" @change="patchCfg({ soundSet: cfg.soundSet })">
               <option value="duck">小黄鸭</option>
-              <option value="fx1">音效1</option>
+              <option value="fx1">音效 1</option>
               <option value="custom">自定义</option>
             </select>
           </label>
@@ -7125,6 +7671,35 @@ onUnmounted(() => {
       </p>
 
       <div class="fold">
+        <button class="link-btn utils-btn utils-secondary" @click="toggleDataDirs()">
+          {{ dataDirsOpen ? '收起数据目录' : '数据目录（导入 / 下载的素材存在哪）' }}
+        </button>
+        <div v-if="dataDirsOpen" class="guide">
+          <p class="guide-use">
+            导入的形象、气泡图与下载回来的共享素材都<strong>复制</strong>进插件的用户数据目录，不引用你选的原文件。
+            换机器 / 清理前想直接看看有哪些文件，可以在这里打开对应目录：
+          </p>
+          <div class="field row" v-if="dataDirs">
+            <span class="label">形象</span>
+            <code class="dir-path" :title="dataDirs.skins">{{ dataDirs.skins }}</code>
+            <button class="export-btn utils-btn utils-outline" type="button" @click="openDataDir(dataDirs.skins)">打开</button>
+          </div>
+          <div class="field row" v-if="dataDirs">
+            <span class="label">音效</span>
+            <code class="dir-path" :title="dataDirs.sounds">{{ dataDirs.sounds }}</code>
+            <button class="export-btn utils-btn utils-outline" type="button" @click="openDataDir(dataDirs.sounds)">打开</button>
+          </div>
+          <div class="field row" v-if="dataDirs">
+            <span class="label">气泡图</span>
+            <code class="dir-path" :title="dataDirs.bubbles">{{ dataDirs.bubbles }}</code>
+            <button class="export-btn utils-btn utils-outline" type="button" @click="openDataDir(dataDirs.bubbles)">打开</button>
+          </div>
+          <p v-if="dataDirsOpen && !dataDirs" class="hint">宿主未提供数据目录信息。</p>
+          <p v-if="assetsFlash.msg" class="msg" :class="msgCls(assetsFlash)">{{ assetsFlash.msg }}</p>
+        </div>
+      </div>
+
+      <div class="fold">
         <button class="link-btn utils-btn utils-secondary" @click="assetsFold.open = !assetsFold.open">
           {{ assetsFold.open ? '收起素材包' : '素材包（换机器一次带走）' }}
         </button>
@@ -7172,32 +7747,117 @@ onUnmounted(() => {
     <!-- [资源] 导入的形象：画廊（点缩略图切换、置顶、删除、勾选参与随机） -->
     <section v-if="cardOn('assets', 'assetsSkins')" class="card" data-search="assetsSkins">
       <div class="card-head">
-        <h2>导入的形象</h2>
+        <button class="fold-title" type="button" @click="galleryFolds.skins = !galleryFolds.skins; rndMenu = ''; skinPicked = []">
+          <span class="fold-caret">{{ galleryOpen('skins') ? '▾' : '▸' }}</span>
+          导入的形象
+        </button>
         <div class="head-actions">
-          <button class="export-btn utils-btn utils-outline" type="button" @click="doRandomSkin()">随机一张</button>
-          <button class="export-btn utils-btn utils-outline" type="button" @click="doImportSkin()">导入图片…</button>
+            <button class="export-btn utils-btn utils-outline" type="button" @click="doRandomSkin()">随机一张</button>
+            <button class="export-btn utils-btn utils-outline" type="button" @click="doImportSkin()">导入图片…</button>
+            <!-- 卡头唯一的整理入口。原来这里是「选中操作」「随机设置」两个下拉并列，两处很别扭：
+                 1) 面板与箭头都在表达「我有独立状态」，但实际共用一个布尔，点一个两个同时展开；
+                 2) 「设为参与随机」在两边各有一份（选中批量 / 全部批量），用户要在两个面板间找；
+                 3) 卡头一行四个按钮已经偏挤。
+                 现在收成一个「整理」，面板内按**作用范围**分成两段，段内动作都天然可批量：
+                 上段作用于单击选中那批（未选中时收起，只留一行引导），下段作用于整张清单。
+                 选中态因此回到它本来的角色 —— 「接下来要操作哪几张」的选择器，
+                 而不是「必须先点开某个下拉」的前置条件：整清单的动作用不着先选任何东西。
+
+                 面板内部**一个层级**：曾把整批动作收成悬停二级菜单来压高度又撤掉（只为「看着短」，
+                 代价是多一层悬停）；这一轮改回来，但只收**低频**的那一族（「全部 N 张」），
+                 日常那 6 项（使用 / 排序 / 随机 / 删除）照旧平铺直取。收法见 onDocMoveForRndMenu：
+                 悬停展开 + 220ms 延迟收 + 首次开面板自动展一瞬（新用户不必先发现那里能悬停）。 -->
+            <div class="rnd-menu">
+              <button class="export-btn utils-btn utils-outline" type="button"
+                      :class="{ 'has-sel': !!pickedSkinned.length }"
+                      :title="pickedSkinned.length
+                        ? `已选中 ${pickedSkinned.length} 张，可整理它们`
+                        : '整理形象：使用 / 排序 / 删除 / 是否参与随机'"
+                      @click="toggleRndMenu">
+                {{ pickedSkinned.length ? `已选 ${pickedSkinned.length} 张` : '整理' }}
+                <span class="rnd-menu-caret">{{ rndMenu ? '▴' : '▾' }}</span>
+              </button>
+              <!-- 坐标在 toggleRndMenu 里按按钮实测（见 rndPanelPos）；面板是 fixed 定位，
+                   所以 .rnd-menu 只作为「哪些点击算面板内部」的判定锚点（onDocClickForRndMenu） -->
+              <div v-if="rndMenu" class="rnd-menu-panel"
+                   :style="{ right: rndPanelPos.right + 'px', top: rndPanelPos.top + 'px', minWidth: rndPanelPos.minWidth + 'px' }">
+                <!-- 第一段：作用于选中的那批。**未选中时整段不渲染**，只留一行可点的引导。
+                     原来是把 6 个按钮原样摆着置灰 —— 面板一下多出 6 行灰条，比能用的项还长，
+                     还会让人先去点一下试试是不是坏了。 -->
+                <template v-if="pickedSkinned.length">
+                  <p class="rnd-menu-title">选中的 {{ pickedSkinned.length }} 张</p>
+                  <button type="button" @click="doUsePicked(); rndMenu = ''">使用这张</button>
+                  <button type="button"
+                          :disabled="pickedSkinned.length === skinGallery.items.length"
+                          @click="doPinPicked(); rndMenu = ''">移到最前</button>
+                  <button type="button"
+                          :disabled="pickedSkinned.length === skinGallery.items.length"
+                          @click="doBottomPicked(); rndMenu = ''">移到最后</button>
+                  <button type="button" @click="applyPickedRandom(true); rndMenu = ''">参与随机</button>
+                  <button type="button" @click="applyPickedRandom(false); rndMenu = ''">不参与随机</button>
+                  <!-- 删除是这一列里唯一不可逆的动作，用一条分隔线与上面五项拉开：
+                       连点「不参与随机」时手滑一下就删掉几张，只靠红字挡不住 -->
+                  <div class="rnd-menu-sep"></div>
+                  <button type="button" class="danger"
+                          @click="doRemovePicked(); rndMenu = ''">删除选中的</button>
+                </template>
+                <button v-else class="rnd-menu-guide" type="button"
+                        title="去缩略图上点一下"
+                        @click="skinFlash.err = false; skinFlash.msg = '在缩略图上点一下即可选中，可连点多张'; rndMenu = ''">
+                  选中缩略图后可整理它们
+                </button>
+                <div class="rnd-menu-sep"></div>
+                <!-- 第二段：整张清单，无需先选中任何东西。低频，悬停展开（见 onDocMoveForRndMenu） -->
+                <div class="rnd-menu-sub">
+                  <p class="rnd-menu-title rnd-sub-trigger">
+                    全部 {{ skinGallery.items.length }} 张
+                    <span class="rnd-sub-caret">{{ rndSubOpen ? '▾' : '▸' }}</span>
+                  </p>
+                  <div v-show="rndSubOpen" class="rnd-sub-panel">
+                    <button type="button"
+                            :disabled="skinGallery.items.length > 0 && randomSkinPool.length >= skinGallery.items.length"
+                            @click="doBatchRandom('all')">全部参与随机</button>
+                    <button type="button" :disabled="randomSkinPool.length === 0"
+                            @click="doBatchRandom('none')">全部不参与随机</button>
+                    <button type="button"
+                            :disabled="randomSkinPool.length === 1 && skinGallery.items.some(it => it.id === skinGallery.current)"
+                            @click="doBatchRandom('keepCurrent')">只保留使用中那张</button>
+                  </div>
+                </div>
+              </div>
+            </div>
         </div>
       </div>
+      <p v-if="!galleryOpen('skins')" class="hint">
+        共 {{ skinGallery.items.length }} 张{{ skinMeta ? `，当前使用「${skinMeta.name}」` : '' }}。默认收起，点标题展开。
+      </p>
+      <template v-if="galleryOpen('skins')">
       <div class="skin-grid">
-        <div v-for="it in skinGallery.items" :key="it.id" class="skin-cell"
-             :class="{ active: it.id === skinGallery.current }">
-          <button class="skin-cell-pick" type="button"
-                  :title="`${it.name}（${assetSize(it)} · ${assetAt(it)}）`"
-                  @click="doUseSkin(it.id)">
-            <img v-if="it.thumb" class="skin-cell-img" :src="it.thumb" :alt="it.name" />
-            <span v-else class="skin-cell-none">无预览</span>
-          </button>
-          <span v-if="it.builtin" class="skin-cell-badge">官方</span>
-          <span class="skin-cell-ops">
-            <button class="skin-op" type="button" title="置顶" @click.stop="doPinSkin(it.id)">置顶</button>
-            <button class="skin-op danger" type="button" title="删除这张" @click.stop="doRemoveSkin(it.id)">删</button>
-          </span>
-          <label class="skin-cell-rand" :title="it.random !== false ? '已参与随机抽签，点击取消' : '未参与随机，点击加入'">
-            <input type="checkbox" :checked="it.random !== false"
-                   @change="doToggleSkinRandom(it.id, ($event.target as HTMLInputElement).checked)" />
-            <span>随机</span>
-          </label>
-          <span v-if="it.id === skinGallery.current" class="skin-cell-tag">使用中</span>
+        <div v-for="(it, idx) in skinGallery.items" :key="it.id" class="skin-cell"
+             :class="{ active: it.id === skinGallery.current, picked: skinPicked.indexOf(it.id) >= 0, broken: thumbBroken[it.id], noprev: !it.thumb && !thumbBroken[it.id], dragging: draggingId === it.id, 'drop-before': dragOverId === it.id && !dragOverAfter, 'drop-after': dragOverId === it.id && dragOverAfter }"
+             :draggable="true"
+             @dragstart="onSkinDragStart(it.id, $event)"
+             @dragover="onSkinDragOver(it, $event)"
+             @drop="onSkinDrop(it, $event)"
+             @dragend="onSkinDragEnd()">
+          <!-- 序号：让「移到最前 / 拖拽」的效果可验证（操作后看序号变化），也方便描述「第几张」 -->
+          <span class="skin-cell-idx">{{ idx + 1 }}</span>
+          <div class="skin-box">
+            <!-- 单击 = 切换选中（「整理」面板里「选中的 N 张」那一段作用于它），
+                 双击 = 切换使用。可多选：连点几张就能对它们一起排序 / 删除 / 改随机。
+                 原先每张图上挂一套按钮太占画面，收敛到卡头后图本身清爽，
+                 功能靠「选中」这一个中间态承接。 -->
+            <button class="skin-cell-pick" type="button"
+                    :title="`${it.name}（${assetSize(it)} · ${assetAt(it)}）· 单击选中（可多选），双击切换使用`"
+                    @click="pickSkin(it.id)"
+                    @dblclick="doUseSkinPick(it.id)">
+              <img v-if="it.thumb && !thumbBroken[it.id]" class="skin-cell-img" :src="it.thumb" :alt="it.name"
+                   @error="onThumbError(it.id)" />
+              <span v-else-if="thumbBroken[it.id]" class="skin-cell-broken">预览失败</span>
+              <span v-else class="skin-cell-none">无预览</span>
+            </button>
+            <span v-if="it.id === skinGallery.current" class="skin-cell-tag">使用中</span>
+          </div>
         </div>
         <button class="skin-cell skin-cell-add" type="button" title="导入图片" @click="doImportSkin()">
           <span class="skin-cell-add-plus">＋</span>
@@ -7205,16 +7865,24 @@ onUnmounted(() => {
         </button>
       </div>
       <p v-if="skinMeta" class="hint">
-        当前使用：{{ skinMeta.name }}（{{ assetSize(skinMeta) }} · {{ assetAt(skinMeta) }}）；点缩略图切换，最多保留 20 张。
-        画廊里勾选「随机」的共 {{ randomSkinPool.length }} 张（随包内置那张始终参与），「随机一张」会从它们里挑。
+        当前使用：{{ skinMeta.name }}（{{ assetSize(skinMeta) }} · {{ assetAt(skinMeta) }}）
+        <button class="link-btn" type="button" @click="skinHintOpen = !skinHintOpen">{{ skinHintOpen ? '收起说明' : '操作说明' }}</button>
       </p>
-      <p v-else class="hint">
+      <p v-if="skinMeta && skinHintOpen" class="hint">
+        单击缩略图选中（可连点多张），再点卡片上方「整理」，可对它们：切换使用 / 移到最前 / 移到最后 / 参与随机 / 不参与随机 / 删除；
+        双击缩略图也能直接切换使用，最多保留 20 张；
+        直接拖动缩略图可排到任意位置；
+        参与随机的共 {{ randomSkinPool.length }} 张（随包内置那张始终参与），「随机一张」会从它们里挑；
+        「整理 → 全部」那一段不用先选中，可整批切换参与随机。
+      </p>
+      <p v-else-if="!skinMeta" class="hint">
         还没有导入形象。点「导入图片…」加一张，支持 png / jpg / webp / gif / apng（动图不裁剪，保留动画）。
       </p>
       <p v-if="skinUnused" class="hint">
         已导入但当前未使用：「挂件外观 → 形象」选的不是「自定义」。
       </p>
       <p v-if="skinFlash.msg" class="msg" :class="msgCls(skinFlash)">{{ skinFlash.msg }}</p>
+      </template>
     </section>
 
     <!-- [资源] 导入的气泡图：点小鲸鱼抽到「动图组」时随机显示一张。
@@ -7227,14 +7895,19 @@ onUnmounted(() => {
         </div>
       </div>
       <div class="skin-grid">
-        <div v-for="it in bubbleItems" :key="it.id" class="skin-cell">
-          <span class="skin-cell-pick" :title="`${it.name}（${assetSize(it)} · ${assetAt(it)}）`">
-            <img v-if="it.thumb" class="skin-cell-img" :src="it.thumb" :alt="it.name" />
-            <span v-else class="skin-cell-none">无预览</span>
-          </span>
-          <span class="skin-cell-ops">
-            <button class="skin-op danger" type="button" title="删除这张" @click.stop="doRemoveBubble(it.id)">删</button>
-          </span>
+        <div v-for="it in bubbleItems" :key="it.id" class="skin-cell"
+             :class="{ broken: thumbBroken[it.id], noprev: !it.thumb && !thumbBroken[it.id] }">
+          <div class="skin-box">
+            <span class="skin-cell-pick" :title="`${it.name}（${assetSize(it)} · ${assetAt(it)}）`">
+              <img v-if="it.thumb && !thumbBroken[it.id]" class="skin-cell-img" :src="it.thumb" :alt="it.name"
+                   @error="onThumbError(it.id)" />
+              <span v-else-if="thumbBroken[it.id]" class="skin-cell-broken">预览失败</span>
+              <span v-else class="skin-cell-none">无预览</span>
+            </span>
+            <span class="skin-cell-ops">
+              <button class="skin-op danger" type="button" title="删除这张" @click.stop="doRemoveBubble(it.id)">删</button>
+            </span>
+          </div>
         </div>
         <button class="skin-cell skin-cell-add" type="button" title="导入图片" @click="doImportBubble()">
           <span class="skin-cell-add-plus">＋</span>
@@ -7250,24 +7923,33 @@ onUnmounted(() => {
       <p v-if="bubbleFlash.msg" class="msg" :class="msgCls(bubbleFlash)">{{ bubbleFlash.msg }}</p>
     </section>
 
-    <!-- [资源] 导入的音效：六槽位（按压 / 释放 + 四类提醒音），每槽位可放多段（挂件随机播一条） -->
+    <!-- [资源] 导入的音效：六槽位（按压 / 释放 + 四类提醒音），每槽位只保留一段 -->
     <section v-if="cardOn('assets', 'assetsSounds')" class="card" data-search="assetsSounds">
       <h2>导入的音效</h2>
+      <!-- 六个槽位各成一个块（.sound-group 有底色与描边）。
+           每个槽位最多一段：再导入就是替换掉旧的，所以没有「第 1 段 / 第 2 段」的编号，
+           也不需要「哪几段属于谁」的分组暗示。 -->
       <div class="sound-group" v-for="r in SOUND_ROLES" :key="r">
-        <div class="field row">
+        <div class="sound-group-head">
           <span class="label" :title="ALERT_SOUND_WHEN[r]">{{ SOUND_ROLE_LABEL[r] }}</span>
-          <span class="sound-file" :title="soundLabel(r)">
-            {{ soundLabel(r) || (ALERT_SOUND_ROLES.indexOf(r) >= 0 ? '未导入（静音）' : '未导入（可选）') }}
+          <!-- 概览只报有没有，不报名字：名字就在同一行的右侧（.sound-file），复述一遍纯属重复 -->
+          <span class="asset-meta">
+            <template v-if="soundMetaOf(r).length">已导入</template>
+            <template v-else>{{ ALERT_SOUND_ROLES.indexOf(r) >= 0 ? '未导入（静音）' : '未导入（可选）' }}</template>
           </span>
           <button class="export-btn utils-btn utils-outline" type="button" @click="doImportSound(r)">
-            {{ soundMetaOf(r).length ? '追加' : '导入' }}
+            {{ soundMetaOf(r).length ? '替换' : '导入' }}
           </button>
         </div>
-        <div class="field row sound-seg" v-for="(it, i) in soundMetaOf(r)" :key="it.file">
-          <span class="sound-file" :title="it.name">{{ i + 1 }}. {{ it.name }}</span>
-          <span class="asset-meta">{{ assetSize(it) }} · {{ assetAt(it) }}</span>
-          <button class="export-btn utils-btn utils-outline" type="button" @click="doPreviewSound(r, i)">试听</button>
-          <button class="export-btn utils-btn utils-outline" type="button" @click="doRemoveSound(r, it.file)">删除</button>
+        <!-- 单段时直接并进槽位头一行：既然只有一个，再单起一行纯属浪费纵向空间 -->
+        <div class="sound-seg" v-for="(it, i) in soundMetaOf(r)" :key="it.file">
+          <span class="sound-file" :title="it.name">{{ it.name }}</span>
+          <span class="seg-ops">
+            <button class="export-btn utils-btn utils-outline" type="button" @click="doPreviewSound(r, i)">试听</button>
+            <button class="export-btn utils-btn utils-outline" type="button" @click="doRemoveSound(r, it.file)">删除</button>
+          </span>
+          <!-- 体积与导入时间都是次要信息，合成一行放在最下面 -->
+          <span class="seg-time" :title="assetAt(it)">{{ assetSize(it) }} · {{ assetAtShort(it) }}</span>
         </div>
       </div>
       <p v-if="cfg.soundSet === 'custom' && !soundsMeta.press.length" class="hint">
@@ -7277,7 +7959,7 @@ onUnmounted(() => {
         按压 / 释放音已导入但当前未使用：「音效开关」没开，或「音色」选的不是「自定义」。
       </p>
       <p class="hint">
-        同一槽位可以放多段（点「追加」继续加），挂件每次随机播一条。
+        <strong>一个槽位只保留一段</strong> —— 再导入（按钮显示「替换」）会顶掉旧的。
         提醒音留空 = 静音（不打扰是默认），只在对应提醒真的弹出时响一次；播放跟随「挂件外观」里的音效开关与音量。
         音效支持 mp3 / wav / ogg 等，导入时可先拖选片段试听（最长 10 秒），结果转成单声道 WAV。
       </p>
@@ -7298,27 +7980,33 @@ onUnmounted(() => {
           <p class="group-title">内置形象 <em>（随包 {{ BUILTIN_SKINS.length }} 张 · 可下载 {{ SKIN_PACK_SKINS.length }} 张，共约 {{ fmtBytes(skinPackBytes) }}；当前：{{ cfg.skin === 'custom' ? '自定义' : cfg.skin }}）</em></p>
           <div class="skin-grid">
             <div v-for="s in BUILTIN_SKINS" :key="'b-' + s" class="skin-cell" :class="{ active: cfg.skin === s }">
-              <img class="skin-cell-img" :src="builtinSkinUrl(s)" :alt="s" :title="s" />
-              <span class="skin-cell-tag">{{ s }}</span>
+              <div class="skin-box">
+                <img class="skin-cell-img" :src="builtinSkinUrl(s)" :alt="s" :title="s" />
+                <span class="skin-cell-tag">{{ s }}</span>
+              </div>
             </div>
             <!-- 可下载的那批（v1.8.0 起只剩 1 张）：未装灰底 + 下载角标（缩略图是设置页内嵌的，不下载也能看见长什么样）；
                  已装则与「导入的形象」共用一套展示（缩略图从画廊来），可选用 / 可删 -->
             <div v-for="s in skinPackItems" :key="'p-' + s.id" class="skin-cell"
                  :class="{ active: cfg.skin === s.id, 'is-remote': !skinPackInstalled[s.id] }">
-              <button class="skin-cell-pick" type="button"
-                      :title="skinPackInstalled[s.id] ? `${s.id}（已下载，点选用）`
-                        : `${s.id}（未下载，点一下下载，下完自动切到这张）`"
-                      @click="doSkinPackCell(s.id)">
-                <img class="skin-cell-img" :src="skinPackThumb(s.id)" :alt="s.id" />
-              </button>
-              <span v-if="skinPackInstalled[s.id]" class="skin-cell-ops">
-                <button class="skin-op danger" type="button" title="从本地删除这张（可重新下载）"
-                        @click.stop="doRemoveSkin(s.id)">删</button>
-              </span>
-              <!-- 角标写「下载」：v1.8.0 起这批只剩 1 张，「下载全部」显得莫名其妙 -->
-              <span v-else class="skin-cell-badge">下载</span>
-              <span class="skin-cell-tag">{{ s.id }}</span>
-              <span v-if="skinInUseMissing && s.id === cfg.skin" class="skin-cell-tag warn">正在使用 · 未下载</span>
+              <div class="skin-box">
+                <button class="skin-cell-pick" type="button"
+                        :title="skinPackInstalled[s.id] ? `${s.id}（已下载，点选用）`
+                          : `${s.id}（未下载，点一下下载，下完自动切到这张）`"
+                        @click="doSkinPackCell(s.id)">
+                  <img class="skin-cell-img" :src="skinPackThumb(s.id)" :alt="s.id" />
+                </button>
+                <!-- 角标写「下载」：v1.8.0 起这批只剩 1 张，「下载全部」显得莫名其妙 -->
+                <span v-if="!skinPackInstalled[s.id]" class="skin-cell-badge">下载</span>
+                <!-- 名字与警示标签二选一：两个都贴 bottom:0，同时渲染会叠在一起看不清。
+                     「正在使用 · 未下载」本身已含「是哪张」的信息（它只可能出现在 cfg.skin 那张上） -->
+                <span v-if="skinInUseMissing && s.id === cfg.skin" class="skin-cell-tag warn">正在使用 · 未下载</span>
+                <span v-else class="skin-cell-tag">{{ s.id }}</span>
+                <span v-if="skinPackInstalled[s.id]" class="skin-cell-ops">
+                  <button class="skin-op danger" type="button" title="从本地删除这张（可重新下载）"
+                          @click.stop="doRemoveSkin(s.id)">删</button>
+                </span>
+              </div>
             </div>
           </div>
           <div class="btn-row">
@@ -7381,7 +8069,10 @@ onUnmounted(() => {
          点缩略图 = 下这一张；顶上按钮 = 逐张串行把未下载的补齐 -->
     <section v-if="cardOn('assets', 'assetsSharedSkins')" class="card" data-search="assetsSharedSkins">
       <div class="card-head">
-        <h2>共享角色</h2>
+        <button class="fold-title" type="button" @click="galleryFolds.sharedSkins = !galleryFolds.sharedSkins">
+          <span class="fold-caret">{{ galleryOpen('sharedSkins') ? '▾' : '▸' }}</span>
+          共享角色
+        </button>
         <div class="head-actions">
           <button class="export-btn utils-btn utils-primary" type="button"
                   :disabled="sharedSkinBusy || sharedSkinAllInstalled"
@@ -7393,6 +8084,10 @@ onUnmounted(() => {
           </button>
         </div>
       </div>
+      <p v-if="!galleryOpen('sharedSkins')" class="hint">
+        共 {{ sharedSkinItems.length }} 张，已下载 {{ sharedSkinInstalledCount }} 张。默认收起，点标题展开。
+      </p>
+      <template v-if="galleryOpen('sharedSkins')">
       <div v-if="dlProgress && dlProgress.pack === 'shared-skins'" class="dl-box">
         <div class="dl-track" :class="{ indet: dlPercent === null }">
           <div class="dl-bar" :class="{ indet: dlPercent === null, done: dlProgress.phase === 'done', err: dlProgress.phase === 'failed' }"
@@ -7411,19 +8106,23 @@ onUnmounted(() => {
       <div class="skin-grid">
         <div v-for="s in sharedSkinItems" :key="'sh-' + s.id" class="skin-cell"
              :class="{ active: cfg.skin === s.id, 'is-remote': !sharedSkinInstalled[s.id] }">
-          <button class="skin-cell-pick" type="button"
-                  :title="sharedSkinInstalled[s.id] ? `${sharedSkinNames[s.id] || s.id}（已下载，点选用）`
-                    : `${sharedSkinNames[s.id] || s.id}（未下载，点一下下载这张，下完自动切到这张）`"
-                  @click="doSharedSkinCell(s.id)">
-            <img class="skin-cell-img" :src="sharedSkinThumb(s.id)" :alt="sharedSkinNames[s.id] || s.id" />
-          </button>
-          <span v-if="sharedSkinInstalled[s.id]" class="skin-cell-ops">
-            <button class="skin-op danger" type="button" title="从本地删除这张（可重新下载）"
-                    @click.stop="doRemoveSkin(s.id)">删</button>
-          </span>
-          <!-- 单张点击只下这一张，但 40MB 整包时代留下的「下载全部」措辞要改成「下载」 -->
-          <span v-else class="skin-cell-badge">下载</span>
-          <span class="skin-cell-tag">{{ sharedSkinNames[s.id] || s.id }}</span>
+          <div class="skin-box">
+            <button class="skin-cell-pick" type="button"
+                    :title="sharedSkinInstalled[s.id] ? `${sharedSkinNames[s.id] || s.id}（已下载，点选用）`
+                      : `${sharedSkinNames[s.id] || s.id}（未下载，点一下下载这张，下完自动切到这张）`"
+                    @click="doSharedSkinCell(s.id)">
+              <img v-if="!thumbBroken['sh-' + s.id]" class="skin-cell-img" :src="sharedSkinThumb(s.id)"
+                   :alt="sharedSkinNames[s.id] || s.id" @error="onThumbError('sh-' + s.id)" />
+              <span v-else class="skin-cell-broken">预览加载失败</span>
+            </button>
+            <!-- 单张点击只下这一张，但 40MB 整包时代留下的「下载全部」措辞要改成「下载」 -->
+            <span v-if="!sharedSkinInstalled[s.id]" class="skin-cell-badge">下载</span>
+            <span class="skin-cell-tag">{{ sharedSkinNames[s.id] || s.id }}</span>
+            <span v-if="sharedSkinInstalled[s.id]" class="skin-cell-ops">
+              <button class="skin-op danger" type="button" title="从本地删除这张（可重新下载）"
+                      @click.stop="doRemoveSkin(s.id)">删</button>
+            </span>
+          </div>
         </div>
       </div>
       <p v-if="!sharedSkinItems.length" class="hint">暂无可下载的共享角色。</p>
@@ -7434,14 +8133,18 @@ onUnmounted(() => {
         已下载的可悬停「删」单张，删了能重新下载；下载回来的角色存本地，不占「导入的形象」的 20 张配额。
       </p>
       <p v-if="sharedSkinFlash.msg" class="msg" :class="msgCls(sharedSkinFlash)">{{ sharedSkinFlash.msg }}</p>
+      </template>
     </section>
 
     <!-- [资源] 共享音效库：与共享角色同一批上游素材（45 段），落 sounds 的 shared 槽位。
          它是「素材池」不直接参与实播 —— 要到下面选一个实播槽位「选用」才生效，
-         否则一装几十段、挂件随机播到哪段全看运气 -->
+         否则一装几十段、把原本选好的音效挤掉 -->
     <section v-if="cardOn('assets', 'assetsSharedSounds')" class="card" data-search="assetsSharedSounds">
       <div class="card-head">
-        <h2>共享音效库</h2>
+        <button class="fold-title" type="button" @click="galleryFolds.sharedSounds = !galleryFolds.sharedSounds">
+          <span class="fold-caret">{{ galleryOpen('sharedSounds') ? '▾' : '▸' }}</span>
+          共享音效库
+        </button>
         <div class="head-actions">
           <button class="export-btn utils-btn utils-primary" type="button"
                   :disabled="sharedSoundBusy || sharedSoundAllInstalled"
@@ -7453,6 +8156,10 @@ onUnmounted(() => {
           </button>
         </div>
       </div>
+      <p v-if="!galleryOpen('sharedSounds')" class="hint">
+        共 {{ sharedSoundItems.length }} 段，已下载 {{ sharedSoundInstalledCount }} 段。默认收起，点标题展开。
+      </p>
+      <template v-if="galleryOpen('sharedSounds')">
       <div v-if="dlProgress && dlProgress.pack === 'shared-sounds'" class="dl-box">
         <div class="dl-track" :class="{ indet: dlPercent === null }">
           <div class="dl-bar" :class="{ indet: dlPercent === null, done: dlProgress.phase === 'done', err: dlProgress.phase === 'failed' }"
@@ -7468,32 +8175,81 @@ onUnmounted(() => {
           <a class="dl-src-url" :href="dlProgress.url" target="_blank" rel="noreferrer" :title="dlProgress.url">{{ dlProgress.url }}</a>
         </div>
       </div>
-      <div class="field row sound-seg" v-for="it in sharedSoundItems" :key="'shs-' + it.id">
-        <span class="sound-file" :title="it.name">{{ it.name }}</span>
-        <span class="asset-meta">{{ fmtBytes(it.size) }}{{ sharedSoundInstalled[it.id] ? ' · 已下载' : '' }}</span>
-        <button v-if="sharedSoundInstalled[it.id]" class="export-btn utils-btn utils-outline" type="button"
-                @click="doPreviewSharedSound(it)">试听</button>
-        <template v-if="sharedSoundInstalled[it.id]">
-          <select class="sound-role-pick" :value="sharedSoundUseRole[it.id] || ''"
-                  @change="sharedSoundUseRole[it.id] = ($event.target as HTMLSelectElement).value as SoundRole">
-            <option value="">选择要加入的音效段…</option>
-            <option v-for="r in SOUND_ROLES" :key="'sr-' + r" :value="r">{{ SOUND_ROLE_LABEL[r] }}</option>
-          </select>
-          <button class="export-btn utils-btn utils-outline" type="button"
-                  :disabled="!sharedSoundUseRole[it.id]" @click="doUseSharedSound(it)">选用</button>
+      <!-- 列表按「是否已下载」分两组：两组的控件数量差 3 个（未下载行没有试听/下拉/选用/删），
+           混排会让整列文件名的右边界在两种行之间来回跳，45 行看下来就是锯齿。
+           分组后同组内控件结构一致，列能对齐；未下载的那组默认收进 .fold 里，
+           免得 45 行未下载项把「已下载」这半截推到屏外。 -->
+      <div class="shs-list">
+        <template v-if="sharedSoundInstalledItems.length">
+          <p class="group-title">已下载 <em>（{{ sharedSoundInstalledItems.length }} 段，可试听 / 选用 / 删）</em></p>
+          <div class="shs-row" v-for="it in sharedSoundInstalledItems" :key="'shs-' + it.id">
+            <!-- 主线：文件名是这一行唯一需要读的信息，独占剩余宽度、不再被控件挤到截断 -->
+            <div class="shs-main">
+              <span class="sound-file" :title="it.name">{{ it.name }}</span>
+              <span class="asset-meta">{{ fmtBytes(it.size) }}</span>
+            </div>
+            <!-- 副线：三个动作归到一行，与文件名左对齐。原先 4 个控件横铺在文件名右边，
+                 「选择要加入的音效段…」这个全场最长的文案还逐行重复，把文件名压成了 AUGH#H -->
+            <div class="shs-ops">
+              <!-- 下拉按语义分组：按压 / 释放是「音色」的两段（要配合音色=自定义才响），
+                   另外四类是独立的提醒音。混在一个平铺列表里，用户看不出这层区别 -->
+              <select class="sound-role-pick" :value="sharedSoundUseRole[it.id] || ''"
+                      @change="sharedSoundUseRole[it.id] = ($event.target as HTMLSelectElement).value as SoundRole">
+                <option value="">选用到槽位…</option>
+                <optgroup label="音色 · 按压 / 释放">
+                  <option value="press">{{ SOUND_ROLE_LABEL.press }}</option>
+                  <option value="release">{{ SOUND_ROLE_LABEL.release }}</option>
+                </optgroup>
+                <optgroup label="提醒音 · 四类提醒">
+                  <option v-for="r in ALERT_SOUND_ROLES" :key="'sr-' + r" :value="r">{{ SOUND_ROLE_LABEL[r] }}</option>
+                </optgroup>
+              </select>
+              <button class="export-btn utils-btn utils-primary" type="button"
+                      :disabled="!sharedSoundUseRole[it.id]" @click="doUseSharedSound(it)">选用</button>
+              <button class="export-btn utils-btn utils-outline" type="button"
+                      :class="{ 'preview-on': previewingSharedId === it.id }"
+                      @click="doPreviewSharedSound(it)">{{ previewingSharedId === it.id ? '停止' : '试听' }}</button>
+              <button class="export-btn utils-btn" type="button"
+                      :class="removeConfirmId === it.id ? 'utils-danger' : 'utils-outline'"
+                      :title="removeConfirmId === it.id ? '再点一次确认删除（3 秒后自动取消）' : '从共享音效库删掉这一段；若已选用到槽位，槽位上的那份也一并清掉'"
+                      @click="doRemoveSharedSound(it)">{{ removeConfirmId === it.id ? '确认删' : '删' }}</button>
+            </div>
+          </div>
         </template>
-        <span v-else class="asset-meta">未下载</span>
-        <button v-if="!sharedSoundInstalled[it.id]" class="export-btn utils-btn utils-primary" type="button"
-                :disabled="sharedSoundBusy" @click="doDownloadSharedSound(it)">下载</button>
+        <p v-else class="hint">共享音效库暂时是空的 —— 上方按钮若显示「下载全部 N 段」，点它把音效拉回来。</p>
+
+        <div class="fold" v-if="sharedSoundPendingItems.length">
+          <button class="link-btn utils-btn utils-secondary" type="button"
+                  @click="sharedSoundPendingOpen = !sharedSoundPendingOpen">
+            未下载 {{ sharedSoundPendingItems.length }} 段<span class="fold-caret">{{ sharedSoundPendingOpen ? '▾' : '▸' }}</span>
+          </button>
+          <template v-if="sharedSoundPendingOpen">
+            <div class="shs-row" v-for="it in sharedSoundPendingItems" :key="'shs-' + it.id">
+              <div class="shs-main">
+                <span class="sound-file" :title="it.name">{{ it.name }}</span>
+                <span class="asset-meta">{{ fmtBytes(it.size) }}</span>
+              </div>
+              <div class="shs-ops">
+                <!-- 措辞带上「这一段」：顶部还有一个「下载剩余 N 段」（逐段串行下完），
+                     两个按钮的量级差 40 倍，都写「下载」会让人以为点了就是整包 -->
+                <button class="export-btn utils-btn utils-primary" type="button"
+                        :disabled="sharedSoundBusy" @click="doDownloadSharedSound(it)">下载这一段</button>
+              </div>
+            </div>
+          </template>
+        </div>
       </div>
-      <p v-if="!sharedSoundItems.length" class="hint">暂无可下载的共享音效。</p>
       <p class="hint">
         这些音效来自上游 QQ 群分享，<strong>不随插件包分发</strong>，改为按需从 GitHub 直链下载。
-        <strong>点某段右侧的「下载」只下载这一段</strong>；点上方的按钮会把还没下载的<strong>逐段</strong>下回来。
+        <strong>「下载这一段」只拉当前这一条</strong>；卡头的按钮是把还没下载的<strong>逐段</strong>串行下回来。
         下载后先进「共享音效库」这个素材池，<strong>不会自动播放</strong> —— 从下拉里选一个音效段（按压 / 释放 / 四类提醒音）再点「选用」，
-        才会把这段加进那个槽位（可多段，挂件随机播一条）。这样不会一装几十段、随机播到哪段全看运气。
+        才会把这段放进那个槽位（一个槽位只保留一段，再选用就是顶掉旧的）。
+        这样不会一装几十段、把原本选好的音效挤掉。
+        <br>「选用」是<strong>另存一份</strong>到槽位，所以这里点「删」时，<strong>槽位上那份也会跟着清掉</strong>
+        （不然删完挂件还在响，像是没删干净）；清掉了哪个槽位会写在下面的提示里。
       </p>
       <p v-if="sharedSoundFlash.msg" class="msg" :class="msgCls(sharedSoundFlash)">{{ sharedSoundFlash.msg }}</p>
+      </template>
     </section>
 
     <!-- [外观] 文案：只剩台词库（随机台词组 + 6 个多行文本 + 保存 / 恢复默认）。
@@ -8429,46 +9185,47 @@ onUnmounted(() => {
       </div>
       <p v-if="clearConfirm" class="hint">将清除：{{ clearItemNames || '（未选中任何项）' }}。此操作不可撤销。</p>
       <p v-if="dataFlash.msg" class="msg" :class="msgCls(dataFlash)">{{ dataFlash.msg }}</p>
+    </section>
 
-      <div class="fold">
-        <button class="link-btn utils-btn utils-secondary" @click="backupFolds.open = !backupFolds.open">{{ backupFolds.open ? '收起备份与恢复' : '备份与恢复' }}</button>
-        <div v-if="backupFolds.open" class="guide">
-          <p class="guide-use"><strong>导出：</strong>把「挂件设置 / 账本 / 窗口位置 / 计时」打包成一个 JSON 文件（不含 dsh 开发者配置与 Node 路径）；<strong>凭据默认不导出</strong>，勾选「包含凭据」后必须设密码，凭据会用 scrypt + AES-256-GCM 加密后才写入文件（文件里没有明文）。</p>
-          <p class="guide-use"><strong>安全提示：</strong>密码不会保存到任何地方，忘记就无法解密（其余项仍可正常恢复）；备份文件本身含你的设置与用量记录，请妥善保管。</p>
-          <label class="field row check">
-            <span class="label">包含凭据 <em>（需设密码，加密后写入）</em></span>
-            <input type="checkbox" v-model="backupWithSecrets" @change="backupFlash.msg = ''" />
-          </label>
-          <label v-if="backupWithSecrets" class="field row">
-            <span class="label">备份密码</span>
-            <input type="password" v-model="backupPassword" placeholder="至少 6 位，导入时要用" autocomplete="new-password" />
-          </label>
-          <div class="btn-row">
-            <button class="secondary utils-btn utils-secondary" :disabled="backupBusy" @click="backupExport">导出备份…</button>
-            <button class="secondary utils-btn utils-secondary" :disabled="backupBusy" @click="backupPick">导入备份…</button>
-            <button v-if="backupPreview" class="secondary utils-btn utils-secondary" @click="backupCancelPick">取消导入</button>
-          </div>
+    <!-- [数据] 备份与恢复。原先折在「数据与隐私」卡的 .fold 里，但「数据」组 desc 一直把它
+         当并列的第三张卡来写（「凭据设置 · 清除数据 · 备份与恢复」），搜索索引里也没提它 ——
+         即 desc 承诺是卡、实际是别人卡里的折叠。提升为独立卡，三者对齐；也更好找。
+         卡内内容原样搬来，交互与状态（backupFlash 等）不变。 -->
+    <section v-if="cardOn('data', 'backup')" class="card" data-search="backup">
+      <h2>备份与恢复</h2>
+      <p class="hint">把「挂件设置 / 账本 / 窗口位置 / 计时」打包成一个 JSON 文件（不含 dsh 开发者配置与 Node 路径）；<strong>凭据默认不导出</strong>，勾选「包含凭据」后必须设密码，凭据会用 scrypt + AES-256-GCM 加密后才写入文件（文件里没有明文）。<strong>安全提示：</strong>密码不会保存到任何地方，忘记就无法解密（其余项仍可正常恢复）；备份文件本身含你的设置与用量记录，请妥善保管。</p>
+      <label class="field row check">
+        <span class="label">包含凭据 <em>（需设密码，加密后写入）</em></span>
+        <input type="checkbox" v-model="backupWithSecrets" @change="backupFlash.msg = ''" />
+      </label>
+      <label v-if="backupWithSecrets" class="field row">
+        <span class="label">备份密码</span>
+        <input type="password" v-model="backupPassword" placeholder="至少 6 位，导入时要用" autocomplete="new-password" />
+      </label>
+      <div class="btn-row">
+        <button class="secondary utils-btn utils-secondary" :disabled="backupBusy" @click="backupExport">导出备份…</button>
+        <button class="secondary utils-btn utils-secondary" :disabled="backupBusy" @click="backupPick">导入备份…</button>
+        <button v-if="backupPreview" class="secondary utils-btn utils-secondary" @click="backupCancelPick">取消导入</button>
+      </div>
 
-          <div v-if="backupPreview">
-            <p class="guide-use">已选文件：<code>{{ backupPreview.path }}</code><br />导出时间：{{ backupPreview.exportedAt || '未知' }} · 插件版本：{{ backupPreview.appVersion || '未知' }}</p>
-            <label v-for="it in backupItems" :key="it.key" class="field row check">
-              <span class="label">{{ it.label }} <em>{{ it.note }}{{ backupHas(it.key) ? '' : '：备份里没有这一项' }}</em></span>
-              <input type="checkbox" v-model="backupPicks[it.key]" :disabled="!backupHas(it.key)" @change="backupConfirm = false" />
-            </label>
-            <label v-if="backupHas('secrets')" class="field row">
-              <span class="label">备份密码</span>
-              <input type="password" v-model="backupPassword" placeholder="导出时设的密码（用于解密凭据）" autocomplete="off" />
-            </label>
-            <div class="btn-row">
-              <button class="danger utils-btn utils-danger" :disabled="backupBusy || !backupAnyItem" @click="backupApply">
-                {{ backupConfirm ? '确认覆盖写入？不可撤销' : '恢复选中项' }}
-              </button>
-              <button v-if="backupConfirm" class="secondary utils-btn utils-secondary" @click="backupConfirm = false">取消</button>
-            </div>
-          </div>
-          <p v-if="backupFlash.msg" class="msg" :class="msgCls(backupFlash)">{{ backupFlash.msg }}</p>
+      <div v-if="backupPreview">
+        <p class="guide-use">已选文件：<code>{{ backupPreview.path }}</code><br />导出时间：{{ backupPreview.exportedAt || '未知' }} · 插件版本：{{ backupPreview.appVersion || '未知' }}</p>
+        <label v-for="it in backupItems" :key="it.key" class="field row check">
+          <span class="label">{{ it.label }} <em>{{ it.note }}{{ backupHas(it.key) ? '' : '：备份里没有这一项' }}</em></span>
+          <input type="checkbox" v-model="backupPicks[it.key]" :disabled="!backupHas(it.key)" @change="backupConfirm = false" />
+        </label>
+        <label v-if="backupHas('secrets')" class="field row">
+          <span class="label">备份密码</span>
+          <input type="password" v-model="backupPassword" placeholder="导出时设的密码（用于解密凭据）" autocomplete="off" />
+        </label>
+        <div class="btn-row">
+          <button class="danger utils-btn utils-danger" :disabled="backupBusy || !backupAnyItem" @click="backupApply">
+            {{ backupConfirm ? '确认覆盖写入？不可撤销' : '恢复选中项' }}
+          </button>
+          <button v-if="backupConfirm" class="secondary utils-btn utils-secondary" @click="backupConfirm = false">取消</button>
         </div>
       </div>
+      <p v-if="backupFlash.msg" class="msg" :class="msgCls(backupFlash)">{{ backupFlash.msg }}</p>
     </section>
 
     <!-- [开发者] DeepSeek Harness（dsh） -->
@@ -10292,22 +11049,12 @@ onUnmounted(() => {
 
 <style scoped>
 .page {
-  --fg: #1f2a44;
-  --fg-dim: #536ba9;
-  --fg-faint: #9fb0d9;
-  --accent: #536ba9;
-  --line: rgba(83, 107, 169, 0.4);
-  --card-bg: rgba(127, 127, 127, 0.08);
-  --card-border: rgba(127, 127, 127, 0.18);
-  --track: rgba(83, 107, 169, 0.1);
-  --input-bg: #ffffff;
-  --ok: #2fa24c;
-  --err: #e0433f;
-  --warn: #c07d1a;
-  /* 顶部 Tab 吸顶时的底色，必须与 main.css 里 body 的背景一致，否则滚到一半内容会从导航下面透出来 */
-  --bar-bg: #f4f4f4;
-  /* 让原生控件（下拉列表、复选框等）跟随本页主题，否则深色模式下
-     下拉展开的选项会用系统浅色底 + 本页浅色字，导致文字看不清 */
+  /* 主题变量（--fg / --accent / --line / --card-bg / --ok / --err 等）已上提至
+     main.css 的 :root 作全项目唯一真源，这里不再重复定义 —— 改配色只改那一处。
+     仅保留页面级、非颜色令牌的 color-scheme：它让原生控件（下拉 / 复选框）跟随本页主题，
+     否则深色模式下下拉展开的选项会用系统浅色底 + 本页浅色字，导致文字看不清。
+     ⚠️ 它同时会影响滚动条绘制，main.css 的 `::-webkit-scrollbar { color-scheme: normal }`
+     正为此反向压制，两者是一对，别只改一处。 */
   color-scheme: light;
   max-width: 560px;
   margin: 0 auto;
@@ -10317,19 +11064,6 @@ onUnmounted(() => {
 }
 @media (prefers-color-scheme: dark) {
   .page {
-    --fg: #e8ecf5;
-    --fg-dim: #9fb0d9;
-    --fg-faint: #7f8db3;
-    --accent: #8aa4e6;
-    --line: rgba(255, 255, 255, 0.22);
-    --card-bg: rgba(255, 255, 255, 0.06);
-    --card-border: rgba(255, 255, 255, 0.12);
-    --track: rgba(255, 255, 255, 0.08);
-    --input-bg: #2b3145;
-    --ok: #4ec46b;
-    --err: #ff6b66;
-    --warn: #e0a63c;
-    --bar-bg: #303133;
     color-scheme: dark;
   }
   /* 深色下悬停浮出的轨道：main.css 默认给的是浅色系灰，深底上会显脏，这里换成冷白 */
@@ -10359,17 +11093,27 @@ h1 {
   padding: 6px 0 8px;
   background: var(--bar-bg);
 }
+/* Tab 行：7 个分组等分整行宽。窄窗口下等分会把「开发者」三字压到字叠字，
+   所以给每个 Tab 设 min-width 并让整行可横向滚动（滚动条隐藏，见下）——
+   宁可滑动，也不要文字挤压到读不出 */
 .tab-row {
   display: flex;
   gap: 3px;
   padding: 3px;
   border: 1px solid var(--line);
   border-radius: 10px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.tab-row::-webkit-scrollbar {
+  display: none;
 }
 .tab {
-  flex: 1;
-  padding: 3px 0;
+  flex: 1 0 auto;
+  min-width: 52px;
+  padding: 3px 6px;
   font-size: 13px;
+  white-space: nowrap;
   border: 0;
   border-radius: 8px;
   background: transparent;
@@ -10447,8 +11191,10 @@ h1 {
   border-radius: 12px;
   padding: 16px;
   margin-bottom: 16px;
-  /* 点搜索命中标签滚到卡片时，吸顶的 .tab-bar 会盖住卡头；这里预留出它的高度，让卡顶落在它下方 */
-  scroll-margin-top: 96px;
+  /* 点搜索命中标签滚到卡片时，吸顶的 .tab-bar 会盖住卡头；预留它的高度让卡顶落在下方。
+     值由 JS 实测吸顶条高后写进 --tab-bar-h（见 onMounted 的 ResizeObserver），
+     不写死数字 —— 吸顶区含可换行的 desc，高度随窗口宽变化。兜底 96px 供首帧未测得时用 */
+  scroll-margin-top: var(--tab-bar-h, 96px);
 }
 .card h2 {
   margin: 0 0 12px;
@@ -10493,6 +11239,125 @@ h1 {
 .head-actions {
   display: flex;
   gap: 8px;
+}
+/* 卡头的「整理」下拉：按钮沿用 utils-outline 基类，这里只负责面板定位。
+   .rnd-menu 自己 position:relative 当锚点（不能挂在 .head-actions 上 —— 后面还有别的按钮） */
+.rnd-menu {
+  position: relative;
+}
+.rnd-menu-caret {
+  font-size: 9px;
+  opacity: 0.75;
+}
+/* 有选中项时按钮变实心强调色：选中态是「操作哪几张」的入口，不显眼用户不会去点，
+   而整清单的动作（面板下半段）又不需要选中 —— 明确区分这两种处境 */
+.rnd-menu > button.has-sel {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-weak);
+}
+.rnd-menu-panel {
+  position: fixed;
+  z-index: 20;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  /* 用 fixed + 运行时算出的坐标（见 rndPanelPos 与 toggleRndMenu），top / right 由 :style 给，
+     不在这里写 top: calc(...) —— fixed 下百分比相对视口算，纯属死声明。
+     之所以不用 absolute 挂在卡头下沿：.tab-bar 是 position:sticky + z-index:5 且带不透明底色，
+     粘住后是一条独立的层叠上下文，卡头里的下拉无论写多高的 z-index 都会被它盖住 ——
+     滚到一半时面板上半截就会被吸顶条切掉（截图里的现象）。
+     挂到 body 下、用 fixed 定位后，下拉与吸顶条不再争夺同一个层叠上下文，也就不必给 tab-bar 降级。
+     宽度由内容撑开（fixed 元素默认 shrink-to-fit，无需再写 max-content） */
+  background: var(--input-bg);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+}
+/* 面板内的分组标题（「选中的 N 张」/「全部 N 张」）：这面板里并存两类作用范围不同的动作，
+   不给小标题就会让人以为它们是一回事。样式上跟菜单项**走同一套内边距、同一档字号**——
+   标题若比项更小更挤，视觉上就会像「没有对齐的注释」而不是「这一组的名字」 */
+.rnd-menu-title {
+  margin: 0;
+  padding: 6px 10px 3px;
+  font-size: 12px;
+  color: var(--fg-dim, #536ba9);
+  opacity: 0.9;
+  white-space: nowrap;
+}
+.rnd-menu-sep {
+  height: 1px;
+  margin: 4px 0;
+  /* 与项同宽：左右不留缝，这条线才能当作「一组到此为止」的边界，而不是飘在中间的一道短线 */
+  background: var(--line);
+}
+/* 「全部 N 张」这一族：低频，悬停展开（展开 / 收起的状态在 onDocMoveForRndMenu 里维护）。
+   触发项就是那个分组标题本身 —— 再单起一行「更多…」会让面板多一行，
+   而标题本来就是「这一族叫什么」的最短说法。指针停在标题或面板上都算「还在这一组里」，
+   两者的共同祖先是 .rnd-menu-sub，所以判定只看这一个选择器。
+   整块用与菜单项一致的内缩，否则子项会比上面的项明显内陷一层。 */
+.rnd-menu-sub {
+  padding: 0;
+}
+.rnd-sub-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  /* 标题本身不是可点项，只是这一组的标牌：右对齐的箭头表示「悬停这里会展开」 */
+  cursor: default;
+}
+.rnd-sub-trigger:hover {
+  color: var(--fg);
+  opacity: 1;
+}
+.rnd-sub-caret {
+  font-size: 8px;
+  opacity: 0.7;
+}
+.rnd-sub-panel {
+  display: flex;
+  flex-direction: column;
+}
+/* 未选中时的引导行：上半段的按钮全不渲染，只剩这一行。做成可点的按钮（点一下给提示）
+   而不是纯文字，因为「怎么选中」本身就是这里唯一的未知项；
+   用 link-btn 的文字观感而不是菜单项观感 —— 它不是动作，是说明 */
+.rnd-menu-guide {
+  padding: 6px 10px;
+  font-size: 12px;
+  text-align: left;
+  color: var(--fg-dim, #536ba9);
+  opacity: 0.75;
+  white-space: nowrap;
+}
+.rnd-menu-guide:hover {
+  opacity: 1;
+  background: transparent;
+}
+.rnd-menu-panel button {
+  padding: 6px 10px;
+  font-size: 12px;
+  text-align: left;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.rnd-menu-panel button:hover:not(:disabled) {
+  background: var(--accent-weak);
+}
+/* 面板里的危险动作（「删除选中的」）：悬停给红底，跟同类字色区分开，
+   免得在一列同款菜单项里误点 */
+.rnd-menu-panel button.danger {
+  color: var(--err, #e0433f);
+}
+.rnd-menu-panel button.danger:hover:not(:disabled) {
+  background: rgba(210, 70, 70, 0.14);
+}
+/* 已是终态的批量动作置灰：点「全部参与随机」再点一次没有任何变化，
+   灰掉能直接告诉用户「当前就是这样」，省掉一次无意义的点击 */
+.rnd-menu-panel button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 /* 卡片头部的区间快捷切换：与 UsageChart.vue 里那份同构（等分、文字居中），
    尺寸/配色来自 main.css 的 utils 基类。放在这里而不是沿用组件的 scoped 块 ——
@@ -11683,7 +12548,9 @@ select:focus,
   padding: 10px 12px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: var(--panel2);
+  /* 原先写 var(--panel2)，全项目没有该定义且无 fallback → background 整条失效，
+     这个盒子的底其实是透明的，只剩一圈描边。想要「比卡片再深一档的次级块」用 --track。 */
+  background: var(--track);
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -12057,6 +12924,22 @@ input[type='checkbox'] {
 /* 折叠面板里的首个标题紧贴顶部，不额外留白 */
 .guide > .link-btn:first-child {
   margin-top: 0;
+}
+/* 「数据目录」里展示的落盘路径：等宽、可截断，长路径不把按钮挤出去 */
+.dir-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 2px 6px;
+  border-radius: 4px;
+  /* 原先写 var(--bg)，全项目没有该定义且无 fallback → background 整条失效，
+     路径标签没有底衬。这是只读的等宽值标签，用输入框底色 --input-bg 最贴近。 */
+  background: var(--input-bg);
+  color: var(--fg-dim);
+  font-size: 11px;
+  font-family: ui-monospace, Consolas, monospace;
 }
 /* 嵌套说明（折叠面板内的教程）：比外层 .guide 再退一层，靠左侧色条区分层级，
    否则两层同色边框叠在一起会糊成一块 */
@@ -12456,11 +13339,108 @@ input[type='checkbox'] {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* 音效组里的分段明细行：左侧让出与槽位名等宽的空档（.label 的 72px + gap 10px），
-   文件名与上一行的文件名对齐，一眼看出这几段属于同一个槽位 */
-.sound-seg {
+/* ===== 「导入的音效」：六个槽位各成一个块 =====
+   块 = 槽位头（角色名 + 概况 + 导入/替换按钮）+ 该槽位那一段（最多一段）的明细。
+   原先这里只有一条 padding-left 缩进，没有底色 / 描边 / 块间距，
+   六个槽位连同各自的明细在视觉上连成一片，看不出归属。 */
+.sound-group {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--card-border);
+  border-radius: 10px;
+  background: var(--card-bg);
+}
+.sound-group:first-of-type {
+  /* 紧跟在卡片标题下，不需要再多一层上边距 */
   margin-top: 4px;
-  padding-left: 82px;
+}
+.sound-group-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+/* 槽位头里的概况文案占住中间剩余宽度，把「导入 / 替换」按钮推到行尾 ——
+   六个块的按钮因此左边界一致 */
+.sound-group-head .asset-meta {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sound-seg {
+  display: flex;
+  align-items: center;
+  /* 允许换行，配合下面 .seg-time 的 flex-basis:100% 把它挤到第二行 */
+  flex-wrap: wrap;
+  gap: 8px;
+  /* 与槽位头拉开一点距离即可：这段就属于上面那个槽位，不需要分隔线再切一刀 */
+  margin-top: 6px;
+}
+.seg-ops {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 6px;
+}
+/* 导入时间：单独占满一行（flex-basis:100% 逼它换行），比原来挤在行尾更短更易扫。
+   同一个槽位里多个同名段（都叫「来财」）就是靠这里的时分来区分先后。 */
+.seg-time {
+  flex: 1 1 100%;
+  font-size: 11px;
+  color: var(--fg-faint);
+  white-space: nowrap;
+}
+/* ===== 共享音效库的分组列表 =====
+   「已下载」与「未下载」分开渲染（见模板注释：两类行控件数差 3 个，混排必然列对不齐）。
+   每行是上下两段：
+   - .shs-main 主线：文件名 + 体积，文件名 flex:1 独占剩余宽度，不再被控件挤压
+   - .shs-ops  副线：动作控件，与文件名左对齐，窄卡片里可换行
+   这是把一个 6 元素横铺的行拆成「读的一行 + 操作的一行」，让 45 行扫下来能对齐。 */
+.shs-list {
+  margin-top: 4px;
+}
+.shs-row {
+  padding: 6px 0;
+  border-top: 1px solid var(--track);
+}
+/* 行内竖向留白 + 上下两段之间的间距；用 padding 而非 margin，
+   保证 border-top 是紧贴上一行、间距全部落在下面 */
+.shs-row:first-of-type {
+  border-top: none;
+  padding-top: 0;
+}
+.shs-main {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.shs-ops {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+/* 槽位下拉：给个基准宽度而不是 flex:1 铺满 —— 铺满后「选用 / 试听 / 删」会被推到行尾，
+   离开文件名的视线范围；固定宽度更紧凑，也让 45 行的按钮列左右对齐。
+   用 --input-bg 而非透明：它是个可选下拉，透明底会和「试听 / 删」两个描边按钮糊在一起 */
+.shs-ops .sound-role-pick {
+  flex: 0 1 150px;
+  min-width: 0;
+  padding: 3px 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--input-bg);
+  color: var(--fg-dim);
+  font-size: 12px;
+}
+/* 正在试听的那一段：按钮切成「停止」并给强调色描边，让用户在 45 行里一眼找到在放哪条。
+   配色跟随主题（--accent），不写死颜色 */
+.shs-ops .preview-on {
+  color: var(--accent);
+  border-color: var(--accent);
 }
 /* 素材的体积与导入时间：次要信息，跟在文件名后面，不参与换行挤压 */
 .asset-meta {
@@ -12475,22 +13455,35 @@ input[type='checkbox'] {
   flex-wrap: wrap;
   gap: 8px;
 }
+/* 一格 = 一个 64×64 的预览图框。操作（置顶 / 随机 / 删）已改为悬停时浮在图上
+   （见 .skin-cell-ops），格内常态只有图 +「使用中 / 下载」角标，网格紧凑干净。
+   .skin-box 是「图 + 角标 + 操作条」的定位锚。 */
 .skin-cell {
+  position: relative;
+  display: block;
+  width: 64px;
+}
+/* 预览图框：虚线棋盘底（透明图能看出透明区）+ 圆角描边，挂在 .skin-box 上，
+   这样内置形象（没有 pick 包裹层）与其它格长得一样 */
+.skin-box {
   position: relative;
   width: 64px;
   height: 64px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  overflow: hidden;
   background-color: #fff;
   background-image: linear-gradient(45deg, rgba(0, 0, 0, 0.07) 25%, transparent 25%, transparent 75%, rgba(0, 0, 0, 0.07) 75%),
     linear-gradient(45deg, rgba(0, 0, 0, 0.07) 25%, transparent 25%, transparent 75%, rgba(0, 0, 0, 0.07) 75%);
   background-size: 10px 10px;
   background-position: 0 0, 5px 5px;
 }
-.skin-cell.active {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 2px rgba(83, 107, 169, 0.28);
+/* 图片与角标各自裁圆角 —— 不能给 .skin-box 加 overflow:hidden，
+   否则「使用中」的外发光（box-shadow 画在边框外）会被裁掉看不见 */
+.skin-cell-img,
+.skin-cell-broken,
+.skin-cell-none {
+  border-radius: 8px;
+  overflow: hidden;
 }
 .skin-cell-pick {
   display: block;
@@ -12500,6 +13493,10 @@ input[type='checkbox'] {
   border: none;
   background: transparent;
   cursor: pointer;
+}
+.skin-cell.active .skin-box {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(83, 107, 169, 0.28);
 }
 .skin-cell-img {
   display: block;
@@ -12516,18 +13513,53 @@ input[type='checkbox'] {
   font-size: 11px;
   color: var(--fg-dim);
 }
-/* 操作条常显（只靠 hover 显隐在触控板上不好点），压在缩略图右上角 */
+/* 缩略图读到一半失败（文件被外部删了、动图解码失败、data URL 超长被截断等）也要给个反馈，
+   不能留一块空白格让人以为「没导入进来」。JS 侧把该格标记成 thumbBroken，这里只负责显示 */
+.skin-cell-broken {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  font-size: 11px;
+  color: var(--fg-dim);
+  text-align: center;
+  line-height: 1.4;
+}
+/* 「置顶 / 删除」已从**导入的形象**每格图内移到卡头（见 .head-actions），图上不再挂操作条 ——
+   原先每格悬停浮出一行小按钮，37 格下来整屏全是按钮、图本身读不清。
+   现在靠「单击选中」这一个中间态承接：选中格加主题色描边（.skin-cell.picked），
+   卡头的「置顶 / 删除」作用于它。
+   下面 .skin-cell-ops / .skin-op 仍供**气泡图 / 皮肤包 / 共享角色**三处网格使用（它们的操作简单、
+   格数也少，贴格悬停浮现比搬到卡头更直接），故不能删。 */
 .skin-cell-ops {
   position: absolute;
-  top: 2px;
-  right: 2px;
+  left: 0;
+  right: 0;
+  top: 0;
   display: flex;
-  gap: 2px;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  padding: 1px;
+  border-radius: 8px 8px 0 0;
+  /* 不铺满整条的深色遮罩 —— 只给按钮各自底色的淡淡渐变托底，尽量减少对图的遮挡 */
+  background: linear-gradient(rgba(0, 0, 0, 0.5), rgba(0, 0, 0, 0));
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+.skin-cell:hover .skin-cell-ops,
+.skin-cell:focus-within .skin-cell-ops,
+.skin-cell.active .skin-cell-ops {
+  opacity: 1;
+  pointer-events: auto;
 }
 .skin-op {
-  padding: 1px 4px;
+  flex: 0 0 auto;
+  padding: 0 2px;
   font-size: 10px;
-  line-height: 1.4;
+  line-height: 1.5;
   border: none;
   border-radius: 4px;
   background: rgba(0, 0, 0, 0.55);
@@ -12535,53 +13567,115 @@ input[type='checkbox'] {
   cursor: pointer;
 }
 .skin-op.danger {
-  background: rgba(190, 60, 60, 0.8);
+  background: rgba(210, 70, 70, 0.9);
+}
+.skin-op:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+/* 普通选中（.skin-cell.picked）：单击缩略图切换选中，供「整理」面板里
+   「选中的 N 张」那一段作用。可多选，所以是「集合里的每个都描边」而不是单选高亮。
+   与「使用中」（右下角 .skin-cell-tag）区分开 —— 选中只是「接下来要操作它」，不等于启用。 */
+.skin-cell.picked {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.skin-cell.picked .skin-box {
+  background: var(--accent-weak);
 }
 .skin-cell-tag {
   position: absolute;
-  left: 0;
   right: 0;
   bottom: 0;
-  font-size: 10px;
-  line-height: 1.5;
-  text-align: center;
-  background: rgba(83, 107, 169, 0.85);
-  color: #fff;
-}
-/* 「官方」角标：官方下载形象与用户自建图的区分，压在左上角（右上角已被操作条占用） */
-.skin-cell-badge {
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  padding: 0 4px;
-  font-size: 10px;
-  line-height: 1.5;
-  border-radius: 4px;
-  background: rgba(83, 107, 169, 0.85);
+  padding: 0 3px;
+  font-size: 9px;
+  line-height: 1.4;
+  border-radius: 6px 0 6px 0;
+  background: rgba(83, 107, 169, 0.9);
   color: #fff;
   pointer-events: none;
 }
-/* 「参与随机」勾选：压在缩略图左下角，与底部「使用中」标签错开（标签有随机时才显示） */
-.skin-cell-rand {
+/* 序号（左下角）：让「置 / ↑↓」的效果可验证，也方便描述「第几张」。
+   放左下而不是左上 —— 顶部整条被悬停操作条（.skin-cell-ops）占据，序号在左上会被按钮盖住。
+   右下角是「使用中」角标，左下角空着，正好错开。
+   悬停时淡出：操作条要盖住上半张图的视觉重心，序号此刻已不必要，隐去更清爽 */
+.skin-cell-idx {
   position: absolute;
-  left: 2px;
-  bottom: 16px;
-  display: flex;
-  align-items: center;
-  gap: 2px;
+  left: 0;
+  bottom: 0;
+  min-width: 13px;
   padding: 0 3px;
-  font-size: 10px;
-  line-height: 1.5;
-  border-radius: 4px;
-  background: rgba(0, 0, 0, 0.5);
+  font-size: 9px;
+  line-height: 13px;
+  text-align: center;
   color: #fff;
-  cursor: pointer;
+  border-radius: 0 6px 0 6px;
+  background: rgba(0, 0, 0, 0.32);
+  pointer-events: none;
+  z-index: 1;
+  transition: opacity 0.12s ease;
 }
-.skin-cell-rand input {
-  margin: 0;
-  width: 11px;
-  height: 11px;
-  cursor: pointer;
+.skin-cell:hover .skin-cell-idx,
+.skin-cell:focus-within .skin-cell-idx,
+.skin-cell.dragging .skin-cell-idx {
+  opacity: 0;
+}
+/* 拖拽排序：源格半透明表示「正在被搬走」；落点格用左侧/右侧一条竖线提示插入位置。
+   指示线用 ::before/::after 画，避免再加 DOM 节点影响 flex 布局。 */
+.skin-cell.dragging {
+  opacity: 0.4;
+}
+.skin-cell.drop-before::before,
+.skin-cell.drop-after::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--accent);
+  pointer-events: none;
+}
+.skin-cell.drop-before::before {
+  left: -2px;
+}
+.skin-cell.drop-after::after {
+  right: -2px;
+}
+/* 可拖拽时给个抓手指针；批量模式下不可拖（此时点格是勾选） */
+.skin-cell[draggable='true'] .skin-cell-pick {
+  cursor: grab;
+}
+.skin-cell.dragging .skin-cell-pick {
+  cursor: grabbing;
+}
+/* 操作条已在顶部（.skin-cell-ops），与右下角的「使用中 / 角色名」角标不再抢位，无需再抬角标。
+   左上角的「下载」角标只出现在**未下载**的格上，而操作条只在**已下载**的格上出现，二者互斥、也不会撞。 */
+/* 「下载」角标：贴在图片左上角（`.skin-cell-tag` 占右下角）。
+   注意别再写第二份覆盖规则 —— 之前这里与下方重复定义过，后写的那份把 top/right/size
+   全改了，角标位置与预期不符。现在只服务「未下载 · 可下载」一种语义（已下载的不再贴角标）。 */
+.skin-cell-badge {
+  position: absolute;
+  left: 0;
+  top: 0;
+  padding: 0 3px;
+  font-size: 9px;
+  line-height: 1.4;
+  border-radius: 0 0 6px 0;
+  background: rgba(83, 107, 169, 0.9);
+  color: #fff;
+  pointer-events: none;
+  white-space: nowrap;
+}
+/* 缩略图缺失 / 加载失败（文件被外部删了、动图解码失败、data URL 超长被截断等）都要给整格套警示色，
+   一眼能从一片正常格里认出「这张坏了要重导」。两档：
+   - `.broken`：thumb 有值但解码失败（@error 置位），文案「预览失败」—— 大概率文件损坏
+   - `.noprev`：thumb 为空（没缩略图且回落读原图也失败），文案「无预览」—— 大概率文件已被删
+   早先只有 @error 才描边，导致「无预览」那格混在正常格里、只显示一块灰字，看不出是坏的。 */
+.skin-cell.broken .skin-box,
+.skin-cell.noprev .skin-box {
+  border-color: rgba(200, 90, 60, 0.75);
+  background-color: rgba(200, 90, 60, 0.08);
 }
 /* 未下载的远程形象：整格压暗 + 缩略图降饱和，一眼看出「还没下来」，
    但缩略图仍可见 —— 让用户在下手前看得见长什么样 */
@@ -12600,31 +13694,31 @@ input[type='checkbox'] {
 .skin-cell.is-remote .skin-cell-tag.warn {
   background: rgba(200, 120, 30, 0.92);
 }
-/* 下载角标：未装格右上角，与「已装」的删除按钮同位置，切换时不跳 */
-.skin-cell-badge {
-  position: absolute;
-  top: 2px;
-  right: 2px;
-  padding: 1px 4px;
-  font-size: 10px;
-  line-height: 1.4;
-  /* 「下载全部」4 字比原来的「下载」长，不换行免得撑破格子 */
-  white-space: nowrap;
-  border-radius: 4px;
-  background: rgba(83, 107, 169, 0.9);
-  color: #fff;
-}
+/* 「导入」格：内容为「＋ / 导入」，位置与其它 64×64 图框对齐。
+   边框改**实线**、底色与 .skin-box 同款棋盘 —— 早先用虚线 + 纯色底，夹在一排棋盘格里
+   看着像"这一格坏了"，实线 + 同底后它是一枚正常的「加图」按钮。 */
 .skin-cell-add {
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
+  width: 64px;
+  height: 64px;
   gap: 1px;
-  border-style: dashed;
-  background-image: none;
-  background-color: var(--input-bg);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  background-color: #fff;
+  background-image: linear-gradient(45deg, rgba(0, 0, 0, 0.07) 25%, transparent 25%, transparent 75%, rgba(0, 0, 0, 0.07) 75%),
+    linear-gradient(45deg, rgba(0, 0, 0, 0.07) 25%, transparent 25%, transparent 75%, rgba(0, 0, 0, 0.07) 75%);
+  background-size: 10px 10px;
+  background-position: 0 0, 5px 5px;
   color: var(--fg-dim);
   cursor: pointer;
+}
+.skin-cell-add:hover {
+  border-color: var(--accent);
+  color: var(--accent);
 }
 .skin-cell-add-plus {
   font-size: 18px;

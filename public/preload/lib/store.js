@@ -362,7 +362,7 @@ function normMenuGroupsRev(v) {
   return n
 }
 function defaultConfig() {
-  return { scale: 1.3, vol: 0.9, soundOn: true, soundSet: 'duck', usageMode: 'ledger', peakMode: 'default', peakRemindOn: true, bubbleOn: true, menuBtn: true, onTop: true, lowAlertOn: true, lowAlertAmount: LOW_ALERT_BY_CURRENCY.CNY, budgetOn: false, budgetAmount: 0, dropAlertOn: false, dropAlertAmount: 5, clickQueueOn: false, remindSec: 8, quietOn: false, quietFrom: '23:00', quietTo: '07:00', timeBubbleOn: true, updateCheckOn: false, dragLock: false, enterMode: 'both', timerNotifyOn: true, timerMailOn: true, timerPersistOn: true, timerMode: 'off', timerSec: 1500, timerAt: '07:30', timerNote: '', timerBreakMin: 5, timerRemindSec: 8, timerBubblePin: true, timerBubbleOnly: true, guideDone: false, dshNodeDir: '', dshKeepAlive: false, dshPort: DSH_PORT_DEFAULT, dshRegistry: '', dshVersion: '', dshReinstall: false, dshNoOpen: true, dshMarketUrl: '', dshMarketMirror: true, dshMarketRegistry: '', dshMarketOfficial: false, dshExportCred: false, dshExportNoMod: true, avoidTaskbar: true, edgeTop: 0, edgeRight: 0, edgeBottom: 0, edgeLeft: 0, scrollGapOn: false, scrollGapPx: SCROLL_GAP_DEFAULT, snapMode: 'ratio', snapRatio: SNAP_RATIO_DEFAULT, opacity: 100, passThrough: false, skin: 'DSniang1', theme: 'default', quotes: normQuotes(null), alerts: normAlerts(null), quotaTotal: 0, quotaReset: 'monthly', tokenPrice: normTokenPrice(null), historyKeepDays: HISTORY_KEEP_DEFAULT, models: [], mainModelId: DEFAULT_MAIN_MODEL, dshBackupKeep: DSB_KEEP_DEFAULT, menuGroups: normMenuGroups(null), menuGroupsRev: 0, ghAccelOn: false, ghAccelIps: normIps(null), ghAccelRefreshedAt: 0, ghAccelSrc: normGhAccelSrc(null), skinPackSrc: '', notifySystemOn: true, notifyMailOn: false, mailFrom: '', mailTo: '', mailFromName: '小鲸鱼余额挂件', mailSubjectPrefix: '[小鲸鱼余额挂件]' }
+  return { scale: 1.3, vol: 0.9, soundOn: true, soundSet: 'duck', usageMode: 'ledger', peakMode: 'default', peakRemindOn: true, bubbleOn: true, menuBtn: true, onTop: true, lowAlertOn: true, lowAlertAmount: LOW_ALERT_BY_CURRENCY.CNY, budgetOn: false, budgetAmount: 0, dropAlertOn: false, dropAlertAmount: 5, clickQueueOn: false, remindSec: 8, quietOn: false, quietFrom: '23:00', quietTo: '07:00', timeBubbleOn: true, updateCheckOn: false, dragLock: false, enterMode: 'both', timerNotifyOn: true, timerMailOn: true, timerPersistOn: true, timerMode: 'off', timerSec: 1500, timerAt: '07:30', timerNote: '', timerBreakMin: 5, timerRemindSec: 8, timerBubblePin: true, timerBubbleOnly: true, guideDone: false, dshNodeDir: '', dshKeepAlive: false, dshPort: DSH_PORT_DEFAULT, dshRegistry: '', dshVersion: '', dshReinstall: false, dshNoOpen: true, dshMarketUrl: '', dshMarketMirror: true, dshMarketRegistry: '', dshMarketOfficial: false, dshExportCred: false, dshExportNoMod: true, avoidTaskbar: true, edgeTop: 0, edgeRight: 0, edgeBottom: 0, edgeLeft: 0, scrollGapOn: false, scrollGapPx: SCROLL_GAP_DEFAULT, snapMode: 'ratio', snapRatio: SNAP_RATIO_DEFAULT, opacity: 100, passThrough: false, skin: 'DSniang1', theme: 'default', quotes: normQuotes(null), alerts: normAlerts(null), quotaTotal: 0, quotaReset: 'monthly', tokenPrice: normTokenPrice(null), historyKeepDays: HISTORY_KEEP_DEFAULT, models: [], mainModelId: DEFAULT_MAIN_MODEL, dshBackupKeep: DSB_KEEP_DEFAULT, menuGroups: normMenuGroups(null), menuGroupsRev: 0, ghAccelOn: false, ghAccelIps: normIps(null), ghAccelRefreshedAt: 0, ghAccelSrc: normGhAccelSrc(null), skinPackSrc: '', randomIncludeBuiltin: true, notifySystemOn: true, notifyMailOn: false, mailFrom: '', mailTo: '', mailFromName: '小鲸鱼余额挂件', mailSubjectPrefix: '[小鲸鱼余额挂件]' }
 }
 // dsh Web UI 监听端口（默认 3080）。
 // ⚠️ 为什么必须能配：3080 属于 Windows/Hyper-V 的「动态端口保留段」，被系统预留时
@@ -703,6 +703,8 @@ function readConfig() {
     ghAccelSrc: normGhAccelSrc(p.ghAccelSrc),
     // 形象素材包的自填加速前缀（空 = 用内置默认 ghfast.top；非法串一律回空）
     skinPackSrc: normSkinPackPrefix(p.skinPackSrc),
+    // 「随机」抽签是否把随包内置形象算进池子（默认算）。关掉后池子只剩用户勾选参与随机的项。
+    randomIncludeBuiltin: p.randomIncludeBuiltin !== false,
     // 通知渠道：系统通知（默认开，沿用旧行为）+ 邮件通知（默认关，需先配好 SMTP）。
     // 邮件凭据（服务器/端口/账号/授权码）不在配置里，见 readSecretMail —— 只这里存「非敏感」的收发件人与信头
     notifySystemOn: p.notifySystemOn !== false,
@@ -796,6 +798,7 @@ function writeConfig(cfg) {
       ghAccelRefreshedAt: normGhAccelRefreshedAt(cfg.ghAccelRefreshedAt),
       ghAccelSrc: normGhAccelSrc(cfg.ghAccelSrc),
       skinPackSrc: normSkinPackPrefix(cfg.skinPackSrc),
+      randomIncludeBuiltin: cfg.randomIncludeBuiltin !== false,
       notifySystemOn: cfg.notifySystemOn !== false,
       notifyMailOn: cfg.notifyMailOn === true,
       mailFrom: String(cfg.mailFrom || '').trim().slice(0, 200),
@@ -950,6 +953,7 @@ function patchConfig(patch) {
   // 形象素材包自填加速前缀：空串是合法值（= 回落到内置默认），故不能用 `!== undefined` 之外的真值判断，
   // 这里显式接受字符串（含空串）
   if (p.skinPackSrc !== undefined) cfg.skinPackSrc = normSkinPackPrefix(p.skinPackSrc)
+  if (p.randomIncludeBuiltin !== undefined) cfg.randomIncludeBuiltin = p.randomIncludeBuiltin !== false
   // 通知渠道开关 + 邮件的非敏感字段（SMTP 服务器/授权码走 saveMailSecrets，不经这里）
   if (p.notifySystemOn !== undefined) cfg.notifySystemOn = !!p.notifySystemOn
   if (p.notifyMailOn !== undefined) cfg.notifyMailOn = !!p.notifyMailOn

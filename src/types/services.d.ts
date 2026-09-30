@@ -1165,6 +1165,8 @@ export interface SharedSoundItem {
   ext: string
   size: number
   installed: boolean
+  // shared 槽位里的落盘文件名（已装时非空）。删除要按它定位 —— name 不唯一
+  file: string
 }
 
 export interface SharedPackList<T> {
@@ -1780,6 +1782,8 @@ export interface WhaleServices {
   // —— 自定义挂件形象画廊（多张图片；文件复制进 userData/whale-skins） ——
   // 画廊列表：元信息 + 缩略图 data URL（current = 挂件当前用的那张的 id）
   listSkins(): SkinGallery
+  // 补写某张的缩略图（设置页懒补老数据）：只服务官方图（builtin），且已有缩略图时跳过
+  setSkinThumb(id: string, thumb: string): { ok: boolean; skipped?: boolean; error?: string }
   // 当前形象元信息（画廊为空时返回 null），供「自定义素材」卡片展示
   getSkin(): SkinMeta | null
   // 当前形象本体（base64 data URL，挂件 img.src 直接用）；空串表示无自定义形象
@@ -1792,11 +1796,16 @@ export interface WhaleServices {
   importSkinFromData(name: string, dataUrl: string, thumb: string): SkinImportResult
   // 换用画廊里的某一张
   setSkinCurrent(id: string): { ok: boolean; current?: string; error?: string }
-  // 把某一张移到画廊最前（不改变当前使用的那张）
-  pinSkin(id: string): { ok: boolean; error?: string }
-  // 开关某一张是否参与「随机」抽签（不影响当前使用的那张）
-  setSkinRandom(id: string, on: boolean): { ok: boolean; id?: string; random?: boolean; error?: string }
+  // 移动画廊里某张的位置：to = 'top'（置顶）/ 'up' / 'down'（上下挪一格）/ 'to'（配合拖拽，需传 index 落点下标）。
+  // moved=false 表示已在边界（最前/最后）或落点即原位，不是错误
+  moveSkin(id: string, to: 'top' | 'up' | 'down' | 'to', index?: number): { ok: boolean; moved?: boolean; index?: number; error?: string }
+  // 批量搬动：把 ids 整体搬到 index 落点，被搬的那批保持原相对顺序。moved=false 表示落点即原位（或全被选中），不是错误
+  moveSkins(ids: string[], index: number): { ok: boolean; moved?: boolean; index?: number; error?: string }
+  // 批量改「参与随机」：map = { id: boolean }，宿主只读改写盘一次
+  setSkinRandomBatch(map: Record<string, boolean>): { ok: boolean; changed?: number; error?: string }
   removeSkin(id: string): { ok: boolean; current?: string; left?: number; error?: string }
+  // 批量删除：一趟读改写盘删完；removed 为实际删掉的张数，failed 为查不到的 id 数
+  removeSkins(ids: string[]): { ok: boolean; removed?: number; failed?: number; current?: string; left?: number; error?: string }
   // —— 可选下载的内置形象（v1.7.x 起随包只留默认那张，其余挂 Release 按需下） ——
   // 可下载清单 + 已装状态（缩略图与清单是设置页内嵌的静态资源，不走这条 IPC）
   listSkinPacks(): SkinPackList
@@ -1807,17 +1816,24 @@ export interface WhaleServices {
   // 可下载清单 + 已装状态（缩略图是设置页内嵌静态资源 resources/thumbs，不走这条 IPC）
   listSharedSkins(): SharedSkinList
   listSharedSounds(): SharedSoundList
-  // 下载并安装单张共享角色（与内置形象同链路，装完推给挂件）
-  downloadSharedSkin(id: string, prefix?: string): Promise<SharedPackDownloadResult>
+  // 下载并安装单张共享角色（与内置形象同链路，装完推给挂件）。
+  // thumb 是缩略图的 data URL（webp/png），由设置页从打包资源 resources/thumbs 读好传来 ——
+  // 宿主定位不到插件目录，不给的话画廊只能回落读原图（MB 级），很快耗尽回落预算变「无预览」
+  downloadSharedSkin(id: string, prefix?: string, thumb?: string): Promise<SharedPackDownloadResult>
   // 下载并安装单个共享音效到 shared 槽位（素材池，不参与实播，故不推给挂件）
   downloadSharedSound(id: string, prefix?: string): Promise<SharedPackDownloadResult>
+  // 从共享音效库删一段（按落盘文件名定位，见 SharedSoundItem.file）。
+  // 一并清掉从这段「选用」出去的实播槽位副本（选用是另存拷贝，靠 meta.from 反查），
+  // clearedRoles 是因此被清空的实播槽位，供提示里说明影响面
+  removeSharedSound(file: string): { ok: boolean; error?: string; clearedRoles?: SoundRole[] }
   // 素材包下载进度快照：只读内存、零副作用，供设置页下载期间 1Hz 轮询。
   // 返回 null 表示从未下载过；下载结束后快照仍保留终态一小段时间（含命中源与体积）
   downloadProgress(): DownloadProgress | null
   // 把共享库的一段「选用」到某个实播槽位（file 是共享库里那段的文件名）
   useSharedSound(file: string, role: string): { ok: boolean; role?: string; name?: string; error?: string }
-  // 试听共享库里的一段：按名取一段 data URL（shared 槽位不在 getSoundData 里）
-  readSharedSoundData(name: string): { ok: boolean; url?: string; error?: string }
+  // 试听共享库里的一段：按落盘文件名取一段 data URL（shared 槽位不在 getSoundData 里）。
+  // 传 file 而非 name —— 素材池允许同名，按 name 会误取第一条（见 SharedSoundItem.file）
+  readSharedSoundData(file: string): { ok: boolean; url?: string; error?: string }
   // —— 自定义气泡图片（点鲸鱼随机显示一张；文件复制进 userData/whale-bubbles） ——
   // 列表：元信息 + 缩略图 data URL
   listBubbles(): BubbleList
@@ -1964,6 +1980,9 @@ export interface WhaleServices {
   openLogFile(): { ok: boolean; path: string }
   // 用系统文件管理器打开指定目录（定位插件目录里的 dsh 用）；路径为空时 ok:false
   openDir(dir: string): { ok: boolean; path: string }
+  // 素材落盘目录（形象 / 音效 / 气泡各一个）：设置页「资源」页展示位置并提供「打开」按钮。
+  // 路径由宿主拼（只有它知道 userData 在哪），设置页只展示、不自己拼
+  dataDirs(): { skins: string; sounds: string; bubbles: string }
   // DeepSeek Harness（dsh）：状态与 启动/重启/结束/更新/打开页面
   dshStatus(): DshStatus
   // 轻量进度（只回命令行与日志尾部，不探端口）。安装/更新这类长跑操作期间前端 1Hz 轮询它

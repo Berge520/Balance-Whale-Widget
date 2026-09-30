@@ -124,6 +124,34 @@ for (const rel of ['whale-pack/skins-pack.whaleassets', 'whale-pack/manifest.jso
   if (existsSync(path.join(outDir, rel))) errors.push(`不该随包：${rel}`)
 }
 
+// 全量扫垃圾文件。上面几条都是「点名式」检查，只能拦住写死的路径；这条是兜底。
+//
+// 为什么需要：打包是 `cd dist && zip -qr ... .`（release.yml），**dist 里有什么就打什么**；
+// 而 dist 的内容由 vite.config.js 的 copyPublicExceptSkip 从 public/ 递归原样拷贝，
+// 排除清单里只有 2 个文件 + 1 个目录，**没有任何「排除垃圾文件」的规则**。于是路径是：
+// 在 public/preload/lib/ 下留一个 api.js.bak → 原样进 dist/ → 打进 zip → 用户包里带着它。
+// .gitignore 里的 *.bak 挡不住这条路（它只管 git 层，dist/ 是构建产物、不进 git）。
+// 上游 DeepSeek-Balance-Whale-Widget 正是这么翻车的（lib/index.js.bak-devpaths 被打进包）。
+//
+// 用后缀黑名单而非白名单：产物核对宁可多报，漏放一个备份文件进发行版是实打实的泄底。
+// .map 一并纳入 —— 当前 vite 生产构建不产 sourcemap（实测 dist 里 0 个），
+// 所以这条是零成本的哨兵：谁哪天开了 build.sourcemap，这里当场红。
+const JUNK_SUFFIXES = ['.bak', '.orig', '.tmp', '.log', '.swp', '.map', '~']
+const JUNK_NAMES = new Set(['thumbs.db', '.ds_store', 'desktop.ini'])
+const junk = []
+const scanJunk = (dir, rel) => {
+  for (const ent of readdirSync(dir, { withFileTypes: true })) {
+    const childRel = rel ? `${rel}/${ent.name}` : ent.name
+    if (ent.isDirectory()) { scanJunk(path.join(dir, ent.name), childRel); continue }
+    const lower = ent.name.toLowerCase()
+    if (JUNK_SUFFIXES.some((s) => lower.endsWith(s)) || JUNK_NAMES.has(lower)) junk.push(childRel)
+  }
+}
+scanJunk(outDir, '')
+if (junk.length) {
+  errors.push(`zip 里混入了本机垃圾文件（多半是 public/ 下的残留被原样拷进了 dist/）：${junk.join(', ')}`)
+}
+
 if (errors.length) {
   console.error('[verify-release-zip] ✗ 核对失败：')
   for (const e of errors) console.error(`  - ${e}`)

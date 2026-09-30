@@ -62,3 +62,184 @@ test('Release 校验 tag 与 package.json 版本一致', () => {
   assert.match(release, /GITHUB_REF_NAME/, 'release.yml 没有读取 tag 名，无法校验版本')
   assert.match(release, /package\.json/, 'release.yml 没有读取 package.json 版本，无法校验版本')
 })
+
+test('plugin.json 的 feature code 都有 onPluginEnter 分支', () => {
+  // 每条 feature 对应一个「指令」：plugin.json 声明 code，services.js 的 onPluginEnter 按
+  // action.code 分派。两边必须成对 —— 只加 plugin.json 忘了加分支（或相反）不会报任何错，
+  // 表现为「指令能搜到、点了没反应」：这是 uTools 插件最典型且**用户重启插件也修不好**的哑故障，
+  // 三关（lint / typecheck / test）全绿也照样发生，故用门禁钉死。
+  //
+  // 判据：code 要么在 services.js 里以 `code === '<x>'` 显式比较，要么被兜底分支覆盖。
+  // 当前 `whale` 走的就是兜底路径（services.js 末尾的默认功能，不写显式比较），
+  // 因此这里**只看「有没有人处理」，不要求显式比较**：兜底分支存在即可覆盖未被显式比较的 code。
+  const plugin = JSON.parse(read('public/plugin.json'))
+  const services = read('public/preload/services.js')
+
+  const codes = (plugin.features || []).map((f) => f && f.code).filter(Boolean)
+  assert.ok(codes.length > 0, 'plugin.json 没有任何 feature code，解析规则可能已失效')
+
+  // services.js 里所有显式比较的 code
+  const handled = new Set()
+  for (const m of services.matchAll(/\bcode\s*===\s*['"]([^'"]+)['"]/g)) handled.add(m[1])
+
+  // 兜底分支：onPluginEnter 回调体内出现的「默认功能」注释锚点。
+  // 它一旦被删（例如有人把所有分支改成显式比较却漏了 whale），本测试会立刻报 whale 未处理 ——
+  // 这正是我们要拦的形态，故把兜底当作与这条注释绑定的契约。
+  const hasFallback = /默认功能（whale）/.test(services)
+
+  const unhandled = codes.filter((c) => !handled.has(c) && !hasFallback)
+  assert.deepEqual(unhandled, [],
+    `这些 feature code 在 services.js 的 onPluginEnter 里没有任何分支（指令能搜到、点了没反应）：${unhandled.join(', ')}`)
+
+  // 反向：services.js 里比较的 code 必须在 plugin.json 声明。
+  // 多出来的分支是死代码 —— 通常意味着 feature 被删了但分支忘了删，或 code 拼错了一个字母
+  // （拼错时它既不匹配任何真实指令、又不报错，正是最难发现的一种）。
+  const declared = new Set(codes)
+  const orphan = [...handled].filter((c) => !declared.has(c))
+  assert.deepEqual(orphan, [],
+    `services.js 比较了这些 code，但 plugin.json 没有声明对应 feature（死分支或拼写错误）：${orphan.join(', ')}`)
+})
+
+test('挂件视觉类配置键在消费方（挂件页 / 宿主建窗）里都有读取点', () => {
+  // 「控件有值、没有消费方」初筛（受上游 DeepSeek-Balance-Whale-Widget v0.3.17 的
+  // tools/check-dead-settings.mjs 启发）。上游踩过的形态是：设置页滑块能拖、能持久化、
+  // 能回显，但运行时代码从不读它 —— 用户调了没用，只能靠「反馈 → 排查」发现。
+  //
+  // ⚠ 作用范围（别高估它）：这是**回归防护**，不是**新增防护**。
+  //   能拦：本表里的键被删掉 / 改名读点 → 立刻红。
+  //   拦不住：新加一个挂件控件却忘了接到消费方 —— 新键不在本表，本测试根本不看它。
+  //   要拦后者得从 defaultConfig() 全量抽键，但那会误报十几条（见下），故不做。
+  //
+  // 为什么只挑这批：defaultConfig() 现有 86 个键，其余大批（quotaTotal / historyKeepDays /
+  // ghAccel* / dshMarket* 等）的消费方在 App.vue 的计算逻辑或 hosts / dsh 模块里，
+  // 形态各异（readConfig().<k>、参数透传等），按键名一律要求「在消费方文件里有读点」
+  // 会误报十几条 —— 那正是上游脚本要配 ALLOW 白名单的原因。收窄后本表天然零白名单、免维护。
+  //
+  // 表内取舍：以「用户可调、且调了直接影响挂件外观/行为」为准；因此含 menuGroups(右键菜单分组)、
+  // timerMode/timerAt/timerRemindSec(计时模式) 这类偏行为项 —— 它们同样由挂件页消费，
+  // 且「调了没用」的观感与视觉项一致。少数键在 App.vue 里搜不到（配置经 services.saveConfig
+  // 的其它路径写入），这不影响本测试：它只查「消费方有没有读」，不查「设置页怎么写」。
+  const WIDGET_VISUAL_KEYS = [
+    // 外观 / 尺寸
+    'scale', 'opacity', 'skin', 'theme', 'passThrough', 'dragLock', 'onTop', 'avoidTaskbar',
+    'snapMode', 'snapRatio', 'edgeTop', 'edgeRight', 'edgeBottom', 'edgeLeft',
+    'scrollGapOn', 'scrollGapPx', 'menuBtn', 'menuGroups', 'menuGroupsRev',
+    // 声音
+    'vol', 'soundOn', 'soundSet',
+    // 气泡 / 台词
+    'bubbleOn', 'quotes', 'timeBubbleOn', 'usageMode', 'peakMode', 'peakRemindOn',
+    // 提醒 / 计时
+    'lowAlertOn', 'lowAlertAmount', 'budgetOn', 'budgetAmount', 'clickQueueOn', 'remindSec',
+    'timerMode', 'timerSec', 'timerAt', 'timerNote', 'timerBreakMin', 'timerRemindSec',
+    'timerBubblePin', 'timerBubbleOnly', 'timerNotifyOn', 'timerMailOn', 'timerPersistOn',
+    'notifyMailOn',
+  ]
+
+  // 消费方有**两个**，缺一不可：
+  //   - public/floating-page.js：挂件页面自己读的（外观 / 声音 / 气泡 / 计时）
+  //   - public/preload/lib/widget.js：宿主侧建窗参数（onTop / avoidTaskbar / edgeX 吸附
+  //     与贴边偏移 / scrollGapPx 滚动间隙 —— 这些是**宿主**在摆窗口，页面里根本不出现，
+  //     实测 10 个键全落在这边）。
+  // 两个文件合起来才算「这批键的运行时消费方」；只看 floating-page.js 会把宿主侧那批误判成死键。
+  const consumers = [read('public/floating-page.js'), read('public/preload/lib/widget.js')]
+  // 必须剥掉注释与字符串：否则「注释里提到键名」会被当成读取方
+  // （上游脚本明确记过这个坑：给函数写一句含键名的说明，契约层立刻被骗过）。
+  const strip = (src) => src
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/\/\/[^\n]*/g, ' ')
+    .replace(/'(?:[^'\\\n]|\\.)*'/g, "''")
+    .replace(/"(?:[^"\\\n]|\\.)*"/g, '""')
+    .replace(/`(?:[^`\\]|\\.)*`/g, '``')
+  const stripped = consumers.map(strip).join('\n')
+
+  // 键必须来自 defaultConfig()：防止本表写了一个配置里根本不存在的键（那样会永远「有读点」或永远误报）
+  const storeSrc = read('public/preload/lib/store.js')
+  const dft = storeSrc.match(/function defaultConfig\(\)\s*\{\s*return\s*\{([\s\S]*?)\}\s*\}/)
+  assert.ok(dft, '没找到 defaultConfig()，解析规则可能已失效')
+  const declared = new Set()
+  for (const m of dft[1].matchAll(/(?:^|[,{])\s*([A-Za-z_$][\w$]*)\s*:/g)) declared.add(m[1])
+  assert.ok(declared.size >= 50, `defaultConfig 只解析出 ${declared.size} 个键，解析规则可疑`)
+
+  const phantom = WIDGET_VISUAL_KEYS.filter((k) => !declared.has(k))
+  assert.deepEqual(phantom, [],
+    `本表登记了 defaultConfig() 里不存在的键（表已过期或键名拼错）：${phantom.join(', ')}`)
+
+  const dead = WIDGET_VISUAL_KEYS.filter((k) => {
+    const re = new RegExp('\\.' + k + '\\b|\\[\\s*[\'"]' + k + '[\'"]\\s*\\]')
+    return !re.test(stripped)
+  })
+  assert.deepEqual(dead, [],
+    `这些挂件视觉键在两个消费方（floating-page.js / widget.js）里都没有读取点（设置页能改、但挂件不读 = 调了没用）：${dead.join(', ')}`)
+})
+
+test('App.vue 的 data-search 与 SEARCH_INDEX 一一对应', () => {
+  // 卡片搜索（跨 Tab 找卡）靠两张表配合：
+  //   - 模板上每张卡挂 data-search="<key>"（渲染锚点）
+  //   - 脚本里 SEARCH_INDEX 登记 <key> → { label, tab, keys }（检索索引）
+  // 只登记一边就会静默坏掉：漏登记 → 搜不到、且搜索态下这张卡永不渲染
+  //（cardOn 走 searchHits，不在索引里就命中不了）；多登记 → 产生死链接。
+  // 这个坑真实发生过（共享形象 / 共享音效两张卡漏登记），故用门禁钉死。
+  const app = read('src/App.vue')
+
+  // 模板里所有 data-search="xxx"（去重）；排除 scrollToCard 里的选择器字符串。
+  // 锚点不只在 App.vue：抽出去的异步组件（AccelView）自带 .card，锚点挂在那里，
+  // 故连 views/ 下的 .vue 一起扫 —— 只看 App.vue 会把 ghAccel 误判成死链接。
+  const templateKeys = new Set()
+  const appSrc = app + '\n' + fs.readdirSync(new URL('../src/views', import.meta.url))
+    .filter((f) => f.endsWith('.vue'))
+    .map((f) => read(`src/views/${f}`)).join('\n')
+  for (const m of appSrc.matchAll(/data-search="([A-Za-z0-9_]+)"/g)) templateKeys.add(m[1])
+
+  // SEARCH_INDEX 对象的键：从 `const SEARCH_INDEX ... = {` 到下一个顶层 `}`
+  const block = app.match(/const SEARCH_INDEX[^=]*=\s*\{([\s\S]*?)\n\}/)
+  assert.ok(block, '没找到 SEARCH_INDEX 定义，解析规则可能已失效')
+  const indexKeys = new Set()
+  // 只取形如 `  key: {` 的行（行首缩进 + 键名 + 冒号 + 花括号），避开注释与嵌套对象
+  for (const m of block[1].matchAll(/^\s{2}([A-Za-z0-9_]+):\s*\{/gm)) indexKeys.add(m[1])
+
+  // 至少得解析出东西，否则解析规则悄悄失效会让本测试变成永远通过
+  assert.ok(templateKeys.size >= 10, `模板里只解析出 ${templateKeys.size} 个 data-search，解析规则可疑`)
+  assert.ok(indexKeys.size >= 10, `SEARCH_INDEX 只解析出 ${indexKeys.size} 个键，解析规则可疑`)
+
+  const missingInIndex = [...templateKeys].filter((k) => !indexKeys.has(k))
+  const missingInTpl = [...indexKeys].filter((k) => !templateKeys.has(k))
+  assert.deepEqual(missingInIndex, [],
+    `这些卡有 data-search 但 SEARCH_INDEX 没登记（搜不到、搜索态下也不渲染）：${missingInIndex.join(', ')}`)
+  assert.deepEqual(missingInTpl, [],
+    `SEARCH_INDEX 登记了但模板没有对应 data-search（死链接）：${missingInTpl.join(', ')}`)
+
+  // label 必须与卡片 <h2> 一致：搜索命中后，标签上显示的是 SEARCH_INDEX.label，
+  // 点进去看到的却是 <h2>，两者不一致会让用户以为点错了卡。
+  // 取法：先剥掉 HTML 注释（注释里会提到 <h2>，不清会误匹配），再按 <section … data-search="key" …>
+  // 定位到该卡，取其内第一处 <h2> 的**纯文本**（卡头可能含 caret / 摘要等 span，只比对可读文字）。
+  const labelOf = {}
+  for (const m of block[1].matchAll(/^\s{2}([A-Za-z0-9_]+):\s*\{[^}]*?label:\s*'([^']*)'/gm)) labelOf[m[1]] = m[2]
+  const noComment = appSrc.replace(/<!--[\s\S]*?-->/g, '')
+  // 所有卡片的起始位置（<section ... data-search="key" ...>）
+  const sections = []
+  for (const m of noComment.matchAll(/<section\b[^>]*data-search="([A-Za-z0-9_]+)"[^>]*>/g)) {
+    sections.push({ key: m[1], start: m.index + m[0].length })
+  }
+  const h2Of = {}
+  const stripTags = (s) => s
+    .replace(/<span[^>]*class="(?:caret|card-sum|gh-accel-sum|gh-accel-caret)[\s\S]*?<\/span>/g, '')
+    .replace(/<[^>]+>/g, '')        // 去掉剩余标签（含 span 包裹）
+    .replace(/\{\{[^}]*\}\}/g, '') // 去掉未渲染的插值（若有）
+    .replace(/\s+/g, ' ')
+    .trim()
+  for (let i = 0; i < sections.length; i++) {
+    const seg = noComment.slice(sections[i].start, sections[i + 1] ? sections[i + 1].start : undefined)
+    const h = seg.match(/<h2[^>]*>([\s\S]*?)<\/h2>/)
+    if (h) h2Of[sections[i].key] = stripTags(h[1])
+  }
+  const mismatched = []
+  for (const k of Object.keys(labelOf)) {
+    if (!h2Of[k]) continue // 组件卡片（AccelView）的 h2 不在 App.vue，跳过
+    // 卡头可能带装饰性前后缀（如 ghAccel 的 caret），用「包含」判定比「相等」稳：
+    // 索引名是「干净名字」，卡头可含额外符号，只要索引名是卡头文字的一部分即可。
+    if (!h2Of[k].includes(labelOf[k])) mismatched.push(`${k}: 索引「${labelOf[k]}」不在卡头「${h2Of[k]}」中`)
+  }
+  assert.ok(Object.keys(h2Of).length >= 10, `只匹配到 ${Object.keys(h2Of).length} 个卡片 h2，解析规则可疑`)
+  assert.deepEqual(mismatched, [],
+    `SEARCH_INDEX.label 与卡片标题不一致（搜索标签会显示成另一个名字）：\n  ${mismatched.join('\n  ')}`)
+})

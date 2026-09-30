@@ -179,7 +179,7 @@ onUnmounted(endDrag)
 </script>
 
 <template>
-  <div class="overlay">
+  <div class="whale-overlay">
     <div class="panel">
       <div class="head">
         <span class="title">裁剪形象图片</span>
@@ -221,16 +221,7 @@ onUnmounted(endDrag)
 </template>
 
 <style scoped>
-.overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 50;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 20px;
-  background: rgba(20, 26, 42, 0.55);
-}
+/* 遮罩底 .whale-overlay 已上提至 main.css（三弹窗共用），此处只留面板本体 */
 .panel {
   max-width: 540px;
   max-height: 100%;

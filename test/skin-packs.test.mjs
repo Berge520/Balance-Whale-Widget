@@ -184,6 +184,38 @@ test('parsePack 拒绝清单项越界（off/len 超数据区、负数、零长�
   assert.equal(ok.dataStart, HEAD_BYTES + Buffer.from(JSON.stringify(packManifest([{ name: 'a.webp', ext: 'webp', off: 0, len: 10 }]))).length)
 })
 
+// 容器里「数据区」是 原图字节 + 缩略图字节 拼在一起，每项各自记 off/len 与 thumbOff/thumbLen。
+// downloadSkinPacks 必须按 thumbOff/thumbLen 切出缩略图再交给 installBuiltin —— 切错（比如
+// 忘了加 dataStart、或拿 thumbLen 当 off 用）不会报错，只会把原图字节当缩略图落盘，
+// 画廊于是显示一张几 MB 的「缩略图」，回落预算瞬间耗光。这条把切片边界钉住。
+test('解析：带 thumbOff / thumbLen 的项，缩略图偏移落在数据区内且不越界', () => {
+  const main = Buffer.alloc(10, 1)
+  const thumb = Buffer.alloc(6, 2)
+  const data = Buffer.concat([main, thumb])
+  const it = { name: 'a.webp', ext: 'webp', off: 0, len: 10, thumbOff: 10, thumbLen: 6 }
+  const buf = makePack(packManifest([it]), data)
+  const parsed = parsePack(buf)
+  assert.equal(parsed.error, undefined)
+  // 缩略图按 thumbOff/thumbLen 切出来的必须是后 6 字节，而不是原图那 10 字节
+  // （与实现同款写法：先加 dataStart 再切，不能拿 data 直接 slice）
+  const tb = buf.slice(parsed.dataStart + it.thumbOff, parsed.dataStart + it.thumbOff + it.thumbLen)
+  assert.deepEqual(tb, thumb)
+  assert.notDeepEqual(tb, main.slice(0, 6))
+})
+
+// thumbOff / thumbLen 都是 0 = 这个包没内嵌缩略图（当前发布的就是这样），
+// 此时不能拿 off/len 去兜底切原图 —— 那样等于把原图当缩略图存下来，比没有缩略图还糟。
+test('解析：包内无缩略图（thumbLen 0）时不误切，原图 off/len 照常正确', () => {
+  const data = Buffer.alloc(10, 1)
+  const it = { name: 'a.webp', ext: 'webp', off: 0, len: 10, thumbOff: 0, thumbLen: 0 }
+  const buf = makePack(packManifest([it]), data)
+  const parsed = parsePack(buf)
+  assert.equal(parsed.error, undefined)
+  assert.equal(Number(it.thumbLen) || 0, 0, '没带缩略图的包，thumbLen 必须是 0，不能与 len 混用')
+  const main = buf.slice(parsed.dataStart + it.off, parsed.dataStart + it.off + it.len)
+  assert.equal(main.length, 10)
+})
+
 // ── 清单（listSkinPacks）────────────────────────────────────────────────
 
 test('listSkinPacks 覆盖全部可下载形象，且已装标记为布尔', () => {

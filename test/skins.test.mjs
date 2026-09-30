@@ -90,53 +90,151 @@ test('importBuffer 拒绝不支持的格式与空数据', () => {
   assert.equal(importBuffer('x.png', 'png', Buffer.alloc(0), null).ok, false)
 })
 
-// ── 「参与随机」开关（setRandom）──────────────────────────────────────────
+// ── 「参与随机」开关（setRandomBatch）──────────────────────────────────
 // 语义约定：random 字段缺失 = 参与（默认），只有显式关掉才存 false。
 // 这样升级后老记录不会因为字段缺失而突然全部退出随机池（用户会以为随机坏了）。
 
-test('setRandom：新装项默认参与随机（random 字段缺失即 true）', () => {
+test('参与随机：新装项默认参与（random 字段缺失即 true）', () => {
   reset()
   const a = importBuffer('mine.webp', 'webp', PNG, null)
   const item = listSkins().items.filter((x) => x.id === a.id)[0]
   assert.equal(item.random, true, '未设置过时应视为参与随机')
 })
 
-test('setRandom：关掉后存 false，listSkins 如实回报', () => {
-  reset()
-  const a = importBuffer('mine.webp', 'webp', PNG, null)
-  const r = skins.setRandom(a.id, false)
-  assert.equal(r.ok, true)
-  assert.equal(r.random, false)
-  assert.equal(listSkins().items.filter((x) => x.id === a.id)[0].random, false)
-})
+// ── 批量改「参与随机」（setRandomBatch）──────────────────────────────────
+// 存在的意义：整张清单只读改写盘一次。逐张改会做 N 次 readRaw+writeRaw。
 
-test('setRandom：重新打开时删掉字段（缺省即参与，存储保持精简）', () => {
-  reset()
-  const a = importBuffer('mine.webp', 'webp', PNG, null)
-  skins.setRandom(a.id, false)
-  // 直接从存储里看：关掉时应有 random:false
-  assert.equal(store.get(K.skins).items[0].random, false)
-  skins.setRandom(a.id, true)
-  assert.equal('random' in store.get(K.skins).items[0], false, '打开时应把字段删掉而非存 true')
-  assert.equal(listSkins().items.filter((x) => x.id === a.id)[0].random, true)
-})
-
-test('setRandom：改开关不影响「当前形象」，也不动其它项', () => {
+test('setRandomBatch：按 map 逐项设置，未知 id 静默跳过', () => {
   reset()
   const a = importBuffer('a.webp', 'webp', PNG, null)
   const b = importBuffer('b.webp', 'webp', PNG, null)
-  const curBefore = listSkins().current
-  skins.setRandom(a.id, false)
-  assert.equal(listSkins().current, curBefore, '改开关不该换掉当前使用的形象')
-  assert.equal(listSkins().items.filter((x) => x.id === b.id)[0].random, true, '不该波及别的项')
+  const c = importBuffer('c.webp', 'webp', PNG, null)
+  const r = skins.setRandomBatch({ [a.id]: false, [b.id]: true, 'no-such-id': false })
+  assert.equal(r.ok, true)
+  assert.equal(r.changed, 2, '只统计清单里真实存在的项')
+  const byId = {}
+  for (const it of listSkins().items) byId[it.id] = it.random
+  assert.equal(byId[a.id], false)
+  assert.equal(byId[b.id], true)
+  assert.equal(byId[c.id], true, '未出现在 map 里的项不动')
 })
 
-test('setRandom：id 不存在时返回失败而非静默成功', () => {
+test('setRandomBatch：一次写盘（不会逐项落盘 N 次）', () => {
   reset()
-  importBuffer('mine.webp', 'webp', PNG, null)
-  const r = skins.setRandom('no-such-id', false)
+  const a = importBuffer('a.webp', 'webp', PNG, null)
+  const b = importBuffer('b.webp', 'webp', PNG, null)
+  let writes = 0
+  const rawSet = globalThis.utools.dbStorage.setItem
+  globalThis.utools.dbStorage.setItem = (k, v) => { if (k === K.skins) writes++; return rawSet(k, v) }
+  try {
+    skins.setRandomBatch({ [a.id]: false, [b.id]: false })
+  } finally {
+    globalThis.utools.dbStorage.setItem = rawSet
+  }
+  assert.equal(writes, 1, '批量只应触发一次存储写入')
+})
+
+test('setRandomBatch：空 map / 非布尔值都不落盘', () => {
+  reset()
+  const a = importBuffer('a.webp', 'webp', PNG, null)
+  assert.equal(skins.setRandomBatch({}).changed, 0)
+  const r = skins.setRandomBatch({ [a.id]: 'yes' })
+  assert.equal(r.changed, 0)
+  assert.equal(listSkins().items[0].random, true, '非布尔值被跳过，不改存储')
+})
+
+// ── 画廊排序（moveSkin）──────────────────────────────────────────────────
+// 取代旧的 pinSkin：旧接口只能置顶、再点无反馈。moveSkin 支持 top / up / down。
+
+test('moveSkin：top 把指定项移到最前，其它项相对顺序不变', () => {
+  reset()
+  const a = importBuffer('a.webp', 'webp', PNG, null)
+  const b = importBuffer('b.webp', 'webp', PNG, null)
+  const c = importBuffer('c.webp', 'webp', PNG, null)
+  // 依次导入 → unshift → 顺序 [c, b, a]
+  assert.deepEqual(listSkins().items.map((x) => x.id), [c.id, b.id, a.id])
+  const r = skins.moveSkin(a.id, 'top')
+  assert.equal(r.ok, true)
+  assert.equal(r.moved, true)
+  assert.deepEqual(listSkins().items.map((x) => x.id), [a.id, c.id, b.id])
+})
+
+test('moveSkin：up / down 上下挪一格', () => {
+  reset()
+  const a = importBuffer('a.webp', 'webp', PNG, null)
+  const b = importBuffer('b.webp', 'webp', PNG, null)
+  const c = importBuffer('c.webp', 'webp', PNG, null)
+  // 初始 [c, b, a]
+  skins.moveSkin(a.id, 'up')                    // a 上移一格 → [c, a, b]
+  assert.deepEqual(listSkins().items.map((x) => x.id), [c.id, a.id, b.id])
+  skins.moveSkin(a.id, 'down')                  // a 下移一格 → [c, b, a]
+  assert.deepEqual(listSkins().items.map((x) => x.id), [c.id, b.id, a.id])
+})
+
+test('moveSkin：已在边界时 moved=false 且不回错、不动顺序', () => {
+  reset()
+  const a = importBuffer('a.webp', 'webp', PNG, null)
+  const b = importBuffer('b.webp', 'webp', PNG, null)
+  // 新导入的项 unshift 到最前，所以此刻顺序是 [b, a]：b 已在最前、a 已在最后
+  assert.deepEqual(listSkins().items.map((x) => x.id), [b.id, a.id])
+  const top = skins.moveSkin(b.id, 'up')
+  assert.equal(top.ok, true, '已是最前不该当错误')
+  assert.equal(top.moved, false)
+  const bottom = skins.moveSkin(a.id, 'down')
+  assert.equal(bottom.moved, false)
+  assert.deepEqual(listSkins().items.map((x) => x.id), [b.id, a.id], '边界操作不改顺序')
+})
+
+test('moveSkin：id 不存在时返回失败', () => {
+  reset()
+  importBuffer('a.webp', 'webp', PNG, null)
+  const r = skins.moveSkin('no-such-id', 'top')
   assert.equal(r.ok, false)
   assert.match(r.error, /不存在/)
+})
+
+// ── 拖拽落点（moveSkin 'to' + index）──────────────────────────────────────
+// 设置页拖拽排序时把「插到第几个位置」算好传进来，宿主只负责搬运。
+
+test("moveSkin：to 把指定项搬到目标下标，其它项相对顺序不变", () => {
+  reset()
+  const a = importBuffer('a.webp', 'webp', PNG, null)
+  const b = importBuffer('b.webp', 'webp', PNG, null)
+  const c = importBuffer('c.webp', 'webp', PNG, null)
+  // 初始 [c, b, a]
+  const r = skins.moveSkin(a.id, 'to', 1)       // a 搬到下标 1 → [c, a, b]
+  assert.equal(r.ok, true)
+  assert.equal(r.moved, true)
+  assert.equal(r.index, 1)
+  assert.deepEqual(listSkins().items.map((x) => x.id), [c.id, a.id, b.id])
+  const r2 = skins.moveSkin(c.id, 'to', 2)      // c 搬到下标 2 → [a, b, c]
+  assert.equal(r2.index, 2)
+  assert.deepEqual(listSkins().items.map((x) => x.id), [a.id, b.id, c.id])
+})
+
+test("moveSkin：to 落点越界自动夹到合法范围", () => {
+  reset()
+  const a = importBuffer('a.webp', 'webp', PNG, null)
+  const b = importBuffer('b.webp', 'webp', PNG, null)
+  // 初始 [b, a]
+  const tooBig = skins.moveSkin(a.id, 'to', 99) // 夹到末尾 → 已在末尾，moved=false
+  assert.equal(tooBig.ok, true)
+  assert.equal(tooBig.moved, false, '夹回后即原位，不该真移动')
+  const neg = skins.moveSkin(a.id, 'to', -5)    // 夹到 0 → [a, b]
+  assert.equal(neg.ok, true)
+  assert.equal(neg.moved, true)
+  assert.deepEqual(listSkins().items.map((x) => x.id), [a.id, b.id])
+})
+
+test("moveSkin：to 与当前下标相同则 moved=false（拖到原位）", () => {
+  reset()
+  const a = importBuffer('a.webp', 'webp', PNG, null)
+  const b = importBuffer('b.webp', 'webp', PNG, null)
+  // 初始 [b, a]
+  const r = skins.moveSkin(b.id, 'to', 0)
+  assert.equal(r.ok, true)
+  assert.equal(r.moved, false)
+  assert.deepEqual(listSkins().items.map((x) => x.id), [b.id, a.id], '原位拖动不改顺序')
 })
 
 // ── 官方图显示名（installBuiltin 的 displayName）─────────────────────────
@@ -173,6 +271,236 @@ test('installBuiltin：重复下载不改动「当前形象」（仍在用自己
   const mine = importBuffer('mine.webp', 'webp', PNG, null)
   skins.installBuiltin('s34330e4aba', 'png', PNG, null, '神里绫华')
   assert.equal(listSkins().current, mine.id)
+})
+
+// ── 缩略图（webp 落盘 / 懒补 setThumb）──────────────────────────────────
+// 回归背景：v1.9.x 早先版本下载共享角色时没落缩略图，listSkins 只能回落读原图
+// （0.9~2.7MB 一张，8MB 回落预算撑不过 4 张），后面的项全显示「无预览」。
+// 现在缩略图由设置页读打包资源 resources/thumbs/<id>.webp 后传下来（宿主定位不到插件目录）。
+
+// 最小合法 WebP 头（RIFF....WEBP），writeThumb 只校验前缀与实际字节数
+const WEBP = Buffer.from('524946460000000057454250', 'hex')
+function webpUrl() { return 'data:image/webp;base64,' + WEBP.toString('base64') }
+
+test('listSkins：缩略图优先 .thumb.png，缺失时回落到 .thumb.webp（共享角色落的是 webp）', () => {
+  reset()
+  skins.installBuiltin('s1', 'png', PNG, webpUrl(), '角色一')
+  const item = listSkins().items.filter((x) => x.id === 's1')[0]
+  assert.match(item.thumb, /^data:image\/webp;base64,/, 'webp 缩略图必须能被读回（老代码只认 .thumb.png）')
+})
+
+test('setThumb：已有缩略图时跳过（不重复写盘）', () => {
+  reset()
+  skins.installBuiltin('s1', 'png', PNG, webpUrl(), '角色一')
+  const r = skins.setThumb('s1', webpUrl())
+  assert.equal(r.ok, true)
+  assert.equal(r.skipped, true)
+})
+
+test('setThumb：老数据缺缩略图时补上，listSkins 立刻能读到（不再回落读原图）', () => {
+  reset()
+  skins.installBuiltin('s1', 'png', PNG, '', '角色一')
+  // 没有缩略图文件时 listSkins 会回落读原图（塞进来的是 PNG 原图，体积 = 原图），
+  // 这正是「回落」的痕迹 —— 缩略图文件真的不存在，不是设了空串。
+  assert.equal(fs.existsSync(path.join(TMP, 'whale-skins', 's1.thumb.png')), false)
+  assert.match(listSkins().items[0].thumb, /^data:image\/png;base64,/)
+  const r = skins.setThumb('s1', webpUrl())
+  assert.equal(r.ok, true)
+  assert.equal(r.skipped, undefined)
+  assert.equal(fs.existsSync(path.join(TMP, 'whale-skins', 's1.thumb.webp')), true)
+  assert.match(listSkins().items[0].thumb, /^data:image\/webp;base64,/, '补上后应走缩略图而不是原图回落')
+})
+
+test('setThumb：id 不存在时返回失败而非静默成功', () => {
+  reset()
+  const r = skins.setThumb('no-such-id', webpUrl())
+  assert.equal(r.ok, false)
+  assert.match(r.error, /不存在/)
+})
+
+test('setThumb：数据不是合法图片 data URL 时返回失败，不写坏文件', () => {
+  reset()
+  skins.installBuiltin('s1', 'png', PNG, '', '角色一')
+  const r = skins.setThumb('s1', 'not-a-data-url')
+  assert.equal(r.ok, false)
+  assert.equal(fs.existsSync(path.join(TMP, 'whale-skins', 's1.thumb.png')), false)
+  assert.equal(fs.existsSync(path.join(TMP, 'whale-skins', 's1.thumb.webp')), false)
+})
+
+test('removeSkin：两种格式的缩略图都清掉（png 与 webp 都不留垃圾）', () => {
+  reset()
+  skins.installBuiltin('s1', 'png', PNG, webpUrl(), '角色一')
+  const dir = path.join(TMP, 'whale-skins')
+  assert.equal(fs.existsSync(path.join(dir, 's1.thumb.webp')), true)
+  skins.removeSkin('s1')
+  assert.equal(fs.existsSync(path.join(dir, 's1.thumb.webp')), false)
+  assert.equal(fs.existsSync(path.join(dir, 's1.thumb.png')), false)
+  assert.equal(fs.existsSync(path.join(dir, 's1.png')), false)
+})
+
+// ── 批量搬动（moveSkins）────────────────────────────────────────────────
+// 设置页「选中操作 → 置顶」与拖拽落点都走这条：选中几张一起搬到最前 / 某处，
+// 被搬的那批要保持原来的相对顺序。逐张调 moveSkin 会写盘 N 次，且先搬走的项会让后面
+// 算好的落点整体偏移一格，所以批量必须是一趟完成的独立接口。
+
+test('moveSkins：多张一起搬到最前，保持它们在原列表里的相对顺序', () => {
+  reset()
+  const a = importBuffer('a.webp', 'webp', PNG, null)
+  const b = importBuffer('b.webp', 'webp', PNG, null)
+  const c = importBuffer('c.webp', 'webp', PNG, null)
+  const d = importBuffer('d.webp', 'webp', PNG, null)
+  // 初始 [d, c, b, a]；把 b、d 置顶 → 按原相对顺序（d 在 b 前）排到最前 → [d, b, c, a]
+  const r = skins.moveSkins([b.id, d.id], 0)
+  assert.equal(r.ok, true)
+  assert.equal(r.moved, true)
+  assert.equal(r.index, 0)
+  assert.deepEqual(listSkins().items.map((x) => x.id), [d.id, b.id, c.id, a.id])
+})
+
+test('moveSkins：落点是非 0 时插到剩余项的第 index 个之前', () => {
+  reset()
+  const a = importBuffer('a.webp', 'webp', PNG, null)
+  const b = importBuffer('b.webp', 'webp', PNG, null)
+  const c = importBuffer('c.webp', 'webp', PNG, null)
+  // 初始 [c, b, a]；把 a 搬到剩项 [c, b] 的下标 1 前 → [c, a, b]
+  const r = skins.moveSkins([a.id], 1)
+  assert.equal(r.index, 1)
+  assert.deepEqual(listSkins().items.map((x) => x.id), [c.id, a.id, b.id])
+})
+
+test('moveSkins：落点越界自动夹到合法范围（只在剩余项之间）', () => {
+  reset()
+  const a = importBuffer('a.webp', 'webp', PNG, null)
+  const b = importBuffer('b.webp', 'webp', PNG, null)
+  const c = importBuffer('c.webp', 'webp', PNG, null)
+  // 初始 [c, b, a]；把 a 搬到 99 → 夹到剩项 [c, b] 的末尾 → [c, b, a] 即原位，moved=false
+  const far = skins.moveSkins([a.id], 99)
+  assert.equal(far.ok, true)
+  assert.equal(far.moved, false)
+  assert.deepEqual(listSkins().items.map((x) => x.id), [c.id, b.id, a.id])
+  // 负数夹到 0 → [a, c, b]
+  const neg = skins.moveSkins([a.id], -5)
+  assert.equal(neg.moved, true)
+  assert.deepEqual(listSkins().items.map((x) => x.id), [a.id, c.id, b.id])
+})
+
+test('moveSkins：顺序没变（落点即原位）时 moved=false 且不写盘', () => {
+  reset()
+  const a = importBuffer('a.webp', 'webp', PNG, null)
+  const b = importBuffer('b.webp', 'webp', PNG, null)
+  // 初始 [b, a]；把 a 搬到剩项 [b] 的下标 1 → [b, a] 即原位
+  const r = skins.moveSkins([a.id], 1)
+  assert.equal(r.ok, true)
+  assert.equal(r.moved, false)
+  assert.deepEqual(listSkins().items.map((x) => x.id), [b.id, a.id])
+})
+
+test('moveSkins：全被选中时无插入位置，moved=false 且不动顺序', () => {
+  reset()
+  const a = importBuffer('a.webp', 'webp', PNG, null)
+  const b = importBuffer('b.webp', 'webp', PNG, null)
+  const r = skins.moveSkins([a.id, b.id], 0)
+  assert.equal(r.ok, true)
+  assert.equal(r.moved, false)
+  assert.deepEqual(listSkins().items.map((x) => x.id), [b.id, a.id])
+})
+
+test('moveSkins：脏 id 被静默滤掉，其余项照常搬运', () => {
+  reset()
+  const a = importBuffer('a.webp', 'webp', PNG, null)
+  const b = importBuffer('b.webp', 'webp', PNG, null)
+  // 初始 [b, a]；「no-such-id」不在列表里，只搬 a
+  const r = skins.moveSkins(['no-such-id', a.id], 0)
+  assert.equal(r.ok, true)
+  assert.equal(r.moved, true)
+  assert.deepEqual(listSkins().items.map((x) => x.id), [a.id, b.id])
+})
+
+test('moveSkins：空数组 / 全脏 id 时不动也不写盘', () => {
+  reset()
+  importBuffer('a.webp', 'webp', PNG, null)
+  assert.equal(skins.moveSkins([], 0).moved, false)
+  assert.equal(skins.moveSkins(['nope'], 0).moved, false)
+  assert.equal(listSkins().items.length, 1)
+})
+
+test('moveSkins：不夹带「当前形象」的改动（搬顺序不等于换图）', () => {
+  reset()
+  const a = importBuffer('a.webp', 'webp', PNG, null)
+  const b = importBuffer('b.webp', 'webp', PNG, null)
+  // importBuffer 不切当前形象：空画廊导入第一张时 current 落到它，第二张不再顶替
+  const cur = listSkins().current
+  assert.equal(cur, a.id, '当前形象 = 第一张（后续导入不顶替）')
+  skins.moveSkins([b.id], 0)   // 把第二张搬到最前
+  assert.equal(listSkins().current, cur, '当前形象不受顺序调整影响')
+  assert.deepEqual(listSkins().items.map((x) => x.id), [b.id, a.id], '顺序确实变了')
+})
+
+// ── 批量删除（removeSkins）──────────────────────────────────────────────
+// 设置页「选中操作 → 删除」一次可能删十几张，走这条一趟读改写盘删完。
+
+test('removeSkins：一次删掉多张，文件与元信息都清干净', () => {
+  reset()
+  const a = importBuffer('a.webp', 'webp', PNG, null)
+  const b = importBuffer('b.webp', 'webp', PNG, null)
+  const c = importBuffer('c.webp', 'webp', PNG, null)
+  const r = skins.removeSkins([a.id, c.id])
+  assert.equal(r.ok, true)
+  assert.equal(r.removed, 2)
+  assert.equal(r.failed, 0)
+  assert.equal(r.left, 1)
+  assert.deepEqual(listSkins().items.map((x) => x.id), [b.id])
+  const dir = path.join(TMP, 'whale-skins')
+  assert.equal(fs.existsSync(path.join(dir, a.id + '.webp')), false)
+  assert.equal(fs.existsSync(path.join(dir, c.id + '.webp')), false)
+  assert.equal(fs.existsSync(path.join(dir, b.id + '.webp')), true)
+})
+
+test('removeSkins：删掉当前形象时把当前位交给剩下的第一张', () => {
+  reset()
+  const a = importBuffer('a.webp', 'webp', PNG, null)
+  const b = importBuffer('b.webp', 'webp', PNG, null)
+  // importBuffer 不切当前形象（keepCurrent 语义）：current 停在第一张 a
+  assert.equal(listSkins().current, a.id)
+  const r = skins.removeSkins([a.id])
+  assert.equal(r.current, b.id, '当前位交给剩下的第一张 b')
+  assert.equal(listSkins().current, b.id)
+})
+
+test('removeSkins：删光了则 current 置空（由设置页回退内置形象）', () => {
+  reset()
+  const a = importBuffer('a.webp', 'webp', PNG, null)
+  const r = skins.removeSkins([a.id])
+  assert.equal(r.left, 0)
+  assert.equal(r.current, '')
+})
+
+test('removeSkins：未知 id 计入 failed 且不影响其余项', () => {
+  reset()
+  const a = importBuffer('a.webp', 'webp', PNG, null)
+  const r = skins.removeSkins(['no-such-id', a.id])
+  assert.equal(r.ok, true)
+  assert.equal(r.removed, 1)
+  assert.equal(r.failed, 1)
+  assert.equal(r.left, 0)
+})
+
+test('removeSkins：全是未知 id 时不动也不写盘', () => {
+  reset()
+  importBuffer('a.webp', 'webp', PNG, null)
+  const r = skins.removeSkins(['x', 'y'])
+  assert.equal(r.removed, 0)
+  assert.equal(r.failed, 2)
+  assert.equal(listSkins().items.length, 1)
+})
+
+test('removeSkins：空数组直接返回，不误清数据', () => {
+  reset()
+  importBuffer('a.webp', 'webp', PNG, null)
+  const r = skins.removeSkins([])
+  assert.equal(r.ok, true)
+  assert.equal(r.removed, 0)
+  assert.equal(listSkins().items.length, 1)
 })
 
 test.after(() => { fs.rmSync(TMP, { recursive: true, force: true }) })

@@ -1,6 +1,60 @@
+/* ===== 主题变量：全项目唯一真源 =====
+   原先 App.vue 的 .page 与 AccelView.vue 的 .gh-accel 各写了一份**逐字一致**的
+   设计令牌（颜色、边框、底、状态色），各带浅/深两套。AccelView 那份的注释说
+   「scoped 隔离导致父级变量拿不到」—— 该说法不成立：scoped 只给**选择器**加
+   [data-v-x]，不影响 **CSS 变量的 DOM 继承**，.gh-accel 是 .page 的后代，本就能拿到。
+   两份是纯复制，改配色要改三处（此文件 :root + 上面两个），故收到这里作单一真源。
+
+   ⚠️ 变量挂 :root（= <html>），沿 DOM 继承覆盖全页；.page / .gh-accel 里的同名定义
+   已全部删除，以后**改配色只改这一节**（浅色在上、深色在下方媒体查询里各一套）。
+
+   ⚠️ color-scheme **不在这里**：它是「原生控件（下拉/复选框/滚动条）跟随主题」的开关，
+   且 main.css 的滚动条一节要靠它反向压制（见 `::-webkit-scrollbar { color-scheme: normal }`）。
+   它属于**页面级**而非颜色令牌，仍留在 App.vue 的 .page 上。
+
+   ⚠️ 深色块里 body 的 background-color 必须与 --bar-bg 同值：--bar-bg 是顶部 Tab
+   吸顶条的底色，吸住时必须和 body 底一致，否则滚到一半内容会从导航下面透出来。
+   现在两者都走同一个变量，不必再靠人眼对表。 */
 :root {
+  /* 全局裸按钮（.btn-row 里无类名的主按钮）用的实心蓝，与主题令牌无关，单独保留 */
   --blue: rgb(88, 164, 246);
   --light: #fff;
+  --fg: #1f2a44;
+  --fg-dim: #536ba9;
+  --fg-faint: #9fb0d9;
+  --accent: #536ba9;
+  /* 强调色的淡底，给「选中」这类需要大块底色的状态用。深色主题下另有更亮的主题色，
+     故必须每个主题各给一份，不能只靠 fallback —— 深底上压 #536ba9 的淡蓝会发灰 */
+  --accent-weak: rgba(83, 107, 169, 0.12);
+  --line: rgba(83, 107, 169, 0.4);
+  --card-bg: rgba(127, 127, 127, 0.08);
+  --card-border: rgba(127, 127, 127, 0.18);
+  --track: rgba(83, 107, 169, 0.1);
+  --input-bg: #ffffff;
+  --ok: #2fa24c;
+  --err: #e0433f;
+  --warn: #c07d1a;
+  /* 顶部 Tab 吸顶时的底色，必须与 body 背景一致（见上） */
+  --bar-bg: #f4f4f4;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --fg: #e8ecf5;
+    --fg-dim: #9fb0d9;
+    --fg-faint: #7f8db3;
+    --accent: #8aa4e6;
+    --accent-weak: rgba(138, 164, 230, 0.16);
+    --line: rgba(255, 255, 255, 0.22);
+    --card-bg: rgba(255, 255, 255, 0.06);
+    --card-border: rgba(255, 255, 255, 0.12);
+    --track: rgba(255, 255, 255, 0.08);
+    --input-bg: #2b3145;
+    --ok: #4ec46b;
+    --err: #ff6b66;
+    --warn: #e0a63c;
+    --bar-bg: #303133;
+  }
 }
 
 html,
@@ -97,6 +151,28 @@ button.utils-outline:hover:not(:disabled) {
   color: var(--fg-dim, #536ba9);
 }
 
+/* ===== 全屏遮罩弹层底：三个弹窗共用（单一来源）=====
+   SkinCropper / SoundTrimmer / FirstRunGuide 各写了一份**逐字一致**的 .overlay，
+   这是「全屏遮罩」这一通用语义，本就该是全局的，所以收到这里。
+   放全局的另一个理由与上面的按钮同源：这几个 .vue 全是 scoped，规则只对本组件模板
+   直接写的元素生效；改一处漏一处正是要避免的。
+
+   ⚠️ 这里只放**不含主题变量**的部分（纯固定色 + 几何）。下面 .panel 那类用
+   var(--input-bg) / var(--fg) 的规则**必须留在各组件 scoped**：主题变量是各 .page
+   作用域内定义的局部变量（App.vue 与 AccelView.vue 各一套，且深色模式下会换值），
+   main.css 的 :root 里没有它们，写在这里会静默 fallback 成写死的浅色值，
+   深色模式下直接串色。 */
+.whale-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+  background: rgba(20, 26, 42, 0.55);
+}
+
 textarea {
   display: block;
   margin: 0;
@@ -171,13 +247,13 @@ textarea {
 
 @media (prefers-color-scheme: light) {
   body {
-    background-color: #f4f4f4;
+    background-color: var(--bar-bg);
   }
 }
 
 @media (prefers-color-scheme: dark) {
   body {
-    background-color: #303133;
+    background-color: var(--bar-bg);
     color: #fff;
   }
 

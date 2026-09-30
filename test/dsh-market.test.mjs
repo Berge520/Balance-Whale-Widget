@@ -289,6 +289,84 @@ test('rangeAllows：tilde 只放开 patch 位', () => {
   assert.equal(rangeAllows('~1.2.3', '1.3.0'), false)
 })
 
+// ── 上界的 `-0` 天花板（2026-09-30 修）──
+//
+// ⚠️ 盯的真实事故：上界原先写成裸正式版 `0.2.0`，而按 semver **prerelease 恒小于同核正式版**
+//    （`0.2.0-rc.2 < 0.2.0`），于是任何 `0.2.0-*` 都「小于上界」= 越过上界仍被判在范围内，
+//    排他上界形同虚设。这不是理论风险：dsh 已发布的版本**全部**是 prerelease
+//    （0.1.7-rc.1、0.2.0-rc.2…），且当时 dist-tags.latest 就是 `0.2.0-rc.2`。
+//    后果是「市场说兼容，dsh 自己的门却拒绝安装」的双结论矛盾。
+//    修法是上界写成 `major.minor.0-0`（node-semver 的 `<0.2.0-0` 写法，与 dsh-market
+//    上游 exclusiveUpperBound 同款）—— 它排序上低于 `0.2.0` 的所有 prerelease，
+//    同时仍排除正式版本身。
+test('rangeAllows：caret 上界的 -0 天花板挡得住 prerelease（回归：0.2.0-rc.2 曾穿透 ^0.1.7）', () => {
+  // 跨代：^0.1.7 的上界是 0.2.0，prerelease 的 0.2.0-rc.2 必须被挡住
+  assert.equal(rangeAllows('^0.1.7', '0.2.0-rc.2'), false)
+  // ^1.2.3 的上界是 2.0.0 → 2.0.0-rc.1 必须被挡住
+  assert.equal(rangeAllows('^1.2.3', '2.0.0-rc.1'), false)
+  // 正式版本身照旧被排除（-0 不能把上界放宽到自己）
+  assert.equal(rangeAllows('^1.2.3', '2.0.0'), false)
+  // ⚠️ 同代的 prerelease 走的是**准入门**而非天花板：`^0.1.7-rc.1` 与目标 `0.1.8-rc.1`
+  //    核（major.minor.patch）不同，按 set 级规则同样不收 —— 这条钉住「准入门比天花板更严」，
+  //    免得日后有人以为「只要低于 -0 就放行」。跨核同代 rc 的放行见准入门那组。
+  assert.equal(rangeAllows('^0.1.7-rc.1', '0.1.8-rc.1'), false)
+  // 同代 prerelease 落在 -0 之下的正向用例：核相同才准入
+  assert.equal(rangeAllows('^0.1.7-rc.1', '0.1.7-rc.2'), true)
+  // 同代正式版照常放行（正式版不受准入门约束）
+  assert.equal(rangeAllows('^0.1.7', '0.1.8'), true)
+})
+
+test('rangeAllows：tilde 上界同样带 -0 天花板', () => {
+  // ~1.2.3 的上界是 1.3.0 → 1.3.0-rc.1 必须被挡住（旧写法会放行）
+  assert.equal(rangeAllows('~1.2.3', '1.3.0-rc.1'), false)
+  assert.equal(rangeAllows('~1.2.3', '1.3.0'), false)
+  // 同代 prerelease 落在天花板上用例见准入门那组（声明需显式带 prerelease）
+})
+
+// ── prerelease 准入门（npm semver 的 set 级规则）──
+//
+// ⚠️ 默认口径（不开 includePrerelease）：带 prerelease 的目标版本，只有当**声明自己就带
+//    prerelease 且与目标同核**时才准予参与比较。所以 `^0.1.0` 不收 `0.1.7-rc.1`（声明没提 rc）。
+// ⚠️ 但 dsh **每条已发布宿主线本身就是 prerelease**，严格默认口径会把同代 rc 宿主全判
+//    「不兼容」、市场一片红。故兼容性检测链路显式传 `includePrerelease: true` 放宽**准入**。
+//    准入放宽**只决定「目标允不允许参与比较」，不移动上界的 -0 天花板** —— 两件事必须分开，
+//    否则「放宽准入」会顺手废掉刚修好的跨代围栏。下面两组对照正是在钉这条边界。
+test('rangeAllows：默认口径下声明未写 prerelease 就不收 prerelease 目标', () => {
+  // 声明 ^0.1.0（无 prerelease），目标是 0.1.7-rc.1 → 默认不收
+  assert.equal(rangeAllows('^0.1.0', '0.1.7-rc.1'), false)
+  // 声明自己带 prerelease 且同核 → 收
+  assert.equal(rangeAllows('^0.1.7-rc.1', '0.1.7-rc.2'), true)
+  // 声明带 prerelease 但**不同核** → 不收
+  assert.equal(rangeAllows('^0.1.7-rc.1', '0.2.0-rc.1'), false)
+  // 目标是正式版时与 prerelease 门无关，照常判
+  assert.equal(rangeAllows('^0.1.0', '0.1.7'), true)
+})
+
+test('rangeAllows：includePrerelease 放宽准入，但不移动上界天花板', () => {
+  // 放宽准入后，同代 rc 目标被接纳
+  assert.equal(rangeAllows('^0.1.0', '0.1.7-rc.1', { includePrerelease: true }), true)
+  assert.equal(rangeAllows('^0.1.7-rc.1', '0.1.7-rc.2', { includePrerelease: true }), true)
+  // ⚠️ 关键边界：准入放宽**不得**让跨代 prerelease 越过 -0 天花板
+  assert.equal(rangeAllows('^0.1.7', '0.2.0-rc.2', { includePrerelease: true }), false)
+  assert.equal(rangeAllows('^1.2.3', '2.0.0-rc.1', { includePrerelease: true }), false)
+  assert.equal(rangeAllows('~1.2.3', '1.3.0-rc.1', { includePrerelease: true }), false)
+  // >= 比较器同样受准入门约束
+  assert.equal(rangeAllows('>=0.1.7', '0.2.0-rc.1'), false)
+  assert.equal(rangeAllows('>=0.1.7', '0.2.0-rc.1', { includePrerelease: true }), true)
+})
+
+// ⚠️ 回归（2026-09-30 踩过，19 条测试同时红）：admitPrerelease 一旦被放到 rangeAllows
+//    **函数开头统一拦**，认不出的范围（如 '不是个范围'）就从 true 变 false ——
+//    而 dsh-host-compat.js 的 UNJUDGEABLE_PROBE 反测机制**正是靠**「认不出的范围返 true」
+//    来区分「判过」与「压根没解析」，探针一失效，所有 undeclared 会被误判成 incompatible。
+//    所以准入判断必须留在**各分支解析成功之后**。这条把那个边界钉死。
+test('rangeAllows：认不出的范围仍返 true（准入判断必须在解析成功之后，否则探针反测失效）', () => {
+  assert.equal(rangeAllows('不是个范围', '0.0.0-0'), true)
+  assert.equal(rangeAllows('不是个范围', '0.0.0-0', { includePrerelease: true }), true)
+  // 探针本身在任何正常范围下都不该被放行 —— 这是 isUnjudgeable 成立的前提
+  assert.equal(rangeAllows('^0.1.7', '0.0.0-0'), false)
+})
+
 test('rangeAllows：裸版本按 npm 语义只有完全相同才算落在范围内', () => {
   // 本机实测就有这种写法：dsh-better-sidebar 写的是 "0.19.1"，锁定式
   assert.equal(rangeAllows('0.19.1', '0.19.1'), true)

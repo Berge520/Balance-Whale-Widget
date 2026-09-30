@@ -24,6 +24,32 @@ globalThis.utools = {
   dbCryptoStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
 }
 
+// ── fetch 桩：把宿主兼容性检测那条联网链路钉死在本地 ──
+//
+// ⚠️ 为什么必须挂（2026-09-30 定位）：这些用例走 dshMarketInstall / dshMarketUpdate，
+//    而 A 层宿主兼容性拦截会在写入前调 dsh-host-compat.lookup() 联网拉包的 manifest。
+//    它默认打的是 dsh-market.js 的 MIRROR_REGISTRY（registry.npmmirror.com），夹具里
+//    既没配 registry 也没桩 fetch → **真去联网**。于是「本用例断言能装上」这件事，
+//    取决于上游包当天发布的 peerDependencies 是否容得下桩宿主版本，测试结果随上游漂移。
+//    实测踩到：dshmarket@1.66.6 声明 `@deepseek-ai/dsh-settings: ^0.1.0-rc.7 || … || ^0.2.0-rc.1`，
+//    没有一个分支容得下宿主 0.2.0-rc.2 → 判 incompatible → 写入前被拦 → 18 条集体红。
+//
+//    桩返回的 manifest **不含任何 @deepseek-ai/dsh* 声明** → manifestFacts 返 null →
+//    结论是 unknown（不拦）。这正是这些用例想要的：它们验的是 from / version / dryRun /
+//    staleReason 的语义，兼容性检查不该在这里插手。
+//    （宿主兼容性自己的用例另见 dsh-host-compat.test.mjs，那里直接喂 facts，不走网络。）
+const STUB_MANIFEST = {
+  name: 'dshmarket',
+  version: '1.66.6',
+  engines: { node: '>=20' },
+  peerDependencies: { '@deepseek-ai/cordis': '^4.0.1' },
+}
+globalThis.fetch = async () => ({
+  ok: true,
+  status: 200,
+  text: async () => JSON.stringify(STUB_MANIFEST),
+})
+
 const require = createRequire(import.meta.url)
 const settings = require('../public/preload/lib/settings.js')
 

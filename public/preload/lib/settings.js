@@ -711,7 +711,11 @@ async function enforceHostCompat(entry, opts) {
   const registry = String(o.registry || cfgRegistry() || dshMarket.MIRROR_REGISTRY)
   const res = await dshHostCompat.lookup([pkg], { registry: registry })
   const facts = res && res.facts ? res.facts[pkg] : null
-  const verdict = dshHostCompat.deriveHostCompatibility(facts, host, dshMarket.rangeAllows)
+  // ⚠️ includePrerelease：dsh 宿主**每条已发布版本线都是 prerelease**（0.1.7-rc.1、0.2.0-rc.2…），
+  //    按 npm 默认口径（声明未写 prerelease 就不收 prerelease 目标）会把同代 rc 宿主全判「不兼容」，
+  //    市场会一片红。放宽**准入**即可，上界的 `-0` 天花板不受影响 —— 跨代（^0.1.7 遇 0.2.0-rc.2）
+  //    仍正确判不兼容。与 dsh-market 上游同款口径（那边 discovery 传 true）。
+  const verdict = dshHostCompat.deriveHostCompatibility(facts, host, (r, v) => dshMarket.rangeAllows(r, v, { includePrerelease: true }))
   if (verdict.status === 'incompatible') {
     return { blocked: !force, forced: force, status: verdict.status, reason: verdict.reason, requirement: verdict.requirement, package: pkg, host: host }
   }
@@ -1990,7 +1994,7 @@ module.exports = {
           // ⚠️ 缺键（理论上 lookup 每个包都给值，但防御一下）按「没拉到」记，
           //    不能落成 null —— null 在判定层是「拉到了但没声明」，会把网络问题说成插件没要求
           const facts = res && res.facts && p in res.facts ? res.facts[p] : dshHostCompat.UNAVAILABLE
-          const v = dshHostCompat.deriveHostCompatibility(facts, host, dshMarket.rangeAllows)
+          const v = dshHostCompat.deriveHostCompatibility(facts, host, (r, hv) => dshMarket.rangeAllows(r, hv, { includePrerelease: true }))
           results[p] = { status: v.status, reason: v.reason, requirement: v.requirement, package: p }
         }
         return { ok: true, host: host, results: results }
@@ -2018,7 +2022,7 @@ module.exports = {
       for (const pkg of Object.keys(byPkg)) {
         // 同上：缺键按「没拉到」记，别落成 null（null = 拉到了但没声明）
         const facts = res && res.facts && pkg in res.facts ? res.facts[pkg] : dshHostCompat.UNAVAILABLE
-        const v = dshHostCompat.deriveHostCompatibility(facts, host, dshMarket.rangeAllows)
+        const v = dshHostCompat.deriveHostCompatibility(facts, host, (r, hv) => dshMarket.rangeAllows(r, hv, { includePrerelease: true }))
         for (const key of byPkg[pkg]) results[key] = { status: v.status, reason: v.reason, requirement: v.requirement, package: pkg }
       }
       return { ok: true, host: host, results: results }
@@ -2607,6 +2611,12 @@ module.exports = {
   listSkins() {
     return skins.listSkins()
   },
+  // 补写某张形象的缩略图（设置页懒补）：共享角色在 v1.9.x 早先版本下载时没落缩略图，
+  // 升级后 listSkins 只能回落读原图，很快耗尽回落预算 → 画廊一片「无预览」。
+  // 设置页打开画廊时发现哪张缺，就把打包好的 resources/thumbs/<id>.webp 读成 data URL 送来补一次。
+  setSkinThumb(id, thumb) {
+    return skins.setThumb(id, thumb)
+  },
   // 当前形象元信息（画廊为空时返回 null），供设置页展示当前文件名
   getSkin() {
     return skins.readMeta()
@@ -2643,17 +2653,27 @@ module.exports = {
     if (r && r.ok) sendToWidget('whale:skin', skins.getSkinData())
     return r
   },
-  // 把某一张移到画廊最前（不改变当前使用的那张）
-  pinSkin(id) {
-    return skins.pinSkin(id)
+  // 移动画廊里某张的位置：to = 'top'（置顶）/ 'up' / 'down'（上下挪一格）/ 'to' + index（拖拽落到指定位置）
+  moveSkin(id, to, index) {
+    return skins.moveSkin(id, to, index)
   },
-  // 开关某一张是否参与「随机」抽签（不影响当前使用的那张）
-  setSkinRandom(id, on) {
-    return skins.setRandom(id, on !== false)
+  // 批量搬动：把 ids 整体搬到 index 落点（设置页选中一批后「置顶」/ 拖拽），一趟写盘
+  moveSkins(ids, index) {
+    return skins.moveSkins(ids, index)
+  },
+  // 批量改「参与随机」：map = { id: boolean }，宿主只读改写盘一次
+  setSkinRandomBatch(map) {
+    return skins.setRandomBatch(map)
   },
   removeSkin(id) {
     const r = skins.removeSkin(id)
     if (r && r.ok) sendToWidget('whale:skin', skins.getSkinData())
+    return r
+  },
+  // 批量删除：设置页选中一批后点「删除」，一趟读改写盘删完
+  removeSkins(ids) {
+    const r = skins.removeSkins(ids)
+    if (r && r.ok && r.removed) sendToWidget('whale:skin', skins.getSkinData())
     return r
   },
   // —— 可选下载的内置形象（v1.7.x 起随包只留默认那张，其余挂 Release 按需下）——
@@ -2676,9 +2696,11 @@ module.exports = {
   listSharedSounds() {
     return assetsPacks.listSharedSounds()
   },
-  // 下载并安装单张共享角色（与内置形象同链路落盘，装完把形象数据推给挂件）
-  async downloadSharedSkin(id, prefix) {
-    const r = await assetsPacks.downloadSharedSkin(id, { prefix: prefix })
+  // 下载并安装单张共享角色（与内置形象同链路落盘，装完把形象数据推给挂件）。
+  // thumb 由设置页从打包资源 resources/thumbs/<id>.webp 读成 data URL 传来 ——
+  // 宿主定位不到插件目录（只有渲染进程知道相对路径），故缩略图必须由调用方给。
+  async downloadSharedSkin(id, prefix, thumb) {
+    const r = await assetsPacks.downloadSharedSkin(id, { prefix: prefix, thumb: thumb })
     if (r && r.ok && !r.skipped) sendToWidget('whale:skin', skins.getSkinData())
     return r
   },
@@ -2701,9 +2723,24 @@ module.exports = {
     if (r && r.ok) sendToWidget('whale:sounds', sounds.getSoundData())
     return r
   },
-  // 试听共享库里的一段（shared 槽位不在 getSoundData 里，得按名单独取一段 data URL）
-  readSharedSoundData(name) {
-    return assetsPacks.readSharedSoundData(name)
+  // 试听共享库里的一段（shared 槽位不在 getSoundData 里，得按落盘文件名单独取一段 data URL）
+  readSharedSoundData(file) {
+    return assetsPacks.readSharedSoundData(file)
+  },
+  // 从共享库里删一段：素材池那段 + 从它「选用」出去的实播槽位副本一起清（见 assets-packs 注释）。
+  // 返回值带 clearedRoles（被清空的实播槽位），设置页据此在提示里说明影响面
+  removeSharedSound(file) {
+    return assetsPacks.removeSharedSound(file)
+  },
+  // —— 数据目录：设置页「资源」页展示落盘位置并提供「打开」按钮 ——
+  // 形象 / 音效 / 气泡各一个目录（导入的素材都复制进这里，不引用源文件）。
+  // 返回的是绝对路径，设置页只展示 + 交给 openDir 打开，不自己拼路径 —— 宿主才知道 userData 在哪
+  dataDirs() {
+    return {
+      skins: skins.dir(),
+      sounds: sounds.dir(),
+      bubbles: bubbles.dir(),
+    }
   },
   // —— 自定义气泡图片（点鲸鱼时随机显示一张，无「当前用哪张」概念） ——
   // 列表：元信息 + 缩略图 data URL，供设置页网格展示

@@ -249,7 +249,17 @@ async function downloadSkinPacks(opts) {
         continue
       }
       const ext = String(it.ext || 'webp').toLowerCase()
-      const r = skins.installBuiltin(meta.id, ext, data, null)
+      // 缩略图：manifest 的每项带 thumbOff / thumbLen（导出时由 assets.js 一并写进容器，
+      // 见 scripts/build-skin-pack.py）。两者为 0 表示这个包没带缩略图 —— 那就传空串，
+      // 宿主定位不到插件目录，设置页也没有共享角色那条「懒补」后路，只能回落读原图。
+      let thumb = ''
+      const thumbLen = Number(it.thumbLen) || 0
+      if (thumbLen > 0) {
+        const to = Number(it.thumbOff) || 0
+        const tb = buf.slice(parsed.dataStart + to, parsed.dataStart + to + thumbLen)
+        if (tb.length) thumb = 'data:image/webp;base64,' + tb.toString('base64')
+      }
+      const r = skins.installBuiltin(meta.id, ext, data, thumb)
       if (r && r.ok) installed.push(meta.id)
       else {
         errors.push(meta.id + '（' + ((r && r.error) || '写入失败') + '）')

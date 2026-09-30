@@ -44,11 +44,23 @@ function installedSkinIds() {
   return have
 }
 
-// 已有共享音效名（音效以「名」为去重键：落盘走 sounds.installBuiltin 的同名覆盖）
+// 共享音效的落盘名（shared 槽位里已装的那几段）→ 返回 name 集合。
+// 判定「已装」一律用它，不用 file：用户把音效导出素材包 / 清理重建后文件名会变，
+// 但「这一段共享音效装没装」在语义上是按上游 name 认的（下载即同名覆盖）。
 function installedSoundNames() {
   const meta = sounds.readMeta()
   const out = {}
   for (const it of meta.shared || []) out[it.name] = true
+  return out
+}
+
+// shared 槽位里每段的落盘文件名（按 name 索引），供设置页「删这段」按 file 精确定位。
+// 同一 name 若因历史遗留撞出多条，取第一条 —— 正常路径下 installBuiltin 已做同名覆盖，不会出现。
+function sharedSoundFiles() {
+  const out = {}
+  for (const it of sounds.readMeta().shared || []) {
+    if (!(it.name in out)) out[it.name] = it.file
+  }
   return out
 }
 
@@ -66,11 +78,14 @@ function listSharedSkins() {
   }
 }
 
-// 可下载的音效库清单 + 已装状态（按名去重）
+// 可下载的音效库清单 + 已装状态。
+// installed 按 name 判定（上游同名即同一段）；file 只在已装时非空，供设置页「删这段」精确删。
 function listSharedSounds() {
   const have = installedSoundNames()
+  const files = sharedSoundFiles()
   const items = SHARED_SOUND_LIB.map((s) => ({
     id: s.id, name: s.name, ext: s.ext, size: s.size, installed: have[s.name] === true,
+    file: files[s.name] || '',
   }))
   return {
     ok: true,
@@ -175,7 +190,12 @@ async function fetchWithChain(prefix, origin, wantSha, fetchImpl) {
 }
 
 // 下载并安装单张共享角色图。已装的不重复写入。
-// opts.fetchImpl 可注入（单测）；opts.prefix 是用户自填的加速前缀（'' = 只用内置链）。
+// opts.fetchImpl 可注入（单测）；opts.prefix 是用户自填的加速前缀（'' = 只用内置链）；
+// opts.thumb 是缩略图的 data URL（webp / png），由设置页从打包资源 resources/thumbs 读好传来
+//（宿主自己定位不到插件目录，见下）。
+// ⚠️ 早先这里第 4 个参数写死 null，导致下载回来的共享角色一张缩略图都没有 ——
+//    listSkins 只能回落读原图，而原图 0.9–2.7MB 一张、回落预算 8MB，约第 4 张就耗光，
+//    之后全部返回空缩略图，画廊显示「无预览」。缩略图必须在下载时就落盘。
 async function downloadSharedSkin(id, opts) {
   const meta = SHARED_SKIN_PACK_SKINS.filter((s) => s.id === id)[0]
   if (!meta) return { ok: false, error: '没有这个共享角色：' + String(id || '') }
@@ -191,7 +211,7 @@ async function downloadSharedSkin(id, opts) {
     const origin = fileUrl('skins', meta.id, 'png')
     const res = await fetchWithChain(o.prefix, origin, meta.sha256, fetchImpl)
     dlp.phase('install', { label: '正在写入角色…', total: res.item.buf.length })
-    const r = skins.installBuiltin(meta.id, 'png', res.item.buf, null, meta.name)
+    const r = skins.installBuiltin(meta.id, 'png', res.item.buf, o.thumb || '', meta.name)
     if (!r || !r.ok) {
       const why = (r && r.error) || '写入失败'
       dlp.end(false, res.item.buf.length)
@@ -249,11 +269,13 @@ async function downloadSharedSound(id, opts) {
 
 // 试听共享库里的一段：读它落盘的音频字节 → data URL。
 // 为什么不复用 sounds.getSoundData：那边只推「实播槽位」（shared 是几十段的素材池，
-// 全推给挂件等于每次搬几 MB 无用 base64），所以这里按「名」临时读一段给设置页试听用。
+// 全推给挂件等于每次搬几 MB 无用 base64），所以这里按「落盘文件名」临时读一段给设置页试听用。
+// ⚠️ 必须按 file 定位，不能按 name：素材池里完全可能有两段同名（上游一批素材里重名不算罕见），
+// 按 name 取第一条会让第二段的「试听」永远放出第一段的声音（与 removeSharedSound 同源问题）。
 // 返回值不缓存 —— 试听是低频动作，缓存反而会在下载 / 选用后变脏
-function readSharedSoundData(name) {
+function readSharedSoundData(file) {
   const meta = sounds.readMeta()
-  const src = (meta.shared || []).filter((x) => x.name === name)[0]
+  const src = (meta.shared || []).filter((x) => x.file === file)[0]
   if (!src) return { ok: false, error: '共享库里没有这段音效' }
   try {
     const buf = sounds.readSoundBuffer(src.file)
@@ -265,8 +287,23 @@ function readSharedSoundData(name) {
   }
 }
 
+// 删掉共享库里的一段（按落盘文件名定位，shared 槽位的同名覆盖用 name 会误伤）。
+// 只删素材池这一段，不动已「选用」到实播槽位的那份（useSharedSound 是另存一份，两者互不干扰）。
+function removeSharedSound(file) {
+  const f = String(file || '')
+  if (!f) return { ok: false, error: '缺少要删除的文件名' }
+  const r = sounds.removeSound('shared', f)
+  if (!r || !r.ok) return { ok: false, error: (r && r.error) || '删除失败' }
+  // 把这门声「选用」到实播槽位的副本一并清掉：用户删了池里这段，槽位那份照旧在响，
+  // 看着就是「删了没删干净」（选用是另存拷贝，两份无文件级关联，只能靠 from 标记反查）。
+  // 返回清掉的槽位名，供设置页在提示里说明影响面
+  const clearedRoles = sounds.removeDerivedFrom(f)
+  return { ok: true, clearedRoles: clearedRoles }
+}
+
 module.exports = {
-  listSharedSkins, listSharedSounds, downloadSharedSkin, downloadSharedSound, readSharedSoundData,
+  listSharedSkins, listSharedSounds, downloadSharedSkin, downloadSharedSound, removeSharedSound,
+  readSharedSoundData,
   _fileUrl: fileUrl, _sourceChain: sourceChain, _labelOf: labelOf,
   _readBodyWithProgress: readBodyWithProgress,
 }

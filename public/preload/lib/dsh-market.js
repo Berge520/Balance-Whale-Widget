@@ -503,9 +503,44 @@ function verStr(t) {
   const base = t[0] + '.' + t[1] + '.' + t[2]
   return t[3] && t[3].length ? base + '-' + t[3].join('.') : base
 }
+// `^` / `~` 的**排他上界**字符串（major.minor.0 → `major.minor.0-0`）。
+//
+// ⚠️ 上界必须带 `-0`，不能是裸正式版。按 semver，prerelease 恒小于同核正式版：
+//    `0.2.0-rc.2 < 0.2.0`。所以拿 `0.2.0` 当排他上界时，任何 `0.2.0-*` 都「小于上界」
+//    = 越过上界仍被判「在范围内」，围栏形同虚设。
+//    这不是理论风险：dsh 已发布的版本**全部**是 prerelease（0.1.7-rc.1、0.2.0-rc.2…），
+//    且当前 dist-tags.latest 就是 `0.2.0-rc.2`。实测旧写法下 `^0.1.7` 对 `0.2.0-rc.2`
+//    返 true —— 正是「市场说兼容、dsh 自己的门却拒绝安装」的双结论矛盾。
+//    `0.2.0-0` 排序上低于 `0.2.0` 的**所有** prerelease，同时仍排除正式版本身，
+//    与 node-semver 的 `<0.2.0-0` 写法一致（dsh-market 上游 exclusiveUpperBound 同款）。
+function ceilStr(hi) {
+  return hi.join('.') + '-0'
+}
+// prerelease **准入**门（npm semver 的 set 级规则）：带 prerelease 的目标版本，
+// 只有当**声明自己就带 prerelease 且与目标同核**时才准予参与比较。
+//
+// 默认关闭 = npm 默认口径，所以 `^0.1.0` 不收 `0.1.7-rc.1`（声明没提 prerelease）。
+//
+// ⚠️ 但 dsh **已发布的每一条宿主线本身就是 prerelease**（0.1.7-rc.1、0.2.0-rc.2…），
+//    严格默认口径会把同代 rc 宿主全判「不兼容」，市场一片红。故留 `includePrerelease`
+//    开关，由**兼容性检测**链路显式放宽准入 —— 与 dsh-market 上游同款口径（那边 discovery 传 true）。
+// ⚠️ 准入放宽**只决定「这个目标允不允许参与比较」，不移动上界的 `-0` 天花板**：
+//    `^0.1.7` 放宽后仍挡得住 `0.2.0-rc.2`（跨代），只放行 `0.1.x-rc.*`（同代）。
+//    两件事必须分开，否则「放宽准入」会顺手废掉刚修好的跨代围栏。
+//
+// ⚠️ 调用点在**各分支解析成功之后**，不能在函数开头统一拦 —— rangeAllows 对认不出的
+//    范围必须返 true（保守口径），而探针 `0.0.0-0` 正是靠这条来反测「判不了」的
+//    （见 dsh-host-compat.js 的 isUnjudgeable）。若在开头拦，认不出的范围会变成 false，
+//    探针失效 → 所有 undeclared 被误判成 incompatible。
+function admitPrerelease(opts, lo, t) {
+  if (opts && opts.includePrerelease === true) return true
+  if (!t[3] || !t[3].length) return true          // 目标是正式版 → 与 prerelease 门无关
+  if (!lo || !lo[3] || !lo[3].length) return false // 声明没写 prerelease → 不收 prerelease 目标
+  return lo[0] === t[0] && lo[1] === t[1] && lo[2] === t[2]
+}
 // range 支持：`^x.y.z` / `~x.y.z` / `x.y.z` / `>=x.y.z` / `*` / `latest` / 空。
 // 认不出的形态一律返回 true（= 落在范围内 = 不报更新）—— 保守优先，宁可漏报。
-function rangeAllows(range, target) {
+function rangeAllows(range, target, opts) {
   const r = String(range == null ? '' : range).trim()
   if (!r || r === '*' || r === 'latest' || r === 'x') return true
   const t = parseVer(target)
@@ -516,17 +551,14 @@ function rangeAllows(range, target) {
   if (caret) {
     const lo = parseVer(r.slice(1))
     if (!lo) return true
+    if (admitPrerelease(opts, lo, t) === false) return false
     if (cmpVer(target, verStr(lo)) < 0) return false
     const hi = caret[1] === '0'
       ? (caret[2] === '0' || caret[2] === undefined
         ? [0, 0, Number(caret[3] || 0) + 1]      // ^0.0.x → [0.0.x, 0.0.x+1)
         : [0, Number(caret[2]) + 1, 0])          // ^0.5.x → [0.5.x, 0.6.0)
       : [Number(caret[1]) + 1, 0, 0]             // ^1.2.3 → [1.2.3, 2.0.0)
-    // ⚠️ 上界是**不含 prerelease 的正式版**：`^0.1.7-rc.1` 的上界是 `0.2.0`，而
-    //    `0.2.0-rc.1` 按 semver 也 < `0.2.0`，会被判「在范围内」。这与 npm 的
-    //    `includePrerelease: false` 默认口径一致（prerelease 版本只有显式写进范围才匹配），
-    //    对本项目是**安全的保守方向**：宁可判「在范围内」（不报更新）也不误报。
-    return cmpVer(target, hi.join('.')) < 0
+    return cmpVer(target, ceilStr(hi)) < 0
   }
   // tilde：~1.2.3 → [1.2.3, 1.3.0)；~1.2 → [1.2.0, 1.3.0)
   //   ⚠️ 上界是**同一 minor 的下一个**（major.minor+1.0），不是下一个 major。
@@ -536,20 +568,33 @@ function rangeAllows(range, target) {
   if (tilde) {
     const lo = parseVer(r.slice(1))
     if (!lo) return true
+    if (admitPrerelease(opts, lo, t) === false) return false
     if (cmpVer(target, verStr(lo)) < 0) return false
     const hi = tilde[2] === undefined
       ? [Number(tilde[1]) + 1, 0, 0]                                  // ~1 → [1.0.0, 2.0.0)
       : [Number(tilde[1]), Number(tilde[2]) + 1, 0]                   // ~1.2[.3] → […, 1.3.0)
-    return cmpVer(target, hi.join('.')) < 0
+    return cmpVer(target, ceilStr(hi)) < 0
   }
   // >=x.y.z / >x.y.z
+  //   带 prerelease 的目标同样受准入门约束（`>=0.1.7` 不收 `0.2.0-rc.1`）。
   const ge = r.match(/^>=\s*(\S+)/)
-  if (ge) return cmpVer(target, ge[1]) >= 0
+  if (ge) {
+    const lop = parseVer(ge[1])
+    if (admitPrerelease(opts, lop, t) === false) return false
+    return cmpVer(target, ge[1]) >= 0
+  }
   const gt = r.match(/^>\s*(\S+)/)
-  if (gt) return cmpVer(target, gt[1]) > 0
+  if (gt) {
+    const lop = parseVer(gt[1])
+    if (admitPrerelease(opts, lop, t) === false) return false
+    return cmpVer(target, gt[1]) > 0
+  }
   // 裸版本（含 `1.2`、`1` 这类简写）—— 按 npm 语义只有**完全相同**才算落在范围内
   const bare = parseVer(r)
-  if (bare) return cmpVer(target, r) === 0
+  if (bare) {
+    if (admitPrerelease(opts, bare, t) === false) return false
+    return cmpVer(target, r) === 0
+  }
   // 认不出的形态（`latest`、workspace:*、npm:xxx 之类）→ 保守判「在范围内」
   return true
 }

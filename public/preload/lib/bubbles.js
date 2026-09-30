@@ -253,4 +253,6 @@ module.exports = {
   listBubbles, pickBubbleFile, importBubbleFromData, removeBubble, clearAll, getBubbleData,
   // 素材包（assets.js）用
   exportItems, importBuffer,
+  // 设置页「打开数据目录」用
+  dir: bubblesDir,
 }

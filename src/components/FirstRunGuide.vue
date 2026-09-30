@@ -11,7 +11,8 @@
  * 手动重开（数据 Tab 里的「重新查看新手引导」）时传 reopen：文案与左上角副标题按「补配凭据」口径走，
  * 不再说「欢迎使用」，否则老用户会以为自己重装了一遍。
  *
- * 弹层外观照抄 SkinCropper / SoundTrimmer 那套 .overlay + .panel —— 项目里已有的全屏遮罩模式，
+ * 弹层外观沿用 SkinCropper / SoundTrimmer 那套全屏遮罩 —— 项目里已有的模式，
+ * 遮罩底 .whale-overlay 三处共用、已在 main.css 里，本组件只写自己的 .panel，
  * 不引入新样式体系。凭据的保存 / 测试不在本组件里实现，一律 emit 给 App.vue 复用既有逻辑，
  * 免得「引导里一份、数据 Tab 里一份」两处拼参数（历史上这种重复就漏过收件人）。
 -->
@@ -82,7 +83,7 @@ function onTest() {
 </script>
 
 <template>
-  <div class="overlay">
+  <div class="whale-overlay">
     <div class="panel">
       <button class="close" type="button" title="关闭" @click="emit('skip')">×</button>
 
@@ -217,17 +218,7 @@ function onTest() {
 </template>
 
 <style scoped>
-/* 遮罩 + 面板：与 SkinCropper.vue / SoundTrimmer.vue 逐字一致，保持项目内弹层观感统一 */
-.overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 50;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 20px;
-  background: rgba(20, 26, 42, 0.55);
-}
+/* 遮罩底 .whale-overlay 已上提至 main.css（三弹窗共用），此处只留面板本体 */
 .panel {
   position: relative;
   width: 100%;
@@ -341,7 +332,7 @@ function onTest() {
   gap: 3px;
   margin: 12px 0 4px;
   padding: 10px 12px;
-  border: 1px dashed var(--border, rgba(83, 107, 169, 0.32));
+  border: 1px dashed var(--line);
   border-radius: 10px;
   background: rgba(83, 107, 169, 0.05);
 }
@@ -372,7 +363,7 @@ input[type='password'] {
   box-sizing: border-box;
   width: 100%;
   padding: 8px 10px;
-  border: 1px solid var(--border, rgba(83, 107, 169, 0.32));
+  border: 1px solid var(--line);
   border-radius: 8px;
   background: var(--input-bg, #fff);
   color: inherit;
@@ -395,7 +386,7 @@ input[type='password']:focus {
   align-items: flex-start;
   gap: 10px;
   padding: 10px 12px;
-  border: 1px solid var(--border, rgba(83, 107, 169, 0.24));
+  border: 1px solid var(--line);
   border-radius: 10px;
   cursor: pointer;
 }

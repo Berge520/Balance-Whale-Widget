@@ -791,7 +791,10 @@ watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = nu
        这样 CSS 变量与 scoped 样式有一个稳定的宿主节点，卡片本身仍是 .card，视觉不变 -->
   <div class="gh-accel">
     <!-- [帮助] GitHub 加速（hosts 方案）：走系统 hosts 直连，不装常驻进程 -->
-    <section class="card">
+    <!-- data-search 是设置页「卡片搜索」的滚动锚点：搜「加速」命中后点标签要能滚到这张卡。
+         必须挂在 .card 上（.card 才有 scroll-margin-top 预留吸顶条高度）；
+         挂在组件根 .gh-accel 上会滚到卡外的容器顶，被吸顶条盖住卡头 -->
+    <section class="card" data-search="ghAccel">
     <!-- 标题行即折叠开关：整卡默认收起，展开才去读 hosts / 源表（见 toggleGhAccelCard）。
          不用 .fold 那套（它样式与其它折叠区一致、字重偏轻）—— 这里要的是卡片的主标题，
          所以就地做成一行 h2 + 右侧箭头，视觉上与其它卡片的 <h2> 对齐 -->
@@ -1094,37 +1097,12 @@ watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = nu
 </template>
 
 <style scoped>
-/* 本组件自带一份设计令牌：scoped 样式不会跨越组件边界，父级 .page 上的 CSS 变量
-   在子组件里拿不到（会退化成继承值 / 空值），所以这里必须自带一份。
-   数值需与 App.vue 的 .page / 暗色媒体查询保持一致 —— 改配色时要两处一起改。 */
+/* 设计令牌（--fg / --accent / --line / --ok / --err 等）全部来自 main.css 的 :root，
+   本组件不再自带副本 —— 改配色只改那一处。
+   （此前这里写「scoped 隔离导致父级变量拿不到」，该说法不成立：scoped 只给选择器加
+   [data-v-x]，不影响 CSS 变量的 DOM 继承命中。） */
 .gh-accel {
-  --fg: #1f2a44;
-  --fg-dim: #536ba9;
-  --fg-faint: #9fb0d9;
-  --accent: #536ba9;
-  --line: rgba(83, 107, 169, 0.4);
-  --card-bg: rgba(127, 127, 127, 0.08);
-  --card-border: rgba(127, 127, 127, 0.18);
-  --input-bg: #ffffff;
-  --ok: #2fa24c;
-  --err: #e0433f;
-  --warn: #c07d1a;
   display: block;
-}
-@media (prefers-color-scheme: dark) {
-  .gh-accel {
-    --fg: #e8ecf5;
-    --fg-dim: #9fb0d9;
-    --fg-faint: #7f8db3;
-    --accent: #8aa4e6;
-    --line: rgba(255, 255, 255, 0.22);
-    --card-bg: rgba(255, 255, 255, 0.06);
-    --card-border: rgba(255, 255, 255, 0.12);
-    --input-bg: #2b3145;
-    --ok: #4ec46b;
-    --err: #ff6b66;
-    --warn: #e0a63c;
-  }
 }
 /* 通用控件样式：原本由 App.vue 的 scoped 样式提供，组件拆分后 scoped 隔离掉了，
    这里按本组件用到的部分补齐一份（.card / .field / .label / .btn-row / .msg / .guide / .fold 等） */
@@ -1393,7 +1371,9 @@ watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = nu
 }
 .gh-accel .gh-order li.gh-order-child .gh-order-idx {
   background: none;
-  color: var(--fg2);
+  /* 原先写 var(--fg2)，全项目没有 --fg2 定义且无 fallback → color 整条失效，
+     实际是回退到继承色。子级序号想要「比父级更淡」，用语义最接近的 --fg-faint。 */
+  color: var(--fg-faint);
 }
 /* 复选框 + 序号 + 名称整行布局，占满剩余宽度把上移/下移推到右侧。
    这里用 span 而不是 label：label 会把点击转发给内部的 input，而 input 的 change
@@ -1424,7 +1404,9 @@ watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = nu
   height: 18px;
   margin-top: 1px;
   border-radius: 50%;
-  background: var(--bd);
+  /* 原先写 var(--bd)，全项目没有 --bd 定义且无 fallback → background 整条失效，
+     序号圆底实际是透明的。想要「跟件底色」的淡底，用 --track。 */
+  background: var(--track);
   color: var(--fg);
   font-size: 11px;
   line-height: 18px;

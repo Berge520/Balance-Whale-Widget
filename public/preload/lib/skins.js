@@ -96,6 +96,23 @@ function writeRaw(raw) {
   try { utools.dbStorage.setItem(K.skins, raw) } catch (err) { logErr('[whale][skins] 写形象信息失败', err && err.message) }
 }
 
+// 缩略图读取：优先 png（用户导入时设置页 canvas 生成），其次 webp（共享角色 / 内置包打包时生成）。
+// 两者互斥 —— writeThumb 落盘时会清掉另一格式，这里按序探测只是兼容历史数据。
+function readThumb(id) {
+  return readFileUrl(id + '.thumb.png', 'png') || readFileUrl(id + '.thumb.webp', 'webp')
+}
+
+// 缩略图「文件是否存在」—— 注意不能用 readThumb(id) 非空来判断：listSkins 的 thumb 字段带回落
+// （没有缩略图时会塞回原图 data URL），光看列表分不出「真没有缩略图」还是「回落来的」。
+// 用途：setThumb 判断要不要补，以及导出（exportItems）时区分「真没有」与「回落显示」。
+function hasThumbFile(id) {
+  const dir = skinsDir()
+  for (const ext of ['png', 'webp']) {
+    try { if (fs.statSync(path.join(dir, id + '.thumb.' + ext)).size > 0) return true } catch (err) {}
+  }
+  return false
+}
+
 // 画廊列表：元信息 + 缩略图 data URL。缩略图缺失（老格式迁移过来的那张 / 生成失败）时回落到原图：
 // 老格式只可能有一张，新导入的都会带缩略图，所以给回落总量设个上限兜底，
 // 避免万一多张都缺缩略图时一次 IPC 搬几十 MB
@@ -106,7 +123,7 @@ function listSkins() {
     current: raw.current,
     items: raw.items.map((it) => {
       const size = fileSize(it.id + '.' + it.ext)
-      let thumb = readFileUrl(it.id + '.thumb.png', 'png')
+      let thumb = readThumb(it.id)
       if (!thumb && size > 0 && size <= fallbackBudget) {
         thumb = readFileUrl(it.id + '.' + it.ext, it.ext)
         if (thumb) fallbackBudget -= size
@@ -171,16 +188,28 @@ function newId() {
   return 'k' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5)
 }
 
-// 缩略图落盘：设置页 canvas 生成，格式固定 PNG（网格里等比居中，透明留白）
+// 缩略图落盘：设置页 canvas 生成，格式固定 PNG（网格里等比居中，透明留白）。
+// 也接受 webp —— 共享角色/内置包的缩略图是打包时生成好的 .webp（体积比 PNG 小一半），
+// 没必要在宿主里解码重压。扩展名按实际字节走，读回时按同名探测（见 listSkins）。
 function writeThumb(id, dataUrl) {
-  const PREFIX = 'data:image/png;base64,'
   const url = typeof dataUrl === 'string' ? dataUrl : ''
-  if (url.indexOf(PREFIX) !== 0) return
-  const buf = Buffer.from(url.slice(PREFIX.length), 'base64')
-  if (!buf.length || buf.length > THUMB_MAX_BYTES) return
-  try { fs.writeFileSync(path.join(skinsDir(), id + '.thumb.png'), buf) } catch (err) {
-    logErr('[whale][skins] 写缩略图失败', err && err.message)
+  const m = /^data:image\/(png|webp);base64,/.exec(url)
+  if (!m) return false
+  const ext = m[1]
+  const buf = Buffer.from(url.slice(m[0].length), 'base64')
+  if (!buf.length || buf.length > THUMB_MAX_BYTES) return false
+  const dir = skinsDir()
+  try { fs.mkdirSync(dir, { recursive: true }) } catch (err) {}
+  // 清掉另一格式的旧缩略图，避免 png/webp 两份并存时读回取到过期的那份
+  for (const other of ['png', 'webp']) {
+    if (other === ext) continue
+    try { fs.unlinkSync(path.join(dir, id + '.thumb.' + other)) } catch (err) {}
   }
+  try { fs.writeFileSync(path.join(dir, id + '.thumb.' + ext), buf) } catch (err) {
+    logErr('[whale][skins] 写缩略图失败', err && err.message)
+    return false
+  }
+  return true
 }
 
 // 新增一项并把「当前形象」切过去（导了图却还在用内置形象会很困惑）。
@@ -296,26 +325,72 @@ function setCurrent(id) {
   return { ok: true, current: id }
 }
 
-// 置顶：把该项移到画廊最前（数组顺序即展示顺序），当前形象不受影响
-function pinSkin(id) {
+// 移动某张在画廊里的位置（数组顺序即展示顺序），当前形象不受影响。
+// to: 'top' = 移到最前；'up' / 'down' = 上下挪一格；'to' = 移到指定下标（配合拖拽落点）。
+// 旧接口叫 pinSkin（只能置顶、且再点无反馈），v1.9.x 换成能上下调的 moveSkin：
+// 用户既能微调相邻顺序，也能一键置顶，「置顶」不再是「点了没反应」的黑洞。
+function moveSkin(id, to, index) {
   const raw = readRaw()
   const idx = raw.items.findIndex((x) => x.id === id)
   if (idx < 0) return { ok: false, error: '形象不存在' }
+  let want
+  if (to === 'to') {
+    // 拖拽落点：先把目标夹到合法范围（前端算出的 index 可能因为列表刚变而越界）
+    want = Math.max(0, Math.min(Number(index) || 0, raw.items.length - 1))
+  } else {
+    want = to === 'top' ? 0 : to === 'up' ? idx - 1 : to === 'down' ? idx + 1 : idx
+  }
+  if (want === idx) return { ok: true, moved: false }   // 已在边界：不回错，让设置页据此提示「已是最前 / 最后」
+  if (want < 0 || want >= raw.items.length) return { ok: true, moved: false }
   const one = raw.items.splice(idx, 1)[0]
-  raw.items.unshift(one)
+  raw.items.splice(want, 0, one)
   writeRaw(raw)
-  return { ok: true }
+  return { ok: true, moved: true, index: want }
 }
 
-// 开关「是否参与随机抽签」。存 false 才写字段（缺省即参与），保持存储精简
-function setRandom(id, on) {
+// 一次把多张整体搬走（设置页选中一批后「置顶」/ 拖拽落点）：搬到 index 位置，
+// 被搬的那批保持它们在原列表里的相对顺序，当前形象不受影响。**一趟写盘**。
+// 与 moveSkin 的关系：moveSkin 是单张的通用接口（还带 'up'/'down'），本函数是它的批量版；
+// 批量调用 moveSkin N 次会写盘 N 次，且先搬走的项会让后面算好的落点整体偏移一格，越搬越乱。
+function moveSkins(ids, index) {
   const raw = readRaw()
-  const one = raw.items.filter((x) => x.id === id)[0]
-  if (!one) return { ok: false, error: '形象不存在' }
-  if (on === false) one.random = false
-  else delete one.random
+  const set = Object.create(null)
+  // 允许传进已被删掉的 id，静默滤掉即可（否则一次脏 id 会让整批都不动）
+  for (const id of Array.isArray(ids) ? ids : []) {
+    if (raw.items.some((x) => x.id === id)) set[id] = true
+  }
+  const moving = raw.items.filter((x) => set[x.id])
+  if (!moving.length) return { ok: true, moved: false }
+  const rest = raw.items.filter((x) => !set[x.id])
+  if (!rest.length) return { ok: true, moved: false }   // 全被选中：没有可插入的位置
+  // 落点先夹到合法范围（前端算出的 index 可能因为列表刚变而越界）
+  const want = Math.max(0, Math.min(Number(index) || 0, rest.length))
+  const next = rest.slice(0, want).concat(moving, rest.slice(want))
+  // 顺序没变就别白写盘（如单张已在该位置）
+  if (next.every((x, i) => x.id === raw.items[i].id)) return { ok: true, moved: false }
+  raw.items = next
   writeRaw(raw)
-  return { ok: true, id: id, random: on !== false }
+  return { ok: true, moved: true, index: want }
+}
+
+// 批量改「是否参与随机」：map = { id: boolean }。
+// 存在的意义是**只读改写盘一次** —— 设置页的「全部启用 / 全停用 / 只留当前那张」若挨个改
+// 会做 N 次 readRaw + writeRaw（37 张 = 37 次全量序列化落盘）。未知 id 静默跳过（列表可能刚被删）。
+function setRandomBatch(map) {
+  const ids = Object.keys(map || {})
+  if (!ids.length) return { ok: true, changed: 0 }
+  const raw = readRaw()
+  let changed = 0
+  for (const one of raw.items) {
+    if (!Object.prototype.hasOwnProperty.call(map, one.id)) continue
+    const on = map[one.id]
+    if (typeof on !== 'boolean') continue
+    if (on === false) one.random = false
+    else delete one.random
+    changed++
+  }
+  if (changed) writeRaw(raw)
+  return { ok: true, changed: changed }
 }
 
 // 删除一张（文件与元信息一并清掉）。删的是当前形象时，当前位交给剩下的第一张；
@@ -326,12 +401,45 @@ function removeSkin(id) {
   if (idx < 0) return { ok: false, error: '形象不存在' }
   const it = raw.items[idx]
   clearSkinFiles(it.id, '')
-  try { fs.unlinkSync(path.join(skinsDir(), it.id + '.thumb.png')) } catch (err) {}
+  // 两种格式都要清：老数据是 .thumb.png，共享角色/内置包是 .thumb.webp，漏一种就在磁盘留垃圾
+  for (const ext of ['png', 'webp']) {
+    try { fs.unlinkSync(path.join(skinsDir(), it.id + '.thumb.' + ext)) } catch (err) {}
+  }
   raw.items.splice(idx, 1)
   if (raw.current === id) raw.current = raw.items[0] ? raw.items[0].id : ''
   writeRaw(raw)
   dataCache = null
   return { ok: true, current: raw.current, left: raw.items.length }
+}
+
+// 一次删掉多张（设置页选中一批后点「删除」）：**一趟读改写盘删完**。
+// 逐张调 removeSkin 会做 N 次 readRaw + writeRaw（删 10 张 = 10 次全量序列化落盘），
+// 而且每趟都把 current 重算一遍，中间态还可能落到一张马上要被删的图上。
+// 未知 id 在下面按「不存在」计入 failed（列表可能刚被删空过一次）。
+function removeSkins(ids) {
+  const list = Array.isArray(ids) ? ids : []
+  if (!list.length) return { ok: true, removed: 0, failed: 0 }
+  const raw = readRaw()
+  let removed = 0
+  let failed = 0
+  for (const id of list) {
+    const idx = raw.items.findIndex((x) => x.id === id)
+    if (idx < 0) { failed++; continue }
+    const it = raw.items[idx]
+    clearSkinFiles(it.id, '')
+    // 两种格式都要清：老数据是 .thumb.png，共享角色/内置包是 .thumb.webp，漏一种就在磁盘留垃圾
+    for (const ext of ['png', 'webp']) {
+      try { fs.unlinkSync(path.join(skinsDir(), it.id + '.thumb.' + ext)) } catch (err) {}
+    }
+    raw.items.splice(idx, 1)
+    removed++
+  }
+  if (!removed) return { ok: true, removed: 0, failed: failed }
+  // 当前形象被删掉了才重算：只有当它已不在列表里，才把当前位交给剩下的第一张
+  if (!raw.items.some((x) => x.id === raw.current)) raw.current = raw.items[0] ? raw.items[0].id : ''
+  writeRaw(raw)
+  dataCache = null
+  return { ok: true, removed: removed, failed: failed, current: raw.current, left: raw.items.length }
 }
 
 // 已装的内置可下载形象 id 列表（供设置页判断「哪些已下载」，避免重复下载）
@@ -340,14 +448,26 @@ function builtinIds() {
 }
 
 // 装一个内置形象（供 lib/skin-packs.js / lib/assets-packs.js 调用）：固定 id、打官方标记、不动当前形象。
-// 缩略图直接落 PNG 字节（官方图不带用户裁剪，缩略图由设置页按需展示）。
+// thumb 是缩略图的 data URL（webp / png），由设置页从打包资源读好传来（宿主定位不到插件目录）。
 // displayName：共享角色带中文原名（如「神里绫华」），画廊里显示它而不是 id 短哈希；
 //   内置包不带则回落到 id。已存在同 id 的项时，一并把名字补正（旧记录当时只存了 id）。
-function installBuiltin(id, ext, buf, thumbBuf, displayName) {
+function installBuiltin(id, ext, buf, thumb, displayName) {
   const name = String(displayName || id).slice(0, 120)
   return addItem(name, ext, (fid) => fs.writeFileSync(path.join(skinsDir(), fid + '.' + ext), buf),
-    thumbBuf && thumbBuf.length ? 'data:image/png;base64,' + thumbBuf.toString('base64') : '',
+    typeof thumb === 'string' ? thumb : '',
     { id: id, builtin: true, keepCurrent: true, displayName: name })
+}
+
+// 补写某张的缩略图（设置页懒补用）：共享角色/内置包在早先的版本里下载时没落缩略图，
+// 升级后画廊只能回落读原图 —— 原图 0.9~2.7MB 一张，listSkins 的 8MB 回落预算撑不过几张，
+// 后面的全显示「无预览」。设置页手上有打包好的 resources/thumbs/<id>.webp，
+// 打开画廊时发现哪张缺就补哪张（只补一次，落盘后 readThumb 就能直接读到）。
+// 只服务「已装的官方图」：用户自己导入的项本该在导入时就带缩略图，缺了是用户删了文件，不该瞎补。
+function setThumb(id, dataUrl) {
+  const one = readRaw().items.filter((x) => x.id === id)[0]
+  if (!one) return { ok: false, error: '形象不存在' }
+  if (hasThumbFile(id)) return { ok: true, skipped: true }
+  return writeThumb(id, dataUrl) ? { ok: true } : { ok: false, error: '缩略图数据不可用' }
 }
 
 // 清除全部自定义形象（供设置页「清除选中数据」调用）
@@ -368,8 +488,11 @@ function exportItems() {
   for (const it of raw.items) {
     let data = null
     try { data = fs.readFileSync(path.join(skinsDir(), it.id + '.' + it.ext)) } catch (err) { continue }
+    // 缩略图两种格式都要试：用户导入的是 .thumb.png，共享角色/内置包带的是 .thumb.webp
     let thumb = null
-    try { thumb = fs.readFileSync(path.join(skinsDir(), it.id + '.thumb.png')) } catch (err) {}
+    for (const ext of ['png', 'webp']) {
+      try { thumb = fs.readFileSync(path.join(skinsDir(), it.id + '.thumb.' + ext)); break } catch (err) {}
+    }
     out.push({ id: it.id, name: it.name, ext: it.ext, at: it.at, data: data, thumb: thumb, current: it.id === raw.current, builtin: it.builtin === true })
   }
   return out
@@ -410,9 +533,13 @@ function getSkinData() {
 
 module.exports = {
   importSkin, importSkinFromPath, pickImageFile, importSkinFromData,
-  removeSkin, setCurrent, pinSkin, setRandom, clearAll, getSkinData, listSkins, readMeta,
+  removeSkin, removeSkins, setCurrent, moveSkin, moveSkins, setRandomBatch, clearAll, getSkinData, listSkins, readMeta,
   // 内置可下载形象（lib/skin-packs.js）用
   builtinIds, installBuiltin,
+  // 设置页把共享角色的打包缩略图补落盘用（老数据没有缩略图时懒补）
+  setThumb,
   // 素材包（assets.js）用
   exportItems, importBuffer,
+  // 设置页「打开数据目录」用
+  dir: skinsDir,
 }
