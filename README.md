@@ -281,9 +281,9 @@ public/                  # 开发入口目录（打包时整体复制进 dist/�
 │  ├─ floating.js        # 悬浮窗 preload（contextBridge 暴露 window.whale）
 │  └─ lib/               # 宿主能力：api / widget / ipc / store / pricing / codex / dsh 一族 / dsh-usage / notify / hosts / skins / skin-packs / bubbles / sounds / assets / assets-packs / backup / settings / log / constants
 ├─ whale/                # 基础挂件素材（默认形象 / 内置音效 / 气泡图）
-└─ whale-pack/           # 内置形象包（1 张缩略图 + manifest，大图按需下载）
-resources/               # 缩略图与内置形象包（thumbs/ 随包分发；内置形象包大图按需下载）
-shared/                  # 共享角色与共享音效原文件（入库但不进插件包，按需单张下载）
+├─ whale-pack/           # 内置形象包（thumbs/ + manifest 随包分发，大图按需下载）
+└─ shared/               # 共享角色 / 共享音效原文件（入库但不进插件包，按需单张下载）
+resources/               # 共享素材缩略图与原图源（thumbs/ 随包分发，skins-src/ 为素材源不入库）
 src/                     # 设置页（Vue 3 单文件组件）
 ├─ App.vue               # 设置页主界面与逻辑
 ├─ views/                # 按 Tab 拆分的视图组件（AccelView.vue = GitHub 加速）
