@@ -361,8 +361,26 @@ function normMenuGroupsRev(v) {
   const n = Math.round(clampNum(v, 0, 1e6, 0))
   return n
 }
+// 提醒音独立音量（low/budget/peak/pass 四类提醒音，press/release 音色音不在此列）：
+// vol = 音量 0-1；volSet = 用户是否显式设置过。必须用布尔位区分「没动过」和「恰好设成同值」
+// ——配置每次保存都整体写盘，无法从值本身推断意图。volSet=false 时播放跟随全局 vol。
+// ⚠️ 解析侧不能用 `Number(x) || 默认`：0 是合法音量（静音），会被 || 吃掉
+const ALERT_VOL_KEYS = ['low', 'budget', 'peak', 'pass']
+function defaultAlertVols() {
+  return { low: { vol: 1, volSet: false }, budget: { vol: 1, volSet: false }, peak: { vol: 1, volSet: false }, pass: { vol: 1, volSet: false } }
+}
+function normAlertVols(v, dft) {
+  const p = v && typeof v === 'object' ? v : {}
+  const d = dft && typeof dft === 'object' ? dft : defaultAlertVols()
+  const out = {}
+  for (const k of ALERT_VOL_KEYS) {
+    const cur = p[k] && typeof p[k] === 'object' ? p[k] : {}
+    out[k] = { vol: clampNum(cur.vol, 0, 1, d[k] ? d[k].vol : 1), volSet: cur.volSet === true }
+  }
+  return out
+}
 function defaultConfig() {
-  return { scale: 1.3, vol: 0.9, soundOn: true, soundSet: 'duck', usageMode: 'ledger', peakMode: 'default', peakRemindOn: true, bubbleOn: true, menuBtn: true, onTop: true, lowAlertOn: true, lowAlertAmount: LOW_ALERT_BY_CURRENCY.CNY, budgetOn: false, budgetAmount: 0, dropAlertOn: false, dropAlertAmount: 5, clickQueueOn: false, remindSec: 8, quietOn: false, quietFrom: '23:00', quietTo: '07:00', timeBubbleOn: true, updateCheckOn: false, dragLock: false, enterMode: 'both', timerNotifyOn: true, timerMailOn: true, timerPersistOn: true, timerMode: 'off', timerSec: 1500, timerAt: '07:30', timerNote: '', timerBreakMin: 5, timerRemindSec: 8, timerBubblePin: true, timerBubbleOnly: true, guideDone: false, dshNodeDir: '', dshKeepAlive: false, dshPort: DSH_PORT_DEFAULT, dshRegistry: '', dshVersion: '', dshReinstall: false, dshNoOpen: true, dshMarketUrl: '', dshMarketMirror: true, dshMarketRegistry: '', dshMarketOfficial: false, dshExportCred: false, dshExportNoMod: true, avoidTaskbar: true, edgeTop: 0, edgeRight: 0, edgeBottom: 0, edgeLeft: 0, scrollGapOn: false, scrollGapPx: SCROLL_GAP_DEFAULT, snapMode: 'ratio', snapRatio: SNAP_RATIO_DEFAULT, opacity: 100, passThrough: false, skin: 'DSniang1', theme: 'default', uiMode: 'auto', quotes: normQuotes(null), alerts: normAlerts(null), quotaTotal: 0, quotaReset: 'monthly', tokenPrice: normTokenPrice(null), historyKeepDays: HISTORY_KEEP_DEFAULT, models: [], mainModelId: DEFAULT_MAIN_MODEL, dshBackupKeep: DSB_KEEP_DEFAULT, menuGroups: normMenuGroups(null), menuGroupsRev: 0, ghAccelOn: false, ghAccelIps: normIps(null), ghAccelRefreshedAt: 0, ghAccelSrc: normGhAccelSrc(null), skinPackSrc: '', randomIncludeBuiltin: true, notifySystemOn: true, notifyMailOn: false, mailFrom: '', mailTo: '', mailFromName: '小鲸鱼余额挂件', mailSubjectPrefix: '[小鲸鱼余额挂件]' }
+  return { scale: 1.3, vol: 0.9, soundOn: true, soundSet: 'duck', usageMode: 'ledger', peakMode: 'default', peakRemindOn: true, bubbleOn: true, menuBtn: true, onTop: true, lowAlertOn: true, lowAlertAmount: LOW_ALERT_BY_CURRENCY.CNY, budgetOn: false, budgetAmount: 0, dropAlertOn: false, dropAlertAmount: 5, clickQueueOn: false, remindSec: 8, quietOn: false, quietFrom: '23:00', quietTo: '07:00', timeBubbleOn: true, updateCheckOn: false, dragLock: false, enterMode: 'both', timerNotifyOn: true, timerMailOn: true, timerPersistOn: true, timerMode: 'off', timerSec: 1500, timerAt: '07:30', timerNote: '', timerBreakMin: 5, timerRemindSec: 8, timerBubblePin: true, timerBubbleOnly: true, guideDone: false, dshNodeDir: '', dshKeepAlive: false, dshPort: DSH_PORT_DEFAULT, dshRegistry: '', dshVersion: '', dshReinstall: false, dshNoOpen: true, dshMarketUrl: '', dshMarketMirror: true, dshMarketRegistry: '', dshMarketOfficial: false, dshExportCred: false, dshExportNoMod: true, avoidTaskbar: true, edgeTop: 0, edgeRight: 0, edgeBottom: 0, edgeLeft: 0, scrollGapOn: false, scrollGapPx: SCROLL_GAP_DEFAULT, snapMode: 'ratio', snapRatio: SNAP_RATIO_DEFAULT, opacity: 100, passThrough: false, skin: 'DSniang1', theme: 'default', uiMode: 'auto', quotes: normQuotes(null), alerts: normAlerts(null), alertVols: normAlertVols(null), quotaTotal: 0, quotaReset: 'monthly', tokenPrice: normTokenPrice(null), historyKeepDays: HISTORY_KEEP_DEFAULT, models: [], mainModelId: DEFAULT_MAIN_MODEL, dshBackupKeep: DSB_KEEP_DEFAULT, menuGroups: normMenuGroups(null), menuGroupsRev: 0, ghAccelOn: false, ghAccelIps: normIps(null), ghAccelRefreshedAt: 0, ghAccelSrc: normGhAccelSrc(null), skinPackSrc: '', randomIncludeBuiltin: true, notifySystemOn: true, notifyMailOn: false, mailFrom: '', mailTo: '', mailFromName: '小鲸鱼余额挂件', mailSubjectPrefix: '[小鲸鱼余额挂件]' }
 }
 // dsh Web UI 监听端口（默认 3080）。
 // ⚠️ 为什么必须能配：3080 属于 Windows/Hyper-V 的「动态端口保留段」，被系统预留时
@@ -609,6 +627,7 @@ function readConfig() {
   return {
     scale: clampNum(p.scale, MIN_SCALE, MAX_SCALE, dft.scale),
     vol: clampNum(p.vol, 0, 1, dft.vol),
+    alertVols: normAlertVols(p.alertVols, dft.alertVols),
     soundOn: p.soundOn !== false,
     soundSet: p.soundSet === 'fx1' ? 'fx1' : p.soundSet === 'custom' ? 'custom' : 'duck',
     usageMode: p.usageMode === 'token' ? 'token' : 'ledger',
@@ -727,6 +746,7 @@ function writeConfig(cfg) {
     utools.dbStorage.setItem(K.config, {
       scale: cfg.scale,
       vol: cfg.vol,
+      alertVols: normAlertVols(cfg.alertVols),
       soundOn: cfg.soundOn !== false,
       soundSet: cfg.soundSet,
       usageMode: cfg.usageMode,
@@ -827,6 +847,7 @@ function patchConfig(patch) {
   const p = patch && typeof patch === 'object' ? patch : {}
   if (p.scale !== undefined) cfg.scale = Math.round(clampNum(p.scale, MIN_SCALE, MAX_SCALE, cfg.scale) * 10) / 10
   if (p.vol !== undefined) cfg.vol = clampNum(p.vol, 0, 1, cfg.vol)
+  if (p.alertVols !== undefined) cfg.alertVols = normAlertVols(p.alertVols, cfg.alertVols)
   if (p.soundOn !== undefined) cfg.soundOn = !!p.soundOn
   if (p.soundSet !== undefined) cfg.soundSet = (p.soundSet === 'fx1' || p.soundSet === 'custom') ? p.soundSet : 'duck'
   if (p.usageMode !== undefined) cfg.usageMode = p.usageMode === 'token' ? 'token' : 'ledger'

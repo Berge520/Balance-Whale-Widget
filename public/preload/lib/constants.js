@@ -13,7 +13,7 @@ const FETCH_TIMEOUT_MS = 20000
 const UPDATE_CHECK_URL = 'https://ghfast.top/https://raw.githubusercontent.com/Berge520/Balance-Whale-Widget/refs/heads/main/package.json'
 // 当前插件版本。uTools 未提供读取插件自身版本的 API，此处由 scripts/sync-version.mjs
 // 在构建前从 package.json 的 version 自动写入，无需手动维护
-const PLUGIN_VERSION = '1.9.1'
+const PLUGIN_VERSION = '1.10.0'
 const UPDATE_TTL_MS = 12 * 3600 * 1000
 
 const MIN_SCALE = 0.6
@@ -411,8 +411,16 @@ const MODEL_TEMPLATES = {
     name: '智谱 GLM Coding（订阅）', kind: 'quota', currency: 'CNY',
     url: 'https://open.bigmodel.cn/api/monitor/usage/quota/limit',
     auth: 'raw', // 智谱此接口不带 Bearer
-    usedPctPath: 'data.limits[0].TOKENS_LIMIT.percentage',
-    resetPath: 'data.limits[0].nextResetTime',
+    // 该接口只认 Coding Plan 订阅；start plan（体验/积分套餐）账号会报「当前用户不存在coding plan」，
+    // 数据走 zcode.z.ai 的登录 JWT 接口，API Key 拿不到 ⇒ 只能提示，不做识别
+    errorHint: '该接口仅支持 Coding Plan 订阅账号；Start Plan（体验套餐）查不了额度',
+    // data.limits[] 是扁平条目数组，TOKENS_LIMIT 是每条的 type 值（不是 limits[0] 的子对象），
+    // 且 5h 窗口不保证排 [0]（pro 账号 [0] 是 TIME_LIMIT）⇒ 按 type(+unit) 挑条目：
+    // unit=3 = 5 小时窗口、unit=6 = 周窗口；新注册/credit 制账号 type 是 CREDIT_LIMIT，一并兼容
+    windows: [
+      { key: 'rolling', label: '5h', usedPctPath: 'data.limits[type=TOKENS_LIMIT|CREDIT_LIMIT&unit=3].percentage', resetPath: 'data.limits[type=TOKENS_LIMIT|CREDIT_LIMIT&unit=3].nextResetTime' },
+      { key: 'weekly', label: '周', usedPctPath: 'data.limits[type=TOKENS_LIMIT|CREDIT_LIMIT&unit=6].percentage', resetPath: 'data.limits[type=TOKENS_LIMIT|CREDIT_LIMIT&unit=6].nextResetTime' },
+    ],
   },
   kimi_coding: {
     name: 'Kimi Coding（订阅）', kind: 'quota', currency: 'CNY',
@@ -450,11 +458,14 @@ const MODEL_TEMPLATES = {
     ],
   },
   zhipu_glm_coding_intl: {
-    // 与国内站同构，只是域名不同、按美元计；鉴权同样不带 Bearer
+    // 与国内站同构，只是域名不同、按美元计；鉴权同样不带 Bearer；条目挑法同上
     name: '智谱 GLM Coding（国际 z.ai）', kind: 'quota', currency: 'USD',
     url: 'https://api.z.ai/api/monitor/usage/quota/limit', auth: 'raw',
-    usedPctPath: 'data.limits[0].TOKENS_LIMIT.percentage',
-    resetPath: 'data.limits[0].nextResetTime',
+    errorHint: '该接口仅支持 Coding Plan 订阅账号；Start Plan（体验套餐）查不了额度',
+    windows: [
+      { key: 'rolling', label: '5h', usedPctPath: 'data.limits[type=TOKENS_LIMIT|CREDIT_LIMIT&unit=3].percentage', resetPath: 'data.limits[type=TOKENS_LIMIT|CREDIT_LIMIT&unit=3].nextResetTime' },
+      { key: 'weekly', label: '周', usedPctPath: 'data.limits[type=TOKENS_LIMIT|CREDIT_LIMIT&unit=6].percentage', resetPath: 'data.limits[type=TOKENS_LIMIT|CREDIT_LIMIT&unit=6].nextResetTime' },
+    ],
   },
   codex: {
     // 本机 Codex 会话统计：不查接口、也不要密钥，读 ~/.codex 下的会话日志（见 lib/codex.js）。

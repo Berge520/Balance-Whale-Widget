@@ -1,6 +1,6 @@
 <script lang="ts" setup>
 import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
-import type { AssetsApplyResult, AssetsExportResult, AssetsPreviewResult, BackupPreviewResult, BubbleMeta, CodexSummaryResult, CodexWindow, CodexWindows, DshBackupListResult, DshBackupSnapshot, DshDiagnoseFinding, DshDiagnoseItem, DshDiagnoseResult, DshDumpResult, DshExportPreviewResult, DshHostCompatCheckResult, DshHostCompatVerdict, DshIsolateCandidate, DshIsolateCandidatesResult, DshIsolatePlan, DshMarketCatalogResult, DshMarketInstallResult, DshMarketInstalledEntry, DshMarketPingEntry, DshMarketPlugin, DshMarketRegistryLatestEntry, DshMarketRegistryLatestResult, DshMarketStatusResult, DshMarketUninstallResult, DshMarketUpdateEntry, DshPatchItem, DshPatchListResult, DshUsageResult, DownloadProgress, LedgerDetailDay, LedgerDetailEntry, ModelUsageRow, SharedSkinList, SharedSoundItem, SharedSoundList, SkinGallery, SkinMeta, SkinPackList, SoundMeta, SoundRole, WhaleMailSecrets, WhaleModel, WhaleModelRow, WhaleModelTemplate, WhalePriceModel, WhaleServices, WhaleTokenPrice } from './types/services'
+import type { AlertRole, AssetsApplyResult, AssetsExportResult, AssetsPreviewResult, BackupPreviewResult, BubbleMeta, CodexSummaryResult, CodexWindow, CodexWindows, DshBackupListResult, DshBackupSnapshot, DshDiagnoseFinding, DshDiagnoseItem, DshDiagnoseResult, DshDumpResult, DshExportPreviewResult, DshHostCompatCheckResult, DshHostCompatVerdict, DshIsolateCandidate, DshIsolateCandidatesResult, DshIsolatePlan, DshMarketCatalogResult, DshMarketInstallResult, DshMarketInstalledEntry, DshMarketPingEntry, DshMarketPlugin, DshMarketRegistryLatestEntry, DshMarketRegistryLatestResult, DshMarketStatusResult, DshMarketUninstallResult, DshMarketUpdateEntry, DshPatchItem, DshPatchListResult, DshUsageResult, DownloadProgress, LedgerDetailDay, LedgerDetailEntry, ModelUsageRow, SharedSkinList, SharedSoundItem, SharedSoundList, SkinGallery, SkinMeta, SkinPackList, SoundMeta, SoundRole, WhaleMailSecrets, WhaleModel, WhaleModelRow, WhaleModelTemplate, WhalePriceModel, WhaleServices, WhaleTokenPrice } from './types/services'
 import SkinCropper from './components/SkinCropper.vue'
 import SoundTrimmer from './components/SoundTrimmer.vue'
 import FirstRunGuide from './components/FirstRunGuide.vue'
@@ -242,6 +242,12 @@ function cardTabLabel(key: string) {
 function clearSearch() {
   searchQuery.value = ''
 }
+// 输入法组字守卫：组字期间按 Enter/Esc 是「确认候选词 / 取消组字」，不该触发输入框上挂的
+// 确认 / 关闭动作（比如给快照起中文名时一回车名字就被提交了）。keyCode 229 是 IME 处理中的经典标记
+function isImeComposing(e: Event | undefined) {
+  const ke = e as KeyboardEvent | undefined
+  return !!ke && (ke.isComposing || ke.keyCode === 229)
+}
 // 点命中标签 → 滚到那张卡。卡片在搜索结果里按 SEARCH_INDEX 顺序渲染，标签与之同序，
 // 故直接按 key 找模板上的 data-search（跨 Tab 渲染出的卡都在 DOM 里，能选到）。
 // 滚动用 scrollIntoView({block:'start'}) 把卡顶到视口顶部；吸顶的 .tab-bar 会挡住卡头，
@@ -367,6 +373,13 @@ const cfg = reactive({
   scale: 1.3,
   scaleNum: 6,
   vol: 0.9,
+  // 提醒音独立音量（volSet=false = 未动过滑块，跟随全局音量；拖动即置 true，「恢复默认」复位）
+  alertVols: {
+    low: { vol: 1, volSet: false },
+    budget: { vol: 1, volSet: false },
+    peak: { vol: 1, volSet: false },
+    pass: { vol: 1, volSet: false },
+  },
   soundOn: true,
   soundSet: 'duck',
   usageMode: 'ledger',
@@ -4988,7 +5001,8 @@ function onOpacityCommit() {
 // 同值副本：preload 不参与打包，设置页读不到宿主常量（见 public/preload/lib/sounds.js 的 ROLES / ROLE_LABEL）
 const SOUND_ROLES: SoundRole[] = ['press', 'release', 'low', 'budget', 'peak', 'pass']
 // 四类提醒各自的提醒音：留空 = 静音（没有内置回落，不打扰是默认），导入后跟随音效开关与音量
-const ALERT_SOUND_ROLES: SoundRole[] = ['low', 'budget', 'peak', 'pass']
+// 类型是 SoundRole 的提醒子集：它们还要索引 cfg.alertVols（音色两段没有独立音量）
+const ALERT_SOUND_ROLES: AlertRole[] = ['low', 'budget', 'peak', 'pass']
 const SOUND_ROLE_LABEL: Record<SoundRole, string> = {
   press: '按压音效', release: '释放音效',
   low: '低余额提醒音', budget: '预算提醒音', peak: '峰谷提醒音', pass: '穿透提醒音',
@@ -4999,6 +5013,37 @@ const ALERT_SOUND_WHEN: Record<string, string> = {
   budget: '今日用量首次超出预算时',
   peak: '进入峰时段 / 谷时段时',
   pass: '切换鼠标穿透时',
+}
+// —— 提醒音独立音量（三态：跟随全局 / 独立生效，语义对齐悬浮窗 alertVolumeOf） ——
+// 展示值：未显式设置（volSet=false）时显示全局音量当「跟随值」，滑块以此为起点
+function alertVolShown(r: AlertRole): number {
+  if (cfg.alertVols[r].volSet) return cfg.alertVols[r].vol
+  return typeof cfg.vol === 'number' && isFinite(cfg.vol) ? cfg.vol : 0.9
+}
+function alertVolSummary(r: AlertRole): string {
+  const av = cfg.alertVols[r]
+  return av.volSet ? Math.round(av.vol * 100) + '%' : '跟随 ' + Math.round(alertVolShown(r) * 100) + '%'
+}
+// 拖动 = 显式设置（volSet=true，此后不再跟随全局）；「恢复」= 回到跟随（音量复位默认 100%）
+function setAlertVol(r: AlertRole, v: number, set: boolean) {
+  const n = Number(v)
+  cfg.alertVols[r].vol = Math.round(Math.min(1, Math.max(0, isFinite(n) ? n : 0)) * 100) / 100
+  cfg.alertVols[r].volSet = set
+  // 整份传：宿主 patchConfig 按 alertVols 键整体归一化。浅拷贝防 reactive 代理过 contextBridge
+  patchCfg({
+    alertVols: {
+      low: { ...cfg.alertVols.low },
+      budget: { ...cfg.alertVols.budget },
+      peak: { ...cfg.alertVols.peak },
+      pass: { ...cfg.alertVols.pass },
+    },
+  })
+}
+function resetAlertVol(r: AlertRole) {
+  setAlertVol(r, 1, false)
+}
+function onAlertVolInput(r: AlertRole, e: Event) {
+  setAlertVol(r, Number((e.target as HTMLInputElement).value), true)
 }
 // 六槽位统一初始化：宿主返回值缺键时也保证是空值（模板里到处取值）
 function blankSoundMap<T>(fill: T): Record<SoundRole, T> {
@@ -7265,6 +7310,15 @@ function applyConfig(c: any) {
   cfg.scale = c.scale
   cfg.scaleNum = scaleToNum(c.scale)
   cfg.vol = c.vol
+  // 提醒音独立音量：宿主已归一化，这里只做类型兜底（缺槽位保留本地默认 = 跟随全局）
+  const avs = c.alertVols && typeof c.alertVols === 'object' ? c.alertVols : {}
+  for (const r of ALERT_SOUND_ROLES) {
+    const av = avs[r]
+    if (av && typeof av === 'object') {
+      cfg.alertVols[r].vol = typeof av.vol === 'number' && isFinite(av.vol) ? Math.min(1, Math.max(0, av.vol)) : 1
+      cfg.alertVols[r].volSet = av.volSet === true
+    }
+  }
   cfg.soundOn = c.soundOn !== false
   cfg.soundSet = c.soundSet
   cfg.usageMode = c.usageMode
@@ -7528,7 +7582,7 @@ onUnmounted(() => {
       <!-- 卡片搜索：输入即跨 Tab 过滤出命中的卡片（见 SEARCH_INDEX）。清空 / Esc 回到正常 Tab 视图 -->
       <div class="search-row">
         <input class="search-input" type="search" v-model="searchQuery" placeholder="搜索设置项（如：穿透 / 音效 / 备份 / dsh）"
-               @keydown.esc="clearSearch" />
+               @keydown.esc="!isImeComposing($event) && clearSearch()" />
         <button v-if="searchActive" class="search-clear utils-btn utils-secondary" type="button" @click="clearSearch">清除</button>
       </div>
       <p class="tab-desc">
@@ -7753,7 +7807,7 @@ onUnmounted(() => {
           </p>
           <p class="hint">
             四类提醒音（低余额 / 预算 / 峰谷 / 穿透）留空 = 静音，不打扰是默认，
-            只在对应提醒真的弹出时响一次（系统通知不受影响）。
+            只在对应提醒真的弹出时响一次（系统通知不受影响）。各类提醒音的独立音量在「用量」页的「提醒与通知」里调。
           </p>
         </div>
       </div>
@@ -8048,7 +8102,7 @@ onUnmounted(() => {
           <!-- 概览只报有没有，不报名字：名字就在同一行的右侧（.sound-file），复述一遍纯属重复 -->
           <span class="asset-meta">
             <template v-if="soundMetaOf(r).length">已导入</template>
-            <template v-else>{{ ALERT_SOUND_ROLES.indexOf(r) >= 0 ? '未导入（静音）' : '未导入（可选）' }}</template>
+            <template v-else>{{ (ALERT_SOUND_ROLES as string[]).indexOf(r) >= 0 ? '未导入（静音）' : '未导入（可选）' }}</template>
           </span>
           <button class="export-btn utils-btn utils-outline" type="button" @click="doImportSound(r)">
             {{ soundMetaOf(r).length ? '替换' : '导入' }}
@@ -8685,7 +8739,7 @@ onUnmounted(() => {
       <div v-if="cfg.usageMode === 'ledger'" class="calibrate-row">
         <span class="calibrate-label">校准今日已用</span>
         <input class="num calibrate-input" type="number" min="0" step="0.01"
-               v-model.number="calibrateInput" placeholder="实际金额" @keyup.enter="calibrateToday" />
+               v-model.number="calibrateInput" placeholder="实际金额" @keyup.enter="!isImeComposing($event) && calibrateToday()" />
         <button class="export-btn utils-btn utils-outline" :disabled="calibrateInputEmpty" @click="calibrateToday">校准</button>
       </div>
       <p v-else class="hint">当前为「平台令牌」用量模式，今日已用以平台返回为准，无需校准。</p>
@@ -8888,6 +8942,22 @@ onUnmounted(() => {
           </p>
         </div>
       </div>
+
+      <!-- 提醒音独立音量：语义上属于「提醒」，放这页比折叠在「外观」的音效条里更好找；
+           音效开关/音色/全局音量仍在「外观」的音效折叠条里 -->
+      <div v-for="r in ALERT_SOUND_ROLES" :key="'av-' + r" class="field row">
+        <span class="label">{{ SOUND_ROLE_LABEL[r] }}</span>
+        <input class="range" type="range" min="0" max="1" step="0.05"
+               :value="alertVolShown(r)" :disabled="!cfg.soundOn"
+               @input="onAlertVolInput(r, $event)" />
+        <span class="num-text">{{ alertVolSummary(r) }}</span>
+        <button v-if="cfg.alertVols[r].volSet" class="link-btn utils-btn utils-secondary"
+                type="button" :disabled="!cfg.soundOn" @click="resetAlertVol(r)">恢复跟随</button>
+      </div>
+      <p class="hint">
+        提醒音量默认跟随「外观」页的全局音量；单独拖动某一类后即独立生效（不再跟随），
+        点「恢复跟随」回到随全局音量变化。提醒音的导入与静音（留空）在「资源」页。
+      </p>
 
       <!-- 低频的「提醒表现 + 时段 + 文案」收在一处折叠，卡片默认只留「哪几类提醒要开」 -->
       <div class="fold">
@@ -10289,8 +10359,8 @@ onUnmounted(() => {
                       placeholder="给这份快照起个名字（如「装插件前」）"
                       :value="dshRenameText"
                       @input="dshRenameText = ($event.target as HTMLInputElement).value"
-                      @keyup.enter="dshRenameSave()"
-                      @keyup.esc="dshRenameCancel()"
+                      @keyup.enter="!isImeComposing($event) && dshRenameSave()"
+                      @keyup.esc="!isImeComposing($event) && dshRenameCancel()"
                     />
                     <button class="secondary patch-btn utils-btn utils-secondary" @click="dshRenameSave()">保存</button>
                     <button class="link-btn utils-btn utils-secondary" @click="dshRenameCancel()">取消</button>

@@ -12,9 +12,17 @@ export type SkinId =
   | 'glby' | 'Jian' | 'wjztg'
   | 'custom'
 
+// 提醒音独立音量条目：vol 0-1；volSet = 用户是否动过滑块（false = 跟随全局音量）
+export interface AlertVol {
+  vol: number
+  volSet: boolean
+}
+
 export interface WhaleConfig {
   scale: number
   vol: number
+  // 提醒音独立音量：四类提醒音各自的音量与「是否显式设置过」（volSet=false = 跟随全局音量）
+  alertVols: { low: AlertVol; budget: AlertVol; peak: AlertVol; pass: AlertVol }
   soundOn: boolean
   soundSet: 'duck' | 'fx1' | 'custom'
   usageMode: 'ledger' | 'token'
@@ -1065,6 +1073,9 @@ export interface CalibrateResult {
 // low / budget / peak / pass 是四类提醒（低余额 / 今日预算 / 峰谷切换 / 鼠标穿透）各自的提醒音，留空即静音。
 // 每个槽位是一个「音效组」——可导入多段，挂件每次随机播一条
 export type SoundRole = 'press' | 'release' | 'low' | 'budget' | 'peak' | 'pass'
+
+// 四类提醒音的槽位名（alertVols 的键）：SoundRole 的子集 —— 提醒音有独立音量，音色两段没有
+export type AlertRole = Extract<SoundRole, 'low' | 'budget' | 'peak' | 'pass'>
 
 // 自定义音效元信息（名称仅用于展示；音频本体由宿主按 file 从本地读）
 export interface SoundMeta {

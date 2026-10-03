@@ -8,7 +8,7 @@ try { require('dns').setDefaultResultOrder('ipv4first') } catch (_) {}
 const {
   BALANCE_URL, USAGE_URL, BALANCE_TTL_MS, FETCH_TIMEOUT_MS,
   UPDATE_CHECK_URL, PLUGIN_VERSION, UPDATE_TTL_MS, K,
-  MODEL_FETCH_TIMEOUT_MS, MODEL_STALE_MS, MODEL_MONEY_PREFIX,
+  MODEL_FETCH_TIMEOUT_MS, MODEL_STALE_MS, MODEL_MONEY_PREFIX, MODEL_TEMPLATES,
 } = require('./constants')
 const { logErr } = require('./log')
 const {
@@ -214,10 +214,20 @@ function pickPath(obj, path) {
         continue
       }
       // 按字段挑条目：DeepSeek 的 balance_infos 会带多条币种、顺序不固定，按下标取可能拿到
-      // 另一种币种的余额 —— 金额取错不会报错，只会把钱显示错
-      const field = key.slice(0, eq).trim()
-      const want = key.slice(eq + 1).trim()
-      cur = cur.find((it) => it && typeof it === 'object' && String(it[field]) === want)
+      // 另一种币种的余额 —— 金额取错不会报错，只会把钱显示错。
+      // 多条件用 & 连接、值用 | 列多选一：limits[type=TOKENS_LIMIT|CREDIT_LIMIT&unit=3]
+      // —— 智谱额度数组顺序不保证（pro 账号 [0] 是 TIME_LIMIT），按位置取数必然出错
+      const conds = []
+      for (const raw2 of key.split('&')) {
+        const seg = raw2.trim()
+        if (!seg) continue
+        const q = seg.indexOf('=')
+        if (q < 0) return undefined
+        conds.push([seg.slice(0, q).trim(), seg.slice(q + 1).trim().split('|').map((s) => s.trim())])
+      }
+      if (!conds.length) return undefined
+      cur = cur.find((it) => it && typeof it === 'object' &&
+        conds.every(([field, wants]) => wants.some((w) => String(it[field]) === w)))
     }
   }
   return cur
@@ -255,6 +265,23 @@ function modelAuthHeaders(model, key) {
 function resolveModelUrl(u, base) {
   return String(u || '').replace('{base}', String(base || '').replace(/\/+$/, ''))
 }
+// 从 HTTP 200 的响应体里提炼「业务层错误」：有些接口 key 不对或没订阅也返回 200，
+// 真正的问题在 body 的 code/msg（如智谱未订阅 Coding Plan 返回「当前用户不存在coding plan」）。
+// 不提炼的话用户只会看到笼统的「字段路径取不到数值」，误以为是自己路径写错
+function modelBusinessError(data) {
+  if (!data || typeof data !== 'object') return ''
+  if (data.success === false || data.ok === false) {
+    const e = data.error
+    // error 可能是字符串也可能是 {message}（OpenAI 形态），直接 String 会得到 '[object Object]'
+    const msg = data.msg || data.message || (typeof e === 'string' ? e : e && e.message) || 'success=false'
+    return String(msg).slice(0, 120)
+  }
+  const code = Number(data.code)
+  if (isFinite(code) && code !== 0 && code !== 200 && data.msg) return String(data.msg).slice(0, 120)
+  if (typeof data.error === 'string' && data.error) return data.error.slice(0, 120)
+  if (data.error && typeof data.error === 'object' && data.error.message) return String(data.error.message).slice(0, 120)
+  return ''
+}
 async function fetchModelJson(url, model, key) {
   for (let attempt = 0; attempt < 2; attempt++) {
     let res
@@ -275,7 +302,16 @@ async function fetchModelJson(url, model, key) {
       return { ok: false, error: '接口返回 HTTP ' + res.status }
     }
     try {
-      return { ok: true, data: await res.json() }
+      const data = await res.json()
+      // 200 不代表业务成功：先把 body 里的错误提炼出来，别让真原因埋进「路径取不到数值」
+      const bizErr = modelBusinessError(data)
+      if (bizErr) {
+        // 模板可带 errorHint：像智谱「当前用户不存在coding plan」这类报错是套餐形态不匹配，
+        // 不是用户填错，光看上游原文不知道怎么办 ⇒ 附一句定向提示
+        const hint = MODEL_TEMPLATES[model.tpl] && MODEL_TEMPLATES[model.tpl].errorHint
+        return { ok: false, error: bizErr + (hint ? '（' + hint + '）' : '') }
+      }
+      return { ok: true, data }
     } catch (err) {
       return { ok: false, error: '接口返回不是合法 JSON' }
     }
@@ -756,4 +792,5 @@ module.exports = {
   pickBalanceInfo,
   pickPath,
   pathNum,
+  modelBusinessError,
 }

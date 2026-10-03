@@ -90,7 +90,10 @@ const PATCH_FIXTURES = {
   scrollGapPx: { scrollGapPx: 33 }, snapMode: { snapMode: 'off' }, snapRatio: { snapRatio: 40 },
   opacity: { opacity: 66 }, passThrough: { passThrough: true }, skin: { skin: 'custom' },
   theme: { theme: 'dark' }, uiMode: { uiMode: 'light' }, quotes: { quotes: { time: ['改过的报时'] } },
-  alerts: { alerts: { low: '改过的低额模板' } }, quotaTotal: { quotaTotal: 88 },
+  alerts: { alerts: { low: '改过的低额模板' } },
+  // 0 是合法音量（静音），夹具特意用 0 而不是随便一个非默认值，防止解析侧用 || 兜底把 0 吃掉
+  alertVols: { alertVols: { low: { vol: 0, volSet: true }, peak: { vol: 0.25 } } },
+  quotaTotal: { quotaTotal: 88 },
   quotaReset: { quotaReset: 'never' }, tokenPrice: { tokenPrice: { on: true, cur: 'USD', rate: 7.5, hit: 1, miss: 2, out: 3 } },
   historyKeepDays: { historyKeepDays: 400 }, dshBackupKeep: { dshBackupKeep: 33 },
   menuGroups: { menuGroups: { look: true } }, menuGroupsRev: { menuGroupsRev: 7 },
@@ -148,6 +151,21 @@ test('patchConfig 只改传入的键，未传的键保持现值', () => {
   assert.equal(cfg.vol, defaultConfig().vol)
   assert.equal(cfg.timerSec, defaultConfig().timerSec)
   assert.equal(cfg.mailSubjectPrefix, defaultConfig().mailSubjectPrefix)
+})
+
+test('alertVols 逐槽归一化：0 是合法音量、volSet 严格布尔位、非法值回现值', () => {
+  clearCfg()
+  // 独立音量：vol 钳 0–1，volSet 只认 === true；部分槽位缺省回现值（首次 patch 时是默认值）
+  let after = patchConfig({ alertVols: { low: { vol: 0, volSet: true }, budget: { vol: 2.5 }, peak: { vol: 'abc' }, pass: { volSet: 'yes' } } })
+  assert.deepEqual(after.alertVols.low, { vol: 0, volSet: true }, 'vol=0 必须保留（|| 兜底会把它吃掉）')
+  assert.equal(after.alertVols.budget.vol, 1, 'vol 越上界应钳到 1')
+  assert.equal(after.alertVols.peak.vol, 1, 'vol 非数值应回兜底值')
+  assert.equal(after.alertVols.pass.volSet, false, 'volSet 非 true 一律视为未设置')
+  // volSet:true 会话间持久；已知现值上做「只给 vol 不给 volSet」的补丁，volSet 回落到 false 而不是沿用
+  clearCfg()
+  patchConfig({ alertVols: { low: { vol: 0.3, volSet: true } } })
+  after = patchConfig({ alertVols: { low: { vol: 0.6 } } })
+  assert.deepEqual(after.alertVols.low, { vol: 0.6, volSet: false }, 'volSet 缺省应回 false（补丁未整槽给 volSet 就不算独立生效）')
 })
 
 test('patchConfig 非法值不写入（保持现值），不抛错', () => {

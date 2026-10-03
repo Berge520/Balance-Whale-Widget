@@ -287,9 +287,12 @@
   // 菜单输入统一「回车才生效」：change 事件是随输入/失焦触发的，边打字边存配置
   // 会让数字框打一半（如「2」→「25」）就被钳制回填，光标位置也跟着跳。
   // 改为显式提交：回车提交并失焦回显，blur 也提交一次（点到菜单别处不该丢掉这次编辑）。
+  // 组字守卫：中文输入法组字期间按 Enter 是「确认候选词」，isComposing/229 时不能当「提交」处理，
+  // 否则打着字候选词一确认，倒计时时长就被提交了（参考 DSH 网页版的同类踩坑）
   function commitOnEnter(el, commit) {
     el.addEventListener('keydown', function (e) {
       if (e.key !== 'Enter') return;
+      if (e.isComposing || e.keyCode === 229) return;
       e.preventDefault();
       commit();
       try { el.blur(); } catch (err) {}
@@ -739,8 +742,7 @@
       queueIdx = 0;
       bubbleRandomLines = clickQueueOn ? RANDOM_GROUPS[0].lines() : pickRandomLines();
       swapBubbleContent(function () { applyBubbleLines(bubbleRandomLines); });
-      if (bubbleTimer) { clearTimeout(bubbleTimer); bubbleTimer = null; }
-      bubbleTimer = setTimeout(hideBubble, BUBBLE_MS);
+      bubbleArm(BUBBLE_MS, hideBubble);
     }
   });
 
@@ -764,12 +766,21 @@
   var flipped = false;
   var animDelayTimer = null, drag = null, shown = null, animId = null;
   var bubbleShown = false, bubbleTimer = null, bubbleRandomActive = false, bubbleRandomLines = null;
+  // 气泡 TTL 补收：悬浮窗被隐藏 / 系统休眠时，Electron 会节流隐藏窗口的定时器，
+  // 单靠 setTimeout 可能「该收不收」（收起时刻漂移几十秒）。这里记一份绝对截止时刻，
+  // 窗口回到可见 / 拿到焦点时补收一次，另有每秒巡检兜底（绝大多数时候两次比较就返回）。
+  // 0 = 无 TTL（常驻气泡 / remindSec=0 / 计时气泡 pin），巡检必须跳过，不能误收
+  var bubbleTtlDeadline = 0;
   var bubbleRemindActive = false, bubbleRemindLines = null; // 峰谷提醒气泡（优先级高于随机台词）
   var queueIdx = 0; // 「点按依次播放」当前播到第几组台词
   var bubbleTimerActive = false; // 计时气泡（正计时/倒计时/定时/时间到），优先级最高
   var BUBBLE_STYLE_CLASS = { A: 'dshwv-label', B: 'dshwv-amount', P: 'dshwv-period', C: 'dshwv-hint' };
 
   var soundOn = true, soundVol = 0.9, soundSet = 'duck';
+  // 提醒音独立音量（low/budget/peak/pass 四类提醒音，press/release 音色音不在此列）：
+  // volSet=false = 没动过滑块，播放跟随全局音量；true = 用自己的。必须用布尔位区分
+  // 「没动过」和「恰好设成同值」；0 是合法音量（静音），解析不能用 `||` 兜底（会吃掉 0）
+  var alertVols = { low: { vol: 1, volSet: false }, budget: { vol: 1, volSet: false }, peak: { vol: 1, volSet: false }, pass: { vol: 1, volSet: false } };
   // 宿主推送的 base64 data URL（whale:sounds），**每个槽位是一组**（同一类可导入多段，播放时随机取一条）。
   // press/release 是「音色」两段，low/budget/peak/pass 是四类提醒各自的提醒音（没有内置回落，留空即静音）
   var customSounds = { press: [], release: [], low: [], budget: [], peak: [], pass: [] };
@@ -906,7 +917,8 @@
   }
   // 提醒气泡自动收起：remindSec = 0 表示常驻，等用户点掉（设置页可配）
   function setRemindAutoHide() {
-    if (remindSec > 0) bubbleTimer = setTimeout(hideBubble, remindSec * 1000);
+    if (remindSec > 0) bubbleArm(remindSec * 1000, hideBubble);
+    else bubbleDisarm();
   }
   // 提醒气泡统一入口：峰谷/预算/低余额/穿透说明都走这里（三行内容，停留秒数共用设置）
   function showRemindBubble(lines) {
@@ -1017,7 +1029,7 @@
       bubbleBox.classList.add('dshwv-bubble-open');
     }
     // 拖拽台词比随机台词多停 2 秒：玩拖拽是主动逗鱼，收太快扫兴（随机台词 5s 是被动阅读节奏）
-    bubbleTimer = setTimeout(hideBubble, DRAG_QUOTE_MS);
+    bubbleArm(DRAG_QUOTE_MS, hideBubble);
   }
   // 提醒文案模板：内置默认值（与宿主 store.js 的 ALERTS_DEFAULT 保持一致，浮动页没有 require 读不到宿主常量）。
   // 四类提醒（低余额 / 今日预算 / 峰谷切换 / 鼠标穿透）共用这一份，气泡与系统通知取同一套文案。
@@ -1256,8 +1268,7 @@
     queueIdx += 1;
     bubbleRandomLines = RANDOM_GROUPS[queueIdx].lines();
     swapBubbleContent(function () { applyBubbleLines(bubbleRandomLines); });
-    if (bubbleTimer) { clearTimeout(bubbleTimer); bubbleTimer = null; }
-    bubbleTimer = setTimeout(hideBubble, BUBBLE_MS);
+    bubbleArm(BUBBLE_MS, hideBubble);
     return true;
   }
 
@@ -1894,7 +1905,7 @@
     bubbleRemindLines = null;
     restoreBubbleLines();
     bubbleBox.classList.add('dshwv-bubble-open');
-    bubbleTimer = setTimeout(hideBubble, BUBBLE_MS);
+    bubbleArm(BUBBLE_MS, hideBubble);
   }
   // 「只显计时」关闭时，计时先显示一段后原地切回常规内容（气泡不收起，继续按常规时长停留）
   function timerPeekDone() {
@@ -1920,7 +1931,8 @@
     timerClockText = timerFinished ? '' : fmtClock(timerRemainMs());
     bubbleBox.classList.add('dshwv-bubble-open');
     updateTimerActions(); // 到点后把「休息 / 再来一轮 / 知道了」摆到气泡下缘
-    if (autoHideMs) bubbleTimer = setTimeout(thenNormal ? timerPeekDone : hideBubble, autoHideMs);
+    if (autoHideMs) bubbleArm(autoHideMs, thenNormal ? timerPeekDone : hideBubble);
+    else bubbleDisarm();
   }
   // 峰/谷时段切换提醒：独立于随机台词，内容多一行时段表
   function showPeakRemind(isPeak) {
@@ -1929,6 +1941,7 @@
   }
   function hideBubble() {
     if (bubbleTimer) { clearTimeout(bubbleTimer); bubbleTimer = null; }
+    bubbleTtlDeadline = 0;
     if (bubbleSwapTimer) { clearTimeout(bubbleSwapTimer); bubbleSwapTimer = null; }
     if (hintFadeTimer) { clearTimeout(hintFadeTimer); hintFadeTimer = null; }
     textBox.style.transition = '';
@@ -1950,6 +1963,37 @@
     // gif 靠 CSS opacity 淡出；display:none 会跳过过渡，等淡出完成再隐藏
     gifFadeTimer = setTimeout(function () { gifFadeTimer = null; gifEl.style.display = 'none'; }, 240);
   }
+
+  // —— 气泡 TTL 补收（参考 DSH 网页版同类方案）——
+  // bubbleArm 是所有「气泡自动收起」的唯一入口：setTimeout 照常布防（前台路径），
+  // 同时记一份绝对截止时刻（补收路径用）。悬浮窗隐藏/休眠期间定时器被节流，
+  // 窗口回到可见/焦点时由 bubbleTtlSweep 补收；setInterval 每秒巡检兜底（平时两次比较就返回）。
+  // 传 0 表示该气泡常驻（无 TTL），巡检必须跳过，不能把用户显式要它留着的气泡收掉
+  function bubbleArm(ttlMs, onExpire) {
+    if (bubbleTimer) { clearTimeout(bubbleTimer); bubbleTimer = null; }
+    bubbleTtlDeadline = Date.now() + ttlMs;
+    bubbleTtlAction = onExpire;
+    bubbleTimer = setTimeout(function () { bubbleTimer = null; onExpire(); }, ttlMs);
+  }
+  // 常驻 / 内容切换等场景：只清定时器不动气泡
+  function bubbleDisarm() {
+    if (bubbleTimer) { clearTimeout(bubbleTimer); bubbleTimer = null; }
+    bubbleTtlDeadline = 0;
+    bubbleTtlAction = null;
+  }
+  var bubbleTtlAction = null;
+  function bubbleTtlSweep() {
+    if (bubbleTimer) return;            // 前台定时器还活着：正常路径会收，不抢
+    if (!bubbleTtlDeadline) return;     // 无 TTL（常驻）或已收起：无事可做
+    if (Date.now() < bubbleTtlDeadline) return; // 被提前续期过：还没到点
+    var act = bubbleTtlAction;
+    bubbleDisarm();
+    if (act) act();
+  }
+  document.addEventListener('visibilitychange', function () { if (!document.hidden) bubbleTtlSweep(); });
+  window.addEventListener('focus', bubbleTtlSweep);
+  window.addEventListener('pageshow', bubbleTtlSweep);
+  setInterval(bubbleTtlSweep, 1000);
 
   // —— 数字渲染 / 滚动动画 ——
   function animateAmount(from, to, currency, duration) {
@@ -2270,6 +2314,15 @@
       volInput.value = String(soundVol);
       volPct.textContent = Math.round(soundVol * 100) + '%';
     }
+    if (cfg.alertVols && typeof cfg.alertVols === 'object') {
+      // 只认 0-1 数字与布尔位，非法字段回当前值（宿主 store.js 已归一化，这里兜一层）
+      for (var avKey in alertVols) {
+        var avIn = cfg.alertVols[avKey];
+        if (!avIn || typeof avIn !== 'object') continue;
+        if (typeof avIn.vol === 'number' && isFinite(avIn.vol)) alertVols[avKey].vol = Math.min(1, Math.max(0, avIn.vol));
+        if (typeof avIn.volSet === 'boolean') alertVols[avKey].volSet = avIn.volSet;
+      }
+    }
     if (typeof cfg.soundOn === 'boolean') {
       soundOn = cfg.soundOn;
       soundToggle.checked = soundOn;
@@ -2470,16 +2523,17 @@
   // 每个槽位是一组音频，播放时随机取一条（听久了不腻）。Audio 对象按 URL 缓存并预加载：
   // 每次播放都新建会多一次解码等待，而 pressUp 还要读当前按压音的 duration 才能决定何时接释放音
   var audioPool = {};
-  function audioFor(url) {
+  function audioFor(url, vol) {
     if (!url) return null;
     if (!audioPool[url]) {
       try {
         var a = new Audio(url);
         a.preload = 'auto';
-        a.volume = soundVol;
         audioPool[url] = a;
       } catch (err) { return null; }
     }
+    // 音量每次取用时落（不只在创建时）：同一 URL 的归属可能随配置变化，创建时的值会过期
+    if (typeof vol === 'number' && isFinite(vol)) audioPool[url].volume = Math.min(1, Math.max(0, vol));
     return audioPool[url];
   }
   // 宿主推来的一律是数组；不是数组时按「单段」兜底，免得拿字符串当数组用（取出来是半个字符）
@@ -2567,10 +2621,16 @@
     }
   }
   // 音量统一落到所有音频对象上（含提醒音）：菜单滑块与设置页滑块两条路径共用。
-  // 池里已收着全部音频对象，遍历它一处即够，免得新增槽位后漏掉某一处
+  // 池里已收着全部音频对象，遍历它一处即够，免得新增槽位后漏掉某一处。
+  // 池按 URL 混存音色与提醒音，落音量要先查 URL 归属：提醒音 URL 走各自独立音量（未设置跟全局），
+  // 其余走全局 —— 不能一把统一赋 soundVol，否则用户给某类提醒音单独调的音量会被冲掉
   function applySoundVolume() {
     try {
-      for (var url in audioPool) { if (audioPool[url]) audioPool[url].volume = soundVol; }
+      for (var url in audioPool) {
+        if (!audioPool[url]) continue;
+        var role = alertRoleOfUrl(url);
+        audioPool[url].volume = role ? alertVolumeOf(role) : soundVol;
+      }
     } catch (err) {}
   }
 
@@ -2581,13 +2641,31 @@
   function applyAlertSounds() {
     for (var role in alertUrls) {
       alertUrls[role] = toList(customSounds[role]);
-      for (var i = 0; i < alertUrls[role].length; i++) audioFor(alertUrls[role][i]);
+      for (var i = 0; i < alertUrls[role].length; i++) audioFor(alertUrls[role][i], alertVolumeOf(role));
     }
     prunePool();
   }
+  // 三态音量解析（仿 DSH 网页版 soundVolumeOf）：显式传参 > 该类独立音量（volSet=true 才认）
+  // > 跟随全局。⚠️ 独立音量是 0 时也必须生效（静音是合法选择），所以不能写 `Number(x) || 全局`
+  function alertVolumeOf(role, override) {
+    if (typeof override === 'number' && isFinite(override)) return Math.min(1, Math.max(0, override));
+    var av = alertVols[role];
+    if (av && av.volSet === true) {
+      var n = Number(av.vol);
+      if (isFinite(n)) return Math.min(1, Math.max(0, n));
+    }
+    return soundVol;
+  }
+  // URL → 提醒音槽位归属：applySoundVolume 给整池落音量时用，音色 URL 不在表里返回 null
+  function alertRoleOfUrl(url) {
+    for (var role in alertUrls) {
+      if (alertUrls[role].indexOf(url) >= 0) return role;
+    }
+    return null;
+  }
   function playAlertSound(role) {
     if (!soundOn) return;
-    var a = audioFor(pickUrl(alertUrls[role]));
+    var a = audioFor(pickUrl(alertUrls[role]), alertVolumeOf(role));
     if (!a) return; // 未导入 = 静音
     try {
       a.currentTime = 0;
@@ -2641,9 +2719,10 @@
     try { whaleApi.setInputFocus(false); } catch (err) {}
   }
   // Esc 关菜单：挂件窗口默认 focusable=false，但菜单打开时会经 whale:input-focus 借到焦点，
-  // 所以菜单开着时 Esc 能收到；菜单没开时收不到也不影响原有的「点空白关闭」
+  // 所以菜单开着时 Esc 能收到；菜单没开时收不到也不影响原有的「点空白关闭」。
+  // 组字期间按 Esc 是输入法的「取消组字」，不能抢着关菜单
   window.addEventListener('keydown', function (e) {
-    if (menuOpen && (e.key === 'Escape' || e.key === 'Esc')) closeMenu();
+    if (menuOpen && (e.key === 'Escape' || e.key === 'Esc') && !e.isComposing && e.keyCode !== 229) closeMenu();
   });
   // 挂件到工作区上/下边缘的空白（宿主随 init / snapped 下发，见 preload/lib/widget.js 的 spaceAround）。
   // 窗口留白（--whale-pad）之外的部分落在屏幕外，菜单摆过去也看不见，必须扣掉

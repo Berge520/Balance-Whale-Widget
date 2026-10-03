@@ -90,3 +90,75 @@ test('内置 DeepSeek 模板的字段路径取到人民币余额（防写回下�
   // 反过来排也要一样
   assert.equal(pathNum({ balance_infos: cnyFirst }, MODEL_TEMPLATES.deepseek.path), 88.6)
 })
+
+test('pickPath 条件段支持 & 多条件与 | 多值', () => {
+  const limits = [
+    { type: 'TIME_LIMIT', unit: 3, percentage: 10 },
+    { type: 'TOKENS_LIMIT', unit: 3, percentage: 42 },
+    { type: 'TOKENS_LIMIT', unit: 6, percentage: 7 },
+    { type: 'CREDIT_LIMIT', unit: 3, percentage: 55 },
+  ]
+  const body = { data: { limits } }
+  // & 与 | 组合：type 二选一 + unit 精确匹配；多条匹配时取数组里第一条（find 语义）
+  const firstMatch = (arr, unit) => arr.find((it) =>
+    (it.type === 'TOKENS_LIMIT' || it.type === 'CREDIT_LIMIT') && it.unit === unit)
+  for (const rotated of [limits, [...limits].reverse(), [limits[2], limits[0], limits[3], limits[1]]]) {
+    assert.equal(pathNum({ data: { limits: rotated } }, 'data.limits[type=TOKENS_LIMIT|CREDIT_LIMIT&unit=3].percentage'), firstMatch(rotated, 3).percentage)
+    assert.equal(pathNum({ data: { limits: rotated } }, 'data.limits[type=TOKENS_LIMIT|CREDIT_LIMIT&unit=6].percentage'), firstMatch(rotated, 6).percentage)
+  }
+  // 多条件取不到时仍是 undefined；值列表全不匹配也一样
+  assert.equal(pickPath(body, 'data.limits[type=TOKENS_LIMIT&unit=9].percentage'), undefined)
+  assert.equal(pickPath(body, 'data.limits[type=NOPE|NAH].percentage'), undefined)
+  // 只有 & 没有值的空段（如 a[&]）当条件非法处理
+  assert.equal(pickPath(body, 'data.limits[&].percentage'), undefined)
+})
+
+test('智谱模板按 type+unit 挑条目解析双窗口（防写回下标）', () => {
+  // 实测形状：pro 账号 limits[0] 是 TIME_LIMIT —— 旧路径 data.limits[0].TOKENS_LIMIT.* 必然取空
+  const body = {
+    data: {
+      level: 'pro',
+      limits: [
+        { type: 'TIME_LIMIT', unit: 3, percentage: 10, nextResetTime: '2026-10-03T18:00:00+08:00' },
+        { type: 'TOKENS_LIMIT', unit: 3, percentage: 42.5, nextResetTime: '2026-10-03T18:00:00+08:00' },
+        { type: 'TOKENS_LIMIT', unit: 6, percentage: 7.5, nextResetTime: '2026-10-05T00:00:00+08:00' },
+      ],
+    },
+  }
+  for (const tplName of ['zhipu_glm_coding', 'zhipu_glm_coding_intl']) {
+    const tpl = MODEL_TEMPLATES[tplName]
+    assert.ok(Array.isArray(tpl.windows) && tpl.windows.length === 2, tplName + ' 应是双窗口模板')
+    // start plan 账号查这个接口必然业务报错，提示语必须跟着模板走（api.js fetchModelJson 拼 errorHint）
+    assert.ok(tpl.errorHint && tpl.errorHint.includes('Coding Plan'), tplName + ' 应带 start plan 定向提示')
+    const fiveHour = tpl.windows.find((w) => w.key === 'rolling')
+    const weekly = tpl.windows.find((w) => w.key === 'weekly')
+    assert.equal(pathNum(body, fiveHour.usedPctPath), 42.5)
+    // 重置时刻是 ISO 字符串，由 quotaWindow 里 normResetAt 归一成毫秒，这里只验证路径能取到原文
+    assert.equal(pickPath(body, fiveHour.resetPath), '2026-10-03T18:00:00+08:00')
+    assert.equal(pickPath(body, weekly.resetPath), '2026-10-05T00:00:00+08:00')
+    assert.equal(pathNum(body, weekly.usedPctPath), 7.5)
+    // 新注册/credit 制账号：type 换成 CREDIT_LIMIT 也能取到
+    const creditBody = { data: { limits: [{ type: 'CREDIT_LIMIT', unit: 3, percentage: 55 }] } }
+    assert.equal(pathNum(creditBody, fiveHour.usedPctPath), 55)
+  }
+})
+
+test('modelBusinessError 提炼业务层错误（HTTP 200 但 body 报错）', () => {
+  const { modelBusinessError } = api
+  assert.equal(modelBusinessError({ success: false, msg: '当前用户不存在coding plan' }), '当前用户不存在coding plan')
+  assert.equal(modelBusinessError({ ok: false, message: 'forbidden' }), 'forbidden')
+  assert.equal(modelBusinessError({ code: 1002, msg: '令牌无效' }), '令牌无效')
+  assert.equal(modelBusinessError({ error: { message: 'no plan' } }), 'no plan')
+  assert.equal(modelBusinessError({ error: 'quota exceeded' }), 'quota exceeded')
+  // success=false 且 error 是 {message}：不许吐 '[object Object]'
+  assert.equal(modelBusinessError({ success: false, error: { message: 'no plan' } }), 'no plan')
+  assert.equal(modelBusinessError({ success: false }), 'success=false')
+  // 正常响应 / code=0 / code=200 / 纯数据体都不能误报
+  assert.equal(modelBusinessError({ code: 0, msg: 'ok', data: {} }), '')
+  assert.equal(modelBusinessError({ code: 200, msg: 'ok', data: {} }), '')
+  assert.equal(modelBusinessError({ data: { limits: [] } }), '')
+  assert.equal(modelBusinessError(null), '')
+  assert.equal(modelBusinessError('str'), '')
+  // 超长错误截到 120 字符
+  assert.equal(modelBusinessError({ success: false, msg: 'x'.repeat(300) }).length, 120)
+})

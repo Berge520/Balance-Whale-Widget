@@ -1,5 +1,5 @@
 {
-  "version": "1.9.1",
+  "version": "1.10.0",
   "type": "module",
   "license": "AGPL-3.0-only",
   "scripts": {
@@ -7,7 +7,7 @@
     "typecheck": "vue-tsc --noEmit",
     "lint": "eslint .",
     "test": "node --test \"test/**/*.test.mjs\"",
-    "prebuild": "node scripts/sync-version.mjs && node scripts/check-shared.mjs",
+    "prebuild": "node scripts/sync-version.mjs && node scripts/check-shared.mjs && node scripts/check-dead-settings.mjs",
     "build": "vite build",
     "release": "node scripts/release.mjs"
   },
