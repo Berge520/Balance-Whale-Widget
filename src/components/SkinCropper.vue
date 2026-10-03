@@ -230,8 +230,8 @@ onUnmounted(endDrag)
   scrollbar-gutter: stable;
   padding: 16px;
   border-radius: 12px;
-  background: var(--input-bg, #fff);
-  color: var(--fg, #1f2a44);
+  background: var(--input-bg);
+  color: var(--fg);
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.28);
 }
 .head {
@@ -248,7 +248,7 @@ onUnmounted(endDrag)
   flex: 1;
   min-width: 0;
   font-size: 12px;
-  color: var(--fg-dim, #536ba9);
+  color: var(--fg-dim);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -293,7 +293,7 @@ onUnmounted(endDrag)
   position: absolute;
   width: 10px;
   height: 10px;
-  border: 1px solid var(--accent, #536ba9);
+  border: 1px solid var(--accent);
   border-radius: 2px;
   background: #fff;
   touch-action: none;
@@ -306,26 +306,16 @@ onUnmounted(endDrag)
 .h-sw { left: -5px; bottom: -5px; cursor: nesw-resize; }
 .h-s { left: 50%; bottom: -5px; margin-left: -5px; cursor: ns-resize; }
 .h-se { right: -5px; bottom: -5px; cursor: nwse-resize; }
-.btn-row {
-  display: flex;
-  gap: 10px;
-  margin-top: 12px;
-}
-/* 尺寸/配色走 main.css 的 utils 基类（markup 挂 .utils-btn + .utils-secondary /
-   .utils-primary），这里只留等分拉伸。原先这份是独立一套 13px + 靠 main.css
-   line-height 2.5 撑高，是全页"高矮胖瘦不一"的来源之一。 */
-.btn-row button {
-  flex: 1;
-}
+/* .btn-row 骨架（flex + gap + 等分拉伸）已统一收进 main.css，此处不再各写一份。 */
 .tip {
   margin: 10px 0 0;
   font-size: 12px;
-  color: var(--err, #e0433f);
+  color: var(--err);
 }
 .hint {
   margin: 10px 0 0;
   font-size: 12px;
   line-height: 1.6;
-  color: var(--fg-faint, #9fb0d9);
+  color: var(--fg-faint);
 }
 </style>

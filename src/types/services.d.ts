@@ -62,6 +62,8 @@ export interface WhaleConfig {
   skin: SkinId
   // 气泡配色主题（颜色走挂件页面 CSS 变量）
   theme: 'default' | 'dark' | 'sakura'
+  // 界面深浅色（设置页与挂件面板共用）：auto 跟 uTools isDarkColors / 手动固定 light / dark
+  uiMode: 'auto' | 'light' | 'dark'
   // 台词库（设置页可编辑，一行一条；空组 = 恢复内置默认）
   quotes: WhaleQuotes
   // 提醒文案模板（设置页可编辑；低余额 / 预算 / 峰谷 / 穿透四类提醒的气泡与系统通知共用一份）

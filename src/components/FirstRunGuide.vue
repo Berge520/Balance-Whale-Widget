@@ -416,14 +416,11 @@ input[type='password']:focus {
   color: var(--fg-dim);
 }
 
-/* 尺寸/配色走 utils 基类（markup 是 `class="link-btn utils-btn utils-secondary"`）。
-   这里压一级 `button.link-btn`（0,1,1）盖掉全局 .link-btn 的下划线 ——
-   全局 .link-btn 与 .utils-* 同为 (0,1,0) 且**注入更晚**（main.css 先于各 .vue），
-   不压特异性的话下划线会漏出来。 */
+/* link-btn 基类在 main.css（单一来源），全局版自带 margin-top:10px ——
+   这里两个「如何获取…」按钮紧跟 .field（.field 自带下边距），10px 会把
+   按钮→教程块的间距撑得过开，压回 0。 */
 button.link-btn {
   margin: 0;
-  text-decoration: none;
-  text-underline-offset: 0;
 }
 .guide2 {
   margin-top: 8px;
@@ -468,18 +465,10 @@ button.link-btn {
 .msg.err {
   color: var(--err);
 }
-.btn-row {
-  display: flex;
-  gap: 10px;
-  margin-top: 18px;
-}
-/* 尺寸/配色走 main.css 的 utils 基类（markup 分别挂 .utils-btn，
-   再按主/次/描边叠 .utils-primary / .utils-secondary / .utils-outline）。
-   原先这里是独立一套：圆角 9px（全页唯一一档非 8px）、13px、靠 main.css 的
-   line-height 2.5 撑高 —— 是全页"高矮胖瘦不一"的来源之一，已随统一收敛。 */
-.btn-row button {
-  flex: 1;
-}
+/* .btn-row 骨架已收进 main.css（单一来源）。
+   原先这里是独立一套：margin-top 18px、圆角 9px（全页唯一一档非 8px）、
+   13px 字号、靠 main.css 的 line-height 2.5 撑高 —— 是全页"高矮胖瘦不一"的来源之一，
+   已随统一收敛到全局 12px 骨架 + utils 档位。 */
 /* 跳过 / 上一步 / 关闭：弱化到「存在但不建议点」的层级，不和主按钮抢视线。
    叠 utils-outline 拿到描边档配色，再把下划线加回来 —— 「不抢视线」这个语义
    靠下划线表达，统一的是尺寸而非层级，所以这条要保留。 */

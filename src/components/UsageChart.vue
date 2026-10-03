@@ -353,20 +353,7 @@ function modelBarWidth(tokens?: number) {
   grid-template-columns: minmax(0, 1fr) 54px 108px;
 }
 
-/* ===== 「各模型用量 / 收起各模型用量」折叠按钮 =====
-   尺寸/配色走 utils 基类（markup 是 `class="link-btn utils-btn utils-secondary"`）。
-   这里只需对付全局 `.link-btn` 的**下划线 + 透明底**：`.link-btn` (0,1,0) 与
-   `.utils-btn` / `.utils-secondary` 同特异性，谁赢看源序 —— 而 main.css 是先于各 .vue
-   注入的，所以全局 .link-btn 反而更晚、会把 utils 的 background / text-decoration 抢回去。
-   故这里压一级写成 `button.link-btn`（0,1,1）稳定胜出，只覆盖它多出来的那几项。 */
-button.link-btn {
-  margin-top: 10px;
-  background: rgba(83, 107, 169, 0.18);
-  color: #536ba9;
-  text-decoration: none;
-  text-underline-offset: 0;
-}
-button.link-btn:hover {
-  color: #536ba9;
-}
+/* 「各模型用量 / 收起」折叠按钮（markup 是 link-btn + utils 类）：全局 .link-btn
+   按设计压过 utils 档位渲染成下划线文字链，这里不再写副本 ——
+   旧版这节按「scoped 特异性补丁」处理，还把写死的深蓝抄了一份（深色下几乎隐形）。 */
 </style>

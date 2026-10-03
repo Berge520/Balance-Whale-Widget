@@ -89,7 +89,7 @@ const PATCH_FIXTURES = {
   edgeBottom: { edgeBottom: 13 }, edgeLeft: { edgeLeft: 14 }, scrollGapOn: { scrollGapOn: true },
   scrollGapPx: { scrollGapPx: 33 }, snapMode: { snapMode: 'off' }, snapRatio: { snapRatio: 40 },
   opacity: { opacity: 66 }, passThrough: { passThrough: true }, skin: { skin: 'custom' },
-  theme: { theme: 'dark' }, quotes: { quotes: { time: ['改过的报时'] } },
+  theme: { theme: 'dark' }, uiMode: { uiMode: 'light' }, quotes: { quotes: { time: ['改过的报时'] } },
   alerts: { alerts: { low: '改过的低额模板' } }, quotaTotal: { quotaTotal: 88 },
   quotaReset: { quotaReset: 'never' }, tokenPrice: { tokenPrice: { on: true, cur: 'USD', rate: 7.5, hit: 1, miss: 2, out: 3 } },
   historyKeepDays: { historyKeepDays: 400 }, dshBackupKeep: { dshBackupKeep: 33 },

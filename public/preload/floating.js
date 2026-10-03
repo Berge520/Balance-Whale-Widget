@@ -4,6 +4,7 @@
  * 悬浮窗（floating.html）与主窗宿主（services.js）之间的薄桥接层：
  *  - 接收宿主推送：whale:init / whale:balance / whale:config / whale:snapped / whale:sounds
  *              / whale:skin / whale:bubbles / whale:models
+ *              （另有本地推送 dark：preload 轮询 utools.isDarkColors() 检测 uTools 深浅色变化）
  *  - 向宿主上报：whale:ready / whale:refresh / whale:config / whale:timer / whale:timer-done
  *              / whale:drag-begin / whale:drag-move / whale:drag-end / whale:ignore-mouse / whale:open-settings
  *              / whale:models-refresh / whale:set-main-model / whale:hide-widget
@@ -23,7 +24,7 @@ log('[whale][floating] preload 已加载', {
   logFile: LOG_FILE || '(仅控制台)',
 })
 
-const handlers = { init: [], balance: [], config: [], snapped: [], dsh: [], sounds: [], skin: [], bubbles: [], models: [] }
+const handlers = { init: [], balance: [], config: [], snapped: [], dsh: [], sounds: [], skin: [], bubbles: [], models: [], dark: [] }
 
 function on(name, cb) {
   if (handlers[name] && typeof cb === 'function') handlers[name].push(cb)
@@ -51,6 +52,17 @@ ipcRenderer.on('whale:bubbles', (event, data) => emit('bubbles', data))
 // 多厂商模型列表（含内置 DeepSeek 那条）+ 主显示模型
 ipcRenderer.on('whale:models', (event, data) => emit('models', data))
 
+// —— 深浅色跟随 uTools ——
+// 菜单/计时条等 UI 的深浅形态挂在 <html> 的 dark 类上（floating.css 消费）。判定源是
+// utools.isDarkColors()，uTools 没有主题变更事件，只能在 preload 里轮询（同步布尔读，开销可忽略）。
+// 菜单面板等控件不跟配置里的 theme（那是气泡配色主题），两者是两回事。
+function isDark() {
+  try { return !!utools.isDarkColors() } catch (err) { return false }
+}
+function pushDark() { emit('dark', isDark()) }
+pushDark() // 首次立即给一版，页面 onInit 前也能拿到正确形态
+setInterval(pushDark, 1000)
+
 // 悬浮窗 → 主窗。sendToParent 仅在 createBrowserWindow 创建的窗口中有效。
 function send(channel) {
   const args = Array.prototype.slice.call(arguments, 1)
@@ -72,6 +84,10 @@ const api = {
   onSkin(cb) { on('skin', cb) },
   onBubbles(cb) { on('bubbles', cb) },
   onModels(cb) { on('models', cb) },
+  // uTools 深浅色变化（preload 轮询检测后本地推送，不经主窗）
+  onDark(cb) { on('dark', cb) },
+  // 同步读取当前深浅态：preload 的首条 dark 推送早于页面注册回调，页面启动时用这里补齐初值
+  isDark() { return isDark() },
 
   // —— 向宿主上报 ——
   ready() { send('whale:ready') },

@@ -33,28 +33,34 @@
   --input-bg: #ffffff;
   --ok: #2fa24c;
   --err: #e0433f;
+  /* 危险档按钮的淡底与描边，随 --err 同源换值（utils-danger 用） */
+  --err-weak: rgba(224, 67, 63, 0.16);
+  --err-line: rgba(224, 67, 63, 0.35);
   --warn: #c07d1a;
   /* 顶部 Tab 吸顶时的底色，必须与 body 背景一致（见上） */
   --bar-bg: #f4f4f4;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --fg: #e8ecf5;
-    --fg-dim: #9fb0d9;
-    --fg-faint: #7f8db3;
-    --accent: #8aa4e6;
-    --accent-weak: rgba(138, 164, 230, 0.16);
-    --line: rgba(255, 255, 255, 0.22);
-    --card-bg: rgba(255, 255, 255, 0.06);
-    --card-border: rgba(255, 255, 255, 0.12);
-    --track: rgba(255, 255, 255, 0.08);
-    --input-bg: #2b3145;
-    --ok: #4ec46b;
-    --err: #ff6b66;
-    --warn: #e0a63c;
-    --bar-bg: #303133;
-  }
+/* 深浅判定**跟 uTools 走**，不跟系统：判定源是 App.vue 读 utools.isDarkColors() 后
+   切在 <html> 上的 .dark 类（uTools 没有主题变更事件，页面轮询检测）。原先用
+   @media (prefers-color-scheme: dark) 会让「系统暗 + uTools 亮」时设置页恒为暗色。 */
+html.dark {
+  --fg: #e8ecf5;
+  --fg-dim: #9fb0d9;
+  --fg-faint: #7f8db3;
+  --accent: #8aa4e6;
+  --accent-weak: rgba(138, 164, 230, 0.16);
+  --line: rgba(255, 255, 255, 0.22);
+  --card-bg: rgba(255, 255, 255, 0.06);
+  --card-border: rgba(255, 255, 255, 0.12);
+  --track: rgba(255, 255, 255, 0.08);
+  --input-bg: #2b3145;
+  --ok: #4ec46b;
+  --err: #ff6b66;
+  --err-weak: rgba(255, 107, 102, 0.16);
+  --err-line: rgba(255, 107, 102, 0.35);
+  --warn: #e0a63c;
+  --bar-bg: #303133;
 }
 
 html,
@@ -90,13 +96,15 @@ button:not(:disabled):active {
 
    参数与原先 dsh Tab 内那套（.dsh-card .patch-btn 等）逐字一致，故 dsh 分组观感不变。
 
-   只放**尺寸与配色**，不放 margin / flex：那两项与所在布局强耦合（如 .fold > .link-btn
-   要 margin-top:0、.btn-row button 要 flex:1），留在各文件的 scoped 里按需覆写更清楚。
+   utils-btn 基类只放**尺寸**，不放 margin / flex / 配色：后两项要么与所在布局强耦合
+   （如 .fold > .link-btn 要 margin-top:0、.btn-row button 要 flex:1），要么由下面
+   各 utils-* 档位给。布局微调留在各文件的 scoped 里按需覆写更清楚。
 
    命名：`utils-` 前缀 + `utils-btn`。前者是为了不撞已有单字类名，且方便在产物里检索；
    后者让"只想要基准尺寸、但自己有配色"的例外面板（.tab / .iso-axis-btn）也能复用。
-   值本身全部写死、不走 CSS 变量：--accent / --err 是各 scoped 块自定义的局部变量，
-   放到全局块里取不到，会静默 fallback 成继承色。 */
+
+   ⚠️ utils-primary 不走 --accent：深色主题的 --accent(#8aa4e6) 偏浅，压白字对比不足，
+   主按钮单独写死这个蓝保可读性。 */
 
 /* 基准尺寸：任何按钮都能叠，只给盒模型不给配色 */
 .utils-btn {
@@ -115,18 +123,18 @@ button:not(:disabled):active {
   color: #fff;
 }
 
-/* 次操作：半透明蓝底 + 蓝字描边 */
+/* 次操作：半透明蓝底 + 蓝字描边（主题变量，深色模式自动换亮蓝，不再隐形） */
 .utils-secondary {
-  background: rgba(83, 107, 169, 0.18);
-  border-color: rgba(83, 107, 169, 0.3);
-  color: #536ba9;
+  background: var(--accent-weak);
+  border-color: var(--line);
+  color: var(--accent);
 }
 
-/* 危险操作：半透明红底 + 红字描边 */
+/* 危险操作：半透明红底 + 红字描边（随 --err 令牌深浅各换一份） */
 .utils-danger {
-  background: rgba(224, 67, 63, 0.16);
-  border-color: rgba(224, 67, 63, 0.35);
-  color: #e0433f;
+  background: var(--err-weak);
+  border-color: var(--err-line);
+  color: var(--err);
 }
 
 /* 禁用态压过各 scoped 里的 `:disabled { opacity: .45 }`：
@@ -141,14 +149,55 @@ button.utils-btn:disabled {
 /* hover 只兑 border-color，且仅限前两档：危险档 hover 保持红边（改蓝边会语义错乱） */
 button.utils-secondary:hover:not(:disabled),
 button.utils-outline:hover:not(:disabled) {
-  border-color: #536ba9;
+  border-color: var(--accent);
 }
 
 /* 描边档：给 .export-btn / .detail-toggle 这类"透明底 + 灰字 + 灰描边"用 */
 .utils-outline {
   background: transparent;
-  border-color: var(--line, rgba(83, 107, 169, 0.28));
-  color: var(--fg-dim, #536ba9);
+  border-color: var(--line);
+  color: var(--fg-dim);
+}
+
+/* ===== 文字链按钮：全页统一（单一来源）=====
+   .link-btn 原本只在 App.vue scoped 里定义，AccelView / UsageChart / FirstRunGuide
+   里的同名类在各自模板上是死类 —— 它们还各写了一份「补丁」试图盖它，全在跟一个
+   不存在的全局规则打架（UsageChart 的补丁还把写死的深蓝又抄了一份，深色隐形第二现场）。
+   上提到这里作唯一来源，靠**源序**压过上面的 utils-* 档位（同特异性 (0,1,0)，
+   后来者胜）：`class="link-btn utils-secondary"` 这类组合最终渲染为下划线文字链，
+   与 App.vue 里 60+ 处既有观感一致 —— 下划线就是这类按钮的设计意图。
+
+   ⚠️ 必须放在 utils 档位**之后**，前移会让档位反过来盖掉文字链配色。 */
+.link-btn {
+  margin-top: 10px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--fg-dim);
+  font-size: 12px;
+  text-align: left;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.link-btn:hover {
+  color: var(--fg);
+}
+
+/* ===== 按钮行：全页统一（单一来源）=====
+   各 .vue 里散落着 .btn-row 的逐字副本（App.vue / AccelView / FirstRunGuide /
+   SkinCropper / SoundTrimmer），其中 FirstRunGuide 一份 margin-top 还不同（18px），
+   统一收进全局这一个定义。横向排 + 换行 + 每枚按钮均分宽度。 */
+.btn-row {
+  display: flex;
+  gap: 10px;
+  margin-top: 12px;
+  flex-wrap: wrap;
+}
+
+.btn-row > button {
+  flex: 1;
 }
 
 /* ===== 全屏遮罩弹层底：三个弹窗共用（单一来源）=====
@@ -245,32 +294,47 @@ textarea {
   display: none;
 }
 
-@media (prefers-color-scheme: light) {
-  body {
-    background-color: var(--bar-bg);
-  }
+/* body 底色统一走 --bar-bg（浅深同规则），只有文字/滚动条需要分深浅 —— 类驱动，见 html.dark 注释 */
+body {
+  background-color: var(--bar-bg);
 }
 
-@media (prefers-color-scheme: dark) {
-  body {
-    background-color: var(--bar-bg);
-    color: #fff;
-  }
+html.dark body {
+  color: #fff;
+}
 
-  /* 深色底：轨道压得更淡，滑块换成冷白，靠明度差而不是靠透明度区分 */
-  ::-webkit-scrollbar-track {
-    background-color: rgba(255, 255, 255, 0.07);
-  }
+/* 深色底：轨道压得更淡，滑块换成冷白，靠明度差而不是靠透明度区分 */
+html.dark ::-webkit-scrollbar-track {
+  background-color: rgba(255, 255, 255, 0.07);
+}
 
-  ::-webkit-scrollbar-thumb {
-    background-color: rgba(190, 205, 240, 0.42);
-  }
+html.dark ::-webkit-scrollbar-thumb {
+  background-color: rgba(190, 205, 240, 0.42);
+}
 
-  ::-webkit-scrollbar-thumb:hover {
-    background-color: rgba(190, 205, 240, 0.66);
-  }
+html.dark ::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(190, 205, 240, 0.66);
+}
 
-  ::-webkit-scrollbar-thumb:active {
-    background-color: rgba(190, 205, 240, 0.82);
-  }
+html.dark ::-webkit-scrollbar-thumb:active {
+  background-color: rgba(190, 205, 240, 0.82);
+}
+
+/* ===== 搜索命中卡的定位闪烁：全局唯一来源 =====
+   点搜索命中标签滚到卡片后，给卡一个一闪而过的底色脉冲，视线能立刻接住「滚到哪了」——
+   大卡（挂件外观 / 用量与账本）字段几十行，没有反馈等于还得自己从头找。
+   放全局而不是 App.vue scoped：命中卡可能是异步组件 AccelView 里的 .card（ghAccel），
+   scoped 规则只对本组件模板直写的元素生效，跨组件的卡会静默闪不了。
+   配色用 --accent-weak（主题变量，:root 与 html.dark 都有定义，深浅自动适配）——
+   main.css 顶部「含局部主题变量的规则别放全局」的警告针对的是各 .page 作用域内
+   定义的局部变量；--accent-weak 已上提 :root 真源，不属此列。 */
+@keyframes whale-search-flash {
+  /* 0.6s 两拍：起手亮一下，中段沉下去，尾段再撩一次 —— 比单调的一次淡出更容易被余光捕捉 */
+  0%, 100% { background-color: transparent; }
+  15% { background-color: var(--accent-weak); }
+  55% { background-color: transparent; }
+  75% { background-color: var(--accent-weak); }
+}
+.card.search-flash {
+  animation: whale-search-flash 0.9s ease-out 1;
 }

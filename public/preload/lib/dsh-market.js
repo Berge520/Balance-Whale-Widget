@@ -538,11 +538,26 @@ function admitPrerelease(opts, lo, t) {
   if (!lo || !lo[3] || !lo[3].length) return false // 声明没写 prerelease → 不收 prerelease 目标
   return lo[0] === t[0] && lo[1] === t[1] && lo[2] === t[2]
 }
-// range 支持：`^x.y.z` / `~x.y.z` / `x.y.z` / `>=x.y.z` / `*` / `latest` / 空。
+// range 支持：`^x.y.z` / `~x.y.z` / `x.y.z` / `>=x.y.z` / `||` 复合范围 / `*` / `latest` / 空。
 // 认不出的形态一律返回 true（= 落在范围内 = 不报更新）—— 保守优先，宁可漏报。
 function rangeAllows(range, target, opts) {
   const r = String(range == null ? '' : range).trim()
   if (!r || r === '*' || r === 'latest' || r === 'x') return true
+  // `||` 复合范围按 npm semver 是**析取**：任一段放行即放行（与 node-semver 的
+  //    per-comparator contains 再取 or 同口径）。
+  // ⚠️ 必须在 caret 等单段解析**之前**拆：parseVer 的宽松正则只吃掉开头的版本号，
+  //    整串直接进 caret 分支时后面几段会被静默丢弃 —— 整条
+  //    `^0.1.0-rc.7 || ^0.1.1-rc.2 || ^0.1.2-alpha.2 || ^0.2.0-rc.1` 被当成第一段判，
+  //    宿主 0.2.0-rc.2 明明落在最后一段却被确证「不兼容」拦在写入前（2026-10-03 用户实报）。
+  // ⚠️ 析取里每段用**同一份 opts**：includePrerelease 的准入放宽要穿透到每一段。
+  //    空段（`a ||` / 连续 `||`）跳过；拆完全空则按单串走下面的保守口径。
+  // ⚠️ 探针反测语义不变：真复合范围的每一段都会拒绝 `0.0.0-0`，析取仍为 false，
+  //    isUnjudgeable 照常判「认不出」；只有整条全认不出（如 `workspace:*`）才放行探针
+  //    → unknown —— 与拆分前的保守方向一致。
+  if (r.includes('||')) {
+    const parts = r.split('||').map((p) => p.trim()).filter(Boolean)
+    if (parts.length) return parts.some((p) => rangeAllows(p, target, opts))
+  }
   const t = parseVer(target)
   if (!t) return true
   // caret：^0.5.11 → [0.5.11, 0.6.0)；^1.2.3 → [1.2.3, 2.0.0)
@@ -607,6 +622,10 @@ function rangeAllows(range, target, opts) {
 function lowerBoundOf(range) {
   const r = String(range == null ? '' : range).trim()
   if (!r) return ''
+  // `||` 复合范围：各段下界互不相同，析取的「下界」不是一个点 ——
+  //    硬取第一段会把方向基准压到最旧那段（`^0.1.0-rc.7 || …` → 0.1.0-rc.7），
+  //    让比它新的目录版本全被误判成 update。返空串，让调用方退回 rangeAllows 的保守口径。
+  if (r.includes('||')) return ''
   // caret / tilde：`^1.2.3` / `~1.2.3` → 剥掉前缀后的部分
   const sig = r.match(/^[\^~]\s*(\S+)/)
   if (sig) {

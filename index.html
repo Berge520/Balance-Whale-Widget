@@ -3,6 +3,20 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script>
+      // 首帧深浅色预涂：同步跑在 bundle 之前。深浅应用原本在 Vue 启动后（400KB+ JS 解析完）才挂
+      // dark 类，深色用户每次打开设置页都先闪一段浅色；且启动应用拿的还是本地默认 uiMode(auto)，
+      // 存储里的手动 light/dark 要等 applyConfig 回填、不重应用就拖到下一轮轮询 —— 体感「隔一会才变」。
+      // 合成口径与 store.js normUiMode / App.vue applyUtoolsDark 一致；键名由 check-shared 钉住。
+      try {
+        var ui = utools.dbStorage.getItem('whale:config')
+        var mode = 'auto'
+        if (ui && (ui.uiMode === 'light' || ui.uiMode === 'dark')) mode = ui.uiMode
+        if (mode === 'dark' || (mode === 'auto' && utools.isDarkColors())) {
+          document.documentElement.classList.add('dark')
+        }
+      } catch (err) { /* 无 utools 环境（浏览器直开）保持浅色，Vue 启动后自会纠正 */ }
+    </script>
   </head>
   <body>
     <div id="app"></div>

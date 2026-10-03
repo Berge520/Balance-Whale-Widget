@@ -388,6 +388,36 @@ test('rangeAllows：认不出的形态一律判「在范围内」（保守，宁
   assert.equal(rangeAllows('npm:other@^1.0.0', '9.9.9'), true)
 })
 
+// ── `||` 复合范围的析取（2026-10-03 修）──
+//
+// ⚠️ 回归（用户实报）：整条 `^0.1.0-rc.7 || ^0.1.1-rc.2 || ^0.1.2-alpha.2 || ^0.2.0-rc.1`
+//    被当成第一段判 —— parseVer 的宽松正则只吃开头的版本号，后面三段静默丢弃，
+//    宿主 0.2.0-rc.2 明明落在最后一段却被「确证不兼容」拦在写入前。
+//    node-semver 2.0.0 对同一条的范围判定是 true（默认口径也是），自家实现必须对齐。
+//    析取口径与 node-semver 一致：任一段放行即放行；上界 -0 天花板是段内的，拆分不破坏跨代围栏。
+test('rangeAllows：|| 复合范围按析取判（回归：0.2.0-rc.2 曾被整条判进第一段）', () => {
+  const real = '^0.1.0-rc.7 || ^0.1.1-rc.2 || ^0.1.2-alpha.2 || ^0.2.0-rc.1'
+  // 与 node-semver 2.0.0 对拍过的口径：默认收（声明自己带 prerelease）、放宽准入也收
+  assert.equal(rangeAllows(real, '0.2.0-rc.2'), true)
+  assert.equal(rangeAllows(real, '0.2.0-rc.2', { includePrerelease: true }), true)
+  // 析取的另一头：落在第一段内也算命中
+  assert.equal(rangeAllows(real, '0.1.0-rc.9'), true)
+  // 四段全都容不下 → 才是真的 false
+  assert.equal(rangeAllows(real, '0.3.0-rc.1'), false)
+  assert.equal(rangeAllows(real, '0.1.0-rc.6'), false)
+  // 段间多余空白与空段（`a ||` / 连续 `||`）不影响判定
+  assert.equal(rangeAllows('^1.2.0  ||  ^2.0.0 || ', '2.5.0'), true)
+  assert.equal(rangeAllows(' || ', '1.0.0'), true)
+  // ⚠️ 跨代围栏在复合范围下同样成立：各段的天花板是段内的
+  assert.equal(rangeAllows('^0.1.0-rc.7 || ^0.1.1-rc.2', '0.2.0-rc.2'), false)
+  // 探针语义不变：真复合范围的每一段都拒绝 0.0.0-0，析取仍为 false（isUnjudgeable 照常成立）
+  assert.equal(rangeAllows(real, '0.0.0-0'), false)
+})
+
+test('lowerBoundOf：|| 复合范围返空串（析取没有单一「下界」，硬取第一段会压低方向基准）', () => {
+  assert.equal(lowerBoundOf('^0.1.0-rc.7 || ^0.2.0-rc.1'), '')
+})
+
 test('lowerBoundOf：取范围下界，用于「目录版本 vs 声明下界」判方向', () => {
   // caret / tilde / >= / 裸版本都要给出可比的裸版本号
   assert.equal(lowerBoundOf('^0.5.11'), '0.5.11')

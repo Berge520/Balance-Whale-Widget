@@ -2928,6 +2928,8 @@ module.exports = {
       // 说明正文缓存也一并清：它按版本号索引，版本列表都清了，留着这份正文没有意义
       // （正文写完虽不可变，但用户点「清除」的意图就是「别再留着这些缓存了」，不该偷偷保留）
       try { utools.dbStorage.removeItem(K.dshNotes) } catch (err) {}
+      // 「自动刷新版本」是设置页侧的纯偏好（宿主不读它），与查询标记同进退清掉即可
+      try { utools.dbStorage.removeItem(K.dshAutoRefreshVersions) } catch (err) {}
       resetAnchorCache()
     }
     resetBalanceCache()

@@ -47,7 +47,7 @@
   // 宿主桥接（preload/floating.js 注入）；缺省空实现，单独打开页面也不报错
   var whaleApi = window.whale || {
     onInit: function () {}, onBalance: function () {}, onConfig: function () {}, onSnapped: function () {},
-    onSounds: function () {}, onSkin: function () {}, onBubbles: function () {}, onModels: function () {},
+    onSounds: function () {}, onSkin: function () {}, onBubbles: function () {}, onModels: function () {}, onDark: function () {},
     ready: function () {}, refresh: function () {}, saveConfig: function () {},
     saveTimer: function () {}, notifyTimerDone: function () {},
     dragBegin: function () {}, dragMove: function () {}, dragEnd: function () {}, setIgnoreMouse: function () {}, setInputFocus: function () {},
@@ -935,6 +935,10 @@
   // 只用来判断「到点该不该叫宿主发」—— 两个渠道都关时才真的不发。
   var timerMailOn = true, mailOn = false;
   var usageMode = 'ledger', peakMode = 'default', bubbleOn = true;
+  // 界面深浅色偏好（设置页可改）：'auto' 跟 uTools / 'light' / 'dark'。
+  // 生效值 = 偏好为 auto 时取 uTools 实际深浅，否则用偏好本身；uTools 侧实时值由 onDark/isDark 维护
+  var uiMode = 'auto';
+  var utoolsDark = false; // uTools 当前深浅态的最新缓存（applyDark 合成用）
   var peakRemindOn = true; // 峰/谷时段切换时用气泡提醒（需开启思考气泡）
   var menuBtnEnabled = true; // 挂件右上角菜单按钮开关（设置页可关）
   var lowAlertOn = true, lowAlertAmount = 10; // 低余额预警（余额低于阈值时数字变红）
@@ -956,7 +960,7 @@
   // 固定就是这两份，设置页改过则由 applyConfig 覆盖。
   var QUOTES = {
     hint: ['好模型... ↓', '好女孩...↓'],
-    chat: ['不知道用户有什么用，先赶走吧~', '我...我...我也要挣钱吗？', '我去吃饭啦，测完叫我', '压力一只蓝色大肥鱼？！', 'DeepSleep...', '坏了...用户彻底怒了！'],
+    chat: ['不知道用户有什么用，先赶走吧~', '我...我...我也要挣钱吗？', '我去吃饭啦，测完叫我', '压力一只蓝色大肥鱼？！', 'DeepSleep...', '坏了...用户彻底怒了！', '终有一天，终有一天……'],
     dsh: ['你目录里的dsh是什么...大烧货吗...?', '恭喜你实现token自由！token全跑了！', '真当我是便宜货啊...'],
     short: ['哦鲸鲸...'],
     time: ['现在是 {t}', '已经 {t} 啦', '都 {t} 了哦', '小鲸鱼报时：{t}'],
@@ -981,6 +985,39 @@
   function pickBubbleUrl() {
     if (!customBubbles.length) return '';
     return pickOne(customBubbles) || '';
+  }
+  // —— 拖拽台词 ——
+  // 真把挂件拖出一段距离（松手位移 ≥100px）才弹：drag.moved 3px 就置位，日常挪一下位置不该触发。
+  // 刻意不进 QUOTES / QUOTES_DEFAULT：它不进设置页台词库、不可编辑，塞进去会被 check-shared
+  // 逼着往宿主默认值里放一份没人消费的死副本（normQuotes 只认 hint/chat/dsh/short/time/gifFail）。
+  var DRAG_LINES = ['哇——轻点轻点！', '起飞咯——', '放我下来！……好吧，再玩一次。', '晕鱼了晕鱼了……'];
+  var DRAG_QUOTE_SQ = 100 * 100;       // 触发阈值的平方（比较平方距离，省开方）
+  var DRAG_QUOTE_COOLDOWN = 60 * 1000; // 冷却：连拖几次（如甩到屏幕另一侧）只弹第一句
+  var DRAG_QUOTE_MS = 7 * 1000;        // 停留 7s：比随机台词（5s）多 2 秒，拖拽是主动逗鱼
+  var lastDragQuoteAt = 0;
+  function showDragQuote(distSq) {
+    if (distSq < DRAG_QUOTE_SQ) return;
+    if (Date.now() - lastDragQuoteAt < DRAG_QUOTE_COOLDOWN) return;
+    // 优先级与提醒类入口（showRemindBubble）同口径：计时中不打断，气泡总开关关闭时不弹
+    if (!bubbleOn || timerActive() || bubbleRemindActive) return;
+    lastDragQuoteAt = Date.now();
+    var lines = singleCenter('A', pickOne(DRAG_LINES), '', true);
+    bubbleRandomActive = true; // 按随机台词口径：点气泡可再切组，再点关闭
+    bubbleRandomLines = lines;
+    if (bubbleSwapTimer) { clearTimeout(bubbleSwapTimer); bubbleSwapTimer = null; }
+    if (bubbleTimer) { clearTimeout(bubbleTimer); bubbleTimer = null; }
+    if (gifFadeTimer) { clearTimeout(gifFadeTimer); gifFadeTimer = null; }
+    if (bubbleShown) {
+      // 气泡已开着（多是刚点过鲸鱼）：原地淡入换词，不要闪一下
+      swapBubbleContent(function () { applyBubbleLines(lines); });
+    } else {
+      bubbleShown = true;
+      restoreBubbleLines();
+      applyBubbleLines(lines);
+      bubbleBox.classList.add('dshwv-bubble-open');
+    }
+    // 拖拽台词比随机台词多停 2 秒：玩拖拽是主动逗鱼，收太快扫兴（随机台词 5s 是被动阅读节奏）
+    bubbleTimer = setTimeout(hideBubble, DRAG_QUOTE_MS);
   }
   // 提醒文案模板：内置默认值（与宿主 store.js 的 ALERTS_DEFAULT 保持一致，浮动页没有 require 读不到宿主常量）。
   // 四类提醒（低余额 / 今日预算 / 峰谷切换 / 鼠标穿透）共用这一份，气泡与系统通知取同一套文案。
@@ -2047,7 +2084,9 @@
       if (changed && !currencyChanged) {
         if (!manual && !firstBalance) {
           // 自动刷新发现余额变动：气泡弹出，0.3s 后数字滚动
-          if (!bubbleRemindActive) showBubble(); // 峰谷提醒优先，避免被余额气泡覆盖
+          // 峰谷提醒优先，避免被余额气泡覆盖；用户正在看随机/拖拽台词时也不顶掉
+          // （那是显式交互，余额变动不紧急，点一下鲸鱼随时能看），数字滚动照常进行
+          if (!bubbleRemindActive && !bubbleRandomActive) showBubble();
           state.status = 'changing';
           if (animDelayTimer) clearTimeout(animDelayTimer);
           animDelayTimer = setTimeout(function () {
@@ -2115,6 +2154,9 @@
       // 挂件菜单任何一次改动都会整份 saveCfg → patchConfig 逐字段覆盖，
       // 漏带就等于用 undefined 把用户在设置页开的邮件通知悄悄关掉
       timerMailOn: timerMailOn, notifyMailOn: mailOn,
+      // 界面深浅色偏好本页只读（回填自 applyConfig），必须原样带回：
+      // 同上面的「邮件」开关，整份 saveCfg 漏带就等于用 undefined 抹掉设置页的选择
+      uiMode: uiMode,
       timerMode: timerMode,
       timerSec: timerSegTotalSec(),
       timerAt: String(timerTime.value || ''),
@@ -2398,6 +2440,11 @@
     if (typeof cfg.theme === 'string') {
       themeId = (cfg.theme === 'dark' || cfg.theme === 'sakura') ? cfg.theme : 'default';
       applyTheme();
+    }
+    // 界面深浅色偏好：值变了就立即重新合成（utoolsDark 缓存已是最新，不用等下一轮推送）
+    if (typeof cfg.uiMode === 'string') {
+      var nextUiMode = (cfg.uiMode === 'light' || cfg.uiMode === 'dark') ? cfg.uiMode : 'auto';
+      if (nextUiMode !== uiMode) { uiMode = nextUiMode; applyDark(); }
     }
     // 台词库：time / gifFail 是非空字符串数组才覆盖（空数组会让报时/降级文案没字）；
     // groups 是随机组的抽签配置，整份重建（宿主侧已清洗过，这里只做抽签项装配）
@@ -2988,6 +3035,8 @@
     document.removeEventListener('pointercancel', onDocPointerCancel, true);
     pressUp();
     var wasClick = clickAllowed && !drag.moved;
+    // 松手位移要在 drag 置 null 前算好：真拖拽收尾时按它决定要不要弹「被拖拽」台词
+    var ddx = e.screenX - drag.sSX, ddy = e.screenY - drag.sSY;
     drag = null;
     if (wasClick) {
       showBubble(true); // 用户点击：计时气泡即使不常驻也要弹出来
@@ -2999,6 +3048,7 @@
     } else {
       // 宿主吸附后回推 whale:snapped → 镜像翻转
       whaleApi.dragEnd();
+      showDragQuote(ddx * ddx + ddy * ddy);
     }
     // 立即按松手位置重算：穿透态下这里要决定是交回穿透还是保持接管；
     // 按钮显隐也在这次重算里按松手位置判过（hoverAt → hoverNow → updateHover(..., true)），
@@ -3149,6 +3199,22 @@
     if (data && data.space) menuSpace = data.space;
     if (menuOpen) { menuDirLocked = false; positionMenu(); }
   });
+  // 深浅色跟 uTools 走（preload 轮询 isDarkColors 后本地推送）：挂 <html> 的 dark 类，
+  // 菜单/计时条等面板的深色形态全在 floating.css 的 html.dark 系列规则里。
+  // 首条推送在 preload 阶段就发过（早于本回调注册），此处先把类补齐一次——类已对时 toggle 是空操作。
+  // 生效值由 uiMode 合成：auto 取 uTools 实际值，手动 light/dark 直接用偏好（见 applyDark）
+  whaleApi.onDark(function (dark) {
+    utoolsDark = !!dark;
+    applyDark();
+  });
+  function applyDark() {
+    var dark = uiMode === 'auto' ? utoolsDark : uiMode === 'dark';
+    try { document.documentElement.classList.toggle('dark', dark); } catch (err) {}
+  }
+  try {
+    utoolsDark = !!(window.whale && window.whale.isDark && window.whale.isDark());
+    applyDark();
+  } catch (err) {}
 
   // —— 启动 ——
   render();

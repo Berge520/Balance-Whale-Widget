@@ -13,7 +13,7 @@ const FETCH_TIMEOUT_MS = 20000
 const UPDATE_CHECK_URL = 'https://ghfast.top/https://raw.githubusercontent.com/Berge520/Balance-Whale-Widget/refs/heads/main/package.json'
 // 当前插件版本。uTools 未提供读取插件自身版本的 API，此处由 scripts/sync-version.mjs
 // 在构建前从 package.json 的 version 自动写入，无需手动维护
-const PLUGIN_VERSION = '1.9.0'
+const PLUGIN_VERSION = '1.9.1'
 const UPDATE_TTL_MS = 12 * 3600 * 1000
 
 const MIN_SCALE = 0.6
@@ -324,6 +324,9 @@ const K = {
   // dbStorage：dsh 版本「查过没有」的标记。与 dshVersions 分开存：列表可能为空（上游下架），
   // 但「查过」这件事决定界面是否还要自动重查、按钮是否还挂着
   dshVersionsQueried: 'whale:dshVersionsQueried',
+  // dbStorage：设置页「进入开发者 Tab 自动刷新可用版本」勾选的 true 标记（只在设置页侧读写）。
+  // 默认不勾 —— 查询要联网，自动联网行为须用户显式授权
+  dshAutoRefreshVersions: 'whale:dshAutoRefreshVersions',
   // dbStorage：dsh release 说明正文的持久缓存 { version, at, items: { <版本号>: <markdown> } }。
   // 只存「上游正文」这一层，不存聚合结果 —— 聚合随所选区间变，落库反而会出现「版本号是新的、说明还是旧的」。
   // 正文本身是不可变的（某个 tag 的 release notes 写完就不再改），所以跨会话复用恒安全，

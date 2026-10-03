@@ -166,7 +166,7 @@ function writeSecrets(secrets) {
 // gifFail 是动图加载失败时的顶替文案。
 const QUOTES_DEFAULT = {
   hint: ['好模型... ↓', '好女孩...↓'],
-  chat: ['不知道用户有什么用，先赶走吧~', '我...我...我也要挣钱吗？', '我去吃饭啦，测完叫我', '压力一只蓝色大肥鱼？！', 'DeepSleep...', '坏了...用户彻底怒了！'],
+  chat: ['不知道用户有什么用，先赶走吧~', '我...我...我也要挣钱吗？', '我去吃饭啦，测完叫我', '压力一只蓝色大肥鱼？！', 'DeepSleep...', '坏了...用户彻底怒了！', '终有一天，终有一天……'],
   dsh: ['你目录里的dsh是什么...大烧货吗...?', '恭喜你实现token自由！token全跑了！', '真当我是便宜货啊...'],
   short: ['哦鲸鲸...'],
   time: ['现在是 {t}', '已经 {t} 啦', '都 {t} 了哦', '小鲸鱼报时：{t}'],
@@ -362,7 +362,7 @@ function normMenuGroupsRev(v) {
   return n
 }
 function defaultConfig() {
-  return { scale: 1.3, vol: 0.9, soundOn: true, soundSet: 'duck', usageMode: 'ledger', peakMode: 'default', peakRemindOn: true, bubbleOn: true, menuBtn: true, onTop: true, lowAlertOn: true, lowAlertAmount: LOW_ALERT_BY_CURRENCY.CNY, budgetOn: false, budgetAmount: 0, dropAlertOn: false, dropAlertAmount: 5, clickQueueOn: false, remindSec: 8, quietOn: false, quietFrom: '23:00', quietTo: '07:00', timeBubbleOn: true, updateCheckOn: false, dragLock: false, enterMode: 'both', timerNotifyOn: true, timerMailOn: true, timerPersistOn: true, timerMode: 'off', timerSec: 1500, timerAt: '07:30', timerNote: '', timerBreakMin: 5, timerRemindSec: 8, timerBubblePin: true, timerBubbleOnly: true, guideDone: false, dshNodeDir: '', dshKeepAlive: false, dshPort: DSH_PORT_DEFAULT, dshRegistry: '', dshVersion: '', dshReinstall: false, dshNoOpen: true, dshMarketUrl: '', dshMarketMirror: true, dshMarketRegistry: '', dshMarketOfficial: false, dshExportCred: false, dshExportNoMod: true, avoidTaskbar: true, edgeTop: 0, edgeRight: 0, edgeBottom: 0, edgeLeft: 0, scrollGapOn: false, scrollGapPx: SCROLL_GAP_DEFAULT, snapMode: 'ratio', snapRatio: SNAP_RATIO_DEFAULT, opacity: 100, passThrough: false, skin: 'DSniang1', theme: 'default', quotes: normQuotes(null), alerts: normAlerts(null), quotaTotal: 0, quotaReset: 'monthly', tokenPrice: normTokenPrice(null), historyKeepDays: HISTORY_KEEP_DEFAULT, models: [], mainModelId: DEFAULT_MAIN_MODEL, dshBackupKeep: DSB_KEEP_DEFAULT, menuGroups: normMenuGroups(null), menuGroupsRev: 0, ghAccelOn: false, ghAccelIps: normIps(null), ghAccelRefreshedAt: 0, ghAccelSrc: normGhAccelSrc(null), skinPackSrc: '', randomIncludeBuiltin: true, notifySystemOn: true, notifyMailOn: false, mailFrom: '', mailTo: '', mailFromName: '小鲸鱼余额挂件', mailSubjectPrefix: '[小鲸鱼余额挂件]' }
+  return { scale: 1.3, vol: 0.9, soundOn: true, soundSet: 'duck', usageMode: 'ledger', peakMode: 'default', peakRemindOn: true, bubbleOn: true, menuBtn: true, onTop: true, lowAlertOn: true, lowAlertAmount: LOW_ALERT_BY_CURRENCY.CNY, budgetOn: false, budgetAmount: 0, dropAlertOn: false, dropAlertAmount: 5, clickQueueOn: false, remindSec: 8, quietOn: false, quietFrom: '23:00', quietTo: '07:00', timeBubbleOn: true, updateCheckOn: false, dragLock: false, enterMode: 'both', timerNotifyOn: true, timerMailOn: true, timerPersistOn: true, timerMode: 'off', timerSec: 1500, timerAt: '07:30', timerNote: '', timerBreakMin: 5, timerRemindSec: 8, timerBubblePin: true, timerBubbleOnly: true, guideDone: false, dshNodeDir: '', dshKeepAlive: false, dshPort: DSH_PORT_DEFAULT, dshRegistry: '', dshVersion: '', dshReinstall: false, dshNoOpen: true, dshMarketUrl: '', dshMarketMirror: true, dshMarketRegistry: '', dshMarketOfficial: false, dshExportCred: false, dshExportNoMod: true, avoidTaskbar: true, edgeTop: 0, edgeRight: 0, edgeBottom: 0, edgeLeft: 0, scrollGapOn: false, scrollGapPx: SCROLL_GAP_DEFAULT, snapMode: 'ratio', snapRatio: SNAP_RATIO_DEFAULT, opacity: 100, passThrough: false, skin: 'DSniang1', theme: 'default', uiMode: 'auto', quotes: normQuotes(null), alerts: normAlerts(null), quotaTotal: 0, quotaReset: 'monthly', tokenPrice: normTokenPrice(null), historyKeepDays: HISTORY_KEEP_DEFAULT, models: [], mainModelId: DEFAULT_MAIN_MODEL, dshBackupKeep: DSB_KEEP_DEFAULT, menuGroups: normMenuGroups(null), menuGroupsRev: 0, ghAccelOn: false, ghAccelIps: normIps(null), ghAccelRefreshedAt: 0, ghAccelSrc: normGhAccelSrc(null), skinPackSrc: '', randomIncludeBuiltin: true, notifySystemOn: true, notifyMailOn: false, mailFrom: '', mailTo: '', mailFromName: '小鲸鱼余额挂件', mailSubjectPrefix: '[小鲸鱼余额挂件]' }
 }
 // dsh Web UI 监听端口（默认 3080）。
 // ⚠️ 为什么必须能配：3080 属于 Windows/Hyper-V 的「动态端口保留段」，被系统预留时
@@ -450,6 +450,11 @@ function normSkin(v) {
 // 气泡配色主题
 function normTheme(v) {
   return v === 'dark' || v === 'sakura' ? v : 'default'
+}
+// 界面深浅色（设置页与挂件面板的配色形态）：'auto' 跟 uTools / 'light' / 'dark'。
+// 与 theme（气泡配色主题）是两条线，名字也刻意区分开；非法值回 'auto'（旧行为，不做就近猜测）
+function normUiMode(v) {
+  return v === 'light' || v === 'dark' ? v : 'auto'
 }
 // 额度（资源包 / 订阅）的重置周期：'never' 不重置 / 'daily' 每日 / 'monthly' 每月
 function normQuotaReset(v) {
@@ -678,6 +683,7 @@ function readConfig() {
     passThrough: p.passThrough === true,
     skin: normSkin(p.skin),
     theme: normTheme(p.theme),
+    uiMode: normUiMode(p.uiMode),
     quotes: normQuotes(p.quotes),
     alerts: normAlerts(p.alerts, dft.alerts),
     // 额度（资源包 / 订阅）：总量（元，0 = 未设置）与重置周期，已用由账本算，不落配置
@@ -782,6 +788,7 @@ function writeConfig(cfg) {
       passThrough: cfg.passThrough === true,
       skin: normSkin(cfg.skin),
       theme: normTheme(cfg.theme),
+      uiMode: normUiMode(cfg.uiMode),
       quotes: normQuotes(cfg.quotes),
       alerts: normAlerts(cfg.alerts),
       quotaTotal: clampNum(cfg.quotaTotal, 0, 1e9, 0),
@@ -902,6 +909,8 @@ function patchConfig(patch) {
   if (p.passThrough !== undefined) cfg.passThrough = !!p.passThrough
   if (p.skin !== undefined) cfg.skin = normSkin(p.skin)
   if (p.theme !== undefined) cfg.theme = normTheme(p.theme)
+  // 界面深浅色：auto 跟 uTools / light / dark（设置页与挂件面板共用这一个字段）
+  if (p.uiMode !== undefined) cfg.uiMode = normUiMode(p.uiMode)
   // 台词库：传对象 = 只改它带的组（组值 null/空 = 该组回内置默认）；传 null = 全部回内置默认
   if (p.quotes !== undefined) cfg.quotes = normQuotes(p.quotes, cfg.quotes)
   // 提醒文案模板：口径同台词库（传 null = 全部回内置默认）
@@ -1368,6 +1377,7 @@ module.exports = {
   resetAnchorCache,
   // 纯函数，仅导出给单测：归一化写错不会抛错，只会让填的值悄悄变形（见 test/store.test.mjs）
   normTokenPrice,
+  normUiMode,
   // GitHub 加速 IP 表归一化：hosts.js 写块 / 刷新结果与 store 配置共用
   normIps,
   // dsh 快照保留份数的边界（设置页输入框与 dsh-backup.js 的兜底共用同一组数字）

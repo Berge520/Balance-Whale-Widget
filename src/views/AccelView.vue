@@ -1216,17 +1216,7 @@ watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = nu
   font-size: 13px;
   color: var(--fg-dim);
 }
-.gh-accel .btn-row {
-  display: flex;
-  gap: 10px;
-  margin-top: 12px;
-  /* IP 表这排最多会到 4 个按钮（添加/保存/校验/清除），窄窗下换行而不是把文字挤成竖排 */
-  flex-wrap: wrap;
-}
-.gh-accel .btn-row button {
-  /* 尺寸/配色走 main.css 的 utils 基类（markup 挂 .utils-btn + 对应档） */
-  flex: 1;
-}
+/* .btn-row 骨架已收进 main.css（单一来源），这里不再留副本 */
 /* 执行中的按钮要同时满足「看得出被禁用」和「看得出在动」：
    .utils-btn 的全局禁用态（button.utils-btn:disabled，0,2,1）压过这里原本的
    0.45 压暗，所以改由 `.btn-busy:disabled`（0,3,1）用 opacity: 1 抢回来，
@@ -1315,15 +1305,10 @@ watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = nu
   font-size: 11px;
   word-break: break-all;
 }
-/* 尺寸/配色走 utils 基类（markup 是 `link-btn utils-btn utils-secondary`）。
-   这里压一级 `.gh-accel button.link-btn`（0,2,1）盖掉全局 .link-btn 的下划线 ——
-   全局 .link-btn 与 .utils-* 同为 (0,1,0) 且**注入更晚**（main.css 先于各 .vue），
-   不压特异性的话下划线会漏出来。 */
-.gh-accel button.link-btn {
-  margin-top: 10px;
-  text-decoration: none;
-  text-underline-offset: 0;
-}
+/* link-btn 基类与 utils 档位都在 main.css（单一来源）。本组件 markup 大量使用
+   `link-btn utils-btn utils-secondary` 组合，全局 .link-btn 按设计（源序在后）
+   压过 utils 档位，统一渲染为下划线文字链 —— 与 App.vue 的折叠/行内链接观感一致。
+   下面两条只覆写与本地布局强耦合的 margin。 */
 /* 禁用态不用另写：utils 基类的 button.utils-btn:disabled 已给 opacity + cursor。
    原先这里那条 `.link-btn:disabled { text-decoration: none }` 是给
    「源列表删除」在增删进行中挡连点用的，现在下划线常态就没有，无需再关。 */
@@ -1540,7 +1525,7 @@ watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = nu
   cursor: pointer;
 }
 .gh-accel .gh-op-head:hover .gh-op-title {
-  color: var(--accent, var(--fg));
+  color: var(--accent);
 }
 .gh-accel .gh-op-running .gh-op-head {
   cursor: default;

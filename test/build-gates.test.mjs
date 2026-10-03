@@ -243,3 +243,86 @@ test('App.vue 的 data-search 与 SEARCH_INDEX 一一对应', () => {
   assert.deepEqual(mismatched, [],
     `SEARCH_INDEX.label 与卡片标题不一致（搜索标签会显示成另一个名字）：\n  ${mismatched.join('\n  ')}`)
 })
+
+test('卡内每个字段名都能被该卡的搜索索引命中（label/keys 覆盖）', () => {
+  // 第二层守卫：上面只保证「索引 ↔ 锚点」成对，保证不了「卡里新加的字段有关键词」——
+  // 真实踩过：加「界面深浅色」下拉时忘了给「挂件外观」卡补关键词，搜「界面」静默零命中，
+  // 三关全绿、无任何报警。这里的口径：把每张卡模板里用户可见的**字段名**（.label 文本 +
+  // 折叠钮 / 链接钮等 .link-btn 文本）抠出来，要求每个名字（归一化后）出现在该卡的
+  // SEARCH_INDEX「label+keys」串里。新字段忘了配词 → 这里红，当场补。
+  //
+  // ⚠️ 白名单是**欠账清单**不是免检牌：只允许「历史遗留、值得配词但还没配」的条目，
+  //    新增字段不许进（进来就说明有人在绕闸门）。清一条删一条，目标永远是空表。
+  const app = read('src/App.vue')
+  // 与上一测试同口径：锚点也可能在 views/ 下的异步组件里
+  const appSrc = app + '\n' + fs.readdirSync(new URL('../src/views', import.meta.url))
+    .filter((f) => f.endsWith('.vue'))
+    .map((f) => read(`src/views/${f}`)).join('\n')
+
+  // 解析 SEARCH_INDEX（同上一测试的取法）
+  const block = app.match(/const SEARCH_INDEX[^=]*=\s*\{([\s\S]*?)\n\}/)
+  assert.ok(block, '没找到 SEARCH_INDEX 定义，解析规则可能已失效')
+  const indexOf = {}
+  for (const m of block[1].matchAll(/^\s{2}([A-Za-z0-9_]+):\s*\{[^}]*?label:\s*'([^']*)',\s*tab:\s*'[^']*',\s*keys:\s*'([^']*)'/gm)) {
+    indexOf[m[1]] = { label: m[2], keys: m[3] }
+  }
+  assert.ok(Object.keys(indexOf).length >= 10, `SEARCH_INDEX 只解析出 ${Object.keys(indexOf).length} 项，解析规则可疑`)
+
+  // 与运行时 normSearch 一致：小写 + 删空白（App.vue 是中文界面，lowercase 只影响英文词）
+  const norm = (s) => s.toLowerCase().replace(/\s+/g, '')
+
+  // 卡片分段（同上一测试）：按 <section … data-search="key"> 切片
+  const noComment = appSrc.replace(/<!--[\s\S]*?-->/g, '')
+  const sections = []
+  for (const m of noComment.matchAll(/<section\b[^>]*data-search="([A-Za-z0-9_]+)"[^>]*>/g)) {
+    sections.push({ key: m[1], start: m.index + m[0].length })
+  }
+
+  // 每张卡的用户可见字段名：只抠 <span class="label">（允许带修饰类）。动作按钮（删除 / 取消 /
+  // 复制地址这类 link-btn / utils-btn）不算字段 —— 它们是操作不是设置项，逐个配词没有意义。
+  // 字段名取「主干」：剥标签/插值后，再去掉括号补充说明（全角（…）与半角 (…)）与引号——
+  // 说明句不可能也不该要求关键词覆盖（如「音量（0–100%）」只需覆盖「音量」）；
+  // 主干不足 2 字的（「·」、动态插值剥完剩下的空壳）也不是检索目标，直接丢弃。
+  const fieldNamesOf = {}
+  for (let i = 0; i < sections.length; i++) {
+    const seg = noComment.slice(sections[i].start, sections[i + 1] ? sections[i + 1].start : undefined)
+    const raws = []
+    for (const m of seg.matchAll(/<span class="label[^"]*">([\s\S]*?)<\/span>/g)) raws.push(m[1])
+    const coreOf = (s) => s
+      .replace(/<[^>]+>/g, '')
+      .replace(/\{\{[^}]*\}\}/g, '')
+      .replace(/（[^（）]*）/g, '')
+      .replace(/\([^()]*\)/g, '')
+      .replace(/[「」『』「」""'']/g, '')
+      .replace(/\s+/g, ' ')
+      .trim()
+    const names = raws.map(coreOf).filter((s) => s.length >= 2)
+    fieldNamesOf[sections[i].key] = [...new Set(names)]
+  }
+
+  // 覆盖判定 = 「弱可达」：字段主干里**存在**任一 ≥2 字的子串出现在该卡「label+keys」串里。
+  // 语义：用户敲字段名里的任一个词（如「预警阈值」敲「阈值」、「峰谷切换提醒」敲「峰谷」或「提醒」）
+  // 都能命中这张卡。不要求整名可达 —— 句子式标签（「到点后给休息快捷键」）里「后给」这类
+  // 虚词进词表纯属污染；整串连续匹配（搜「预警阈值」四字连打）受中文分词所限，属已知边界，
+  // 多词 AND（「预警 阈值」带空格）已由运行时覆盖。
+  const reachable = (name, hay) => {
+    for (let i = 0; i < name.length - 1; i++) {
+      for (let j = i + 2; j <= name.length; j++) {
+        if (hay.includes(name.slice(i, j))) return true
+      }
+    }
+    return false
+  }
+
+  const uncovered = []
+  for (const key of Object.keys(fieldNamesOf)) {
+    if (!indexOf[key]) continue // 上一测试已拦「有锚点没索引」，这里不重复报
+    const hay = norm(indexOf[key].label + ' ' + indexOf[key].keys)
+    for (const name of fieldNamesOf[key]) {
+      if (!reachable(norm(name), hay)) uncovered.push(`${key}: 「${name}」`)
+    }
+  }
+  assert.ok(Object.keys(fieldNamesOf).length >= 10, `只匹配到 ${Object.keys(fieldNamesOf).length} 张卡的字段，解析规则可疑`)
+  assert.deepEqual(uncovered, [],
+    `这些字段名在所属卡的搜索关键词里不可达（用户按字段名搜索会零命中）。把缺的词补进该卡 keys：\n  ${uncovered.join('\n  ')}`)
+})

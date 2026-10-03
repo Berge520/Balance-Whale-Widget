@@ -561,6 +561,26 @@ const CHECKS = [
       { file: APP_VUE, pick: sharedSkinIds('const SHARED_SKIN_PACK_SKINS =') },
     ],
   },
+  // 配置存储键（首帧深浅色预涂用）：index.html 的内联预涂脚本同步读 dbStorage 拿 uiMode，
+  // 跑在 bundle 之前、拿不到 constants，键名只能是裸字面量。constants 的 K.config 改了这里不跟，
+  // 预涂读空对象、深浅回退 auto 判定 —— 不报错但首帧主题错，正是这类门禁要拦的静默不一致。
+  {
+    name: '配置存储键 K.config',
+    parts: [
+      // K 是冒号形态的对象字面量，jsString（要求 `= '...'`）用不上，就地抠值。
+      // constants.js 里 `config:` 只此一处（grep 证实），带词界防将来撞上别的 XxxConfig
+      { file: CONSTANTS, pick: (src, file) => {
+        const m = src.match(/\bconfig\s*:\s*'([^']+)'/)
+        if (!m) throw new Error(`${file} 里找不到 config: '...'`)
+        return m[1]
+      } },
+      { file: 'index.html', pick: (src, file) => {
+        const m = src.match(/dbStorage\.getItem\('([^']+)'\)/)
+        if (!m) throw new Error(`${file} 里找不到 dbStorage.getItem('...') 预涂读取`)
+        return m[1]
+      } },
+    ],
+  },
 ]
 
 let bad = 0

@@ -147,6 +147,26 @@ test('deriveHostCompatibility：宿主是 prerelease、声明是 caret 时按 se
   assert.equal(deriveHostCompatibility(facts, '0.1.6', allow).status, 'incompatible')
 })
 
+// ⚠️ 回归（2026-10-03 用户实报，当时被「确证不兼容」拦在写入前）：复合范围 `a || b || …`
+//    整条被当成第一段判 —— 宿主 0.2.0-rc.2 明明落在最后一段 `^0.2.0-rc.1` 内，
+//    却被判 incompatible。node-semver 2.0.0 对同一条判 satisfies=true。修后必须 compatible。
+test('deriveHostCompatibility：|| 复合范围按析取判（回归：0.2.0-rc.2 曾被误判不兼容）', () => {
+  const range = '^0.1.0-rc.7 || ^0.1.1-rc.2 || ^0.1.2-alpha.2 || ^0.2.0-rc.1'
+  const facts = { engine: '', peers: [{ name: '@deepseek-ai/dsh-llm', range: range }] }
+  // 宿主落在最后一段：compatible（此前整条被压进第一段 → incompatible）
+  assert.equal(deriveHostCompatibility(facts, '0.2.0-rc.2', allow).status, 'compatible')
+  // 宿主落在第一段：也 compatible
+  assert.equal(deriveHostCompatibility(facts, '0.1.0-rc.9', allow).status, 'compatible')
+  // 四段全容不下：incompatible
+  assert.equal(deriveHostCompatibility(facts, '0.3.0-rc.1', allow).status, 'incompatible')
+  // 一条复合 + 一条单范围：合取下复合段照常参与一票否决
+  const both = { engine: '', peers: [
+    { name: '@deepseek-ai/dsh-llm', range: range },
+    { name: '@deepseek-ai/dsh-agent', range: '^0.3.0' },
+  ] }
+  assert.equal(deriveHostCompatibility(both, '0.2.0-rc.2', allow).status, 'incompatible')
+})
+
 test('isCompatibleStatus：unknown 不算兼容（把「没声明」混进「兼容」是在骗用户）', () => {
   assert.equal(isCompatibleStatus('compatible'), true)
   assert.equal(isCompatibleStatus('incompatible'), false)

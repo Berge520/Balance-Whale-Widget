@@ -12,7 +12,7 @@ import assert from 'node:assert/strict'
 import store from '../public/preload/lib/store.js'
 import constants from '../public/preload/lib/constants.js'
 
-const { normTokenPrice, normQuotes, QUOTE_GROUP_MAX } = store
+const { normTokenPrice, normQuotes, normUiMode, QUOTE_GROUP_MAX } = store
 const { TOKEN_PRICE_DEFAULT, TOKEN_PRICE_MAX, TOKEN_RATE_MAX } = constants
 
 test('normTokenPrice 缺字段回落默认值，开关只认 true', () => {
@@ -127,4 +127,17 @@ test('normQuotes 同时带 groups 与老 key 时以 groups 为准', () => {
   assert.deepEqual(normQuotes({ groups: [{ kind: 'image', w: 2 }], hint: ['老'] }).groups, [
     { kind: 'image', w: 2 },
   ])
+})
+
+test('normUiMode 只认 light/dark，其余（含缺省与非法）一律回 auto', () => {
+  assert.equal(normUiMode('light'), 'light')
+  assert.equal(normUiMode('dark'), 'dark')
+  assert.equal(normUiMode('auto'), 'auto')
+  assert.equal(normUiMode(undefined), 'auto')
+  assert.equal(normUiMode(null), 'auto')
+  assert.equal(normUiMode(''), 'auto')
+  // 非法值不做就近猜测：配坏了顶多回默认行为（跟 uTools），不会莫名其妙变成另一个手动档
+  assert.equal(normUiMode('Light'), 'auto')
+  assert.equal(normUiMode('system'), 'auto')
+  assert.equal(normUiMode(123), 'auto')
 })

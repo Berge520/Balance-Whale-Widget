@@ -12,8 +12,8 @@
     --whale-pad: 200px;
   }
   /* ===== 滚动条 =====
-     挂件的菜单是浅色面板（见 .dshwv-menu 的 color-scheme: light），所以这里给**固定的浅色一套**，
-     不跟随系统深浅 —— 系统深色时若跟着变白，落在浅色菜单上反而更刺眼。
+     配色跟菜单深浅走：浅色一套在下面各规则里，深色一套在文件末尾的 html.dark 区块。
+     （原先菜单只有浅色形态时这里写死浅色，现在深浅跟 uTools 走，见文末说明。）
      .dshwv-menu / .dshwv-models 不再各自写一套 6px 样式，统一吃这份。
 
      配色用具体色值而非 CSS 变量：::-webkit-scrollbar-* 是伪元素，变量在这层可能解析不到，
@@ -467,3 +467,82 @@
   .dshwv-dsh-state.dshwv-dsh-on { color: #2fa24c; }
   .dshwv-dsh-state.dshwv-dsh-err { color: #e0433f; }
   .dshwv-dsh-cmd { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #9fb0d9; font-size: 11px; }
+
+  /* ===== 深浅色：跟 uTools 走（不跟系统、不跟气泡配色 theme） =====
+     判定源在 preload/floating.js：轮询 utools.isDarkColors()，页面把结果挂在 <html> 的 dark 类上。
+     浅色值仍留在上面各规则里（无桥接/类未挂上时的兜底），深色集中在这里覆写，
+     只动颜色与 color-scheme，不碰几何（--whale-pad / 宽高 / 定位都不变）。
+     ⚠️ 气泡四色（--dshwv-text/hint/fill/stroke）由 JS 的 THEMES（配置 theme 字段）管理，
+     且被 check-shared 钉住，这里不得覆写 —— 菜单深浅与气泡配色是两条独立线。 */
+  html.dark {
+    color-scheme: dark;
+  }
+  /* 面板各自写了 color-scheme: light（原生下拉的选项列表跟着它走），深色下必须逐个翻回来，
+     只靠 html.dark 的 color-scheme 不够 —— 元素自己的声明优先级更高 */
+  html.dark .dshwv-menu {
+    background: rgba(28,32,48,.96);
+    border-color: rgba(255,255,255,.14);
+    box-shadow: 0 12px 32px rgba(0,0,0,.5), 0 2px 8px rgba(0,0,0,.35);
+    color: #dbe2f5;
+    color-scheme: dark;
+  }
+  html.dark .dshwv-menu-row { color: #dbe2f5; }
+  html.dark .dshwv-menu-row:hover { background: rgba(138,164,230,.1); }
+  html.dark .dshwv-menu-label { color: #9fb0d9; }
+  html.dark .dshwv-model-row { color: #dbe2f5; }
+  html.dark .dshwv-model-row:hover { background: rgba(138,164,230,.12); }
+  html.dark .dshwv-model-row.dshwv-model-on { background: rgba(138,164,230,.16); color: #8aa4e6; }
+  html.dark .dshwv-model-val { color: #9fb0d9; }
+  html.dark .dshwv-model-val.dshwv-model-err { color: #ff6b66; }
+  html.dark .dshwv-group { border-top-color: rgba(255,255,255,.1); }
+  html.dark .dshwv-group-head { color: #8d9cc9; }
+  html.dark .dshwv-group-head:hover { background: rgba(138,164,230,.12); color: #c9d6f2; }
+  html.dark .dshwv-menu-foot { border-top-color: rgba(255,255,255,.1); }
+  /* 主按钮/警示按钮本身是实色底白字，深浅色下都成立，不用覆写 */
+  html.dark .dshwv-menu-link { border-color: rgba(138,164,230,.3); background: rgba(138,164,230,.12); color: #a7bdf0; }
+  html.dark .dshwv-menu-link:hover { background: rgba(138,164,230,.2); border-color: rgba(138,164,230,.45); }
+  html.dark .dshwv-menu-foot .dshwv-menu-link.dshwv-menu-link-2nd { background: rgba(255,255,255,.08); color: #aebadb; }
+  html.dark .dshwv-menu-foot .dshwv-menu-link.dshwv-menu-link-2nd:hover { background: rgba(255,255,255,.16); }
+  html.dark .dshwv-menu-foot .dshwv-menu-link.dshwv-menu-link-warn { background: #e0433f; border-color: #e0433f; color: #fff; }
+  html.dark .dshwv-menu-foot .dshwv-menu-link.dshwv-menu-link-warn:hover { background: #c9362f; border-color: #c9362f; }
+  html.dark .dshwv-volpct { color: #9fb0d9; }
+  html.dark .dshwv-timer-unit { color: #7f8db3; }
+  html.dark .dshwv-timer-reset { border-color: rgba(255,255,255,.18); background: rgba(255,255,255,.06); color: #aebadb; }
+  html.dark .dshwv-timer-reset:hover { background: rgba(255,255,255,.12); border-color: rgba(255,255,255,.3); }
+  html.dark .dshwv-timer-actions {
+    background: rgba(28,32,48,.97);
+    border-color: rgba(255,255,255,.16);
+    box-shadow: 0 8px 22px rgba(0,0,0,.5);
+    color-scheme: dark;
+  }
+  html.dark .dshwv-timer-act { border-color: rgba(138,164,230,.3); background: rgba(138,164,230,.12); color: #dbe2f5; }
+  html.dark .dshwv-timer-act:hover { background: rgba(138,164,230,.22); border-color: rgba(138,164,230,.5); }
+  /* 输入控件：底/字/线换深色一套（color-scheme: dark 让原生下拉的选项列表也跟着换） */
+  html.dark .dshwv-range::-webkit-slider-runnable-track { background: rgba(255,255,255,.22); }
+  html.dark .dshwv-range::-webkit-slider-thumb { border-color: #1c2030; }
+  html.dark .dshwv-number,
+  html.dark .dshwv-sound {
+    border-color: rgba(255,255,255,.18);
+    background-color: rgba(255,255,255,.06);
+    color: #dbe2f5;
+  }
+  html.dark .dshwv-number:focus,
+  html.dark .dshwv-sound:focus { border-color: #8aa4e6; box-shadow: 0 0 0 2px rgba(138,164,230,.2); }
+  /* 下拉箭头是背景画的浅蓝三角，深底下要换亮一档才看得见 */
+  html.dark .dshwv-sound {
+    background-image: linear-gradient(45deg, transparent 50%, #9fb0d9 50%), linear-gradient(135deg, #9fb0d9 50%, transparent 50%);
+  }
+  html.dark .dshwv-check { background: rgba(255,255,255,.22); }
+  html.dark .dshwv-check::after { background: #dbe2f5; }
+  html.dark .dshwv-check:checked { background: #5f7fe6; }
+  html.dark .dshwv-dsh-state { color: #9fb0d9; }
+  html.dark .dshwv-dsh-state.dshwv-dsh-on { color: #4ec46b; }
+  html.dark .dshwv-dsh-state.dshwv-dsh-err { color: #ff6b66; }
+  html.dark .dshwv-dsh-cmd { color: #7f8db3; }
+  /* 滚动条：菜单已是深色面板，槽/滑块换成深色一套（浅色那套见上面各规则） */
+  html.dark ::-webkit-scrollbar-track { background-color: rgba(255,255,255,.05); }
+  html.dark .dshwv-menu:hover::-webkit-scrollbar-track,
+  html.dark .dshwv-models:hover::-webkit-scrollbar-track { background-color: rgba(255,255,255,.1); }
+  html.dark ::-webkit-scrollbar-thumb { background-color: rgba(190,205,240,.35); }
+  html.dark ::-webkit-scrollbar-thumb:hover { background-color: rgba(190,205,240,.55); }
+  html.dark ::-webkit-scrollbar-thumb:active { background-color: rgba(190,205,240,.72); }

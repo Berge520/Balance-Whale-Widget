@@ -299,8 +299,8 @@ onUnmounted(() => {
   max-width: 540px;
   padding: 16px;
   border-radius: 12px;
-  background: var(--input-bg, #fff);
-  color: var(--fg, #1f2a44);
+  background: var(--input-bg);
+  color: var(--fg);
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.28);
 }
 .head {
@@ -317,7 +317,7 @@ onUnmounted(() => {
   flex: 1;
   min-width: 0;
   font-size: 12px;
-  color: var(--fg-dim, #536ba9);
+  color: var(--fg-dim);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -325,7 +325,7 @@ onUnmounted(() => {
 .track {
   position: relative;
   height: 90px;
-  border: 1px solid var(--line, rgba(83, 107, 169, 0.4));
+  border: 1px solid var(--line);
   border-radius: 10px;
   background: rgba(127, 127, 127, 0.06);
   overflow: hidden;
@@ -340,8 +340,8 @@ onUnmounted(() => {
   position: absolute;
   top: 0;
   bottom: 0;
-  border-left: 1px solid var(--accent, #536ba9);
-  border-right: 1px solid var(--accent, #536ba9);
+  border-left: 1px solid var(--accent);
+  border-right: 1px solid var(--accent);
   background: rgba(83, 107, 169, 0.16);
 }
 .handle {
@@ -351,7 +351,7 @@ onUnmounted(() => {
   height: 34px;
   margin-top: -17px;
   border-radius: 4px;
-  background: var(--accent, #536ba9);
+  background: var(--accent);
   cursor: ew-resize;
   touch-action: none;
 }
@@ -361,32 +361,22 @@ onUnmounted(() => {
 .time {
   margin: 10px 0 0;
   font-size: 12px;
-  color: var(--fg-dim, #536ba9);
+  color: var(--fg-dim);
 }
 .time em {
   font-style: normal;
-  color: var(--fg-faint, #9fb0d9);
+  color: var(--fg-faint);
 }
-.btn-row {
-  display: flex;
-  gap: 10px;
-  margin-top: 12px;
-}
-/* 尺寸/配色走 main.css 的 utils 基类（markup 挂 .utils-btn + .utils-secondary /
-   .utils-primary），这里只留等分拉伸。原先这份是独立一套 13px + 靠 main.css
-   line-height 2.5 撑高，是全页"高矮胖瘦不一"的来源之一。 */
-.btn-row button {
-  flex: 1;
-}
+/* .btn-row 骨架（flex + gap + 等分拉伸）已统一收进 main.css，此处不再各写一份。 */
 .tip {
   margin: 10px 0 0;
   font-size: 12px;
-  color: var(--err, #e0433f);
+  color: var(--err);
 }
 .hint {
   margin: 10px 0 0;
   font-size: 12px;
   line-height: 1.6;
-  color: var(--fg-faint, #9fb0d9);
+  color: var(--fg-faint);
 }
 </style>

@@ -172,45 +172,61 @@ function normSearch(s: string) {
 // 用户不一定记得界面上的措辞（如搜「穿透」得能命中「挂件窗口」，搜「token」得能命中「DeepSeek 凭据」）。
 const SEARCH_INDEX: Record<string, { label: string; tab: TabKey; keys: string }> = {
   credentials: { label: 'DeepSeek 凭据（API Key / 平台 Token）', tab: 'data', keys: 'apikey api key 密钥 token 令牌 凭据 授权 余额 认证' },
-  look: { label: '挂件外观', tab: 'look', keys: '形象 皮肤 音色 音效 大小 缩放 气泡 主题 报时 点按 播放' },
-  assetsOverview: { label: '资源概览', tab: 'assets', keys: '素材 占用 体积 清除 未使用 素材包 导出 导入' },
+  // keys 覆盖守卫（build-gates）：卡内每个字段名至少要有一个 ≥2 字词出现在 label+keys 里，
+  // 缺词会构建红 —— 下面各卡的「生僻字段词」（音量 / 币种 / 授权码 / 写入位置…）就是补欠账补出来的
+  look: { label: '挂件外观', tab: 'look', keys: '形象 皮肤 音色 音效 音量 大小 缩放 气泡 主题 报时 点按 播放 界面 深浅色 深色 浅色 暗色 亮色 跟随 uTools 峰谷 文案 随机' },
+  assetsOverview: { label: '资源概览', tab: 'assets', keys: '素材 形象 音效 气泡图 占用 体积 清除 未使用 素材包 导出 导入' },
   assetsSkins: { label: '导入的形象', tab: 'assets', keys: '形象 皮肤 图片 缩略图 置顶 删除 导入' },
   assetsBubbles: { label: '导入的气泡图', tab: 'assets', keys: '气泡 图 动图 gif 图片 导入 删除' },
   assetsSounds: { label: '导入的音效', tab: 'assets', keys: '音效 声音 按压 释放 提醒音 试听 导入 删除' },
-  assetsBuiltin: { label: '内置资源', tab: 'assets', keys: '内置 形象 音色 对照 预览' },
+  assetsBuiltin: { label: '内置资源', tab: 'assets', keys: '内置 形象 音色 对照 预览 下载源' },
   // 这两张卡此前漏登记：模板里有 data-search="assetsSharedSkins/SharedSounds"，
   // 但 SEARCH_INDEX 没登记 → 搜「共享」「角色」找不到，且搜索态下这两张卡永不渲染
   // （cardOn 走 searchHits，不在索引里就等于命中不了）。别再漏。
   assetsSharedSkins: { label: '共享形象', tab: 'assets', keys: '共享 角色 形象 下载 选用 预览 缩略图' },
-  assetsSharedSounds: { label: '共享音效', tab: 'assets', keys: '共享 音效 声音 下载 选用 试听 角色' },
-  quotes: { label: '文案', tab: 'look', keys: '台词 文案 台词库 提醒文案 随机 权重 报时 动图' },
-  usage: { label: '用量与账本', tab: 'usage', keys: '用量 趋势 账本 历史 区间 导出 csv 导入 校准 额度 单价 模型占比 明细' },
-  notify: { label: '提醒与通知', tab: 'usage', keys: '提醒 通知 系统通知 邮件 smtp 预算 低余额 波动 免打扰 计时 倒计时 休息' },
-  models: { label: '模型与余额', tab: 'usage', keys: '模型 余额 提供商 厂商 刷新 api key 额度 主显示 密钥 凭据 token' },
-  window: { label: '挂件窗口', tab: 'window', keys: '窗口 显隐 位置 复位 透明度 穿透 吸附 翻转 避让 任务栏 间距' },
-  help: { label: '使用帮助', tab: 'help', keys: '帮助 快捷键 使用说明 故障排查 日志 新手引导' },
-  privacy: { label: '数据与隐私', tab: 'data', keys: '清除 数据 隐私 重置 卸载' },
+  assetsSharedSounds: { label: '共享音效', tab: 'assets', keys: '共享 音效 声音 下载 选用 试听 角色 段' },
+  quotes: { label: '文案', tab: 'look', keys: '台词 文案 台词库 提醒文案 随机 权重 报时 动图 台词组' },
+  usage: { label: '用量与账本', tab: 'usage', keys: '用量 趋势 账本 历史 区间 导出 csv 导入 校准 额度 单价 模型占比 明细 币种 汇率 保留' },
+  notify: { label: '提醒与通知', tab: 'usage', keys: '提醒 通知 系统通知 邮件 smtp 预算 低余额 波动 免打扰 计时 倒计时 休息 预警 阈值 端口 ssl tls 直连 账号 授权码 发件人 收件人 主题 前缀 停留 切换' },
+  models: { label: '模型与余额', tab: 'usage', keys: '模型 余额 提供商 厂商 刷新 api key 额度 主显示 密钥 凭据 token 名称 类型 币种 接口 地址 base url scale 认证 字段 路径 取值 倍数 重置 提醒 阈值' },
+  window: { label: '挂件窗口', tab: 'window', keys: '窗口 显隐 位置 复位 透明度 穿透 吸附 翻转 避让 任务栏 间距 插件 滚动条 置顶 锁定 贴边 宽度' },
+  help: { label: '使用帮助', tab: 'help', keys: '帮助 快捷键 使用说明 故障排查 日志 新手引导 异常 详情' },
+  privacy: { label: '数据与隐私', tab: 'data', keys: '清除 数据 隐私 重置 卸载 凭据 挂件 账本 窗口 素材' },
   backup: { label: '备份与恢复', tab: 'data', keys: '备份 恢复 导出 导入 json 迁移 密码 加密 凭据' },
-  dshMain: { label: 'DeepSeek Harness（dsh）', tab: 'dev', keys: 'dsh harness 启动 重启 结束 更新 版本 端口 注册源 node 日志' },
+  dshMain: { label: 'DeepSeek Harness（dsh）', tab: 'dev', keys: 'dsh harness 启动 重启 结束 更新 版本 端口 注册源 node 日志 状态 安装 目录 命令 地址 使用' },
   dshDiagnose: { label: 'dsh 环境诊断', tab: 'dev', keys: 'dsh 诊断 环境 检查 排障 patch 冲突 端口占用' },
-  dshDump: { label: 'dsh 配置转储', tab: 'dev', keys: 'dsh 配置 转储 dump 分层 默认树 差异' },
-  dshExport: { label: 'dsh 全量导出', tab: 'dev', keys: 'dsh 导出 zip 打包 全量 备份' },
-  dshUsage: { label: 'dsh 用量统计', tab: 'dev', keys: 'dsh 用量 统计 token 趋势' },
-  dshIsolate: { label: 'dsh 插件开关', tab: 'dev', keys: 'dsh 插件 开关 隔离 patch 启用 禁用' },
-  dshMarket: { label: 'dsh 插件市场', tab: 'dev', keys: 'dsh 市场 插件 安装 卸载 更新 目录' },
-  codex: { label: 'Codex 会话统计', tab: 'dev', keys: 'codex 会话 统计 token 用量 日志' },
+  dshDump: { label: 'dsh 配置转储', tab: 'dev', keys: 'dsh 配置 转储 dump 分层 默认树 差异 概览' },
+  dshExport: { label: 'dsh 全量导出', tab: 'dev', keys: 'dsh 导出 zip 打包 全量 备份 来源 目录 凭据 跳过 依赖 文件夹' },
+  dshUsage: { label: 'dsh 用量统计', tab: 'dev', keys: 'dsh 用量 统计 token 趋势 数据 目录 来源 会话' },
+  dshIsolate: { label: 'dsh 插件开关', tab: 'dev', keys: 'dsh 插件 开关 隔离 patch 启用 禁用 写入 位置 保留' },
+  dshMarket: { label: 'dsh 插件市场', tab: 'dev', keys: 'dsh 市场 插件 安装 卸载 更新 目录 数据 来源 写入 位置 关键词' },
+  codex: { label: 'Codex 会话统计', tab: 'dev', keys: 'codex 会话 统计 token 用量 日志 订阅 窗口' },
   about: { label: '关于与更新', tab: 'help', keys: '关于 更新 版本 反馈 好评 市场' },
-  ghAccel: { label: 'GitHub 加速', tab: 'help', keys: 'github 加速 hosts 直连 ip 刷新 源 冲突 证书' },
+  ghAccel: { label: 'GitHub 加速', tab: 'help', keys: 'github 加速 hosts 直连 ip 刷新 源 冲突 证书 状态' },
 }
 // 命中卡片的 key 列表（按 SEARCH_INDEX 声明顺序，与模板中的卡片顺序不同也没关系，
 // 因为搜索结果里每张卡自带栏目名，用户看得到它属于哪一组）
+// 匹配口径：查询按空格拆成多词，**每个词都命中**（AND）才算命中 —— 整句includes会把
+// 「界面 深色」拼成「界面深色」而关键词串里是「界面深浅色…深色」，子串断开、零命中，
+// 用户输入两个词搜不到东西（2026-10-03 真实踩过）。单词行为不变。
+// 排序：标题命中的卡排前面（如搜「备份」时「备份与恢复」该压过关键词角落里提到备份的卡），
+// 同档内保持索引声明序 —— Array.prototype.sort 在现代 V8 是稳定排序，声明序不会被打乱。
 const searchHits = computed(() => {
-  const q = normSearch(searchQuery.value)
-  if (!q) return []
-  return Object.keys(SEARCH_INDEX).filter((k) => {
+  // 先拆词再归一：normSearch 会删掉所有空白，归一后再拆就永远拆不开了
+  const words = searchQuery.value.toLowerCase().split(/\s+/).filter(Boolean)
+  if (!words.length) return []
+  const titleHit: string[] = []
+  const otherHit: string[] = []
+  for (const k of Object.keys(SEARCH_INDEX)) {
     const it = SEARCH_INDEX[k]
-    return normSearch(it.label + it.keys).includes(q)
-  })
+    const label = normSearch(it.label)
+    const keys = normSearch(it.keys)
+    // 标题命中 = 某词出现在标题里；其余（关键词命中）排后一档
+    const bucket = words.every((w) => label.includes(w)) ? titleHit
+      : words.every((w) => label.includes(w) || keys.includes(w)) ? otherHit : null
+    if (bucket) bucket.push(k)
+  }
+  return [...titleHit, ...otherHit]
 })
 // 某张卡是否应该在当前搜索态下渲染：搜索中 → 只有命中的卡渲染（跨 Tab）；非搜索态 → 沿用原 Tab 判定
 function cardOn(tab: TabKey, key: string) {
@@ -284,12 +300,40 @@ onUnmounted(() => {
 })
 function scrollToCard(key: string) {
   const el = document.querySelector(`[data-search="${key}"]`)
-  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  if (!el) return
+  el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  // 定位闪烁：滚过去之后让卡亮一下，视线能立刻接住「滚到哪了」（样式在 main.css 全局段，
+  // 因为 ghAccel 卡在异步组件 AccelView 里，scoped 规则够不到它）。
+  // 连点同一张卡也要重闪：先摘类再强制 reflow，动画才能从头跑（同类名挂着时 animation 不会重启）
+  el.classList.remove('search-flash')
+  void (el as HTMLElement).offsetWidth
+  el.classList.add('search-flash')
+  el.addEventListener('animationend', () => el.classList.remove('search-flash'), { once: true })
 }
 // 平台判定：仅用于 dev Tab 里那几处 Windows 专属文案（Hyper-V 端口段 / UAC 提权）。
 // 宿主 preload 不往页面透传平台，uTools 在渲染进程直接可用（本文件已有 utools.dbStorage 用法）。
 // 取不到时按非 Windows 处理：这些文案只在 Windows 才成立，宁可不显示也不误导。
 const IS_WIN = (() => { try { return utools.isWindows() } catch (err) { return false } })()
+
+// 深浅色判定：生效值 = uiMode 合成（auto 取 uTools 实际值，手动 light/dark 直接用偏好）。
+// uTools 实际值来自 utools.isDarkColors()，不跟系统 —— main.css 的 html.dark 系列规则是消费端。
+// uTools 没有主题变更事件/API，只能轮询；isDarkColors 是同步布尔读，开销可忽略。
+// 轮询间隔取 1s：auto 模式下 uTools 主题切换后最迟 1s 跟上，体感即时。
+function applyUtoolsDark() {
+  let utoolsDark = false
+  try { utoolsDark = !!utools.isDarkColors() } catch (err) { /* 非 uTools 环境按浅色 */ }
+  const dark = cfg.uiMode === 'auto' ? utoolsDark : cfg.uiMode === 'dark'
+  document.documentElement.classList.toggle('dark', dark)
+}
+// 注意：applyUtoolsDark 不能在这里立即调用 —— 它读 cfg.uiMode，而 cfg 在下方才声明，
+// 先调用会撞 TDZ（ReferenceError），整个 <script setup> 崩掉、设置页白屏（2026-10-03 踩过）。
+// 启动调用与轮询定时器挪到 cfg 声明之后。
+// 下拉改动：本地立即应用一次再落库 —— 等下一轮轮询或配置回推才变化，会让人以为没生效
+function onUiModeChange() {
+  cfg.uiMode = cfg.uiMode === 'light' || cfg.uiMode === 'dark' ? cfg.uiMode : 'auto'
+  applyUtoolsDark()
+  patchCfg({ uiMode: cfg.uiMode })
+}
 // 统一的消息态：msg=文案、err=是否错误态；模板用 msgCls(f) 生成 class（合并原先 11 组 msg/err ref）
 type Flash = { msg: string; err: boolean }
 function useFlash(): Flash { return reactive({ msg: '', err: false }) }
@@ -373,6 +417,8 @@ const cfg = reactive({
   skin: DEFAULT_SKIN,
   // 气泡配色主题：'default' | 'dark' | 'sakura'
   theme: 'default',
+  // 界面深浅色：'auto' 跟 uTools / 'light' / 'dark'（设置页与挂件面板共用；与气泡主题是两条线）
+  uiMode: 'auto',
   timerNotifyOn: true,
   // 计时到点的邮件通知（邮件总开关 notifyMailOn 未开时不生效）
   timerMailOn: true,
@@ -440,6 +486,10 @@ const cfg = reactive({
   mailFromName: '小鲸鱼余额挂件',
   mailSubjectPrefix: '[小鲸鱼余额挂件]',
 })
+// 深浅色启动应用 + 轮询（必须在 cfg 声明之后：applyUtoolsDark 读 cfg.uiMode，见上方 TDZ 注释）
+applyUtoolsDark()
+const darkPollTimer = window.setInterval(applyUtoolsDark, 1000)
+onUnmounted(() => { window.clearInterval(darkPollTimer) })
 // 邮件通知的 SMTP 凭据：与 cfg 分开，因为它在宿主侧进的是加密存储（不进备份）。
 // mailPass 回填的是占位掩码而不是真实授权码 —— 只在用户没重新输入时保留原值，避免明文回显
 const mail = reactive({
@@ -847,6 +897,9 @@ watch(activeTab, (tab) => {
     dshDeepOnce = true
     dshStatus(true)
   }
+  // 勾了「自动刷新版本」就每次进 Tab 重查一次：与手动点「重新查询」同一入口（dshQueryVersions），
+  // busy 由宿主快照带回、按钮自身禁用，查询期间重复进 Tab 会被 dshDo 的 busy 拦截，不会叠发 npm view
+  if (dshAutoRefresh.value && dsh.busy !== 'versions' && !dshQueryFailed.value) dshQueryVersions()
   dshPolling.start()
 })
 // 两张统计卡默认收起，首次「展开」时才读取：宿主是同步扫文件（会话日志可能几十 MB），
@@ -1201,6 +1254,22 @@ const dshVersionOptions = computed(() => {
   for (const v of Object.keys(marks)) push(v)
   return out
 })
+// 首次拿到版本列表时把下拉默认指到**实装版本**（resolved 优先全局，与「实际使用」行同源）：
+// 用户此前选的是「自动（取 latest）」，但 dsh 预发布线（alpha/rc）走得比 latest 快，
+// 「自动」点更新反而装出**更旧**的稳定版 —— 默认「装回当前这版」比「莫名降级」安全得多。
+// 只在用户从未主动选过版本时兜底（cfg.dshVersion 为空 = 没选过 / 用户显式选回「自动」；
+// 后者故意不覆盖 —— 用户点回「自动」就是想要 latest 行为，不该被改回去）。
+watch(() => (dsh.versions && dsh.versions.latest) || '', (latest) => {
+  if (!latest || cfg.dshVersion) return
+  const cur = dsh.resolved || dsh.installed || ''
+  if (!cur) return
+  const list: string[] = (dsh.versions && dsh.versions.list) || []
+  // 实装版本必须在列表里才指过去：不在（列表被截断 / 下游镜像没收录）就保持「自动」，
+  // 否则 select 会因 value 无对应 option 而显示空白，比「自动」更让人困惑
+  if (list.indexOf(cur) < 0) return
+  cfg.dshVersion = cur
+  patchCfg({ dshVersion: cur })
+})
 // 查询可用版本：npm view 要联网，慢一点，稍后多次刷新状态
 const DSH_QUERY_MSG = '正在查询可用版本…'
 // 查询结果已经上屏（或正在查询）时就没必要再摆一个按钮占位：
@@ -1214,6 +1283,20 @@ const dshQueryFailed = ref(false)
 const dshVersionsQueried = ref(false)
 // 版本查询的结论码，宿主随快照回溯：'' 无结论 | 'hit' 本次查询拿到版本 | 'empty' 查到但没版本
 const dshVersionsCode = ref('')
+// 「每次进入开发者 Tab 自动刷新可用版本」：勾上后切进本 Tab 就重打一次 npm view，
+// 解决版本缓存无 TTL（上游发新版列表不会自己变）、而手动「重新查询」又容易忘的问题。
+// 默认关：查询要联网（约 0.5–3s），自动联网行为必须用户显式授权 —— 与 dshMarket 卡
+// 「展开不自动抓目录」同一取舍
+const dshAutoRefresh = ref(false)
+const KEY_DSH_AUTO_REFRESH = 'whale:dshAutoRefreshVersions'
+try { dshAutoRefresh.value = utools.dbStorage.getItem(KEY_DSH_AUTO_REFRESH) === true } catch (err) {}
+function dshToggleAutoRefresh() {
+  const next = !dshAutoRefresh.value
+  dshAutoRefresh.value = next
+  try { utools.dbStorage.setItem(KEY_DSH_AUTO_REFRESH, next) } catch (err) {}
+  // 勾选瞬间补一查：用户勾它就是想「现在就有新列表」，等下次进 Tab 再生效太绕
+  if (next && activeTab.value === 'dev' && dsh.busy !== 'versions' && !dshQueryFailed.value) dshQueryVersions()
+}
 const KEY_DSH_QUERIED = 'whale:dshVersionsQueried'
 try { dshVersionsQueried.value = utools.dbStorage.getItem(KEY_DSH_QUERIED) === true } catch (err) {}
 const dshHasVersions = computed(() => !!(dsh.versions && dsh.versions.latest))
@@ -6486,6 +6569,18 @@ function quoteGroupAdd() {
 function quoteGroupDel(i: number) {
   cfg.quotes.groups.splice(i, 1)
 }
+// 卡头预览：一眼看出每组里有什么，免得逐个展开 textarea 找台词。
+// text 取首句截断（占位符原样显示，不做替换——这里只做识别不做渲染）；image 数气泡图张数要等宿主回填，这里只给文字
+function quoteGroupPreview(g: QuoteGroupEdit): string {
+  if (g.kind === 'text') {
+    const lines = String(g.lines || '').split('\n').map(s => s.trim()).filter(Boolean)
+    if (!lines.length) return '还没填台词'
+    const first = lines[0].length > 12 ? `${lines[0].slice(0, 12)}…` : lines[0]
+    return lines.length > 1 ? `${lines.length} 条 · ${first}` : first
+  }
+  if (g.kind === 'image') return '随机抽一张气泡图'
+  return ''
+}
 // 上移 / 下移：顺序决定「依次播放」的出场次序，所以要有办法调
 function quoteGroupMove(i: number, d: number) {
   const j = i + d
@@ -7188,6 +7283,11 @@ function applyConfig(c: any) {
   // 这里打回默认会让「一下载就发现我选的形象被改了」
   cfg.skin = c.skin === 'custom' || LEGACY_BUILTIN_SKINS.includes(c.skin) ? c.skin : DEFAULT_SKIN
   cfg.theme = c.theme === 'dark' || c.theme === 'sakura' ? c.theme : 'default'
+  // 界面深浅色回填：非法值按 auto 处理（与宿主 normUiMode 同口径）。
+  // 回填后立即重应用：启动首次应用拿的是本地默认 auto，存储里的手动 light/dark 这时才到达，
+  // 不重应用要等下一轮 1s 轮询才变对；挂件菜单改 uiMode 经配置推送过来也靠这里即时生效
+  cfg.uiMode = c.uiMode === 'light' || c.uiMode === 'dark' ? c.uiMode : 'auto'
+  applyUtoolsDark()
   cfg.clickQueueOn = c.clickQueueOn === true
   cfg.remindSec = c.remindSec === 0 || c.remindSec === 5 || c.remindSec === 15 ? c.remindSec : 8
   cfg.quietOn = c.quietOn === true
@@ -7561,6 +7661,19 @@ onUnmounted(() => {
       </p>
       <!-- 随机按钮的反馈：skinFlash 原本只在「资源」页画廊渲染，用户停在「外观」页按随机会看不到结果 -->
       <p v-if="skinFlash.msg" class="msg" :class="msgCls(skinFlash)">{{ skinFlash.msg }}</p>
+
+      <label class="field row">
+        <span class="label">界面深浅色</span>
+        <select v-model="cfg.uiMode" @change="onUiModeChange()">
+          <option value="auto">跟随 uTools</option>
+          <option value="light">浅色</option>
+          <option value="dark">深色</option>
+        </select>
+      </label>
+      <p class="hint">
+        设置页与挂件菜单面板的深浅形态，一般选「跟随 uTools」。手动固定后将与 uTools 主题相反；
+        不影响气泡配色（在下方「气泡与文案」里单独设置）。
+      </p>
 
       <div class="fold">
         <button class="link-btn utils-btn utils-secondary" @click="lookFolds.bubble = !lookFolds.bubble">{{ lookFolds.bubble ? '收起气泡与文案' : '气泡与文案（主题 · 峰谷 · 报时 · 点按播放）' }}</button>
@@ -8274,7 +8387,7 @@ onUnmounted(() => {
       </p>
       <template v-if="quoteCardFolds.open">
       <p v-if="quoteResetConfirm" class="hint">
-        将丢弃当前全部自定义台词与固定文案，恢复为内置默认，此操作不可撤销。
+        将恢复为<b>内置默认台词</b>（含版本新增台词），当前全部自定义台词与固定文案会被丢弃，此操作不可撤销。
       </p>
 
       <div class="field">
@@ -8295,6 +8408,7 @@ onUnmounted(() => {
               <option value="A">普通字号</option>
               <option value="B">大字号</option>
             </select>
+            <span v-if="quoteGroupPreview(g)" class="quote-group-preview">{{ quoteGroupPreview(g) }}</span>
             <span class="quote-group-sp"></span>
             <button class="export-btn utils-btn utils-outline" type="button" :disabled="i === 0" title="上移" @click="quoteGroupMove(i, -1)">↑</button>
             <button class="export-btn utils-btn utils-outline" type="button" :disabled="i === cfg.quotes.groups.length - 1" title="下移" @click="quoteGroupMove(i, 1)">↓</button>
@@ -8318,6 +8432,7 @@ onUnmounted(() => {
       <p class="hint">
         台词里可写占位符插入实时数值：<b>{balance}</b> 当前余额、<b>{today}</b> 今日已用、<b>{peak}</b> 当前时段、
         <b>{next}</b> 距下次峰谷切换。后三项是 DeepSeek 口径，主显示换成其它模型时为空；写错的占位符会原样显示出来。
+        想要「余额/时段卡」的自定义文字版？新建一个「自定义台词」组写上这些占位符即可（可选大字号）。
       </p>
       <p class="hint">
         没填台词的「自定义台词」组保存后会被丢掉；一组都不剩时随机台词整体回退为内置默认。
@@ -9269,6 +9384,10 @@ onUnmounted(() => {
           {{ dsh.resolved || dsh.globalVersion ? '更新' : '安装' }}
         </button>
       </div>
+      <label class="field row check">
+        <span class="label">进入开发者页自动刷新版本 <em>（勾选：每次切到本 Tab 重查一次 npm，约 1–3 秒；不勾则用缓存的版本列表）</em></span>
+        <input type="checkbox" :checked="dshAutoRefresh" @change="dshToggleAutoRefresh" />
+      </label>
       <!-- 安装 / 更新的终态横幅：紧贴「更新版本」行，用户点完不用往下滚就能看到结果。
            成功 / 失败都做成整块高对比底色 + 左侧色条，与卡底 12px 的 .msg 细字区分开 ——
            那条只留给「改端口、复制地址」这类瞬时回执 -->
@@ -11062,16 +11181,15 @@ onUnmounted(() => {
   color: var(--fg);
   font-family: system-ui, -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
 }
-@media (prefers-color-scheme: dark) {
-  .page {
-    color-scheme: dark;
-  }
-  /* 深色下悬停浮出的轨道：main.css 默认给的是浅色系灰，深底上会显脏，这里换成冷白 */
-  .log-box:hover::-webkit-scrollbar-track,
-  .detail-entries:hover::-webkit-scrollbar-track,
-  .mkt-list:hover::-webkit-scrollbar-track {
-    background-color: rgba(255, 255, 255, 0.09);
-  }
+/* 深浅色不跟系统、跟 uTools：html.dark 由脚本按 utools.isDarkColors() 切（见 main.css 同名注释） */
+html.dark .page {
+  color-scheme: dark;
+}
+/* 深色下悬停浮出的轨道：main.css 默认给的是浅色系灰，深底上会显脏，这里换成冷白 */
+html.dark .log-box:hover::-webkit-scrollbar-track,
+html.dark .detail-entries:hover::-webkit-scrollbar-track,
+html.dark .mkt-list:hover::-webkit-scrollbar-track {
+  background-color: rgba(255, 255, 255, 0.09);
 }
 h1 {
   margin: 0 0 6px;
@@ -11127,6 +11245,7 @@ h1 {
   background: var(--accent);
   color: #fff;
 }
+/* 选中 Tab 的白字要盖过 .tab:hover 的 var(--fg) 提亮，否则悬停时白字变蓝灰字、在实心蓝底上看不清 */
 .tab-on:hover {
   color: #fff;
 }
@@ -11279,7 +11398,7 @@ h1 {
   margin: 0;
   padding: 6px 10px 3px;
   font-size: 12px;
-  color: var(--fg-dim, #536ba9);
+  color: var(--fg-dim);
   opacity: 0.9;
   white-space: nowrap;
 }
@@ -11323,7 +11442,7 @@ h1 {
   padding: 6px 10px;
   font-size: 12px;
   text-align: left;
-  color: var(--fg-dim, #536ba9);
+  color: var(--fg-dim);
   opacity: 0.75;
   white-space: nowrap;
 }
@@ -11348,7 +11467,7 @@ h1 {
 /* 面板里的危险动作（「删除选中的」）：悬停给红底，跟同类字色区分开，
    免得在一列同款菜单项里误点 */
 .rnd-menu-panel button.danger {
-  color: var(--err, #e0433f);
+  color: var(--err);
 }
 .rnd-menu-panel button.danger:hover:not(:disabled) {
   background: rgba(210, 70, 70, 0.14);
@@ -11405,11 +11524,7 @@ h1 {
   border: 0;
   border-top: 1px solid var(--line);
 }
-/* 卡头里的危险操作（如「确认恢复默认？」）：与 .btn-row button.danger 同一套配色 */
-.head-actions button.danger {
-  background: rgba(224, 67, 63, 0.16);
-  color: var(--err);
-}
+/* 卡头里的危险操作：配色已由全局 .utils-danger 提供，这里不再复写。 */
 /* 「未保存」标记：改完 textarea 不点保存就切 Tab / 关窗口会丢改动，给个常驻提示。
    用 danger 色是因为丢的是用户手写的内容，且 align-self 保证在 flex 行里不拉伸 */
 .dirty-tag {
@@ -11418,7 +11533,7 @@ h1 {
   font-size: 11px;
   line-height: 1.5;
   border-radius: 999px;
-  background: rgba(224, 67, 63, 0.16);
+  background: var(--err-weak);
   color: var(--err);
   white-space: nowrap;
 }
@@ -11648,13 +11763,13 @@ select:focus,
   flex: none;
 }
 .diag-ok {
-  color: #2e9e5b;
+  color: var(--ok);
 }
 .diag-warn {
-  color: #c98a00;
+  color: var(--warn);
 }
 .diag-bad {
-  color: #d9534f;
+  color: var(--err);
 }
 .diag-sum {
   color: var(--fg-dim);
@@ -11878,8 +11993,8 @@ select:focus,
 }
 /* 还原前的二次确认：把按钮染成警示色，避免连点误操作 */
 .bak-confirm {
-  border-color: #d9534f;
-  color: #d9534f;
+  border-color: var(--err);
+  color: var(--err);
 }
 /* E3 候选行是 <label>，整行可点即勾选；补上手型与复选框对齐 */
 .iso-item {
@@ -12062,7 +12177,7 @@ select:focus,
 }
 /* 删除是不可逆的，单独染成警示色与「还原」的确认色区分开 */
 .bak-del.bak-confirm {
-  color: #d9534f;
+  color: var(--err);
 }
 .bak-tag {
   flex: none;
@@ -12180,8 +12295,8 @@ select:focus,
 /* 当前页：用主色描边 + 加粗，而不是实心填充 —— 实心块在深色主题下过重，
    与周围一圈淡边框按钮不成比例 */
 .mkt-page-on {
-  border-color: var(--accent, #4a90d9);
-  color: var(--accent, #4a90d9);
+  border-color: var(--accent);
+  color: var(--accent);
   font-weight: 600;
 }
 /* 省略号占位：与页码等宽对齐，且不可点（不是按钮，没有 hover） */
@@ -12219,7 +12334,7 @@ select:focus,
   position: absolute;
   inset: 0 auto 0 0;
   width: 3px;
-  background: var(--accent, currentColor);
+  background: var(--accent);
   opacity: 0.7;
 }
 .mkt-plan.err::before {
@@ -12569,12 +12684,12 @@ select:focus,
 /* 测速结果：正常绿、测不通红。未测过时整个 span 不渲染（v-if），不会留空位 */
 .mkt-src-ms {
   font-variant-numeric: tabular-nums;
-  color: var(--ok, #2e7d32);
+  color: var(--ok);
   font-size: 12px;
   white-space: nowrap;
 }
 .mkt-src-bad {
-  color: var(--err, #c62828);
+  color: var(--err);
 }
 .mkt-src-btns {
   margin-top: 2px;
@@ -12584,28 +12699,12 @@ input[type='checkbox'] {
   height: 16px;
   accent-color: var(--accent);
 }
-.btn-row {
-  display: flex;
-  gap: 10px;
-  margin-top: 12px;
-  /* IP 表这排最多会到 4 个按钮（添加/保存/校验/清除），窄窗下换行而不是把文字挤成竖排 */
-  flex-wrap: wrap;
-}
-.btn-row button {
-  flex: 1;
-}
-/* 尺寸/配色来自 main.css 的 utils 基类（单一来源）。
-   这里只保留与布局强耦合的两条：等分拉伸、以及 `.secondary` / `.danger`
-   的**填充策略**差异 —— 参考卡片的主按钮是"无类名"，走 main.css 的
-   `button { background: none var(--blue) }` 实心蓝，而 .secondary / .danger
-   要把这个底清掉换成半透明，光靠 utils-secondary 的 background 盖不住
-   （同一个 background 简写但全局 button 规则更具体），必须显式 background: none 兜底。
-   顺带修掉一个既有 bug：`.danger` 原先只写了 background + color，没写 border
-   → 走 border: none，于是危险按钮比旁边的次按钮**矮 2px**（少一圈 1px 描边）。 */
-.btn-row button.secondary,
-.btn-row button.danger {
-  background: none;
-}
+/* .btn-row 骨架（flex + gap + margin-top + flex-wrap + 按钮等分）与 utils 档位配色
+   都已收进 main.css 作单一来源，这里不再留副本。
+
+   历史 hack 已随之上删：旧版给 .btn-row button.secondary/.danger 追加 background:none，
+   立论是「全局 button 规则更具体、会漏出实心底」—— 实际全局 `button` 是 (0,0,1)，
+   压不过档位类的 (0,1,0)，那两条从未生效过，反倒把次/危险按钮自己的半透明底剥掉过。 */
 /* ===== dsh 分组的按钮（dsh 主控 · 环境诊断 · 配置转储 · 全量导出 · 用量统计 · 插件开关 · 插件市场 · Codex 会话统计）=====
    这 8 张卡原先各写各的按钮：主控卡用 .btn-row（实心蓝主 + .secondary 灰蓝、font-size 13 / 无 padding），
    外围四张卡却把 .btn-row 当容器、里面清一色 .secondary（字号掉到按钮默认值），
@@ -12613,12 +12712,8 @@ input[type='checkbox'] {
    同一条动作链（刷新 → 预览 → 确认）上的按钮高矮胖瘦全不一样。
 
    **尺寸/配色那半已经上提到 main.css 的 utils 基类**（markup 挂了 .utils-btn + 对应档），
-   这里只剩三件与 dsh 分组强耦合的事：flex 归属、胶囊圆角的例外、以及选中/危险的覆盖顺序。
-   之所以不能连这些一起上提：flex 是布局耦合（.btn-row 要等分、行尾按钮要贴内容宽），
-   而 `!important` 式的全局覆盖会误伤 .tab / .skin-cell 那些豁免件。
-
-   注意配色不再靠本块给出：.utils-secondary / .utils-danger 的 (0,1,0) 与
-   `.dsh-card .btn-row button` (0,2,1) 争时**后者赢**，所以这里只做覆盖、不做定义。 */
+   这里只剩两件与 dsh 分组强耦合的事：flex 归属（不强制等宽，按钮贴内容宽）与
+   胶囊圆角的例外（.iso-axis-btn）。 */
 .dsh-card .btn-row button {
   flex: 1 1 auto;
 }
@@ -12631,8 +12726,8 @@ input[type='checkbox'] {
    `.dsh-web-hint`，会把 keyframe 里的 opacity 压成固定值，呼吸完全看不出来。
    filter 是独立属性，不与之打架。 */
 .dsh-card .dsh-web-btn.dsh-web-hint {
-  border-color: #536ba9;
-  box-shadow: 0 0 0 1px #536ba9;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
   animation: dsh-web-hint 1.2s ease-in-out infinite;
 }
 @keyframes dsh-web-hint {
@@ -12677,20 +12772,13 @@ input[type='checkbox'] {
    否则选中态会被统一底色盖掉、三个分组按钮看起来一模一样。 */
 .dsh-card .iso-axis-btn.iso-axis-on {
   border-color: var(--accent);
-  background: rgba(83, 107, 169, 0.18);
+  background: var(--accent-weak);
   color: var(--accent);
 }
-/* 危险档（确认隔离 / 候选行禁用…）与 .btn-row button.danger 同色系。
-   同上一节：`.dsh-card .btn-row button` 的 (0,2,1) 高于 .utils-danger 的 (0,1,0)，
-   所以这里必须自己写全三色，否则实心蓝会漏出来。 */
-.dsh-card .btn-row button.danger {
-  background: rgba(224, 67, 63, 0.16);
-  color: var(--err);
-  border-color: rgba(224, 67, 63, 0.35);
-}
+/* 危险档配色全由 .utils-danger 提供（旧版这里的复写与其三值逐字相同，纯冗余已删）。 */
 .dsh-card .bak-confirm {
-  border-color: #d9534f;
-  color: #d9534f;
+  border-color: var(--err);
+  color: var(--err);
 }
 .msg {
   margin: 10px 0 0;
@@ -12886,21 +12974,9 @@ input[type='checkbox'] {
 .notes-latest {
   margin: 0;
 }
-.link-btn {
-  margin-top: 10px;
-  padding: 0;
-  border: none;
-  background: none;
-  color: var(--fg-dim);
-  font-size: 12px;
-  text-align: left;
-  text-decoration: underline;
-  text-underline-offset: 2px;
-  cursor: pointer;
-}
-.link-btn:hover {
-  color: var(--fg);
-}
+/* .link-btn 基类已上提 main.css（单一来源）：原先只在本文件 scoped 里定义，
+   AccelView / UsageChart / FirstRunGuide 里的同名类全是匹配不上的死类。
+   下面几条只留与本文件布局强耦合的间距覆写。 */
 /* 凭据获取教程（默认折叠） */
 .field + .link-btn {
   margin-top: -4px;
@@ -13317,6 +13393,16 @@ input[type='checkbox'] {
   align-items: center;
   gap: 4px;
   flex: 0 0 auto;
+  font-size: 12px;
+  color: var(--fg-dim);
+}
+/* 卡头内容预览：一行小灰字，超长截断（弹性行里既不挤压控件也不把按钮顶出去） */
+.quote-group-preview {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: 12px;
   color: var(--fg-dim);
 }
