@@ -80,6 +80,32 @@ function copyPublicExceptSkip(outDir) {
   }
 }
 
+// src/bubble/bubble-render.js 是悬浮窗与设置页共享的气泡渲染器单一来源。悬浮窗页面是
+// file:// 下的普通 script（不能用 ES module），所以构建时用 esbuild 把它打成 IIFE：
+// dist/bubble-render.js 挂全局 window.BubbleRender，floating.html 在 floating-page.js 之前加载。
+// esbuild 取 Vite 的传递依赖（node_modules 顶层提升副本），不单独进 package.json。
+// 不压缩：与 dist 里其他原样文件一致，标识符不混淆便于排障（注释会被 esbuild 剥掉，源文件保留）。
+// 放 closeBundle 而非 writeBundle：watch 模式下每次重建都会触发，产物始终跟源文件同步。
+function buildBubbleRenderIife(outDir) {
+  return {
+    name: 'whale-build-bubble-render',
+    apply: 'build',
+    async closeBundle() {
+      const esbuild = await import('esbuild')
+      const path = await import('node:path')
+      await esbuild.build({
+        entryPoints: [path.resolve(process.cwd(), 'src/bubble/bubble-render.js')],
+        outfile: path.resolve(process.cwd(), outDir, 'bubble-render.js'),
+        bundle: true,
+        format: 'iife',
+        globalName: 'BubbleRender',
+        minify: false,
+        logLevel: 'silent',
+      })
+    },
+  }
+}
+
 // https://vitejs.dev/config/
 export default defineConfig({
   // publicDir 关掉：uTools 插件要的是 public/ 下的原样文件（preload/、floating.html…），
@@ -89,6 +115,7 @@ export default defineConfig({
     vue(),
     copyPublicExceptSkip('dist'),
     copyResourcesExceptSkip('dist'),
+    buildBubbleRenderIife('dist'),
   ],
   base: './'
 })

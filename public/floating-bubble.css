@@ -1,0 +1,87 @@
+  /* 气泡段样式：从 floating.css 拆出的共享文件 —— 悬浮窗 floating.html 与设置页 index.html
+     挂的是同一份（构建时随 public/ 原样拷进 dist 根）。渲染本体在 src/bubble/bubble-render.js，
+     副本一致性由 scripts/check-shared.mjs 钉住三条：本文件 ↔ 渲染器的
+     BUBBLE_FONT 字号 / THEMES.default 配色 / --dshw-u 除数，改任一侧必须同步另一侧。
+     挂件基准 --dshw-base 由宿主提供（floating.css 的 .dshwv-root；设置页预览容器需自备一份） */
+
+  .dshwv-bubble {
+    position: absolute;
+    /* 气泡圆圈整体放大 18%（文字可用区域 FIT_W/FIT_H 同步放大，字号跟着变大）。
+       left/top 的负偏移用于抵消放大量，让文字仍停在原来的位置；
+       放大量受窗口留白限制：再大圆圈的左缘会被窗口裁掉 */
+    left: -7.97%; top: -4.67%;
+    width: 118%;
+    aspect-ratio: 1026/700;
+    pointer-events: none;
+    z-index: 1;
+    --dshw-u: calc(var(--dshw-base) / 1026);
+  }
+  .dshwv-bubble svg { display: block; width: 100%; height: 100%; pointer-events: none; }
+  /* 气泡描边/填充走 CSS 变量，配色主题只重写变量（渲染器的 THEMES）；兜底值 = 原默认蓝白 */
+  .dshwv-bubble svg path, .dshwv-bubble svg ellipse {
+    fill: var(--dshwv-fill, #FFFFFF);
+    stroke: var(--dshwv-stroke, #203170);
+  }
+  .dshwv-bubble svg path, .dshwv-bubble svg ellipse { pointer-events: none; cursor: pointer; }
+  .dshwv-bubble.dshwv-bubble-open svg path, .dshwv-bubble.dshwv-bubble-open svg ellipse { pointer-events: visiblePainted; }
+  .dshwv-bubble .dshwv-bshape, .dshwv-bubble .dshwv-b1, .dshwv-bubble .dshwv-b2 {
+    opacity: 0; transform: scale(.7);
+    transform-box: fill-box; transform-origin: 50% 50%;
+    transition: opacity .2s ease, transform .2s ease;
+  }
+  .dshwv-bubble.dshwv-bubble-open .dshwv-bshape,
+  .dshwv-bubble.dshwv-bubble-open .dshwv-b1,
+  .dshwv-bubble.dshwv-bubble-open .dshwv-b2 { opacity: 1; transform: none; }
+  .dshwv-gif {
+    position: absolute;
+    left: 44.25%; top: 38%;
+    transform: translate(-50%, -50%);
+    max-width: calc(var(--dshw-u) * 660);
+    max-height: calc(var(--dshw-u) * 472);
+    display: none; opacity: 0;
+    transition: opacity .2s ease;
+    pointer-events: none;
+    -webkit-user-drag: none;
+    user-select: none;
+    object-fit: contain;
+  }
+  .dshwv-root.dshwv-left .dshwv-gif { transform: translate(-50%, -50%) scaleX(-1) }
+  .dshwv-bubble.dshwv-bubble-open .dshwv-gif { opacity: 1; }
+  .dshwv-bubble.dshwv-bubble-open .dshwv-b2 { transition-delay: 0s; }
+  .dshwv-bubble.dshwv-bubble-open .dshwv-b1 { transition-delay: .13s; }
+  .dshwv-bubble.dshwv-bubble-open .dshwv-bshape { transition-delay: .26s; }
+  .dshwv-bubble .dshwv-bshape { transition-delay: .1s; }
+  .dshwv-bubble .dshwv-b1 { transition-delay: .2s; }
+  .dshwv-bubble .dshwv-b2 { transition-delay: .3s; }
+  .dshwv-text {
+    position: absolute;
+    left: 44.25%; top: 38%;
+    transform: translate(-50%, -50%);
+    text-align: center;
+    color: var(--dshwv-text, #536ba9);
+    line-height: 1.15;
+    white-space: nowrap;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity .16s ease, transform .3s ease;
+  }
+  .dshwv-bubble.dshwv-bubble-open .dshwv-text { opacity: 1; transition: opacity .16s ease .36s, transform .3s ease; }
+  .dshwv-root.dshwv-left .dshwv-text { transform: translate(-50%, -50%) scaleX(-1) }
+  /* 三行字号（与渲染器 src/bubble/bubble-render.js 的 BUBBLE_FONT 必须一致：CSS 是未缩小时的默认值，
+     渲染器只在超框时才写行内 calc(var(--dshw-u) * N) 覆盖） */
+  .dshwv-label { font-size: calc(var(--dshw-u) * 72); font-weight: 600; letter-spacing: .06em; }
+  .dshwv-amount { font-size: calc(var(--dshw-u) * 140); font-weight: 800; line-height: 1.05; }
+  .dshwv-period { font-size: calc(var(--dshw-u) * 114); font-weight: 800; line-height: 1.05; }
+  .dshwv-wrap { white-space: normal; max-width: calc(var(--dshw-u) * 660); line-height: 1.2; }
+  .dshwv-hint {
+    font-size: calc(var(--dshw-u) * 72);
+    color: var(--dshwv-hint, #9fb0d9);
+    letter-spacing: .02em;
+    margin-top: calc(var(--dshw-u) * 9);
+    /* 预留一行的高度：说明行是「今日已用 … · 距峰时 …」这类会变长的文案，
+       不预留的话文本变化时三行会整体上下跳 */
+    min-height: calc(var(--dshw-u) * 74);
+    line-height: 1.15;
+  }
+  .dshwv-amount.dshwv-low { color: #e0433f; }
+  .dshwv-hint.dshwv-low { color: #e0433f; }

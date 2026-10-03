@@ -299,6 +299,8 @@ function balanced(src, openAt, file, marker) {
 const CONSTANTS = 'public/preload/lib/constants.js'
 const FLOATING_PAGE = 'public/floating-page.js'
 const FLOATING_CSS = 'public/floating.css'
+const FLOATING_BUBBLE_CSS = 'public/floating-bubble.css'
+const BUBBLE_RENDER = 'src/bubble/bubble-render.js'
 const STORE = 'public/preload/lib/store.js'
 const APP_VUE = 'src/App.vue'
 
@@ -505,31 +507,31 @@ const CHECKS = [
       { file: FLOATING_PAGE, pick: jsFallbackNumber('var port') },
     ],
   },
-  // 气泡字号基准：CSS 的四条 font-size 是未缩小时默认值，floating-page.js 的 BUBBLE_FONT 是
+  // 气泡字号基准：CSS 的四条 font-size 是未缩小时默认值，渲染器的 BUBBLE_FONT 是
   // 超框缩小时的基准。两边不等会让「内容超框」前后字号跳变。
   {
     name: '气泡字号基准 BUBBLE_FONT',
     parts: [
-      { file: FLOATING_PAGE, pick: bubbleFontFromJs('var BUBBLE_FONT =') },
-      { file: FLOATING_CSS, pick: bubbleFontFromCss },
+      { file: BUBBLE_RENDER, pick: bubbleFontFromJs('const BUBBLE_FONT =') },
+      { file: FLOATING_BUBBLE_CSS, pick: bubbleFontFromCss },
     ],
   },
-  // 气泡配色默认主题：JS 的 THEMES.default（会写入）与 CSS 的 var(--dshwv-xxx, #兜底)（首帧兜底）
+  // 气泡配色默认主题：渲染器的 THEMES.default（会写入）与 CSS 的 var(--dshwv-xxx, #兜底)（首帧兜底）
   // 必须一致，否则主题应用前后的颜色不同。
   {
     name: '气泡默认配色 THEMES.default',
     parts: [
-      { file: FLOATING_PAGE, pick: themeDefaultFromJs('var THEMES =') },
-      { file: FLOATING_CSS, pick: themeDefaultFromCss },
+      { file: BUBBLE_RENDER, pick: themeDefaultFromJs('const THEMES =') },
+      { file: FLOATING_BUBBLE_CSS, pick: themeDefaultFromCss },
     ],
   },
-  // 气泡字号单位 u 的除数：CSS 的 --dshw-u 定义 vs floating-page.js BUBBLE_FONT 上方的注释。
+  // 气泡字号单位 u 的除数：CSS 的 --dshw-u 定义 vs 渲染器 BUBBLE_FONT 上方的注释。
   // 除数改动而不动另一边会让字号基准整体错位且无任何报错。
   {
     name: '气泡字号单位除数 --dshw-u',
     parts: [
-      { file: FLOATING_CSS, pick: uDivisorFromCss },
-      { file: FLOATING_PAGE, pick: uDivisorFromJsComment('var BUBBLE_FONT =') },
+      { file: FLOATING_BUBBLE_CSS, pick: uDivisorFromCss },
+      { file: BUBBLE_RENDER, pick: uDivisorFromJsComment('const BUBBLE_FONT =') },
     ],
   },
   // 到点留言长度上限三处副本：宿主 constants（清洗用）、挂件页（菜单输入框取用）、

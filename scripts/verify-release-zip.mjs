@@ -107,8 +107,10 @@ if (plugin.version !== expectVersion) {
   errors.push(`plugin.json 版本是 ${plugin.version}，期望 ${expectVersion}`)
 }
 
-// preload 是插件跑起来的最小集合：入口 + 悬浮窗 preload + lib 下被 require 的实现
-const mustHave = ['preload/services.js', 'preload/floating.js', 'preload/lib/hosts.js', 'index.html']
+// preload 是插件跑起来的最小集合：入口 + 悬浮窗 preload + lib 下被 require 的实现；
+// bubble-render.js / floating-bubble.css 是气泡共享渲染器的构建产物与共享样式
+//（floating.html 在 floating-page.js 之前加载前者，缺了气泡直接白屏）
+const mustHave = ['preload/services.js', 'preload/floating.js', 'preload/lib/hosts.js', 'index.html', 'bubble-render.js', 'floating-bubble.css']
 for (const rel of mustHave) {
   if (!existsSync(path.join(outDir, rel))) errors.push(`缺少 ${rel}`)
 }

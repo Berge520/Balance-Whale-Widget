@@ -92,6 +92,12 @@ export default defineConfig([
     languageOptions: { sourceType: 'script', globals: { ...globals.browser } },
   },
 
+  // 气泡共享渲染器：浏览器 ESM（源文件被设置页直接 import，构建时另打成 IIFE 给悬浮窗）
+  {
+    files: ['src/bubble/**/*.js'],
+    languageOptions: { sourceType: 'module', globals: { ...globals.browser } },
+  },
+
   // 构建脚本 / 单测 / Vite 配置：Node ESM
   {
     files: ['scripts/**/*.mjs', 'test/**/*.mjs', 'vite.config.js'],

@@ -3029,6 +3029,34 @@ module.exports = {
     if (!winAlive()) return false
     try { return !!getWindow().isVisible() } catch (err) { return false }
   },
+  // 台词试播到挂件：把设置页当前编辑的组台词**整组一次**发给悬浮页挂成会话，
+  // 悬浮页点挂件气泡按顺序翻条。传原始文本（占位符不替换）——悬浮页 renderLinePlaceholders
+  // 用的 {balance}/{today} 等是真机实时值，比设置页的示例值更「所见即所得」；
+  // 未显示挂件时返回 ok:false 由页面提示。
+  quotePreview(payload) {
+    const p = payload && typeof payload === 'object' ? payload : {}
+    // steps = 逐屏的三行模型 [{t,s,c,w}|null]×3，一屏 = 会话里可翻的一条
+    const steps = Array.isArray(p.steps) ? p.steps.slice(0, 30) : []
+    if (!steps.length) return { ok: false, error: '没有可预览的台词' }
+    const norm = []
+    for (const rows of steps) {
+      const arr = Array.isArray(rows) ? rows.slice(0, 3) : []
+      const out = []
+      for (const it of arr) {
+        const o = it && typeof it === 'object' ? it : {}
+        out.push({
+          t: String(o.t || '').slice(0, 500),
+          s: o.s === 'B' || o.s === 'P' || o.s === 'C' ? o.s : 'A',
+          c: String(o.c || '').slice(0, 40),
+          w: o.w === true,
+        })
+      }
+      norm.push(out)
+    }
+    if (!winAlive()) return { ok: false, error: '挂件未显示，先在设置页显示挂件再试播' }
+    const sent = sendToWidget('whale:quote-preview', { steps: norm })
+    return sent ? { ok: true } : { ok: false, error: '发送失败，挂件窗口可能正在重建' }
+  },
   // 诊断日志（同步落盘 %TEMP%\whale-debug.log，进程被 uTools 结束也不丢）。
   // 返回末尾部分即可，避免整份日志撑爆剪贴板/界面。
   // 日志超 1MB 会轮转：主文件被清空重建、真内容进了 .1。此时若只读主文件，

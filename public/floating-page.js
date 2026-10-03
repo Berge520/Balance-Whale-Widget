@@ -32,13 +32,9 @@
   // 内置气泡动图（动 WebP：与旧 rua.gif 逐帧像素一致、体积小 ~34KB）。变量名与 CSS 类
   // 仍叫 gif，指的是「这张内置动图」这个概念，不是文件格式
   var GIF_URL = './whale/rua.webp';
-  // 气泡配色预设：floating.css 里气泡颜色全部走 CSS 变量，换主题只重写变量、不重建 DOM。
-  // 「低余额」的红色是状态色，不随主题变（见 .dshwv-low）
-  var THEMES = {
-    default: { text: '#536ba9', hint: '#9fb0d9', fill: '#FFFFFF', stroke: '#203170' },
-    dark:    { text: '#dbe4ff', hint: '#94a3c8', fill: '#1f2437', stroke: '#8fa3e0' },
-    sakura:  { text: '#a3486f', hint: '#c98aa8', fill: '#FFF3F8', stroke: '#d9789f' },
-  };
+  // 气泡配色预设已移入共享渲染器（src/bubble/bubble-render.js，构建后经 dist/bubble-render.js
+  // 以 window.BubbleRender 暴露）：THEMES 原样别名，applyTheme 零改动
+  var THEMES = window.BubbleRender.THEMES;
   var SOUND_FILES = {
     duck: { press: './whale/Ya1.mp3', release: './whale/Ya2.mp3' },
     fx1:  { press: './whale/D1.mp3',  release: './whale/D2.mp3' },
@@ -671,55 +667,26 @@
   }
   whaleApi.onDsh(function (s) { dshRender(s); });
 
-  var textBox = document.createElement('div');
-  textBox.className = 'dshwv-text';
-  var labelEl = document.createElement('div');
-  labelEl.className = 'dshwv-label';
-  labelEl.textContent = 'DeepSeek 余额';
-  var amountEl = document.createElement('div');
-  amountEl.className = 'dshwv-amount';
-  var hintEl = document.createElement('div');
-  // 常驻说明行默认就允许换行：它是三行里最长的一行，nowrap 会撑宽、把三行一起缩小（见 fitBubbleText）
-  hintEl.className = 'dshwv-hint dshwv-wrap';
-  textBox.appendChild(labelEl); textBox.appendChild(amountEl); textBox.appendChild(hintEl);
-
-  var bubbleBox = document.createElement('div');
-  bubbleBox.className = 'dshwv-bubble';
-  bubbleBox.innerHTML =
-    '<svg viewBox="0 0 1026 700" preserveAspectRatio="xMidYMid meet" xmlns="http://www.w3.org/2000/svg">' +
-    '<path class="dshwv-bshape" stroke-width="18" stroke-linejoin="round" stroke-linecap="round" d="M 827 248 A 373 232 0 1 0 81 246 A 373 232 0 0 0 301 465 A 57 32 10 0 0 413 484 A 373 232 0 0 0 827 248 Z"/>' +
-    '<ellipse class="dshwv-b1" cx="352" cy="561" rx="37.5" ry="26" stroke-width="18"/>' +
-    '<ellipse class="dshwv-b2" cx="442" cy="646" rx="24.5" ry="18" stroke-width="18"/>' +
-    '</svg>';
-  var gifEl = document.createElement('img');
-  gifEl.className = 'dshwv-gif';
-  gifEl.src = GIF_URL;
-  gifEl.alt = '';
-  gifEl.draggable = false;
-  var gifFailed = false;
-  // 当前 gifEl.src 对应的「原始值」：img.src 读出来是绝对 URL（相对路径会被解析成 file://…），
-  // 拿它跟 './whale/rua.webp' 比对永远不相等，只能自己记一份
-  var gifSrcSet = GIF_URL;
-  // 换图：自定义气泡图与内置 rua.webp 共用这一个 <img>。图变了才重设 src 并复位失败标记，
-  // 否则每次抽到同一张都会重新发起加载（data URL 也会白解码一遍）
-  function setGifSrc(url) {
-    var u = url || GIF_URL;
-    if (u === gifSrcSet) return;
-    gifSrcSet = u;
-    gifFailed = false;
-    try { gifEl.src = u; } catch (err) { gifFailed = true; }
-  }
-  gifEl.onerror = function () {
-    gifFailed = true;
-    // 自定义图加载失败：此时气泡已经切到「只显示图」的状态，光记标记会留下一片空白，
-    // 当场换成失败文案（下一次抽到别的图时 setGifSrc 会复位标记）
-    if (gifEl.style.display === 'block' && bubbleShown) {
-      bubbleRandomLines = singleCenter('A', pickOne(QUOTES.gifFail), '', true);
-      applyBubbleLines(bubbleRandomLines);
-    }
-  };
-  bubbleBox.appendChild(gifEl);
-  bubbleBox.appendChild(textBox);
+  // 气泡 DOM 构建与渲染算法（setGifSrc / fit / applyLines / gif 失败状态机）在共享渲染器里，
+  // 这里只接线：click 处理依赖页面状态（菜单命中 / 台词队列 / bubbleShown），留在页面。
+  // onGifError / gifFailLines 两个回调引用的台词区函数是声明提升，运行时才触发，无时序问题
+  var renderer = window.BubbleRender.createBubbleRenderer({
+    rootEl: root,
+    defaultGifUrl: GIF_URL,
+    gifFailLines: function () { return singleCenter('A', pickOne(QUOTES.gifFail), '', true); },
+    onGifError: function () {
+      if (bubbleShown) {
+        bubbleRandomLines = singleCenter('A', pickOne(QUOTES.gifFail), '', true);
+        applyBubbleLines(bubbleRandomLines);
+      }
+    },
+  });
+  var textBox = renderer.els.textBox;
+  var labelEl = renderer.els.labelEl;
+  var amountEl = renderer.els.amountEl;
+  var hintEl = renderer.els.hintEl;
+  var bubbleBox = renderer.els.bubbleBox;
+  var gifEl = renderer.els.gifEl;
   bubbleBox.addEventListener('click', function (e) {
     e.stopPropagation();
     // 气泡圆开得很满（left:-7.97%、top:-4.67%、width:118%），打开后 SVG path 带
@@ -728,6 +695,11 @@
     // 必须把这次点击显式转交给按钮，否则「有气泡时菜单点不开」。
     if (isOverMenuBtn(e)) { toggleMenu(); return; }
     if (!bubbleShown) return;
+    // 设置页试播会话进行中：点挂件气泡翻下一条（末条再点收起），不与随机台词互相干扰
+    if (bubblePreviewActive) {
+      if (!previewSessionNext()) hideBubble();
+      return;
+    }
     if (bubbleRandomActive || bubbleTimerActive) {
       // 「只显计时」关闭时计时只是先弹一下：点掉它要接着显示常规内容，而不是直接把气泡收起
       if (bubbleTimerActive && !timerTakesBubble()) { timerPeekDone(); return; }
@@ -766,6 +738,11 @@
   var flipped = false;
   var animDelayTimer = null, drag = null, shown = null, animId = null;
   var bubbleShown = false, bubbleTimer = null, bubbleRandomActive = false, bubbleRandomLines = null;
+  // 设置页「挂件气泡试播」会话：previewSession = {steps, idx}。优先级低于计时/提醒、
+  // 独立于随机台词（点鲸鱼本体弹随机台词时不抢会话里的这条），点挂件气泡才顺序翻条
+  var bubblePreviewActive = false;
+  var previewSession = null;
+  var QUOTE_PREVIEW_STEPS_MAX = 30; // 会话步数上限（单组台词宿主限 30 行，这里对齐防恶意载荷）
   // 气泡 TTL 补收：悬浮窗被隐藏 / 系统休眠时，Electron 会节流隐藏窗口的定时器，
   // 单靠 setTimeout 可能「该收不收」（收起时刻漂移几十秒）。这里记一份绝对截止时刻，
   // 窗口回到可见 / 拿到焦点时补收一次，另有每秒巡检兜底（绝大多数时候两次比较就返回）。
@@ -774,7 +751,7 @@
   var bubbleRemindActive = false, bubbleRemindLines = null; // 峰谷提醒气泡（优先级高于随机台词）
   var queueIdx = 0; // 「点按依次播放」当前播到第几组台词
   var bubbleTimerActive = false; // 计时气泡（正计时/倒计时/定时/时间到），优先级最高
-  var BUBBLE_STYLE_CLASS = { A: 'dshwv-label', B: 'dshwv-amount', P: 'dshwv-period', C: 'dshwv-hint' };
+  // BUBBLE_STYLE_CLASS（台词行类型 → 样式类）已移入共享渲染器，applyBubbleLines 经薄壳走渲染器
 
   var soundOn = true, soundVol = 0.9, soundSet = 'duck';
   // 提醒音独立音量（low/budget/peak/pass 四类提醒音，press/release 音色音不在此列）：
@@ -924,13 +901,15 @@
   function showRemindBubble(lines) {
     if (!bubbleOn || timerActive()) return; // 计时进行中不打断（此时也有系统通知兜底）
     if (bubbleTimer) { clearTimeout(bubbleTimer); bubbleTimer = null; }
-    if (gifFadeTimer) { clearTimeout(gifFadeTimer); gifFadeTimer = null; }
+    renderer.cancelGifFade();
     bubbleShown = true;
     bubbleRandomActive = false;
     bubbleRandomLines = null;
     bubbleTimerActive = false;
     bubbleRemindActive = true;
     bubbleRemindLines = lines;
+    bubblePreviewActive = false; // 提醒优先级高于试播：接管后整段作废
+    previewSession = null;
     restoreBubbleLines();
     applyBubbleLines(lines);
     bubbleBox.classList.add('dshwv-bubble-open');
@@ -941,6 +920,59 @@
   function showPassNotice(on) {
     playAlertSound('pass');
     showRemindBubble(alertLines(on ? 'passOn' : 'passOff', {}, on ? '#e0433f' : '#2fa24c'));
+  }
+  // 设置页「挂件气泡试播」（whale:quote-preview）：整组台词一次发来挂成会话，
+  // 点挂件气泡按顺序翻下一条（每条 BUBBLE_MS 重挂自动收起），末条再点收起。
+  // 收到的是原始模板行（{t,s,c,w} 或 null 占位），占位符在这里才替换——抽签口径本来就是
+  // 「真被抽到时才换」，这样 {balance} 等拿到的也是本机实时值。计时中不打断；
+  // 会话期间任何其它气泡内容接管（点鲸鱼本体 / 提醒 / 计时）都整段作废，不留悬空会话。
+  function showQuotePreviewBubble(payload) {
+    if (!bubbleOn || timerActive()) return;
+    var data = payload && typeof payload === 'object' ? payload : {};
+    var raw = Array.isArray(data.steps) ? data.steps : [];
+    var steps = [];
+    for (var i = 0; i < raw.length && steps.length < QUOTE_PREVIEW_STEPS_MAX; i++) {
+      var lines = normPreviewStepLines(raw[i]);
+      if (lines) steps.push(lines);
+    }
+    if (!steps.length) return;
+    if (bubbleSwapTimer) { clearTimeout(bubbleSwapTimer); bubbleSwapTimer = null; }
+    if (bubbleTimer) { clearTimeout(bubbleTimer); bubbleTimer = null; }
+    renderer.cancelGifFade();
+    bubblePreviewActive = true;
+    previewSession = { steps: steps, idx: 0 };
+    bubbleRandomActive = false;
+    bubbleRandomLines = null;
+    bubbleRemindActive = false;
+    bubbleRemindLines = null;
+    bubbleTimerActive = false;
+    var first = steps[0];
+    if (bubbleShown) {
+      // 气泡已开着：原地淡入换词，不要闪一下（与拖拽台词同款）
+      swapBubbleContent(function () { applyBubbleLines(first); });
+    } else {
+      bubbleShown = true;
+      restoreBubbleLines();
+      applyBubbleLines(first);
+      bubbleBox.classList.add('dshwv-bubble-open');
+    }
+    bubbleArm(BUBBLE_MS, hideBubble);
+  }
+  // 单步清洗：一屏 3 行模型 {t,s,c,w} 或 null 占位；占位符替换在此时做（实时值口径）。
+  // 整步没有任何有效行时返回 null（调用方把这一步整个丢掉）
+  function normPreviewStepLines(rawStep) {
+    var rows = Array.isArray(rawStep) ? rawStep : [];
+    var lines = [];
+    for (var i = 0; i < rows.length && lines.length < 3; i++) {
+      var r = rows[i];
+      if (!r || typeof r !== 'object') { lines.push(null); continue; }
+      var t = renderLinePlaceholders(String(r.t || '').trim());
+      if (!t) { lines.push(null); continue; }
+      var s = (r.s === 'B' || r.s === 'P' || r.s === 'C') ? r.s : 'A';
+      lines.push({ t: t, s: s, c: String(r.c || ''), w: r.w === true });
+    }
+    for (i = 0; i < lines.length; i++) { if (lines[i]) return lines; }
+    return null;
   }
   var timerNotifyOn = true, timerPersistOn = true; // 计时到点系统通知 / 计时状态持久化
   // 计时到点的邮件通知开关，以及「邮件渠道总开关」的本地副本：页面不自己发信，
@@ -1016,9 +1048,11 @@
     var lines = singleCenter('A', pickOne(DRAG_LINES), '', true);
     bubbleRandomActive = true; // 按随机台词口径：点气泡可再切组，再点关闭
     bubbleRandomLines = lines;
+    bubblePreviewActive = false; // 拖拽台词接管内容，试播会话整段作废
+    previewSession = null;
     if (bubbleSwapTimer) { clearTimeout(bubbleSwapTimer); bubbleSwapTimer = null; }
     if (bubbleTimer) { clearTimeout(bubbleTimer); bubbleTimer = null; }
-    if (gifFadeTimer) { clearTimeout(gifFadeTimer); gifFadeTimer = null; }
+    renderer.cancelGifFade();
     if (bubbleShown) {
       // 气泡已开着（多是刚点过鲸鱼）：原地淡入换词，不要闪一下
       swapBubbleContent(function () { applyBubbleLines(lines); });
@@ -1268,6 +1302,15 @@
     queueIdx += 1;
     bubbleRandomLines = RANDOM_GROUPS[queueIdx].lines();
     swapBubbleContent(function () { applyBubbleLines(bubbleRandomLines); });
+    bubbleArm(BUBBLE_MS, hideBubble);
+    return true;
+  }
+  // 试播会话推进：展示 steps[idx+1]，重挂自动收起；末条返回 false 由调用方收起气泡
+  function previewSessionNext() {
+    if (!previewSession) return false;
+    if (previewSession.idx + 1 >= previewSession.steps.length) return false;
+    previewSession.idx += 1;
+    swapBubbleContent(function () { applyBubbleLines(previewSession.steps[previewSession.idx]); });
     bubbleArm(BUBBLE_MS, hideBubble);
     return true;
   }
@@ -1746,92 +1789,12 @@
   }
 
   // —— 气泡内容 ——
-  var bubbleSwapTimer = null, hintFadeTimer = null, gifFadeTimer = null, lastHintText = null;
-  // 气泡自适应：三行字号固定（数值与 floating.css 的 .dshwv-label/amount/period/hint 必须一致），
-  // 长文案换行后可能撑出气泡，这里按可用区域测量后等比缩小字号
-  // （只缩不放，正常内容保持原字号）；单位 u = 挂件基准 / 1026，与 CSS 的 --dshw-u 一致
-  var BUBBLE_FONT = { 'dshwv-label': 72, 'dshwv-amount': 140, 'dshwv-period': 114, 'dshwv-hint': 72 };
-  // 气泡内文字可用区域（单位 u = 挂件基准/1026）。与 CSS 里 .dshwv-bubble 的放大倍数(1.18)保持一致：
-  // 圆圈放大多少，这里就放大多少，字号才会跟着变大而不是被压小。
-  // FIT_H 430 是按「说明行折成两行」定的：三行全展开约 404u（72×1.15 + 140×1.05 + 9 + 2×72×1.15），
-  // 留到 430u 才不会被折行后的高度反压回去；再大就顶到大椭圆下缘（内高约 547u，居中后下侧仅 251u）
-  var FIT_W = 660, FIT_H = 430, FIT_MIN = 0.5;
-  function resetBubbleFont() {
-    labelEl.style.fontSize = '';
-    amountEl.style.fontSize = '';
-    hintEl.style.fontSize = '';
-  }
-  // 量出文本块的真实占位：宽取各行「内容宽度」的最大值（scrollWidth 能反映 nowrap 溢出的宽度，
-  // 而 offsetWidth 会被绝对定位的 shrink-to-fit 上限截断），高为可见各行 offsetHeight 之和。
-  // 均用布局尺寸而非 getBoundingClientRect：后者会带上 Q 弹的 scaleY(.88)/scaleX(1.05)
-  // 与贴左镜像的 scaleX(-1)，导致测量失真。
-  function measureBubbleText(els) {
-    var w = 0, h = 0, i;
-    for (i = 0; i < 3; i++) {
-      var el = els[i];
-      if (el.style.display === 'none') continue;
-      if (el.scrollWidth > w) w = el.scrollWidth;
-      h += el.offsetHeight;
-    }
-    return { w: w, h: h };
-  }
-  function fitBubbleText() {
-    if (gifEl.style.display === 'block') return;
-    var u = (root.clientWidth || 0) / 1026;
-    if (!u) return;
-    var els = [labelEl, amountEl, hintEl];
-    var availW = FIT_W * u, availH = FIT_H * u;
-    var i, k = 1, pass, m;
-    for (pass = 0; pass < 3; pass++) {
-      m = measureBubbleText(els);
-      if (!m.w || !m.h) return;
-      var f = Math.min(1, availW / m.w, availH / m.h);
-      if (f > 0.995) return;
-      k = Math.max(FIT_MIN, k * f);
-      for (i = 0; i < 3; i++) {
-        var base = BUBBLE_FONT[String(els[i].className).split(' ')[0]];
-        if (base) els[i].style.fontSize = 'calc(var(--dshw-u) * ' + (base * k).toFixed(1) + ')';
-      }
-      if (k <= FIT_MIN + 0.001) return;
-    }
-  }
-  function applyBubbleLines(lines) {
-    if (lines && lines.gif) {
-      // 有自定义气泡图就用它，否则回退内置 rua.webp（lines.src 为空串 = 用内置）
-      setGifSrc(lines.src);
-      if (gifFailed) {
-        lines = singleCenter('A', pickOne(QUOTES.gifFail), '', true);
-      } else {
-        if (gifFadeTimer) { clearTimeout(gifFadeTimer); gifFadeTimer = null; }
-        gifEl.style.display = 'block';
-        gifEl.style.opacity = '';
-        labelEl.style.display = 'none';
-        amountEl.style.display = 'none';
-        hintEl.style.display = 'none';
-        return;
-      }
-    }
-    if (gifFadeTimer) { clearTimeout(gifFadeTimer); gifFadeTimer = null; }
-    gifEl.style.display = 'none';
-    gifEl.style.opacity = '';
-    resetBubbleFont();
-    var els = [labelEl, amountEl, hintEl];
-    for (var i = 0; i < 3; i++) {
-      var el = els[i];
-      var ln = lines && lines[i];
-      if (ln) {
-        el.style.display = '';
-        el.className = (BUBBLE_STYLE_CLASS[ln.s] || 'dshwv-label') + (ln.w ? ' dshwv-wrap' : '');
-        el.textContent = ln.t;
-        el.style.color = ln.c || '';
-      } else {
-        el.style.display = 'none';
-        el.textContent = '';
-        el.style.color = '';
-      }
-    }
-    fitBubbleText();
-  }
+  var bubbleSwapTimer = null, hintFadeTimer = null, lastHintText = null;
+  // 渲染算法（fit / applyLines / gif 状态机与 gifFadeTimer）已移入共享渲染器；这里留同名薄壳，
+  // 保住页面全部调用点（render / show* / hide / updateTimerClock…），行为与抽取前一致
+  function resetBubbleFont() { renderer.resetFont(); }
+  function fitBubbleText() { renderer.fitText(); }
+  function applyBubbleLines(lines) { renderer.applyLines(lines); }
   function setHint(text) {
     if (text === lastHintText) return;
     var first = lastHintText === null;
@@ -1860,7 +1823,7 @@
   function restoreBubbleLines() {
     if (bubbleSwapTimer) { clearTimeout(bubbleSwapTimer); bubbleSwapTimer = null; }
     if (hintFadeTimer) { clearTimeout(hintFadeTimer); hintFadeTimer = null; }
-    if (gifFadeTimer) { clearTimeout(gifFadeTimer); gifFadeTimer = null; }
+    renderer.cancelGifFade();
     lastHintText = null;
     textBox.style.transition = '';
     textBox.style.opacity = '';
@@ -1898,11 +1861,13 @@
       return;
     }
     if (bubbleTimer) { clearTimeout(bubbleTimer); bubbleTimer = null; }
-    if (gifFadeTimer) { clearTimeout(gifFadeTimer); gifFadeTimer = null; }
+    renderer.cancelGifFade();
     bubbleShown = true;
     bubbleRandomActive = false;
     bubbleRemindActive = false;
     bubbleRemindLines = null;
+    bubblePreviewActive = false; // 点鲸鱼本体 = 常规内容接管，试播会话整段作废
+    previewSession = null;
     restoreBubbleLines();
     bubbleBox.classList.add('dshwv-bubble-open');
     bubbleArm(BUBBLE_MS, hideBubble);
@@ -1919,13 +1884,15 @@
   function showTimerBubble(autoHideMs, thenNormal) {
     if (!bubbleOn) return;
     if (bubbleTimer) { clearTimeout(bubbleTimer); bubbleTimer = null; }
-    if (gifFadeTimer) { clearTimeout(gifFadeTimer); gifFadeTimer = null; }
+    renderer.cancelGifFade();
     bubbleShown = true;
     bubbleRandomActive = false;
     bubbleRandomLines = null;
     bubbleRemindActive = false;
     bubbleRemindLines = null;
     bubbleTimerActive = true;
+    bubblePreviewActive = false; // 计时优先级最高：接管后试播会话整段作废
+    previewSession = null;
     restoreBubbleLines();
     applyBubbleLines(timerLines());
     timerClockText = timerFinished ? '' : fmtClock(timerRemainMs());
@@ -1954,6 +1921,9 @@
     bubbleRemindLines = null;
     bubbleTimerActive = false;
     timerClockText = '';
+    // 试播会话与气泡同生共死：自动收起 / 手动点收都整段作废
+    bubblePreviewActive = false;
+    previewSession = null;
     // 「时间到」提示收起后回到普通状态（计时已结束，模式保留便于重新开始）；
     // 动作条与气泡同生共死，否则气泡没了按钮还浮在那儿
     timerDoneActions.classList.remove('dshwv-actions-open');
@@ -1961,7 +1931,7 @@
     bubbleShown = false;
     bubbleBox.classList.remove('dshwv-bubble-open');
     // gif 靠 CSS opacity 淡出；display:none 会跳过过渡，等淡出完成再隐藏
-    gifFadeTimer = setTimeout(function () { gifFadeTimer = null; gifEl.style.display = 'none'; }, 240);
+    renderer.fadeOutGif(240);
   }
 
   // —— 气泡 TTL 补收（参考 DSH 网页版同类方案）——
@@ -2071,6 +2041,9 @@
       timerClockText = timerFinished ? '' : fmtClock(timerRemainMs());
     } else if (bubbleRemindActive && bubbleRemindLines) {
       applyBubbleLines(bubbleRemindLines);
+    } else if (bubblePreviewActive && previewSession) {
+      // 试播会话兜底：render() 被余额刷新等高频路径触发时保持会话当前步内容
+      applyBubbleLines(previewSession.steps[previewSession.idx]);
     } else if (bubbleRandomActive && bubbleRandomLines) {
       applyBubbleLines(bubbleRandomLines);
     } else {
@@ -2128,9 +2101,9 @@
       if (changed && !currencyChanged) {
         if (!manual && !firstBalance) {
           // 自动刷新发现余额变动：气泡弹出，0.3s 后数字滚动
-          // 峰谷提醒优先，避免被余额气泡覆盖；用户正在看随机/拖拽台词时也不顶掉
+          // 峰谷提醒优先，避免被余额气泡覆盖；用户正在看随机/拖拽/试播台词时也不顶掉
           // （那是显式交互，余额变动不紧急，点一下鲸鱼随时能看），数字滚动照常进行
-          if (!bubbleRemindActive && !bubbleRandomActive) showBubble();
+          if (!bubbleRemindActive && !bubbleRandomActive && !bubblePreviewActive) showBubble();
           state.status = 'changing';
           if (animDelayTimer) clearTimeout(animDelayTimer);
           animDelayTimer = setTimeout(function () {
@@ -2286,7 +2259,7 @@
     timeBubbleOn = !!v;
     timeToggle.checked = timeBubbleOn;
     saveCfg();
-    if (bubbleShown && !bubbleRandomActive) labelEl.textContent = defaultLabelText();
+    if (bubbleShown && !bubbleRandomActive && !bubblePreviewActive) labelEl.textContent = defaultLabelText();
   }
   function setPeakRemindOn(v) {
     peakRemindOn = !!v;
@@ -2426,8 +2399,8 @@
     if (typeof cfg.timeBubbleOn === 'boolean') {
       timeBubbleOn = cfg.timeBubbleOn;
       timeToggle.checked = timeBubbleOn;
-      // 气泡正显示且未切随机台词时，即时更新首行报时文案
-      if (bubbleShown && !bubbleRandomActive) labelEl.textContent = defaultLabelText();
+      // 气泡正显示且未切随机/试播台词时，即时更新首行报时文案
+      if (bubbleShown && !bubbleRandomActive && !bubblePreviewActive) labelEl.textContent = defaultLabelText();
     }
     if (typeof cfg.peakRemindOn === 'boolean') {
       peakRemindOn = cfg.peakRemindOn;
@@ -3250,6 +3223,7 @@
   });
   whaleApi.onConfig(function (cfg) { applyConfig(cfg); });
   whaleApi.onModels(function (data) { handleModels(data); });
+  whaleApi.onQuotePreview(function (data) { showQuotePreviewBubble(data); });
   whaleApi.onSounds(function (data) {
     // 设置页导入/删除自定义音效后宿主重推；当前正用自定义音色时立即换源，
     // 提醒音与音色无关，每次都要重建（导入即生效、删除即静音）

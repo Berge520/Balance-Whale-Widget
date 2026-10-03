@@ -2,6 +2,7 @@
 import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import type { AlertRole, AssetsApplyResult, AssetsExportResult, AssetsPreviewResult, BackupPreviewResult, BubbleMeta, CodexSummaryResult, CodexWindow, CodexWindows, DshBackupListResult, DshBackupSnapshot, DshDiagnoseFinding, DshDiagnoseItem, DshDiagnoseResult, DshDumpResult, DshExportPreviewResult, DshHostCompatCheckResult, DshHostCompatVerdict, DshIsolateCandidate, DshIsolateCandidatesResult, DshIsolatePlan, DshMarketCatalogResult, DshMarketInstallResult, DshMarketInstalledEntry, DshMarketPingEntry, DshMarketPlugin, DshMarketRegistryLatestEntry, DshMarketRegistryLatestResult, DshMarketStatusResult, DshMarketUninstallResult, DshMarketUpdateEntry, DshPatchItem, DshPatchListResult, DshUsageResult, DownloadProgress, LedgerDetailDay, LedgerDetailEntry, ModelUsageRow, SharedSkinList, SharedSoundItem, SharedSoundList, SkinGallery, SkinMeta, SkinPackList, SoundMeta, SoundRole, WhaleMailSecrets, WhaleModel, WhaleModelRow, WhaleModelTemplate, WhalePriceModel, WhaleServices, WhaleTokenPrice } from './types/services'
 import SkinCropper from './components/SkinCropper.vue'
+import BubblePreview from './components/BubblePreview.vue'
 import SoundTrimmer from './components/SoundTrimmer.vue'
 import FirstRunGuide from './components/FirstRunGuide.vue'
 import UsageChart from './components/UsageChart.vue'
@@ -185,7 +186,7 @@ const SEARCH_INDEX: Record<string, { label: string; tab: TabKey; keys: string }>
   // （cardOn 走 searchHits，不在索引里就等于命中不了）。别再漏。
   assetsSharedSkins: { label: '共享形象', tab: 'assets', keys: '共享 角色 形象 下载 选用 预览 缩略图' },
   assetsSharedSounds: { label: '共享音效', tab: 'assets', keys: '共享 音效 声音 下载 选用 试听 角色 段' },
-  quotes: { label: '文案', tab: 'look', keys: '台词 文案 台词库 提醒文案 随机 权重 报时 动图 台词组' },
+  quotes: { label: '文案', tab: 'look', keys: '台词 文案 台词库 提醒文案 随机 权重 报时 动图 台词组 预览' },
   usage: { label: '用量与账本', tab: 'usage', keys: '用量 趋势 账本 历史 区间 导出 csv 导入 校准 额度 单价 模型占比 明细 币种 汇率 保留' },
   notify: { label: '提醒与通知', tab: 'usage', keys: '提醒 通知 系统通知 邮件 smtp 预算 低余额 波动 免打扰 计时 倒计时 休息 预警 阈值 端口 ssl tls 直连 账号 授权码 发件人 收件人 主题 前缀 停留 切换' },
   models: { label: '模型与余额', tab: 'usage', keys: '模型 余额 提供商 厂商 刷新 api key 额度 主显示 密钥 凭据 token 名称 类型 币种 接口 地址 base url scale 认证 字段 路径 取值 倍数 重置 提醒 阈值' },
@@ -6613,6 +6614,9 @@ function quoteGroupAdd() {
 }
 function quoteGroupDel(i: number) {
   cfg.quotes.groups.splice(i, 1)
+  // 预览选中下标跟着组列表走：删的是当前选中组则清空预览，删前面的则前移一位
+  if (quotePreviewIdx.value === i) quotePreviewIdx.value = null
+  else if (quotePreviewIdx.value !== null && quotePreviewIdx.value > i) quotePreviewIdx.value -= 1
 }
 // 卡头预览：一眼看出每组里有什么，免得逐个展开 textarea 找台词。
 // text 取首句截断（占位符原样显示，不做替换——这里只做识别不做渲染）；image 数气泡图张数要等宿主回填，这里只给文字
@@ -6632,7 +6636,101 @@ function quoteGroupMove(i: number, d: number) {
   if (j < 0 || j >= cfg.quotes.groups.length) return
   const [g] = cfg.quotes.groups.splice(i, 1)
   cfg.quotes.groups.splice(j, 0, g)
+  // 预览选中跟着被移动的组走
+  if (quotePreviewIdx.value === i) quotePreviewIdx.value = j
+  else if (quotePreviewIdx.value === j) quotePreviewIdx.value = i
 }
+
+// —— 台词预览：用与悬浮窗同一个渲染器真渲染 ——
+// 点组上的「预览」选中该组，编辑实时跟手（computed 每次给新行模型，渲染器整体重画）。
+// 预览不取实时数据：card 组与占位符都用写死的示例值，那是挂件的运行时行为
+type PreviewLines = Array<{ t: string; s: 'A' | 'B' | 'P' | 'C'; c?: string; w?: boolean } | null> | { gif: true; src?: string }
+const quotePreviewIdx = ref<number | null>(null)
+// 组内台词按顺序逐条预览（真机是组内随机抽一条，这里顺序过一遍是为了每条都能检查排版）
+const quotePreviewLineIdx = ref(0)
+function quoteGroupTogglePreview(i: number) {
+  if (quotePreviewIdx.value === i) { quotePreviewIdx.value = null; return }
+  quotePreviewIdx.value = i
+  quotePreviewLineIdx.value = 0
+}
+// 当前选中组的文本行（card / image 组为空，预览导航随之隐藏）
+const quotePreviewGroup = computed<QuoteGroupEdit | null>(() => {
+  const i = quotePreviewIdx.value
+  if (i === null) return null
+  return cfg.quotes.groups[i] || null
+})
+const quotePreviewTextLines = computed<string[]>(() => {
+  const g = quotePreviewGroup.value
+  if (!g || g.kind !== 'text') return []
+  return String(g.lines || '').split('\n').map(s => s.trim()).filter(Boolean)
+})
+function quotePreviewNext() {
+  const n = quotePreviewTextLines.value.length
+  if (n) quotePreviewLineIdx.value = (quotePreviewLineIdx.value + 1) % n
+}
+// 点预览区切换：仅多行文本组响应（单行 / card / image 没有可切的条目）
+const quotePreviewStageClickable = computed(() => quotePreviewTextLines.value.length > 1)
+// —— 预览位置：设置页（共享渲染器）还是挂件气泡（试播会话）——
+// 挂件气泡模式发**整组**台词：一屏一条，悬浮页点气泡按顺序翻，末条再点收起；
+// card 组是一屏三行的固定卡、text 组每行台词各占一屏；image 组气泡图在挂件进程里发不过去
+type PreviewStep = Array<{ t: string; s: 'A' | 'B' | 'P' | 'C'; c?: string; w?: boolean } | null>
+const quotePreviewTarget = ref<'stage' | 'widget'>('stage')
+const quotePreviewSteps = computed<PreviewStep[] | null>(() => {
+  const g = quotePreviewGroup.value
+  if (!g || g.kind === 'image') return null
+  const style = g.kind === 'card' ? 'A' : (g.style === 'B' ? 'B' : 'A')
+  if (g.kind === 'card') {
+    return [[{ t: '当前时间段为: {peak}', s: 'A' }, { t: '{balance}', s: 'P' }, { t: '今日约 {today} · 距高峰 {next}', s: 'C', w: true }]]
+  }
+  const lines = quotePreviewTextLines.value
+  if (!lines.length) return null
+  return lines.map((t) => [null, { t, s: style, w: style === 'A' }, null] as PreviewStep)
+})
+function quoteWidgetPreview() {
+  const steps = quotePreviewSteps.value
+  if (!steps) return
+  try {
+    const r = services.quotePreview?.({ steps })
+    if (r && !r.ok) quoteFlashShow(String(r.error || '试播失败'), true)
+    else if (r && r.ok) quoteFlashShow('已发到挂件，点挂件气泡逐条翻看，末条再点收起')
+  } catch (err: any) {
+    quoteFlashShow('试播失败：' + String(err?.message || err), true)
+  }
+}
+// 切到「挂件气泡」档：有可发内容就直接发（少点一次「发送试播」），没有则停留在提示文案
+function quoteSwitchToWidget() {
+  quotePreviewTarget.value = 'widget'
+  if (quotePreviewSteps.value) quoteWidgetPreview()
+}
+// 卡片示例：按悬浮窗余额卡（buildGroup1 的 DeepSeek 分支）的三行结构写死
+const quoteCardPreviewLines: PreviewLines = [
+  { t: '当前时间段为:', s: 'A' },
+  { t: '空闲时段', s: 'P', c: '#2fa24c' },
+  { t: '今日约 ¥ 1.23 · 距高峰 42 分钟', s: 'C', w: true },
+]
+const quotePreviewLines = computed<PreviewLines | null>(() => {
+  const i = quotePreviewIdx.value
+  if (i === null) return null
+  const g = cfg.quotes.groups[i]
+  if (!g) return null
+  if (g.kind === 'image') return { gif: true, src: '' }
+  if (g.kind === 'card') return quoteCardPreviewLines
+  const lines = quotePreviewTextLines.value
+  if (!lines.length) return null
+  // 越界兜底：编辑中删行后 idx 可能超尾，夹回有效区间
+  const li = Math.min(quotePreviewLineIdx.value, lines.length - 1)
+  const first = lines[li]
+  // 占位符替换成示例值（认不出的原样保留，与悬浮窗 renderLinePlaceholders 同口径）
+  const t = first.replace(/\{(\w+)\}/g, (m, k) => {
+    if (k === 'balance') return '¥ 12.34'
+    if (k === 'today') return '¥ 1.23'
+    if (k === 'peak') return '空闲时段'
+    if (k === 'next') return '42 分钟'
+    return m
+  })
+  // 文本组与悬浮窗 textGroupLines 同构：单行居中，A 允许换行、B 不换行
+  return [null, { t, s: g.style, w: g.style === 'A' }, null]
+})
 // 保存：按行拆开整份交给宿主清洗（去空白 / 丢空行 / 限长 / 权重压到 1–999 / 丢掉没台词的文本组），
 // 再回读一次拿到清洗后的结果
 function saveQuotes() {
@@ -8464,6 +8562,8 @@ onUnmounted(() => {
             </select>
             <span v-if="quoteGroupPreview(g)" class="quote-group-preview">{{ quoteGroupPreview(g) }}</span>
             <span class="quote-group-sp"></span>
+            <button class="export-btn utils-btn" :class="quotePreviewIdx === i ? 'utils-primary' : 'utils-outline'"
+                    type="button" @click="quoteGroupTogglePreview(i)">预览</button>
             <button class="export-btn utils-btn utils-outline" type="button" :disabled="i === 0" title="上移" @click="quoteGroupMove(i, -1)">↑</button>
             <button class="export-btn utils-btn utils-outline" type="button" :disabled="i === cfg.quotes.groups.length - 1" title="下移" @click="quoteGroupMove(i, 1)">↓</button>
             <button class="export-btn utils-btn utils-outline" type="button" @click="quoteGroupDel(i)">删除</button>
@@ -8482,6 +8582,49 @@ onUnmounted(() => {
         </div>
         <button class="export-btn utils-btn utils-outline" type="button" :disabled="cfg.quotes.groups.length >= QUOTE_GROUP_MAX"
                 @click="quoteGroupAdd()">{{ cfg.quotes.groups.length >= QUOTE_GROUP_MAX ? `已达上限（${QUOTE_GROUP_MAX} 组）` : '+ 添加组' }}</button>
+      </div>
+
+      <!-- 台词真预览：共享渲染器真渲染（同一套 DOM / 字号自适应 / 主题变量）。
+           不选中组时给引导文案；预览不取实时数据，示例值仅供参考。
+           文本组给「下一条」导航：真机组内是随机抽一条，顺序逐条过是为了每条都检查得到 -->
+      <div class="field">
+        <div class="label quote-preview-label">
+          <span>预览位置</span>
+          <div class="range-tabs quote-preview-tabs">
+            <button class="export-btn utils-btn range-tab quote-preview-tab" type="button"
+                    :class="quotePreviewTarget === 'stage' ? 'utils-primary' : 'utils-outline'"
+                    @click="quotePreviewTarget = 'stage'">设置页</button>
+            <button class="export-btn utils-btn range-tab quote-preview-tab" type="button"
+                    :class="quotePreviewTarget === 'widget' ? 'utils-primary' : 'utils-outline'"
+                    title="把整组台词发到挂件气泡，点挂件气泡按顺序逐条翻看（占位符换成实时值）"
+                    @click="quoteSwitchToWidget()">挂件气泡</button>
+          </div>
+        </div>
+        <BubblePreview v-if="quotePreviewTarget === 'stage' && quotePreviewLines" :lines="quotePreviewLines" :theme="cfg.theme"
+                       :title="quotePreviewStageClickable ? '点击切换下一条台词' : ''"
+                       @next="quotePreviewStageClickable && quotePreviewNext()" />
+        <p v-if="quotePreviewTarget === 'widget'" class="hint quote-preview-empty">
+          点挂件气泡翻下一条，末条再点收起；挂件未显示时先在设置页显示挂件。
+          <button v-if="quotePreviewSteps" class="export-btn utils-btn utils-primary quote-preview-next" type="button"
+                  @click="quoteWidgetPreview()">发送试播</button>
+        </p>
+        <p v-if="quotePreviewTarget === 'stage' && !quotePreviewLines" class="hint quote-preview-empty">
+          点某组右侧的「预览」在这里看到它真显示在气泡里的样子（与挂件同一套渲染）。
+        </p>
+        <!-- 元信息跟着预览体走：台词全删光时 quotePreviewLines 变 null，这行也一起消失 -->
+        <div v-if="quotePreviewTarget === 'stage' && quotePreviewLines !== null" class="quote-preview-meta">
+          <p class="hint quote-preview-nav">
+            <template v-if="quotePreviewTextLines.length > 1">
+              第 {{ Math.min(quotePreviewLineIdx, quotePreviewTextLines.length - 1) + 1 }} / {{ quotePreviewTextLines.length }} 条
+              <button class="export-btn utils-btn utils-outline quote-preview-next" type="button" @click="quotePreviewNext()">下一条</button>
+            </template>
+            <template v-else-if="quotePreviewTextLines.length === 1">单条台词</template>
+          </p>
+          <p class="hint quote-preview-tip">
+            <span v-if="quotePreviewGroup && quotePreviewGroup.kind === 'card'">卡片内容按当前余额 / 时段现算，这里显示示例值。</span>
+            编辑实时跟手，点「预览」取消选中。真机播到这一组时是<b>随机抽一条</b>，不是按顺序轮播。
+          </p>
+        </div>
       </div>
       <p class="hint">
         台词里可写占位符插入实时数值：<b>{balance}</b> 当前余额、<b>{today}</b> 今日已用、<b>{peak}</b> 当前时段、
@@ -13458,6 +13601,12 @@ input[type='checkbox'] {
   width: auto;
   flex: 0 0 auto;
 }
+/* 表头按钮不缩不折行：utils-btn 基类没有 nowrap，行一挤「预览」「删除」会被压成竖排字。
+   空间不够时该让步的是内容预览灰字（它有 ellipsis），不是按钮 */
+.quote-group-head .export-btn {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
 .quote-w {
   display: flex;
   align-items: center;
@@ -13485,6 +13634,41 @@ input[type='checkbox'] {
 }
 .quote-group-tip {
   margin: 0 0 8px;
+}
+/* 台词预览：空态提示贴左边距与组列表对齐 */
+.quote-preview-empty {
+  margin: 4px 0 0;
+}
+/* 预览元信息：导航行（计数 + 下一条）与说明行各占一行，不再挤在一起折行悬半句 */
+.quote-preview-meta {
+  margin-top: 2px;
+}
+/* 预览位置双档切换：label 行与档位按钮并排，档位不用 range-tab 的 flex:1 撑满 */
+.quote-preview-label {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.quote-preview-tabs {
+  flex: 0 0 auto;
+}
+.quote-preview-tab {
+  flex: 0 0 auto;
+  padding: 2px 14px;
+  font-size: 12px;
+}
+.quote-preview-meta .hint {
+  margin: 2px 0 0;
+}
+.quote-preview-nav {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.quote-preview-next {
+  flex: 0 0 auto;
+  padding: 1px 10px;
+  font-size: 12px;
 }
 .sound-file {
   flex: 1;

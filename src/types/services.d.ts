@@ -1988,6 +1988,8 @@ export interface WhaleServices {
   copyText(text: string): boolean
   redirectHotKeySetting(cmdLabel?: string): boolean
   isWidgetVisible(): boolean
+  // 台词试播到挂件：整组台词按会话发去悬浮页（steps 一屏一条，挂件点气泡顺序翻；挂件未显示时 ok:false）
+  quotePreview(payload: { steps: Array<Array<{ t: string; s: string; c?: string; w?: boolean } | null>> }): { ok: boolean; error?: string }
   // 诊断日志（落盘于 %TEMP%\whale-debug.log，进程被 uTools 结束也不丢）
   getDebugLog(): DebugLogResult
   openLogFile(): { ok: boolean; path: string }
