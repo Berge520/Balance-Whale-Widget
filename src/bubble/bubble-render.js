@@ -11,9 +11,10 @@
  * 本文件不依赖宿主桥接与页面状态：gif 加载失败后的「失败文案」与「气泡是否正开着」
  * 都通过回调（gifFailLines / onGifError）交还宿主页面处理，渲染器只认得自己的 DOM。
  *
- * 与 CSS 的三处副本一致性由 scripts/check-shared.mjs 钉住（改这里必须同步
+ * 与 CSS 的四处副本一致性由 scripts/check-shared.mjs 钉住（改这里必须同步
  * public/floating-bubble.css，反之亦然）：BUBBLE_FONT 字号 ↔ .dshwv-label/amount/period/hint、
- * THEMES.default 配色 ↔ .dshwv-bubble 的变量默认值、下方「/ 1026」注释 ↔ CSS 的 --dshw-u 除数。
+ * THEMES.default 配色 ↔ .dshwv-bubble 的变量默认值、下方「/ 1026」注释 ↔ CSS 的 --dshw-u 除数、
+ * FONT_TIERS ↔ store.js 的 QUOTE_FONT_TIERS。
  */
 
 // 气泡配色预设：气泡颜色全部走 CSS 变量，换主题只重写变量、不重建 DOM。
@@ -31,6 +32,10 @@ export const BUBBLE_STYLE_CLASS = { A: 'dshwv-label', B: 'dshwv-amount', P: 'dsh
 // 长文案换行后可能撑出气泡，这里按可用区域测量后等比缩小字号
 // （只缩不放，正常内容保持原字号）；单位 u = 挂件基准 / 1026，与 CSS 的 --dshw-u 一致
 export const BUBBLE_FONT = { 'dshwv-label': 72, 'dshwv-amount': 140, 'dshwv-period': 114, 'dshwv-hint': 72 };
+
+// 台词库 v2 的字号档表（fz 取 1~11）：与 public/preload/lib/store.js 的 QUOTE_FONT_TIERS
+// 是同一张表的两份副本，由 scripts/check-shared.mjs 钉住，改任何一边必须同步另一边
+export const FONT_TIERS = [26, 32, 40, 48, 58, 66, 72, 90, 104, 114, 140];
 
 // 气泡内文字可用区域（单位 u = 挂件基准/1026）。与 CSS 里 .dshwv-bubble 的放大倍数(1.18)保持一致：
 // 圆圈放大多少，这里就放大多少，字号才会跟着变大而不是被压小。
@@ -52,6 +57,11 @@ export function buildBubbleDom(opts) {
   // 常驻说明行默认就允许换行：它是三行里最长的一行，nowrap 会撑宽、把三行一起缩小（见 fitText）
   hintEl.className = 'dshwv-hint dshwv-wrap';
   textBox.appendChild(labelEl); textBox.appendChild(amountEl); textBox.appendChild(hintEl);
+  // 台词库 v2 的行/段容器：与三行结构互斥显示，平时隐藏。段点击（链接）由宿主页面接
+  var rowsBox = document.createElement('div');
+  rowsBox.className = 'dshwv-rows';
+  rowsBox.style.display = 'none';
+  textBox.appendChild(rowsBox);
 
   var bubbleBox = document.createElement('div');
   bubbleBox.className = 'dshwv-bubble';
@@ -68,7 +78,7 @@ export function buildBubbleDom(opts) {
   gifEl.draggable = false;
   bubbleBox.appendChild(gifEl);
   bubbleBox.appendChild(textBox);
-  return { bubbleBox: bubbleBox, gifEl: gifEl, textBox: textBox, labelEl: labelEl, amountEl: amountEl, hintEl: hintEl };
+  return { bubbleBox: bubbleBox, gifEl: gifEl, textBox: textBox, labelEl: labelEl, amountEl: amountEl, hintEl: hintEl, rowsBox: rowsBox };
 }
 
 // 渲染器工厂。opts：
@@ -81,7 +91,7 @@ export function createBubbleRenderer(opts) {
   var rootEl = opts.rootEl;
   var defaultGifUrl = opts.defaultGifUrl;
   var dom = buildBubbleDom({ defaultGifUrl: defaultGifUrl });
-  var gifEl = dom.gifEl, labelEl = dom.labelEl, amountEl = dom.amountEl, hintEl = dom.hintEl;
+  var gifEl = dom.gifEl, labelEl = dom.labelEl, amountEl = dom.amountEl, hintEl = dom.hintEl, rowsBox = dom.rowsBox;
 
   var gifFailed = false;
   // 当前 gifEl.src 对应的「原始值」：img.src 读出来是绝对 URL（相对路径会被解析成 file://…），
@@ -110,26 +120,41 @@ export function createBubbleRenderer(opts) {
     labelEl.style.fontSize = '';
     amountEl.style.fontSize = '';
     hintEl.style.fontSize = '';
+    var segs = rowsBox.querySelectorAll('.dshwv-seg');
+    for (var i = 0; i < segs.length; i++) {
+      segs[i].style.fontSize = '';
+      segs[i].style.height = '';
+    }
   }
   // 量出文本块的真实占位：宽取各行「内容宽度」的最大值（scrollWidth 能反映 nowrap 溢出的宽度，
   // 而 offsetWidth 会被绝对定位的 shrink-to-fit 上限截断），高为可见各行 offsetHeight 之和。
   // 均用布局尺寸而非 getBoundingClientRect：后者会带上 Q 弹的 scaleY(.88)/scaleX(1.05)
-  // 与贴左镜像的 scaleX(-1)，导致测量失真。
+  // 与贴左镜像的 scaleX(-1)，导致测量失真。v2 的行是段容器（dshwv-row），行本身无字号，
+  // 宽高都落在段元素上，所以按「行内全部段」量
   function measureText(els) {
     var w = 0, h = 0, i;
-    for (i = 0; i < 3; i++) {
+    for (i = 0; i < els.length; i++) {
       var el = els[i];
       if (el.style.display === 'none') continue;
+      if (el.classList.contains('dshwv-row')) {
+        var segs = el.querySelectorAll('.dshwv-seg');
+        for (var j = 0; j < segs.length; j++) {
+          if (segs[j].scrollWidth > w) w = segs[j].scrollWidth;
+          h += segs[j].offsetHeight;
+        }
+        continue;
+      }
       if (el.scrollWidth > w) w = el.scrollWidth;
       h += el.offsetHeight;
     }
     return { w: w, h: h };
   }
-  function fitText() {
+  // els 排布：三行结构传 [label, amount, hint]；rows 结构传 rowsBox 的可见行（applyRows 里缓存）
+  function fitText(els) {
     if (gifEl.style.display === 'block') return;
     var u = (rootEl.clientWidth || 0) / 1026;
     if (!u) return;
-    var els = [labelEl, amountEl, hintEl];
+    if (!els) els = [labelEl, amountEl, hintEl];
     var availW = FIT_W * u, availH = FIT_H * u;
     var i, k = 1, pass, m;
     for (pass = 0; pass < 3; pass++) {
@@ -138,12 +163,24 @@ export function createBubbleRenderer(opts) {
       var f = Math.min(1, availW / m.w, availH / m.h);
       if (f > 0.995) return;
       k = Math.max(FIT_MIN, k * f);
-      for (i = 0; i < 3; i++) {
-        var base = BUBBLE_FONT[String(els[i].className).split(' ')[0]];
-        if (base) els[i].style.fontSize = 'calc(var(--dshw-u) * ' + (base * k).toFixed(1) + ')';
+      for (i = 0; i < els.length; i++) {
+        var el = els[i];
+        if (el.classList.contains('dshwv-row')) {
+          var segs = el.querySelectorAll('.dshwv-seg');
+          for (var j = 0; j < segs.length; j++) shrinkSeg(segs[j], k);
+          continue;
+        }
+        var base = BUBBLE_FONT[String(el.className).split(' ')[0]];
+        if (base) el.style.fontSize = 'calc(var(--dshw-u) * ' + (base * k).toFixed(1) + ')';
       }
       if (k <= FIT_MIN + 0.001) return;
     }
+  }
+  // 段的当前基准字号记在 dataset（applyRows 写入），缩放只乘系数，重复 fit 不叠加
+  function shrinkSeg(seg, k) {
+    var base = parseFloat(seg.dataset.fz || '0');
+    if (!base) return;
+    seg.style.fontSize = 'calc(var(--dshw-u) * ' + (base * k).toFixed(1) + ')';
   }
   // 应用 3 行模型 { t, s: 'A'|'B'|'P'|'C', c, w }，或 { gif: true, src } 只显示动图。
   // 行序固定为 标签 / 金额 / 说明，s 决定套哪套字号样式
@@ -160,6 +197,7 @@ export function createBubbleRenderer(opts) {
         labelEl.style.display = 'none';
         amountEl.style.display = 'none';
         hintEl.style.display = 'none';
+        rowsBox.style.display = 'none';
         return;
       }
     }
@@ -167,6 +205,8 @@ export function createBubbleRenderer(opts) {
     gifEl.style.display = 'none';
     gifEl.style.opacity = '';
     resetFont();
+    // v2 行组 { rows }：与三行结构互斥，走段级渲染（含图片/链接/占位段）
+    if (lines && lines.rows) { applyRows(lines.rows); return; }
     var els = [labelEl, amountEl, hintEl];
     for (var i = 0; i < 3; i++) {
       var el = els[i];
@@ -182,7 +222,105 @@ export function createBubbleRenderer(opts) {
         el.style.color = '';
       }
     }
+    rowsBox.style.display = 'none';
     fitText();
+  }
+
+  // —— v2 行×段渲染 ——
+  // rows 形态与 store.js normRows 出口一致：行 = { segs, w? }（字符串/数组输入已在清洗层归一）。
+  // 回调缺省时对应段整段丢（试播载荷不含图段是常态，设置页真预览才传全）：
+  //   bubbleSrc(img) 图片段取图地址（下标进 customBubbles；缺省 = 内置图）
+  //   modelText(model) 占位段现算文本（balance/today/peak/next → 本机实时值）
+  //   onLinkClick(url) 链接段点击（渲染器不绑事件，只标 dataset.url，宿主接 click）
+  // fit 缩放系数只在 applyRows 内部生效（shrinkSeg 按 dataset 基准值乘系数），不写回数据
+  var visRows = [];
+  function applyRows(rows) {
+    labelEl.style.display = 'none';
+    amountEl.style.display = 'none';
+    hintEl.style.display = 'none';
+    var needFit = false;
+    var frag = document.createDocumentFragment();
+    for (var i = 0; i < rows.length && i < 30; i++) {
+      var row = normalizeRowInput(rows[i]);
+      if (!row) continue;
+      var segs = row.segs;
+      // br:1 的段后硬换行，行内剩下的段都丢（与 store.js normSeg 注释同口径）
+      var cut = segs.length;
+      for (var s = 0; s < segs.length; s++) {
+        if (segs[s].br === 1) { cut = s + 1; break; }
+      }
+      var rowEl = document.createElement('div');
+      rowEl.className = 'dshwv-row' + (row.w ? ' dshwv-wrap' : '');
+      var made = false;
+      for (var s2 = 0; s2 < cut && s2 < 12; s2++) {
+        var segEl = buildSeg(segs[s2]);
+        if (segEl) { rowEl.appendChild(segEl); made = true; }
+      }
+      if (!made) continue;
+      frag.appendChild(rowEl);
+    }
+    rowsBox.innerHTML = '';
+    // 先数好再搬：appendChild 会把 fragment 的子节点整体移进 rowsBox，之后再查
+    // frag.childNodes.length 恒为 0，rowsBox 会被永久藏住（试播气泡空白只剩壳的根因）
+    var rowCount = frag.childNodes.length;
+    rowsBox.appendChild(frag);
+    rowsBox.style.display = rowCount ? 'block' : 'none';
+    visRows = [];
+    var kids = rowsBox.children;
+    for (var k2 = 0; k2 < kids.length; k2++) visRows.push(kids[k2]);
+    if (rowsBox.style.display === 'block') { needFit = true; }
+    if (needFit) fitText(visRows);
+  }
+  // 行输入双认：数组 = 段列表（清洗层已保证对象形态，这里只兜字符串），字符串 = 单 text 段
+  function normalizeRowInput(row) {
+    if (typeof row === 'string') return { segs: [{ type: 'text', t: row, fz: 7 }] };
+    if (Array.isArray(row)) return { segs: row };
+    if (row && typeof row === 'object' && Array.isArray(row.segs)) return row;
+    return null;
+  }
+  function buildSeg(seg) {
+    if (!seg || typeof seg !== 'object') return null;
+    if (seg.type === 'image') {
+      var src = opts.bubbleSrc ? opts.bubbleSrc(seg.img) : null;
+      if (!src) return null;
+      var img = document.createElement('img');
+      img.className = 'dshwv-seg dshwv-seg-img';
+      img.alt = '';
+      img.draggable = false;
+      // 图高参与 fit 缩放：按段基准记 dataset.fz（复用 shrinkSeg 通道），超高时图也能缩
+      var h = Number(seg.h) > 0 ? Number(seg.h) : 96;
+      img.dataset.fz = String(h);
+      img.style.height = 'calc(var(--dshw-u) * ' + h + ')';
+      img.src = src;
+      return img;
+    }
+    var isLink = seg.type === 'link';
+    var el = document.createElement('span');
+    el.className = 'dshwv-seg' + (isLink ? ' dshwv-link' : '');
+    if (isLink) el.dataset.url = String(seg.url || '');
+    var text = String(isLink ? (seg.t || seg.url || '') : (seg.t || ''));
+    if (seg.type === 'model') {
+      text = opts.modelText ? String(opts.modelText(seg.model) || '') : '';
+      if (!text) return null;
+    }
+    if (!text) return null;
+    var fz = FONT_TIERS[(Math.round(Number(seg.fz)) || 7) - 1] || 72;
+    el.dataset.fz = String(fz);
+    el.style.fontSize = 'calc(var(--dshw-u) * ' + fz + ')';
+    el.textContent = text;
+    applyTextStyle(el, seg);
+    return el;
+  }
+  function applyTextStyle(el, seg) {
+    if (seg.c) el.style.color = String(seg.c);
+    if (seg.g) {
+      el.style.backgroundImage = String(seg.g);
+      el.style.backgroundClip = 'text';
+      el.style.webkitBackgroundClip = 'text';
+      el.style.color = 'transparent';
+    }
+    if (seg.b === 1) el.style.fontWeight = '700';
+    if (seg.i === 1) el.style.fontStyle = 'italic';
   }
   function cancelGifFade() {
     if (gifFadeTimer) { clearTimeout(gifFadeTimer); gifFadeTimer = null; }
@@ -201,5 +339,6 @@ export function createBubbleRenderer(opts) {
     cancelGifFade: cancelGifFade,
     fadeOutGif: fadeOutGif,
     isGifDisplayed: function () { return gifEl.style.display === 'block'; },
+    visibleRows: function () { return visRows; },
   };
 }

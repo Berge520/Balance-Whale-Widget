@@ -1,9 +1,10 @@
 /*
- * 素材包（形象 + 音效 + 气泡图）导出 / 导入（CommonJS）。
+ * 素材包（形象 + 音效 + 气泡图 + 台词组）导出 / 导入（CommonJS）。
  *
  *  - 导出：把 whale-skins / whale-sounds / whale-bubbles 三个目录里的文件打成一个单文件包
- *    （.whaleassets），换机器或重装时一次带走，不用逐项重导。
- *  - 导入：先解析出预览（几张形象 / 几段音效 / 几张气泡图 / 导出时间），由设置页勾选后再写入。
+ *    （.whaleassets），换机器或重装时一次带走，不用逐项重导。台词组随包带走（纯 JSON）。
+ *  - 导入：先解析出预览（几张形象 / 几段音效 / 几张气泡图 / 几个台词组 / 导出时间），
+ *    由设置页勾选后再写入。台词组的配置写入不在本模块（assets 只搬 JSON，落库归 settings）。
  *
  * 为什么不用 zip：宿主 preload 跑在渲染进程，能用的只有 Node 内置模块，
  * 自己写 zip 要处理 CRC32 与中央目录，出错面比收益大。这里用最简单的自定义容器：
@@ -35,12 +36,15 @@ function stamp() {
 }
 
 // ── 导出 ──
-function exportAssets() {
+// quoteGroups 由调用方（settings.js）传入当前台词组：assets 是资源叶模块，不读配置
+// （引 store 会让「打包素材」反向依赖业务配置，分层变味）。纯 JSON 进清单，不占 blob
+function exportAssets(quoteGroups) {
   const skinItems = skins.exportItems()
   const soundItems = sounds.exportItems()
   const bubbleItems = bubbles.exportItems()
-  if (!skinItems.length && !soundItems.length && !bubbleItems.length) {
-    return { ok: false, error: '还没有导入任何素材，先在「资源」页导入形象、音效或气泡图' }
+  const quoteList = Array.isArray(quoteGroups) ? quoteGroups : []
+  if (!skinItems.length && !soundItems.length && !bubbleItems.length && !quoteList.length) {
+    return { ok: false, error: '还没有可导出的素材，先在「资源」页导入形象、音效或气泡图，或在「台词」页配好台词组' }
   }
   let filePath = ''
   try {
@@ -101,6 +105,9 @@ function exportAssets() {
     skins: skinList,
     sounds: soundList,
     bubbles: bubbleList,
+    // 台词组整组带走（含组级 sound 名与行条件 cond）。包里只有 JSON；被引用的音效若想
+    // 跨机可用，需同时勾选「音效」把对应段（若在实播/共享清单里）一并导出
+    quotes: quoteList,
   }
   const jsonBuf = Buffer.from(JSON.stringify(manifest), 'utf8')
   const head = Buffer.alloc(HEAD_BYTES)
@@ -112,10 +119,10 @@ function exportAssets() {
     logErr('[whale][assets] 写入素材包失败', filePath, err && err.message)
     return { ok: false, error: '写入素材包失败：' + errMsg(err) }
   }
-  log('[whale][assets] 导出素材包', { filePath: filePath, skins: skinList.length, sounds: soundList.length, bubbles: bubbleList.length })
+  log('[whale][assets] 导出素材包', { filePath: filePath, skins: skinList.length, sounds: soundList.length, bubbles: bubbleList.length, quotes: quoteList.length })
   return {
     ok: true, path: filePath, exportedAt: manifest.exportedAt,
-    skins: skinList.length, sounds: soundList.length, bubbles: bubbleList.length,
+    skins: skinList.length, sounds: soundList.length, bubbles: bubbleList.length, quotes: quoteList.length,
   }
 }
 
@@ -148,6 +155,9 @@ function parsePack(buf) {
   // bubbles 是后加的清单项：老素材包里没有，缺省即空数组（schema 不必升版 —— 老版本读新包时
   // 只校验 skins/sounds，多出来的 bubbles 会被它忽略）
   const bubbleList = Array.isArray(manifest.bubbles) ? manifest.bubbles : []
+  // quotes 同 bubbles 先例：纯 JSON 数组，不占 blob、不做越界校验；组内容可信度由
+  // 落库时的 normQuotes 清洗兜底（kind/rows/sound/条数上限都在那一层）
+  const quoteList = Array.isArray(manifest.quotes) ? manifest.quotes : []
   if (skinList.some(bad) || soundList.some(bad) || bubbleList.some(bad)) {
     return { error: '素材包已损坏（文件数据越界）' }
   }
@@ -158,6 +168,7 @@ function parsePack(buf) {
       skins: skinList,
       sounds: soundList,
       bubbles: bubbleList,
+      quotes: quoteList,
     },
     dataStart: dataStart,
   }
@@ -198,18 +209,22 @@ function pickAssets() {
       skins: parsed.manifest.skins.length,
       sounds: parsed.manifest.sounds.length,
       bubbles: parsed.manifest.bubbles.length,
+      quotes: parsed.manifest.quotes.length,
     },
     skinNames: parsed.manifest.skins.map((x) => String(x.name || '')).slice(0, 40),
     soundRoles: parsed.manifest.sounds.map((x) => String(x.role || '')),
     bubbleNames: parsed.manifest.bubbles.map((x) => String(x.name || '')).slice(0, 40),
+    quoteCount: parsed.manifest.quotes.length,
   }
 }
 
 function clearPending() { pending = null; return { ok: true } }
 
 // ── 导入：按勾选项写入 ──
-// opts = { skins: boolean, sounds: boolean, bubbles: boolean }
-// 形象与气泡图是「补充」（每张都生成新 id，不动已有的）；音效是「同槽位覆盖」
+// opts = { skins: boolean, sounds: boolean, bubbles: boolean, quotes: boolean }
+// 形象与气泡图是「补充」（每张都生成新 id，不动已有的）；音效是「同槽位覆盖」；
+// 台词组是「追加」：整包组列表原样返回给 settings.js（normQuotes 清洗 + 排到现有组尾部），
+// 本模块不落配置 —— 组里可能引用了包里没带的音效段，写库与推送要和音效勾选联动，放顶层做
 function applyAssets(opts) {
   const o = opts && typeof opts === 'object' ? opts : {}
   if (!pending) return { ok: false, error: '请先选择素材包' }
@@ -221,6 +236,8 @@ function applyAssets(opts) {
   let soundApplied = 0
   let bubbleAdded = 0
   let bubbleSkipped = 0
+  // 台词组只搬运不落库：勾了且包里有，就整包交给返回值（settings.js 负责清洗 + 追加写配置）
+  const quoteList = o.quotes === true && Array.isArray(m.quotes) ? m.quotes : []
 
   if (o.skins === true) {
     for (const it of m.skins) {
@@ -255,16 +272,18 @@ function applyAssets(opts) {
   // 同一类失败（如「最多保留 20 张形象」）会重复几十遍，去重后只提示一次
   const uniq = []
   for (const e of errors) if (uniq.indexOf(e) < 0) uniq.push(e)
-  const ok = skinAdded + soundApplied + bubbleAdded > 0
+  const ok = skinAdded + soundApplied + bubbleAdded + quoteList.length > 0
   if (ok) pending = null
   return {
     ok: ok,
     skins: { added: skinAdded, skipped: skinSkipped },
     sounds: { applied: soundApplied },
     bubbles: { added: bubbleAdded, skipped: bubbleSkipped },
+    // quotes:true 且包里有组时返回整包组列表（清洗在 settings.js），否则不带这个键
+    ...(o.quotes === true && quoteList.length ? { quoteGroups: quoteList } : {}),
     errors: uniq,
     error: uniq[0] || '',
   }
 }
 
-module.exports = { exportAssets, pickAssets, applyAssets, clearPending }
+module.exports = { exportAssets, pickAssets, applyAssets, clearPending, _parsePack: parsePack }

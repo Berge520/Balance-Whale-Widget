@@ -85,3 +85,12 @@
   }
   .dshwv-amount.dshwv-low { color: #e0433f; }
   .dshwv-hint.dshwv-low { color: #e0433f; }
+  /* 台词库 v2 行×段：与三行结构互斥（渲染器 applyRows 开关 display）。
+     行本身无字号，段自带行内字号；链接段单独开 pointer-events（text 容器整体关掉了）
+     并可点，点击处理由宿主页面按 dataset.url 接 */
+  .dshwv-rows { display: none; }
+  .dshwv-row { white-space: nowrap; line-height: 1.2; }
+  .dshwv-row.dshwv-wrap { white-space: normal; max-width: calc(var(--dshw-u) * 660); }
+  .dshwv-seg { white-space: inherit; }
+  .dshwv-seg-img { display: inline-block; vertical-align: middle; max-width: calc(var(--dshw-u) * 660); }
+  .dshwv-link { text-decoration: underline; cursor: pointer; pointer-events: auto; }

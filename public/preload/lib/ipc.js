@@ -254,7 +254,8 @@ function registerIpc() {
     }
   })
 
-  // 挂件菜单请求唤出主窗（设置页）：「显示挂件」模式下唯一入口
+  // 挂件菜单请求唤出主窗（设置页）：「显示挂件」模式下唯一入口。
+  // redirect 分支（主窗不存在）时页面全新加载落默认 Tab
   ipcRenderer.on('whale:open-settings', () => {
     // 1) 主窗还在（如 both/settings 模式，或设置窗已分离）→ 直接唤回
     let shown = false
@@ -264,6 +265,13 @@ function registerIpc() {
     //    showMainWindow 唤不回主窗，必须 redirect 重新「进入插件」（'余额挂件' 是 whale 的指令别名），
     //    由 onPluginEnter 的 redirect 分支显式 showMainWindow（重定向已让插件重新激活）。
     try { utools.redirect('余额挂件', '') } catch (err) { logErr('[whale][ipc] 跳转设置功能失败', err && err.message) }
+  })
+
+  // 台词链接段点击：只认 http(s) —— file:/javascript: 等一律拒掉（shellOpenExternal 可执行任意协议 URL）
+  ipcRenderer.on('whale:open-external', (event, data) => {
+    const url = String(data && data.url || '').trim()
+    if (!/^https?:\/\//i.test(url)) { logErr('[whale][ipc] 拒绝打开非 http(s) 链接', url.slice(0, 80)); return }
+    try { utools.shellOpenExternal(url) } catch (err) { logErr('[whale][ipc] 打开外部链接失败', err && err.message) }
   })
 
   // 挂件菜单请求隐藏挂件：直接销毁窗口（与设置页「隐藏挂件」同一路径），

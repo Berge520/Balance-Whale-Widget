@@ -29,6 +29,7 @@ test('prebuild 同时挂上 sync-version 与 check-shared', () => {
   assert.match(prebuild, /scripts\/sync-version\.mjs/, 'prebuild 少了 sync-version.mjs：版本号不再从 package.json 传播')
   assert.match(prebuild, /scripts\/check-shared\.mjs/, 'prebuild 少了 check-shared.mjs：跨文件副本不再校验')
   assert.match(prebuild, /scripts\/check-dead-settings\.mjs/, 'prebuild 少了 check-dead-settings.mjs：死键体检不再校验')
+  assert.match(prebuild, /scripts\/gen-search-index\.mjs\s+--check/, 'prebuild 少了 gen-search-index.mjs --check：搜索全文索引不再校验新鲜度')
 })
 
 test('prebuild 仍由 build 触发', () => {

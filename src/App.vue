@@ -6,6 +6,9 @@ import BubblePreview from './components/BubblePreview.vue'
 import SoundTrimmer from './components/SoundTrimmer.vue'
 import FirstRunGuide from './components/FirstRunGuide.vue'
 import UsageChart from './components/UsageChart.vue'
+// 卡片「全文」索引：scripts/gen-search-index.mjs 在构建期从模板提取每张卡的可见文本
+// （h2 卡头 + label 字段名），搜索第三档兜底用。模板改了没重新生成会被 prebuild 拦下
+import { CARD_TEXT } from './search-index.gen'
 // GitHub 加速卡（含 hosts 探测 / 源表 / IP 表编辑，逻辑量在本页里数一数二）改按需异步加载：
 // 它只在「帮助」Tab 才渲染，抽成独立 chunk 后 App.vue 首屏包明显变小，其余 Tab 的打开更快。
 // 渲染时机不变（下面模板仍是 v-if="activeTab === 'help'"），首次切到帮助时才去取这段 JS
@@ -176,7 +179,7 @@ const SEARCH_INDEX: Record<string, { label: string; tab: TabKey; keys: string }>
   // keys 覆盖守卫（build-gates）：卡内每个字段名至少要有一个 ≥2 字词出现在 label+keys 里，
   // 缺词会构建红 —— 下面各卡的「生僻字段词」（音量 / 币种 / 授权码 / 写入位置…）就是补欠账补出来的
   look: { label: '挂件外观', tab: 'look', keys: '形象 皮肤 音色 音效 音量 大小 缩放 气泡 主题 报时 点按 播放 界面 深浅色 深色 浅色 暗色 亮色 跟随 uTools 峰谷 文案 随机' },
-  assetsOverview: { label: '资源概览', tab: 'assets', keys: '素材 形象 音效 气泡图 占用 体积 清除 未使用 素材包 导出 导入' },
+  assetsOverview: { label: '资源概览', tab: 'assets', keys: '素材 形象 音效 气泡图 台词组 占用 体积 清除 未使用 素材包 导出 导入' },
   assetsSkins: { label: '导入的形象', tab: 'assets', keys: '形象 皮肤 图片 缩略图 置顶 删除 导入' },
   assetsBubbles: { label: '导入的气泡图', tab: 'assets', keys: '气泡 图 动图 gif 图片 导入 删除' },
   assetsSounds: { label: '导入的音效', tab: 'assets', keys: '音效 声音 按压 释放 提醒音 试听 导入 删除' },
@@ -186,7 +189,7 @@ const SEARCH_INDEX: Record<string, { label: string; tab: TabKey; keys: string }>
   // （cardOn 走 searchHits，不在索引里就等于命中不了）。别再漏。
   assetsSharedSkins: { label: '共享形象', tab: 'assets', keys: '共享 角色 形象 下载 选用 预览 缩略图' },
   assetsSharedSounds: { label: '共享音效', tab: 'assets', keys: '共享 音效 声音 下载 选用 试听 角色 段' },
-  quotes: { label: '文案', tab: 'look', keys: '台词 文案 台词库 提醒文案 随机 权重 报时 动图 台词组 预览' },
+  quotes: { label: '文案', tab: 'look', keys: '台词 文案 台词库 提醒文案 随机 权重 报时 动图 台词组 预览 音效 条件 模板 高级编辑 富文本 行×段 试播' },
   usage: { label: '用量与账本', tab: 'usage', keys: '用量 趋势 账本 历史 区间 导出 csv 导入 校准 额度 单价 模型占比 明细 币种 汇率 保留' },
   notify: { label: '提醒与通知', tab: 'usage', keys: '提醒 通知 系统通知 邮件 smtp 预算 低余额 波动 免打扰 计时 倒计时 休息 预警 阈值 端口 ssl tls 直连 账号 授权码 发件人 收件人 主题 前缀 停留 切换' },
   models: { label: '模型与余额', tab: 'usage', keys: '模型 余额 提供商 厂商 刷新 api key 额度 主显示 密钥 凭据 token 名称 类型 币种 接口 地址 base url scale 认证 字段 路径 取值 倍数 重置 提醒 阈值' },
@@ -210,24 +213,65 @@ const SEARCH_INDEX: Record<string, { label: string; tab: TabKey; keys: string }>
 // 匹配口径：查询按空格拆成多词，**每个词都命中**（AND）才算命中 —— 整句includes会把
 // 「界面 深色」拼成「界面深色」而关键词串里是「界面深浅色…深色」，子串断开、零命中，
 // 用户输入两个词搜不到东西（2026-10-03 真实踩过）。单词行为不变。
-// 排序：标题命中的卡排前面（如搜「备份」时「备份与恢复」该压过关键词角落里提到备份的卡），
-// 同档内保持索引声明序 —— Array.prototype.sort 在现代 V8 是稳定排序，声明序不会被打乱。
+//
+// 排序三档（档内保持索引声明序，Array.prototype.sort 在现代 V8 是稳定排序）：
+//   1. 标题命中 —— 所有词都出现在卡片标题里（搜「备份」时「备份与恢复」排最前）
+//   2. 同义词命中 —— 所有词都出现在手工 keys 里（搜「悬浮窗」命中「挂件窗口」这类叫法映射）
+//   3. 全文命中 —— 所有词都出现在卡内可见文本里（构建期从模板提取，见 search-index.gen.ts；
+//      覆盖「SMTP」「透明度」这类没配同义词的卡内功能词，新卡自动跟上、不会漂移）
+// 三档 AND 全灭时降级为 OR：任一词命中即收录，按命中词数排序 —— 用户多打了一个没收录的词
+// （如「深色模式」的「模式」）不该得到空结果页。
+// 反向子串：除「词出现在文本里」外，也认「文本里的词出现在长词里」（如输入「检查更新」
+// 能靠「更新」命中）—— 只对 ≥3 字的词放宽，中文没有词边界只能这么放宽。
 const searchHits = computed(() => {
   // 先拆词再归一：normSearch 会删掉所有空白，归一后再拆就永远拆不开了
-  const words = searchQuery.value.toLowerCase().split(/\s+/).filter(Boolean)
+  const words = searchQuery.value.toLowerCase().split(/\s+/).filter(Boolean).map(normSearch).filter(Boolean)
   if (!words.length) return []
+  // 单词与目标串的命中：正向子串；词 ≥3 字时再放宽反向 —— 目标串里的词出现在长词里
+  // （输入「检查更新」靠「更新」命中）。反向只对 ≥3 字的词做：2 字词反向会把「界面」
+  // 这类短词放大成到处命中（任何含「面」的 2 字词都会中），噪声盖过精度。
+  const hits = (w: string, hay: string) => {
+    if (!w || !hay) return false
+    if (hay.includes(w)) return true
+    if (w.length >= 3) {
+      for (let i = 0; i + 2 <= hay.length; i++) {
+        const t = hay.slice(i, i + 2)
+        if (t && w.includes(t)) return true
+      }
+    }
+    return false
+  }
   const titleHit: string[] = []
-  const otherHit: string[] = []
+  const synHit: string[] = []
+  const textHit: string[] = []
+  // OR 兜底：key → 命中词数（AND 全灭时按此排序输出）
+  const orScore = new Map<string, number>()
   for (const k of Object.keys(SEARCH_INDEX)) {
     const it = SEARCH_INDEX[k]
     const label = normSearch(it.label)
     const keys = normSearch(it.keys)
-    // 标题命中 = 某词出现在标题里；其余（关键词命中）排后一档
-    const bucket = words.every((w) => label.includes(w)) ? titleHit
-      : words.every((w) => label.includes(w) || keys.includes(w)) ? otherHit : null
-    if (bucket) bucket.push(k)
+    const text = CARD_TEXT[k] || ''
+    let andTitle = true
+    let andSyn = true
+    let andText = true
+    let orN = 0
+    for (const w of words) {
+      const t = hits(w, label)
+      const s = hits(w, keys)
+      const x = t || s || hits(w, text)
+      if (!t) andTitle = false
+      if (!s) andSyn = false
+      if (!x) andText = false
+      if (x) orN++
+    }
+    if (andTitle) titleHit.push(k)
+    else if (andSyn) synHit.push(k)
+    else if (andText) textHit.push(k)
+    else if (orN > 0) orScore.set(k, orN)
   }
-  return [...titleHit, ...otherHit]
+  if (titleHit.length || synHit.length || textHit.length) return [...titleHit, ...synHit, ...textHit]
+  // AND 全灭 → OR 降级：命中词数多的卡在前，同分保持声明序
+  return [...orScore.entries()].sort((a, b) => b[1] - a[1]).map(([k]) => k)
 })
 // 某张卡是否应该在当前搜索态下渲染：搜索中 → 只有命中的卡渲染（跨 Tab）；非搜索态 → 沿用原 Tab 判定
 function cardOn(tab: TabKey, key: string) {
@@ -5053,6 +5097,9 @@ function blankSoundMap<T>(fill: T): Record<SoundRole, T> {
   return out
 }
 const soundsMeta = ref(blankSoundMap<SoundMeta[]>([]))
+// 共享音效库段清单（台词组「组级音效」下拉的选项来源）。soundsMeta 只装 SOUND_ROLES 六个实播
+// 槽位，shared 不在其中，单独放一份——由 refreshSounds 统一填充，跟槽位元信息同批刷新
+const sharedSounds = ref<SoundMeta[]>([])
 // 音效本体（base64 data URL）只用于「试听」：元信息里只有文件名，播不了
 const soundData = ref(blankSoundMap<string[]>([]))
 const soundFlash: Flash = useFlash()
@@ -5079,6 +5126,7 @@ function refreshSounds() {
   const next = blankSoundMap<SoundMeta[]>([])
   if (m) for (const r of SOUND_ROLES) next[r] = m[r] || []
   soundsMeta.value = next
+  sharedSounds.value = (m && Array.isArray(m.shared)) ? m.shared : []
   const d = services.getSoundData?.()
   const nextData = blankSoundMap<string[]>([])
   if (d) for (const r of SOUND_ROLES) nextData[r] = d[r] || []
@@ -5980,11 +6028,12 @@ function openDataDir(p: string) {
 }
 const assetsBusy = ref(false)
 const assetsPack = ref<AssetsPreviewResult | null>(null)
-const assetsPicks = reactive({ skins: true, sounds: true, bubbles: true })
+const assetsPicks = reactive({ skins: true, sounds: true, bubbles: true, quotes: true })
 const assetsConfirm = ref(false)
 const assetsAnyItem = computed(() => (assetsPicks.skins && !!assetsPack.value?.has?.skins)
   || (assetsPicks.sounds && !!assetsPack.value?.has?.sounds)
-  || (assetsPicks.bubbles && !!assetsPack.value?.has?.bubbles))
+  || (assetsPicks.bubbles && !!assetsPack.value?.has?.bubbles)
+  || (assetsPicks.quotes && !!assetsPack.value?.has?.quotes))
 // 内置音色（同值副本：public/floating-page.js 的 SOUND_FILES，加一组要两处一起改）
 const BUILTIN_SOUND_SETS: Array<{ key: string; label: string; press: string; release: string }> = [
   { key: 'duck', label: '小黄鸭', press: './whale/Ya1.mp3', release: './whale/Ya2.mp3' },
@@ -6479,7 +6528,7 @@ function doExportAssets() {
     } else if (r.canceled) {
       assetsFlash.msg = '已取消导出'
     } else {
-      assetsFlash.msg = `已导出素材包（形象 ${r.skins || 0} 张 · 气泡图 ${r.bubbles || 0} 张 · 音效 ${r.sounds || 0} 段）：${r.path}`
+      assetsFlash.msg = `已导出素材包（形象 ${r.skins || 0} 张 · 气泡图 ${r.bubbles || 0} 张 · 音效 ${r.sounds || 0} 段 · 台词组 ${r.quotes || 0} 个）：${r.path}`
     }
   } catch (err: any) {
     assetsFlash.err = true
@@ -6507,6 +6556,7 @@ function doPickAssets() {
       assetsPicks.skins = !!r.has?.skins
       assetsPicks.sounds = !!r.has?.sounds
       assetsPicks.bubbles = !!r.has?.bubbles
+      assetsPicks.quotes = !!r.has?.quotes
       assetsFlash.msg = '已读取素材包，勾选要导入的内容后点「导入选中项」'
     }
   } catch (err: any) {
@@ -6528,7 +6578,7 @@ function doApplyAssets() {
   assetsBusy.value = true
   try {
     const r: AssetsApplyResult | undefined = services.assetsApply?.({
-      skins: assetsPicks.skins, sounds: assetsPicks.sounds, bubbles: assetsPicks.bubbles,
+      skins: assetsPicks.skins, sounds: assetsPicks.sounds, bubbles: assetsPicks.bubbles, quotes: assetsPicks.quotes,
     })
     if (!r || !r.ok) {
       assetsFlash.err = true
@@ -6538,6 +6588,7 @@ function doApplyAssets() {
       if (r.skins) parts.push(`形象新增 ${r.skins.added} 张${r.skins.skipped ? `（${r.skins.skipped} 张因画廊已满跳过）` : ''}`)
       if (r.bubbles) parts.push(`气泡图新增 ${r.bubbles.added} 张${r.bubbles.skipped ? `（${r.bubbles.skipped} 张因已满跳过）` : ''}`)
       if (r.sounds) parts.push(`音效写入 ${r.sounds.applied} 段`)
+      if (r.quotes) parts.push(`台词组追加 ${r.quotes.added} 个`)
       let msg = '已导入素材包：' + (parts.join(' · ') || '没有可写入的内容') + '。'
       assetsFlash.err = false
       if (r.errors && r.errors.length) { msg += r.errors.join('；'); assetsFlash.err = true }
@@ -6548,6 +6599,8 @@ function doApplyAssets() {
       refreshSharedSkins()
       refreshBubbles()
       refreshSounds()
+      // 台词组进了配置：宿主 patchConfig 会 emitConfigChange 广播，onConfigChange → applyConfig
+      // 自动重建组列表（保存基线也随之落新），这里无需也不能再手动刷一遍
     }
   } catch (err: any) {
     assetsFlash.err = true
@@ -6569,6 +6622,11 @@ function roleLabelOf(r: string) {
 const assetsSkinNames = computed(() => (assetsPack.value?.skinNames || []).join('、'))
 const assetsBubbleNames = computed(() => (assetsPack.value?.bubbleNames || []).join('、'))
 const assetsSoundNames = computed(() => (assetsPack.value?.soundRoles || []).map(roleLabelOf).join('、'))
+// 台词组没有逐个列名的价值（就是一段段台词），只报数量；包里没有 quotes 键时 packLine 显示「没有这一项」
+const assetsQuoteLine = computed(() => {
+  const n = assetsPack.value?.quoteCount
+  return n ? `${n} 个台词组（追加到现有组尾部）` : ''
+})
 // 预览里的一行说明：包里有这一项就列出内容，没有就说清楚
 function packLine(n: number | undefined, unit: string, detail: string) {
   return n ? `${n} ${unit}：${detail}` : '包里没有这一项'
@@ -6578,7 +6636,29 @@ function packLine(n: number | undefined, unit: string, detail: string) {
 // 一组 = 一个抽签项：权重越大越常抽到，顺序决定「依次播放」的出场次序。
 // card 是内置的余额 / 时段卡（内容按当前数据现算，文字改不了）；text 是自己填的台词；image 是抽一张气泡图
 type QuoteKind = 'card' | 'text' | 'image'
-interface QuoteGroupEdit { kind: QuoteKind; w: number; style: 'A' | 'B'; lines: string }
+// v2 行×段的最小类型：段字段按类型展开编辑（text 调样式、image 选图、link 填址、model 选键）
+interface QuoteSegV2 { type?: string; t?: string; url?: string; img?: number; h?: number; model?: string; fz?: number; c?: string; g?: string; b?: number; i?: number; br?: number }
+interface QuoteRowV2 { segs: QuoteSegV2[]; w?: number; d?: number; cond?: Record<string, unknown> }
+interface QuoteGroupEdit { kind: QuoteKind; w: number; style: 'A' | 'B'; lines: string; rows?: QuoteRowV2[]; sound?: string }
+// v2 行列表若全部是「单一 text 段、字号只落在 A(fz7+w:1)/B(fz11) 两档」的简单组，
+// 就转回 textarea 形态照常编辑（保存时按 lines+style 走，宿主再升级回 v2，零损失往返）；
+// 含图片 / 链接 / 变量段或自定义字号的富文本组转不动，返回 null 由调用方走 rows 透传
+function rowsShapeToLines(rows: QuoteRowV2[]): { style: 'A' | 'B'; lines: string } | null {
+  let style: 'A' | 'B' | null = null
+  const lines: string[] = []
+  for (const row of rows) {
+    const segs = Array.isArray(row) ? row : row && typeof row === 'object' ? row.segs : null
+    if (!segs || segs.length !== 1) return null
+    const seg = segs[0] as QuoteSegV2
+    const w = Array.isArray(row) ? undefined : row.w
+    if (!seg || seg.type !== 'text' || typeof seg.t !== 'string' || seg.c || seg.g || seg.b || seg.i || seg.br) return null
+    if (seg.fz === 7 && w === 1) { if (style === 'B') return null; style = 'A' }
+    else if (seg.fz === 11 && w === undefined) { if (style === 'A') return null; style = 'B' }
+    else return null
+    lines.push(seg.t)
+  }
+  return style ? { style, lines: lines.join('\n') } : null
+}
 const QUOTE_KINDS: Array<{ v: QuoteKind; label: string }> = [
   { v: 'card', label: '余额/时段卡' },
   { v: 'text', label: '自定义台词' },
@@ -6610,18 +6690,50 @@ function quoteFlashShow(msg: string, err = false) {
 }
 function quoteGroupAdd() {
   if (cfg.quotes.groups.length >= QUOTE_GROUP_MAX) return
-  cfg.quotes.groups.push({ kind: 'text', w: 5, style: 'A', lines: '' })
+  cfg.quotes.groups.push({ kind: 'text', w: 5, style: 'A', lines: '', sound: '' })
 }
 function quoteGroupDel(i: number) {
   cfg.quotes.groups.splice(i, 1)
   // 预览选中下标跟着组列表走：删的是当前选中组则清空预览，删前面的则前移一位
   if (quotePreviewIdx.value === i) quotePreviewIdx.value = null
   else if (quotePreviewIdx.value !== null && quotePreviewIdx.value > i) quotePreviewIdx.value -= 1
+  // 段编辑选中跟着组列表走：删的是选中组则清空，删前面的则前移一位
+  const sel = quoteEditorSel.value
+  if (sel && sel.group === i) quoteEditorSel.value = null
+  else if (sel && sel.group > i) quoteEditorSel.value = { ...sel, group: sel.group - 1 }
+  // 组级还原确认跟着组列表走：删前面的前移一位
+  if (quoteGroupResetConfirm.value === i) quoteGroupResetConfirm.value = null
+  else if (quoteGroupResetConfirm.value !== null && quoteGroupResetConfirm.value > i) quoteGroupResetConfirm.value -= 1
 }
-// 卡头预览：一眼看出每组里有什么，免得逐个展开 textarea 找台词。
-// text 取首句截断（占位符原样显示，不做替换——这里只做识别不做渲染）；image 数气泡图张数要等宿主回填，这里只给文字
+// 组级重置：撤销这组未保存的修改，回到上次保存的状态（quotesBaseline 存的就是整份 JSON，
+  // 从里面把该组抠出来还回去即可）。仅在有未保存改动时给入口，保存/无改动时按钮无意义
+  const quoteGroupResetConfirm = ref<number | null>(null)
+  function quoteGroupReset(i: number) {
+    if (quoteGroupResetConfirm.value !== i) { quoteGroupResetConfirm.value = i; return }
+    quoteGroupResetConfirm.value = null
+    try {
+      const base = quotesBaseline.value ? JSON.parse(quotesBaseline.value) : null
+      const groups = base && Array.isArray(base.groups) ? base.groups : null
+      if (!groups || !groups[i]) { quoteFlashShow('没有可恢复的保存状态', true); return }
+      cfg.quotes.groups.splice(i, 1, groups[i])
+      quoteEditorSel.value = null
+      quoteFlashShow('已还原这组的保存状态')
+    } catch (err: any) {
+      quoteFlashShow('还原失败：' + String(err?.message || err), true)
+    }
+  }
+
+  // 卡头预览：一眼看出每组里有什么，免得逐个展开 textarea 找台词。
+  // text 取首句截断（占位符原样显示，不做替换——这里只做识别不做渲染）；image 数气泡图张数要等宿主回填，这里只给文字
 function quoteGroupPreview(g: QuoteGroupEdit): string {
   if (g.kind === 'text') {
+    // 富文本组（rows 透传）：标行数 + 段型摘要（如图/链/数据段出现了就点名），免得逐行展开找
+    if (Array.isArray(g.rows) && g.rows.length) {
+      const types = new Set<string>()
+      for (const r of g.rows) for (const s of (r.segs || [])) if (s.type && s.type !== 'text') types.add(s.type)
+      const extra = types.size ? ' · ' + [...types].map((t) => QUOTE_SEG_TYPE_LABELS[t] || t).join('/') : ''
+      return `${g.rows.length} 行 · 段编辑${extra}`
+    }
     const lines = String(g.lines || '').split('\n').map(s => s.trim()).filter(Boolean)
     if (!lines.length) return '还没填台词'
     const first = lines[0].length > 12 ? `${lines[0].slice(0, 12)}…` : lines[0]
@@ -6641,10 +6753,354 @@ function quoteGroupMove(i: number, d: number) {
   else if (quotePreviewIdx.value === j) quotePreviewIdx.value = i
 }
 
+// —— v2 段级编辑器（第 3 期）：行×段 chips 编辑 ——
+// 选中段状态带 group 下标（多个组可同时是富文本形态，选中不能跨组串线）。
+// 编辑 UI 状态放独立 ref，绝不挂到 cfg.quotes 组对象上——quotesBaseline 用整份 JSON 比对「未保存」，
+// UI 状态一旦混进组对象就会误报脏
+interface QuoteEditorSel { group: number; row: number; seg: number }
+const quoteEditorSel = ref<QuoteEditorSel | null>(null)
+// 段拖拽只在精确指针（鼠标 / 触控板）下启用：触屏 dragstart 不可靠，左右移按钮兜底
+const QUOTE_CAN_DRAG = typeof window !== 'undefined' && typeof window.matchMedia === 'function' && window.matchMedia('(pointer: fine)').matches
+// model 段取值键：与宿主 store.js 的 QUOTE_MODEL_KEYS 同一份（check-shared 未钉住，改动需两处同步）
+const QUOTE_MODEL_KEYS = ['balance', 'today', 'peak', 'next']
+// 上限与宿主 normRows / normRow 同口径（行数 30 / 单行段数 12），超了保存时会被截掉，不如这里就拦住
+const QUOTE_ROW_MAX = 30
+const QUOTE_SEG_PER_ROW_MAX = 12
+const QUOTE_SEG_TYPE_LABELS: Record<string, string> = { text: '文本', image: '气泡图', link: '链接', model: '数据' }
+// 字号档位 1–11（档位表在宿主 QUOTE_FONT_TIERS，此处只让选档号，数字越大字越大）
+const QUOTE_FZ_OPTIONS = Array.from({ length: 11 }, (_, n) => n + 1)
+// 占位符 chips：点一下把 {key} 追加到当前 text 段文本尾（真插入光标处要拿选区坐标，成本不值）
+const QUOTE_PLACEHOLDER_CHIPS: Array<{ k: string; label: string }> = [
+  { k: 'balance', label: '余额' },
+  { k: 'today', label: '今日已用' },
+  { k: 'peak', label: '当前时段' },
+  { k: 'next', label: '距高峰' },
+]
+// 成品组模板：字面量 rows，给「高级编辑」一个起点；深拷贝入组，避免模板被编辑污染。
+// sound 是建议的组级音效（共享音效库段名，缺该段时挂件侧静音不报错）；留空 = 不建议音效
+const QUOTE_TEMPLATES: Array<{ label: string; rows: QuoteRowV2[]; sound?: string }> = [
+  {
+    label: '余额播报',
+    rows: [
+      { segs: [{ type: 'text', t: '当前余额', fz: 7 }] },
+      { segs: [{ type: 'model', model: 'balance', fz: 11 }] },
+    ],
+  },
+  {
+    label: '用量 + 时段',
+    rows: [
+      { segs: [{ type: 'text', t: '今日已用 ', fz: 7 }, { type: 'model', model: 'today', fz: 7 }] },
+      { segs: [{ type: 'text', t: '现在是', fz: 7 }, { type: 'model', model: 'peak', fz: 7 }], w: 1 },
+    ],
+  },
+  {
+    label: '图文混排',
+    rows: [
+      { segs: [{ type: 'image', img: 0, h: 96 }] },
+      { segs: [{ type: 'text', t: '余额 {balance}', fz: 7 }], w: 1 },
+    ],
+  },
+  // —— 第 5 期新增：条件行 / 组音效演示模板（零网络依赖，音效名缺段时挂件侧静音） ——
+  {
+    label: '低余额提醒（条件行 + 建议音效）',
+    sound: '来财',
+    rows: [
+      { segs: [{ type: 'text', t: '余额见底啦，快去充值~', fz: 11 }], cond: { type: 'balanceBelow', value: 10 } },
+      { segs: [{ type: 'text', t: '当前余额 {balance}', fz: 7 }], w: 1 },
+    ],
+  },
+  {
+    label: '工作时段问候（峰谷条件）',
+    rows: [
+      { segs: [{ type: 'text', t: '冲冲冲！', fz: 11 }], cond: { type: 'peak' } },
+      { segs: [{ type: 'text', t: '摸鱼中~', fz: 11 }], cond: { type: 'valley' } },
+      { segs: [{ type: 'text', t: '现在是 {peak}', fz: 7 }] },
+    ],
+  },
+  {
+    label: '周末快乐（星期条件）',
+    rows: [
+      { segs: [{ type: 'text', t: '今天不营业，鲸鱼也要休息~', fz: 7 }], w: 1, cond: { type: 'weekday', days: [0, 6] } },
+      { segs: [{ type: 'text', t: '今天也要加油鸭！', fz: 7 }], w: 1, cond: { type: 'weekday', days: [1, 2, 3, 4, 5] } },
+    ],
+  },
+]
+function quoteEditorRowsOf(i: number): QuoteRowV2[] {
+  const g = cfg.quotes.groups[i]
+  if (!g) return []
+  if (!Array.isArray(g.rows)) g.rows = []
+  return g.rows
+}
+// 模板用的纯读取版：不写 g.rows（渲染期改状态会再触发响应式），没 rows 给空数组兜底——
+// v-for 回调作用域吃不到外层 v-else 的 Array.isArray 窄化，模板里一律走它就不碰类型歧义
+function quoteRowsView(i: number): QuoteRowV2[] {
+  const g = cfg.quotes.groups[i]
+  return g && Array.isArray(g.rows) ? g.rows : []
+}
+// 简单组 → 富文本组（单向升级，textarea 回不来——要回只能恢复默认或改配置）：
+// A = fz7 + 行折行，B = fz11，与 rowsShapeToLines 的还原映射一一对应，保存后零损失往返
+function quoteUpgradeToRows(i: number) {
+  const g = cfg.quotes.groups[i]
+  if (!g || Array.isArray(g.rows)) return
+  const fz = g.style === 'B' ? 11 : 7
+  const lines = String(g.lines || '').split('\n').map((s) => s.trim()).filter(Boolean)
+  g.rows = lines.length
+    ? lines.map((t) => (g.style === 'A' ? { segs: [{ type: 'text', t, fz }], w: 1 } : { segs: [{ type: 'text', t, fz }] }))
+    : []
+}
+function quoteRowAdd(i: number) {
+  const rows = quoteEditorRowsOf(i)
+  if (rows.length >= QUOTE_ROW_MAX) return
+  rows.push({ segs: [] })
+}
+function quoteRowDel(i: number, ri: number) {
+  const rows = quoteEditorRowsOf(i)
+  rows.splice(ri, 1)
+  const sel = quoteEditorSel.value
+  if (sel && sel.group === i) {
+    if (sel.row === ri || sel.row >= rows.length) quoteEditorSel.value = null
+    else if (sel.row > ri) quoteEditorSel.value = { ...sel, row: sel.row - 1 }
+  }
+}
+function quoteRowMove(i: number, ri: number, d: number) {
+  const rows = quoteEditorRowsOf(i)
+  const j = ri + d
+  if (j < 0 || j >= rows.length) return
+  const [r] = rows.splice(ri, 1)
+  rows.splice(j, 0, r)
+  const sel = quoteEditorSel.value
+  if (sel && sel.group === i && sel.row === ri) quoteEditorSel.value = { ...sel, row: j }
+  else if (sel && sel.group === i && sel.row === j) quoteEditorSel.value = { ...sel, row: ri }
+}
+function quoteRowToggleWrap(i: number, ri: number) {
+  const r = quoteEditorRowsOf(i)[ri]
+  // w 只存 1（truthy = 行内允许软折行），关掉就摘键，与宿主 normRow 的 wantWrap 口径一致
+  if (r) r.w = r.w === 1 ? undefined : 1
+}
+// 行停留秒数：空串/非法 = 摘键（回默认 5 秒口径），1–120 取整落键，其余超界值夹回边界
+function quoteRowDwellSet(i: number, ri: number, raw: string) {
+  const r = quoteEditorRowsOf(i)[ri]
+  if (!r) return
+  const s = String(raw).trim()
+  if (!s) { r.d = undefined; return }
+  const n = Math.round(Number(s))
+  if (!Number.isFinite(n)) { r.d = undefined; return }
+  r.d = Math.min(120, Math.max(1, n))
+}
+
+// —— 第 4 期：行条件（不满足整行塌缩，不参与抽选） ——
+// 行条件放行对象上（r.cond），会随 quotesBaseline 进脏比对——这是配置不是 UI 状态，正应该如此。
+// 类型清单与宿主 store.js QUOTE_COND_TYPES 同份；model 条件的候选 = 已配置模型（含内置 DeepSeek）
+const QUOTE_COND_LABELS: Record<string, string> = {
+  peak: '工作日峰时',
+  valley: '工作日谷时',
+  balanceBelow: '余额低于',
+  model: '主显模型为',
+  weekday: '星期几',
+}
+// 悬浮页 PEAK_HOURS 同款说明文案：峰时是工作日 9-12 / 14-18 点，用户配条件时要知道边界
+const QUOTE_COND_PEAK_HINT = '峰时 = 工作日 9-12 / 14-18 点，其余为谷时'
+// weekday.days 的顺序展示（一~日），勾选项按下标映射 getDay 值
+const QUOTE_WEEKDAYS: Array<{ d: number; label: string }> = [
+  { d: 1, label: '一' }, { d: 2, label: '二' }, { d: 3, label: '三' }, { d: 4, label: '四' },
+  { d: 5, label: '五' }, { d: 6, label: '六' }, { d: 0, label: '日' },
+]
+// model 条件的候选下拉：取宿主运行时模型清单（含内置 DeepSeek），空清单（宿主没回）时给 deepseek 兜底
+const quoteCondModelOptions = computed(() => {
+  const opts = models.value.filter((m) => m.id && m.id !== NEW_MODEL_ROW).map((m) => ({ id: m.id, name: m.name || m.id }))
+  return opts.length ? opts : [{ id: 'deepseek', name: 'DeepSeek' }]
+})
+// 组级音效下拉的候选：共享音效库（getSounds 的 shared 槽位）段名清单，组里存的是名字。
+// 走 computed 跟随 soundsMeta 刷新（导入 / 删除共享音效 / 素材包导入后 refreshSounds 会更新它）；
+// 空库给 null，下拉只留「无」一项并禁用——比渲染一个空列表友好
+const quoteSoundOptions = computed<Array<{ name: string }> | null>(() => {
+  const list = sharedSounds.value
+  if (!list.length) return null
+  return list.map((m) => ({ name: m.name }))
+})
+// 行条件编辑的展开状态：独立 ref（同 quoteEditorSel 禁令——UI 状态不挂 cfg 对象，免得脏比对误报）
+const quoteCondOpen = ref<string | null>(null) // '组下标:行下标' 或 null
+function quoteCondKey(i: number, ri: number) { return i + ':' + ri }
+function quoteRowCond(r: QuoteRowV2): Record<string, unknown> | null {
+  return r && typeof r === 'object' && r.cond && typeof r.cond === 'object' ? (r.cond as Record<string, unknown>) : null
+}
+// 当前行条件类型（无条件 = ''）。读取走 quoteRowCond，写入在 quoteCondTypeSet
+function quoteCondTypeOf(r: QuoteRowV2): string {
+  const c = quoteRowCond(r)
+  return c ? String(c.type || '') : ''
+}
+function quoteCondTypeSet(i: number, ri: number, type: string) {
+  const r = quoteEditorRowsOf(i)[ri]
+  if (!r) return
+  if (r.cond) delete r.cond
+  if (!type) return
+  // 各类型给合法缺省：threshold/模型 id/勾全天之外的一天（全选 = 恒真，宿主会摘键）
+  const cond: Record<string, unknown> = { type }
+  if (type === 'balanceBelow') cond.value = 10
+  else if (type === 'model') cond.value = quoteCondModelOptions.value[0]?.id || 'deepseek'
+  else if (type === 'weekday') cond.days = [1]
+  r.cond = cond
+}
+// 条件参数编辑都要先确认行还带着同型条件（用户可能在编辑中途换类型 / 清条件）
+function quoteCondValue(i: number, ri: number): number {
+  const c = quoteRowCond(quoteEditorRowsOf(i)[ri] || ({} as QuoteRowV2))
+  return c && c.type === 'balanceBelow' ? Number(c.value) || 0 : 10
+}
+function quoteCondValueSet(i: number, ri: number, v: number) {
+  const c = quoteRowCond(quoteEditorRowsOf(i)[ri] || ({} as QuoteRowV2))
+  if (c && c.type === 'balanceBelow') c.value = Math.max(0, Math.round(v) || 0)
+}
+function quoteCondModel(i: number, ri: number): string {
+  const c = quoteRowCond(quoteEditorRowsOf(i)[ri] || ({} as QuoteRowV2))
+  return c && c.type === 'model' ? String(c.value || '') : ''
+}
+function quoteCondModelSet(i: number, ri: number, id: string) {
+  const c = quoteRowCond(quoteEditorRowsOf(i)[ri] || ({} as QuoteRowV2))
+  if (c && c.type === 'model') c.value = id
+}
+function quoteCondDays(i: number, ri: number): number[] {
+  const c = quoteRowCond(quoteEditorRowsOf(i)[ri] || ({} as QuoteRowV2))
+  return c && c.type === 'weekday' && Array.isArray(c.days) ? (c.days as number[]) : []
+}
+function quoteCondDayToggle(i: number, ri: number, d: number) {
+  const c = quoteRowCond(quoteEditorRowsOf(i)[ri] || ({} as QuoteRowV2))
+  if (!c || c.type !== 'weekday' || !Array.isArray(c.days)) return
+  const days = c.days as number[]
+  const at = days.indexOf(d)
+  if (at >= 0) days.splice(at, 1)
+  else days.push(d)
+  // 全选 / 全不选都算没有意义（恒真 / 恒假），按宿主 normRowCond 口径直接摘键回无条件
+  const row = quoteEditorRowsOf(i)[ri]
+  if (row && (!days.length || days.length >= 7)) delete row.cond
+}
+// 行头 chip 摘要：峰时 / 余额<10 / 主显·DeepSeek / 周一·三 这类一眼能读的短句
+function quoteCondLabel(r: QuoteRowV2): string {
+  const c = quoteRowCond(r)
+  if (!c) return ''
+  const type = String(c.type || '')
+  if (type === 'balanceBelow') return `余额<${c.value}`
+  if (type === 'model') {
+    const id = String(c.value || '')
+    const m = quoteCondModelOptions.value.find((o) => o.id === id)
+    return `主显·${m ? m.name : id}`
+  }
+  if (type === 'weekday') {
+    const days = Array.isArray(c.days) ? (c.days as number[]) : []
+    return days.map((d) => (QUOTE_WEEKDAYS.find((w) => w.d === d) || { label: String(d) }).label).join('')
+  }
+  return QUOTE_COND_LABELS[type] || type
+}
+function quoteSegAdd(i: number, ri: number, type: string) {
+  const row = quoteEditorRowsOf(i)[ri]
+  if (!row || row.segs.length >= QUOTE_SEG_PER_ROW_MAX) return
+  // 新段给合法缺省值：text 空 t 会被宿主当空段丢，先占位让用户补内容
+  const seg: QuoteSegV2 = type === 'image' ? { type: 'image', img: 0, h: 96 }
+    : type === 'link' ? { type: 'link', url: 'https://', t: '' }
+    : type === 'model' ? { type: 'model', model: 'balance', fz: 7 }
+    : { type: 'text', t: '新文本', fz: 7 }
+  row.segs.push(seg)
+  quoteEditorSel.value = { group: i, row: ri, seg: row.segs.length - 1 }
+}
+function quoteSegAddFromSelect(e: Event, i: number, ri: number) {
+  const el = e.target as HTMLSelectElement
+  const t = el.value
+  el.value = ''
+  if (t) quoteSegAdd(i, ri, t)
+}
+function quoteSegDel(i: number, ri: number, si: number) {
+  const row = quoteEditorRowsOf(i)[ri]
+  if (!row) return
+  row.segs.splice(si, 1)
+  const sel = quoteEditorSel.value
+  if (sel && sel.group === i && sel.row === ri) {
+    quoteEditorSel.value = row.segs.length ? { ...sel, seg: Math.min(sel.seg, row.segs.length - 1) } : null
+  } else if (sel && sel.group === i && sel.row > ri) {
+    quoteEditorSel.value = { ...sel, row: sel.row - 1 }
+  }
+}
+function quoteSegMove(i: number, ri: number, si: number, d: number) {
+  const row = quoteEditorRowsOf(i)[ri]
+  if (!row) return
+  const j = si + d
+  if (j < 0 || j >= row.segs.length) return
+  const [s] = row.segs.splice(si, 1)
+  row.segs.splice(j, 0, s)
+  const sel = quoteEditorSel.value
+  if (sel && sel.group === i && sel.row === ri) {
+    if (sel.seg === si) quoteEditorSel.value = { ...sel, seg: j }
+    else if (sel.seg === j) quoteEditorSel.value = { ...sel, seg: si }
+  }
+}
+// 段拖拽换位（允许跨行）：dragover 在目标 chip 上记插入位，drop 时把源段 splice 进去。
+// 同行源段在目标之前时，源段被删后目标下标要回退一位
+let quoteDragFrom: QuoteEditorSel | null = null
+let quoteDragTo: QuoteEditorSel | null = null
+function quoteSegDragStart(e: DragEvent, gi: number, ri: number, si: number) {
+  quoteDragFrom = { group: gi, row: ri, seg: si }
+  quoteDragTo = null
+  // Chromium 不 setData 也能触发 drop，但设了更稳（Firefox 系内核必须设）
+  try { e.dataTransfer?.setData('text/plain', '') } catch { /* 无 dataTransfer 也允许 drop */ }
+}
+function quoteSegDragOver(gi: number, ri: number, si: number) { quoteDragTo = { group: gi, row: ri, seg: si } }
+function quoteSegDrop(i: number) {
+  const from = quoteDragFrom
+  const to = quoteDragTo
+  quoteDragFrom = null
+  quoteDragTo = null
+  if (!from || !to || from.group !== i || to.group !== i) return
+  if (from.row === to.row && from.seg === to.seg) return
+  const rows = quoteEditorRowsOf(i)
+  const srcRow = rows[from.row]
+  const dstRow = rows[to.row]
+  if (!srcRow || !dstRow) return
+  const [seg] = srcRow.segs.splice(from.seg, 1)
+  if (!seg) return
+  const tj = from.row === to.row && from.seg < to.seg ? to.seg - 1 : to.seg
+  dstRow.segs.splice(tj, 0, seg)
+  quoteEditorSel.value = { group: i, row: to.row, seg: tj }
+}
+// 当前选中段（组 / 行 / 段任一失效即 null，字段区随之消失）
+const quoteSelSeg = computed<QuoteSegV2 | null>(() => {
+  const sel = quoteEditorSel.value
+  if (!sel) return null
+  const g = cfg.quotes.groups[sel.group]
+  const row = g && Array.isArray(g.rows) ? g.rows[sel.row] : null
+  const seg = row && Array.isArray(row.segs) ? row.segs[sel.seg] : null
+  return seg || null
+})
+function quoteSegFlag(k: 'b' | 'i' | 'br', v: boolean) {
+  const seg = quoteSelSeg.value
+  if (!seg) return
+  if (v) (seg as Record<string, unknown>)[k] = 1
+  else delete (seg as Record<string, unknown>)[k]
+}
+function quoteInsertPlaceholder(k: string) {
+  const seg = quoteSelSeg.value
+  if (seg) seg.t = String(seg.t || '') + '{' + k + '}'
+}
+// chip 摘要：一眼认出这段是什么（占位符原样显示，这里只做识别不做渲染）
+function quoteSegLabel(seg: QuoteSegV2): string {
+  if (seg.type === 'image') return Number(seg.img) > 0 ? `图 #${seg.img}` : '图 随机'
+  if (seg.type === 'link') return `链 ${String(seg.t || seg.url || '').slice(0, 8)}`
+  if (seg.type === 'model') return `{${seg.model}}`
+  const t = String(seg.t || '')
+  return t.length > 10 ? `${t.slice(0, 10)}…` : (t || '空文本')
+}
+// 从模板新建组：push 深拷贝的 rows，权重给个中间值让用户自己调；模板建议的音效一并带出（用户可改可清）
+function quoteGroupFromTemplate(e: Event) {
+  const el = e.target as HTMLSelectElement
+  const ti = Number(el.value)
+  el.value = ''
+  if (!Number.isInteger(ti) || !QUOTE_TEMPLATES[ti]) return
+  if (cfg.quotes.groups.length >= QUOTE_GROUP_MAX) return
+  const tpl = QUOTE_TEMPLATES[ti]
+  cfg.quotes.groups.push({ kind: 'text', w: 5, style: 'A', lines: '', rows: JSON.parse(JSON.stringify(tpl.rows)), sound: tpl.sound || '' })
+}
+
 // —— 台词预览：用与悬浮窗同一个渲染器真渲染 ——
 // 点组上的「预览」选中该组，编辑实时跟手（computed 每次给新行模型，渲染器整体重画）。
 // 预览不取实时数据：card 组与占位符都用写死的示例值，那是挂件的运行时行为
-type PreviewLines = Array<{ t: string; s: 'A' | 'B' | 'P' | 'C'; c?: string; w?: boolean } | null> | { gif: true; src?: string }
+type PreviewLines = Array<{ t: string; s: 'A' | 'B' | 'P' | 'C'; c?: string; w?: boolean } | null> | { gif: true; src?: string } | { rows: unknown[] }
 const quotePreviewIdx = ref<number | null>(null)
 // 组内台词按顺序逐条预览（真机是组内随机抽一条，这里顺序过一遍是为了每条都能检查排版）
 const quotePreviewLineIdx = ref(0)
@@ -6652,6 +7108,9 @@ function quoteGroupTogglePreview(i: number) {
   if (quotePreviewIdx.value === i) { quotePreviewIdx.value = null; return }
   quotePreviewIdx.value = i
   quotePreviewLineIdx.value = 0
+  // 挂件气泡档下「预览」即试播：有可发内容（非 image 组）直接发整组到挂件，
+  // 设置页档则只选中组（stage 渲染器跟着选中组实时跟手）
+  if (quotePreviewTarget.value === 'widget' && quotePreviewSteps.value) quoteWidgetPreview()
 }
 // 当前选中组的文本行（card / image 组为空，预览导航随之隐藏）
 const quotePreviewGroup = computed<QuoteGroupEdit | null>(() => {
@@ -6664,17 +7123,43 @@ const quotePreviewTextLines = computed<string[]>(() => {
   if (!g || g.kind !== 'text') return []
   return String(g.lines || '').split('\n').map(s => s.trim()).filter(Boolean)
 })
+// 富文本组的候选行（rows 透传组）：预览按行逐条过，与简单组的「逐条」导航同构
+const quotePreviewRichRows = computed<QuoteRowV2[] | null>(() => {
+  const g = quotePreviewGroup.value
+  if (!g || g.kind !== 'text' || !Array.isArray(g.rows) || !g.rows.length) return null
+  return g.rows
+})
+// 预览条目总数：富文本组按行数，简单组按台词条数
+const quotePreviewCount = computed(() => {
+  const rich = quotePreviewRichRows.value
+  return rich ? rich.length : quotePreviewTextLines.value.length
+})
 function quotePreviewNext() {
-  const n = quotePreviewTextLines.value.length
+  const n = quotePreviewCount.value
   if (n) quotePreviewLineIdx.value = (quotePreviewLineIdx.value + 1) % n
 }
-// 点预览区切换：仅多行文本组响应（单行 / card / image 没有可切的条目）
-const quotePreviewStageClickable = computed(() => quotePreviewTextLines.value.length > 1)
+// 点预览区切换：多条目响应（单条 / card / image 没有可切的条目）
+const quotePreviewStageClickable = computed(() => quotePreviewCount.value > 1)
 // —— 预览位置：设置页（共享渲染器）还是挂件气泡（试播会话）——
 // 挂件气泡模式发**整组**台词：一屏一条，悬浮页点气泡按顺序翻，末条再点收起；
 // card 组是一屏三行的固定卡、text 组每行台词各占一屏；image 组气泡图在挂件进程里发不过去
-type PreviewStep = Array<{ t: string; s: 'A' | 'B' | 'P' | 'C'; c?: string; w?: boolean } | null>
-const quotePreviewTarget = ref<'stage' | 'widget'>('stage')
+type PreviewStep = Array<{ t: string; s: 'A' | 'B' | 'P' | 'C'; c?: string; w?: boolean } | null> | { rows: unknown[] }
+// 预览位置是纯 UI 口径，与 usageRange 同理走 localStorage（whale: 前缀 + 白名单 + try/catch 兜底），
+// 不进宿主配置——否则每次重开插件都弹回「设置页」档
+const QUOTE_PREVIEW_TARGET_KEY = 'whale:quotePreviewTarget'
+function loadQuotePreviewTarget(): 'stage' | 'widget' {
+  try {
+    const v = localStorage.getItem(QUOTE_PREVIEW_TARGET_KEY)
+    if (v === 'stage' || v === 'widget') return v
+  } catch (err) {}
+  return 'stage'
+}
+const quotePreviewTarget = ref<'stage' | 'widget'>(loadQuotePreviewTarget())
+// 恢复时只还原档位不自动发送：启动时挂件可能还没显示，自动弹气泡反而吓人
+function quoteSetPreviewTarget(t: 'stage' | 'widget') {
+  quotePreviewTarget.value = t
+  try { localStorage.setItem(QUOTE_PREVIEW_TARGET_KEY, t) } catch (err) {}
+}
 const quotePreviewSteps = computed<PreviewStep[] | null>(() => {
   const g = quotePreviewGroup.value
   if (!g || g.kind === 'image') return null
@@ -6682,6 +7167,9 @@ const quotePreviewSteps = computed<PreviewStep[] | null>(() => {
   if (g.kind === 'card') {
     return [[{ t: '当前时间段为: {peak}', s: 'A' }, { t: '{balance}', s: 'P' }, { t: '今日约 {today} · 距高峰 {next}', s: 'C', w: true }]]
   }
+  // 富文本组：整组候选行编成逐行会话，rows 原样发（占位符由挂件消费时替换）
+  const rich = quotePreviewRichRows.value
+  if (rich) return rich.map((row) => ({ rows: [row] }))
   const lines = quotePreviewTextLines.value
   if (!lines.length) return null
   return lines.map((t) => [null, { t, s: style, w: style === 'A' }, null] as PreviewStep)
@@ -6690,7 +7178,10 @@ function quoteWidgetPreview() {
   const steps = quotePreviewSteps.value
   if (!steps) return
   try {
-    const r = services.quotePreview?.({ steps })
+    // 富文本组的 rows 取自 reactive cfg，是 Proxy 代理：webContents.send 结构化克隆不支持
+    // Proxy，不拍平会抛「An object could not be cloned」（简单组是纯字符串拼的，不受影响）。
+    // 深拷贝成纯对象顺带隔离悬浮页的原地占位符替换，不污染编辑器状态
+    const r = services.quotePreview?.({ steps: JSON.parse(JSON.stringify(steps)) })
     if (r && !r.ok) quoteFlashShow(String(r.error || '试播失败'), true)
     else if (r && r.ok) quoteFlashShow('已发到挂件，点挂件气泡逐条翻看，末条再点收起')
   } catch (err: any) {
@@ -6699,7 +7190,7 @@ function quoteWidgetPreview() {
 }
 // 切到「挂件气泡」档：有可发内容就直接发（少点一次「发送试播」），没有则停留在提示文案
 function quoteSwitchToWidget() {
-  quotePreviewTarget.value = 'widget'
+  quoteSetPreviewTarget('widget')
   if (quotePreviewSteps.value) quoteWidgetPreview()
 }
 // 卡片示例：按悬浮窗余额卡（buildGroup1 的 DeepSeek 分支）的三行结构写死
@@ -6715,33 +7206,71 @@ const quotePreviewLines = computed<PreviewLines | null>(() => {
   if (!g) return null
   if (g.kind === 'image') return { gif: true, src: '' }
   if (g.kind === 'card') return quoteCardPreviewLines
+  // 富文本组：整行段列表包成单行 rows 给渲染器（stage 档无图段回调，image 段由渲染器整段丢）
+  const rich = quotePreviewRichRows.value
+  if (rich) {
+    const row = rich[Math.min(quotePreviewLineIdx.value, rich.length - 1)]
+    const segs = Array.isArray(row) ? row : row && typeof row === 'object' ? row.segs : null
+    if (!segs) return null
+    const out = segs.map((seg) => {
+      if (seg && seg.type === 'text' && typeof seg.t === 'string') {
+        return { type: 'text', t: quoteSamplePlaceholders(seg.t), fz: seg.fz, c: seg.c, g: seg.g, b: seg.b, i: seg.i, br: seg.br }
+      }
+      return seg
+    })
+    return { rows: [out] }
+  }
   const lines = quotePreviewTextLines.value
   if (!lines.length) return null
   // 越界兜底：编辑中删行后 idx 可能超尾，夹回有效区间
   const li = Math.min(quotePreviewLineIdx.value, lines.length - 1)
   const first = lines[li]
-  // 占位符替换成示例值（认不出的原样保留，与悬浮窗 renderLinePlaceholders 同口径）
-  const t = first.replace(/\{(\w+)\}/g, (m, k) => {
+  // 文本组与悬浮窗 textGroupLines 同构：单行居中，A 允许换行、B 不换行
+  return [null, { t: quoteSamplePlaceholders(first), s: g.style, w: g.style === 'A' }, null]
+})
+// 占位符替换成示例值（认不出的原样保留，与悬浮窗 renderLinePlaceholders 同口径）
+function quoteSamplePlaceholders(text: string): string {
+  return String(text).replace(/\{(\w+)\}/g, (m, k) => {
     if (k === 'balance') return '¥ 12.34'
     if (k === 'today') return '¥ 1.23'
     if (k === 'peak') return '空闲时段'
     if (k === 'next') return '42 分钟'
     return m
   })
-  // 文本组与悬浮窗 textGroupLines 同构：单行居中，A 允许换行、B 不换行
-  return [null, { t, s: g.style, w: g.style === 'A' }, null]
-})
+}
+// 预览的 image 段取图：设置页只有 thumb（data URL）可用。
+// 无气泡图 → null（渲染器整段丢，与挂件没导图时同口径）；img 0/缺省 → 固定第一张
+// （预览要稳定可检查，不学挂件的随机抽）；1..N → 对应下标，越界夹回有效区间
+function quoteBubbleSrc(img: number): string | null {
+  const thumbs = bubbleItems.value.map((it) => it.thumb).filter(Boolean)
+  if (!thumbs.length) return null
+  const i = Math.round(Number(img) || 0)
+  return thumbs[i >= 1 ? Math.min(i, thumbs.length) - 1 : 0] || null
+}
+// 预览的 model 段取值：与占位符示例同一套（复用 quoteSamplePlaceholders，认不出的给空串）
+function quoteModelText(model: string): string {
+  return quoteSamplePlaceholders('{' + String(model) + '}').replace(/^\{(\w+)\}$/, '')
+}
 // 保存：按行拆开整份交给宿主清洗（去空白 / 丢空行 / 限长 / 权重压到 1–999 / 丢掉没台词的文本组），
 // 再回读一次拿到清洗后的结果
 function saveQuotes() {
   quoteResetConfirm.value = false
-  const groups = cfg.quotes.groups.map((g) => ({
-    kind: g.kind,
-    w: g.w,
-    style: g.style,
-    // 非文本组不带台词：宿主对它们直接短路，带上只是噪音
-    lines: g.kind === 'text' ? String(g.lines || '').split('\n').map((s) => s.trim()).filter(Boolean) : [],
-  }))
+  quoteGroupResetConfirm.value = null
+  const groups = cfg.quotes.groups.map((g) => {
+    // sound（组级音效名）随出口带出，清洗归宿主
+    const snd = typeof g.sound === 'string' && g.sound ? g.sound : undefined
+    if (g.kind !== 'text') return snd ? { kind: g.kind, w: g.w, sound: snd } : { kind: g.kind, w: g.w }
+    // 富文本组：rows 原样透传给宿主清洗（编辑器第 2 期不展开段编辑，只保不丢）
+    if (Array.isArray(g.rows) && g.rows.length) return snd ? { kind: 'text', w: g.w, rows: g.rows, sound: snd } : { kind: 'text', w: g.w, rows: g.rows }
+    const out: Record<string, any> = {
+      kind: 'text',
+      w: g.w,
+      style: g.style,
+      lines: String(g.lines || '').split('\n').map((s) => s.trim()).filter(Boolean),
+    }
+    if (snd) out.sound = snd
+    return out
+  })
   const quotes: Record<string, any> = { groups }
   for (const f of QUOTE_TEXT_FIELDS) {
     quotes[f.key] = String(cfg.quotes[f.key] || '').split('\n').map((s) => s.trim()).filter(Boolean)
@@ -7542,12 +8071,18 @@ function applyConfig(c: any) {
   for (const f of QUOTE_TEXT_FIELDS) {
     cfg.quotes[f.key] = Array.isArray(q[f.key]) ? q[f.key].join('\n') : ''
   }
-  cfg.quotes.groups = (Array.isArray(q.groups) ? q.groups : []).map((g: any) => ({
-    kind: g?.kind === 'card' ? 'card' : g?.kind === 'image' ? 'image' : 'text',
-    w: typeof g?.w === 'number' ? g.w : 5,
-    style: g?.style === 'B' ? 'B' : 'A',
-    lines: Array.isArray(g?.lines) ? g.lines.join('\n') : '',
-  })) as QuoteGroupEdit[]
+  cfg.quotes.groups = (Array.isArray(q.groups) ? q.groups : []).map((g: any) => {
+    // 组级音效名随组透传（编辑区不清洗，落库时宿主再规整；丢了的话每轮回灌 sound 就消失）
+    const snd = typeof g?.sound === 'string' ? g.sound : ''
+    if (g?.kind === 'card') return { kind: 'card', w: typeof g?.w === 'number' ? g.w : 5, style: 'A', lines: '', sound: snd }
+    if (g?.kind === 'image') return { kind: 'image', w: typeof g?.w === 'number' ? g.w : 5, style: 'A', lines: '', sound: snd }
+    // 宿主出口恒为 v2 rows：能退化成「单 text 段组」的转回 textarea 形态；富文本组 rows 原样透传。
+    // 带 cond / d（行条件 / 停留秒数）的行不算简单组——textarea 两样都编辑不了，转过去就丢了
+    const rows = Array.isArray(g?.rows) ? (g.rows as QuoteRowV2[]) : []
+    const simple = rows.some((r: any) => r && typeof r === 'object' && (r.cond || r.d)) ? null : rowsShapeToLines(rows)
+    if (simple) return { kind: 'text', w: typeof g?.w === 'number' ? g.w : 5, style: simple.style, lines: simple.lines, sound: snd }
+    return { kind: 'text', w: typeof g?.w === 'number' ? g.w : 5, style: g?.style === 'B' ? 'B' : 'A', lines: '', rows, sound: snd }
+  }) as QuoteGroupEdit[]
   // 提醒文案模板：宿主回的就是含换行的字符串，原样显示（缺字段/异常值按空处理）
   const al = c.alerts && typeof c.alerts === 'object' ? c.alerts : {}
   for (const f of ALERT_FIELDS) {
@@ -7996,6 +8531,11 @@ onUnmounted(() => {
             <label class="field row check">
               <span class="label">音效 <em>{{ packLine(assetsPack.has?.sounds, '段', assetsSoundNames) }}</em></span>
               <input type="checkbox" v-model="assetsPicks.sounds" :disabled="!assetsPack.has?.sounds" @change="assetsConfirm = false" />
+            </label>
+            <!-- 台词组：追加进现有组尾部（上限 12 组，超了截断），老包没有这个键时整行禁用 -->
+            <label class="field row check">
+              <span class="label">台词组 <em>{{ packLine(assetsPack.has?.quotes, '个', assetsQuoteLine) }}</em></span>
+              <input type="checkbox" v-model="assetsPicks.quotes" :disabled="!assetsPack.has?.quotes" @change="assetsConfirm = false" />
             </label>
             <div class="btn-row">
               <button class="danger utils-btn utils-danger" :disabled="assetsBusy || !assetsAnyItem" @click="doApplyAssets">
@@ -8547,8 +9087,10 @@ onUnmounted(() => {
         <p class="hint quote-group-tip">
           点气泡时按权重随机抽一组，权重越大越常抽到（1–999）；「依次播放」开着时按这里的先后顺序出场。
         </p>
-        <div v-for="(g, i) in cfg.quotes.groups" :key="i" class="quote-group">
+        <div v-for="(g, i) in cfg.quotes.groups" :key="i" class="quote-group"
+             :class="{ 'quote-group-on': quotePreviewIdx === i }">
           <div class="quote-group-head">
+            <span class="quote-group-no" :title="'第 ' + (i + 1) + ' 组；「依次播放」开着时按这个顺序出场'">{{ i + 1 }}</span>
             <select v-model="g.kind">
               <option v-for="k in QUOTE_KINDS" :key="k.v" :value="k.v">{{ k.label }}</option>
             </select>
@@ -8556,23 +9098,177 @@ onUnmounted(() => {
               权重
               <input class="num" type="number" min="1" max="999" step="1" v-model.number="g.w" />
             </span>
-            <select v-if="g.kind === 'text'" v-model="g.style">
+            <select v-if="g.kind === 'text' && !Array.isArray(g.rows)" v-model="g.style">
               <option value="A">普通字号</option>
               <option value="B">大字号</option>
             </select>
+            <!-- 组级音效：抽中这组时播共享音效库里的一段（名字对不上就静音，不报错） -->
+            <select class="quote-sound-select" v-model="g.sound" :title="quoteSoundOptions ? '抽中这组时播放的音效（共享音效库里的段）' : '先在「资源」页导入共享音效库（素材包），才有音效可选'"
+                    :disabled="!quoteSoundOptions">
+              <option value="">不配音效</option>
+              <option v-if="g.sound && quoteSoundOptions && !quoteSoundOptions.some((o) => o.name === g.sound)" :value="g.sound">{{ g.sound }}（已失效）</option>
+              <option v-for="o in quoteSoundOptions || []" :key="o.name" :value="o.name">{{ o.name }}</option>
+            </select>
             <span v-if="quoteGroupPreview(g)" class="quote-group-preview">{{ quoteGroupPreview(g) }}</span>
             <span class="quote-group-sp"></span>
-            <button class="export-btn utils-btn" :class="quotePreviewIdx === i ? 'utils-primary' : 'utils-outline'"
-                    type="button" @click="quoteGroupTogglePreview(i)">预览</button>
-            <button class="export-btn utils-btn utils-outline" type="button" :disabled="i === 0" title="上移" @click="quoteGroupMove(i, -1)">↑</button>
-            <button class="export-btn utils-btn utils-outline" type="button" :disabled="i === cfg.quotes.groups.length - 1" title="下移" @click="quoteGroupMove(i, 1)">↓</button>
-            <button class="export-btn utils-btn utils-outline" type="button" @click="quoteGroupDel(i)">删除</button>
+            <span class="quote-group-acts">
+              <button class="export-btn utils-btn" :class="quotePreviewIdx === i ? 'utils-primary' : 'utils-outline'"
+                      type="button" @click="quoteGroupTogglePreview(i)">预览</button>
+              <button v-if="quotesDirty" class="export-btn utils-btn" :class="quoteGroupResetConfirm === i ? 'utils-danger' : 'utils-outline'"
+                      type="button" :title="quoteGroupResetConfirm === i ? '再点一次确认：把这组还原成上次保存的状态' : '撤销这组未保存的修改，回到上次保存的状态'"
+                      @click="quoteGroupReset(i)">{{ quoteGroupResetConfirm === i ? '确认还原？' : '还原' }}</button>
+              <button class="export-btn utils-btn utils-outline" type="button" :disabled="i === 0" title="上移" @click="quoteGroupMove(i, -1)">↑</button>
+              <button class="export-btn utils-btn utils-outline" type="button" :disabled="i === cfg.quotes.groups.length - 1" title="下移" @click="quoteGroupMove(i, 1)">↓</button>
+              <button class="export-btn utils-btn utils-outline" type="button" @click="quoteGroupDel(i)">删除</button>
+            </span>
           </div>
-          <textarea v-if="g.kind === 'text'" class="quote-input" rows="3" spellcheck="false"
-                    v-model="g.lines" placeholder="一行一条，随机抽一条显示；可写 {balance} / {today} / {peak} / {next} 占位符"></textarea>
-          <p v-if="g.kind === 'text' && !String(g.lines || '').trim()" class="hint quote-group-note">
-            还没填台词，保存后这一组会被丢掉
-          </p>
+          <template v-if="g.kind === 'text'">
+            <!-- 简单组：textarea 一行一条，与宿主 lines 迁移口径一致；想精细排版再升级行×段 -->
+            <template v-if="!Array.isArray(g.rows)">
+              <textarea class="quote-input" rows="3" spellcheck="false"
+                        v-model="g.lines" placeholder="一行一条，随机抽一条显示；可写 {balance} / {today} / {peak} / {next} 占位符"></textarea>
+              <p v-if="!String(g.lines || '').trim()" class="hint quote-group-note">
+                还没填台词，保存后这一组会被丢掉
+              </p>
+              <div class="quote-adv-row">
+                <button class="export-btn utils-btn utils-outline" type="button"
+                        title="升级为行×段编辑：可加气泡图 / 链接 / 数据段、调字号颜色；升级后回不去简单编辑"
+                        @click="quoteUpgradeToRows(i)">高级编辑（行 × 段）</button>
+              </div>
+            </template>
+            <!-- 富文本组：行 × 段 chips。点 chip 选中在下方展开字段编辑；桌面可拖拽换位（允许跨行），触屏用 ←/→ -->
+            <template v-else>
+              <div v-for="(r, ri) in quoteRowsView(i)" :key="ri" class="quote-row">
+                <div class="quote-row-head">
+                  <span class="quote-row-no">行{{ ri + 1 }}</span>
+                  <!-- 行条件：点 chip 展开 / 收起编辑，无条件时给「+条件」入口。不满足整行塌缩不抽 -->
+                  <button class="quote-cond-chip" :class="{ 'quote-cond-chip-on': !!quoteRowCond(r) }" type="button"
+                          :title="quoteRowCond(r) ? '这行带显示条件，点开修改或清除' : '给这行加显示条件（不满足时整行不出现）'"
+                          @click="quoteCondOpen = quoteCondOpen === quoteCondKey(i, ri) ? null : quoteCondKey(i, ri)">
+                    {{ quoteRowCond(r) ? '⧉ ' + quoteCondLabel(r) : '+条件' }}
+                  </button>
+                  <label class="quote-row-wrap" title="这行允许自动折行（长台词才需要，对应普通字号的折行语义）">
+                    <input type="checkbox" :checked="r.w === 1" @change="quoteRowToggleWrap(i, ri)" /> 折行
+                  </label>
+                  <label class="quote-row-wrap" title="这屏停留秒数（1–120 秒）：挂件气泡到点自动翻下一屏/收起；留空 = 默认 5 秒、需点击翻页的口径不变（试播会话同样生效）">
+                    停留
+                    <input class="num quote-dwell-in" type="number" min="1" max="120" step="1" placeholder="5"
+                           :value="r.d" @change="quoteRowDwellSet(i, ri, ($event.target as HTMLInputElement).value)" /> 秒
+                  </label>
+                  <span class="quote-row-sp"></span>
+                  <button class="export-btn utils-btn utils-outline" type="button" :disabled="ri === 0" title="上移" @click="quoteRowMove(i, ri, -1)">↑</button>
+                  <button class="export-btn utils-btn utils-outline" type="button" :disabled="ri === quoteRowsView(i).length - 1" title="下移" @click="quoteRowMove(i, ri, 1)">↓</button>
+                  <button class="export-btn utils-btn utils-outline" type="button" title="删这行" @click="quoteRowDel(i, ri)">删行</button>
+                  <select class="quote-seg-add" title="往这行里加一段" @change="quoteSegAddFromSelect($event, i, ri)">
+                    <option value="">+ 段…</option>
+                    <option v-for="(lbl, tk) in QUOTE_SEG_TYPE_LABELS" :key="tk" :value="tk">{{ lbl }}</option>
+                  </select>
+                </div>
+                <div v-if="quoteCondOpen === quoteCondKey(i, ri)" class="quote-cond-editor">
+                  <select class="quote-cond-type" :value="quoteCondTypeOf(r)" @change="quoteCondTypeSet(i, ri, ($event.target as HTMLSelectElement).value)">
+                    <option value="">无条件</option>
+                    <option v-for="(lbl, ck) in QUOTE_COND_LABELS" :key="ck" :value="ck">{{ lbl }}</option>
+                  </select>
+                  <template v-if="quoteCondTypeOf(r) === 'balanceBelow'">
+                    <input class="quote-cond-num" type="number" min="0" :value="quoteCondValue(i, ri)"
+                           @change="quoteCondValueSet(i, ri, Number(($event.target as HTMLInputElement).value))" /> 元以下显示
+                  </template>
+                  <template v-else-if="quoteCondTypeOf(r) === 'model'">
+                    <select class="quote-cond-model" :value="quoteCondModel(i, ri)" @change="quoteCondModelSet(i, ri, ($event.target as HTMLSelectElement).value)">
+                      <option v-for="mo in quoteCondModelOptions" :key="mo.id" :value="mo.id">{{ mo.name }}</option>
+                    </select> 为主显示时
+                  </template>
+                  <template v-else-if="quoteCondTypeOf(r) === 'weekday'">
+                    <label v-for="wd in QUOTE_WEEKDAYS" :key="wd.d" class="quote-cond-day">
+                      <input type="checkbox" :checked="quoteCondDays(i, ri).indexOf(wd.d) >= 0" @change="quoteCondDayToggle(i, ri, wd.d)" />{{ wd.label }}
+                    </label>
+                  </template>
+                  <span v-else-if="quoteCondTypeOf(r) === 'peak' || quoteCondTypeOf(r) === 'valley'" class="quote-cond-note">{{ QUOTE_COND_PEAK_HINT }}</span>
+                  <span v-if="quoteCondTypeOf(r) === 'weekday'" class="quote-cond-note">全选或全不选 = 无条件</span>
+                </div>
+                <div class="quote-row-chips" @dragover.prevent @drop.prevent="quoteSegDrop(i)">
+                  <span v-if="!r.segs.length" class="quote-row-empty">空行（保存时会被丢掉，加段或删行）</span>
+                  <span v-for="(s, si) in r.segs" :key="si" class="quote-chip"
+                        :class="['quote-chip-' + (s.type || 'text'), quoteEditorSel && quoteEditorSel.group === i && quoteEditorSel.row === ri && quoteEditorSel.seg === si ? 'quote-chip-on' : '']"
+                        :draggable="QUOTE_CAN_DRAG" :title="QUOTE_CAN_DRAG ? '拖拽换位（可跨行）；点一下编辑这段' : '点一下编辑这段'"
+                        @click="quoteEditorSel = { group: i, row: ri, seg: si }"
+                        @dragstart="quoteSegDragStart($event, i, ri, si)"
+                        @dragover="quoteSegDragOver(i, ri, si)">
+                    {{ quoteSegLabel(s) }}
+                    <button class="quote-chip-x" type="button" title="删这段" @click.stop="quoteSegDel(i, ri, si)">×</button>
+                  </span>
+                </div>
+              </div>
+              <div class="quote-adv-row">
+                <button class="export-btn utils-btn utils-outline" type="button"
+                        :disabled="quoteRowsView(i).length >= QUOTE_ROW_MAX" @click="quoteRowAdd(i)">+ 行</button>
+              </div>
+              <!-- 选中段的字段编辑区（挂在本组下，跨组不会串） -->
+              <div v-if="quoteSelSeg && quoteEditorSel && quoteEditorSel.group === i" class="quote-seg-editor">
+                <div class="quote-seg-editor-head">
+                  <span>编辑段：{{ QUOTE_SEG_TYPE_LABELS[quoteSelSeg.type || 'text'] || quoteSelSeg.type }}</span>
+                  <span class="quote-seg-sp"></span>
+                  <button class="export-btn utils-btn utils-outline" type="button" :disabled="quoteEditorSel.seg === 0" title="左移" @click="quoteSegMove(i, quoteEditorSel.row, quoteEditorSel.seg, -1)">←</button>
+                  <button class="export-btn utils-btn utils-outline" type="button" :disabled="quoteEditorSel.seg === (quoteRowsView(i)[quoteEditorSel.row]?.segs.length || 1) - 1" title="右移" @click="quoteSegMove(i, quoteEditorSel.row, quoteEditorSel.seg, 1)">→</button>
+                </div>
+                <!-- text 段 -->
+                <template v-if="!quoteSelSeg.type || quoteSelSeg.type === 'text'">
+                  <input class="quote-input quote-seg-t" type="text" spellcheck="false" v-model="quoteSelSeg.t"
+                         placeholder="文本内容，可写占位符（保时空文本的段会被丢）" />
+                  <div class="quote-seg-flags">
+                    字号
+                    <select class="num" v-model.number="quoteSelSeg.fz">
+                      <option v-for="n in QUOTE_FZ_OPTIONS" :key="n" :value="n">{{ n }}</option>
+                    </select>
+                    <label class="quote-flag"><input type="checkbox" :checked="!!quoteSelSeg.b" @change="quoteSegFlag('b', ($event.target as HTMLInputElement).checked)" /> 粗体</label>
+                    <label class="quote-flag"><input type="checkbox" :checked="!!quoteSelSeg.i" @change="quoteSegFlag('i', ($event.target as HTMLInputElement).checked)" /> 斜体</label>
+                    <label class="quote-flag" title="这段之后硬换行，本行里排在它后面的段都不显示">
+                      <input type="checkbox" :checked="quoteSelSeg.br === 1" @change="quoteSegFlag('br', ($event.target as HTMLInputElement).checked)" /> 段后换行
+                    </label>
+                    <span class="quote-flag" title="纯色（如 #2fa24c），留空用主题色">色
+                      <input class="quote-seg-c" type="text" v-model="quoteSelSeg.c" placeholder="#2fa24c" />
+                    </span>
+                  </div>
+                  <div class="quote-chip-row">
+                    <span class="quote-chip-row-label">插入占位符：</span>
+                    <button v-for="p in QUOTE_PLACEHOLDER_CHIPS" :key="p.k" class="quote-chip-btn" type="button"
+                            :title="'把 {' + p.k + '} 追加到文本尾，挂件显示时换成实时值'" @click="quoteInsertPlaceholder(p.k)">{{ p.label }}</button>
+                  </div>
+                </template>
+                <!-- image 段 -->
+                <template v-else-if="quoteSelSeg.type === 'image'">
+                  <div class="quote-seg-flags">
+                    图
+                    <input class="num" type="number" min="0" max="99" step="1" v-model.number="quoteSelSeg.img" />
+                    <span class="quote-seg-note">0 = 随机一张；1 起对应「资源」页气泡图顺序，超出张数按最后一张</span>
+                    高
+                    <input class="num" type="number" min="8" max="300" step="1" v-model.number="quoteSelSeg.h" />
+                  </div>
+                </template>
+                <!-- link 段 -->
+                <template v-else-if="quoteSelSeg.type === 'link'">
+                  <input class="quote-input quote-seg-t" type="text" spellcheck="false" v-model="quoteSelSeg.url"
+                         placeholder="链接地址（必填，留空的段保存时会被丢）" />
+                  <input class="quote-input quote-seg-t" type="text" spellcheck="false" v-model="quoteSelSeg.t"
+                         placeholder="显示文字（留空就用链接地址）" />
+                </template>
+                <!-- model 段 -->
+                <template v-else-if="quoteSelSeg.type === 'model'">
+                  <div class="quote-seg-flags">
+                    数据
+                    <select v-model="quoteSelSeg.model">
+                      <option v-for="k in QUOTE_MODEL_KEYS" :key="k" :value="k">{{ k }}</option>
+                    </select>
+                    字号
+                    <select class="num" v-model.number="quoteSelSeg.fz">
+                      <option v-for="n in QUOTE_FZ_OPTIONS" :key="n" :value="n">{{ n }}</option>
+                    </select>
+                    <span class="quote-seg-note">显示时现算：balance 余额 / today 今日已用 / peak 当前时段 / next 距高峰</span>
+                  </div>
+                </template>
+              </div>
+            </template>
+          </template>
           <p v-else-if="g.kind === 'card'" class="hint quote-group-note">
             内置卡片：内容按当前余额 / 峰谷时段现算，文字改不了
           </p>
@@ -8580,8 +9276,14 @@ onUnmounted(() => {
             抽一张「气泡图」里的图（导入在「资源」页）；没导入过时用内置的 rua.webp
           </p>
         </div>
-        <button class="export-btn utils-btn utils-outline" type="button" :disabled="cfg.quotes.groups.length >= QUOTE_GROUP_MAX"
-                @click="quoteGroupAdd()">{{ cfg.quotes.groups.length >= QUOTE_GROUP_MAX ? `已达上限（${QUOTE_GROUP_MAX} 组）` : '+ 添加组' }}</button>
+        <div class="quote-add-row">
+          <button class="export-btn utils-btn utils-outline" type="button" :disabled="cfg.quotes.groups.length >= QUOTE_GROUP_MAX"
+                  @click="quoteGroupAdd()">{{ cfg.quotes.groups.length >= QUOTE_GROUP_MAX ? `已达上限（${QUOTE_GROUP_MAX} 组）` : '+ 添加组' }}</button>
+          <select class="quote-tpl-select" title="从成品模板新建一组（行 × 段编辑）" @change="quoteGroupFromTemplate($event)">
+            <option value="">从模板新建…</option>
+            <option v-for="(t, ti) in QUOTE_TEMPLATES" :key="ti" :value="String(ti)">{{ t.label }}</option>
+          </select>
+        </div>
       </div>
 
       <!-- 台词真预览：共享渲染器真渲染（同一套 DOM / 字号自适应 / 主题变量）。
@@ -8593,7 +9295,7 @@ onUnmounted(() => {
           <div class="range-tabs quote-preview-tabs">
             <button class="export-btn utils-btn range-tab quote-preview-tab" type="button"
                     :class="quotePreviewTarget === 'stage' ? 'utils-primary' : 'utils-outline'"
-                    @click="quotePreviewTarget = 'stage'">设置页</button>
+                    @click="quoteSetPreviewTarget('stage')">设置页</button>
             <button class="export-btn utils-btn range-tab quote-preview-tab" type="button"
                     :class="quotePreviewTarget === 'widget' ? 'utils-primary' : 'utils-outline'"
                     title="把整组台词发到挂件气泡，点挂件气泡按顺序逐条翻看（占位符换成实时值）"
@@ -8601,12 +9303,12 @@ onUnmounted(() => {
           </div>
         </div>
         <BubblePreview v-if="quotePreviewTarget === 'stage' && quotePreviewLines" :lines="quotePreviewLines" :theme="cfg.theme"
+                       :bubble-src="quoteBubbleSrc" :model-text="quoteModelText"
                        :title="quotePreviewStageClickable ? '点击切换下一条台词' : ''"
                        @next="quotePreviewStageClickable && quotePreviewNext()" />
         <p v-if="quotePreviewTarget === 'widget'" class="hint quote-preview-empty">
           点挂件气泡翻下一条，末条再点收起；挂件未显示时先在设置页显示挂件。
-          <button v-if="quotePreviewSteps" class="export-btn utils-btn utils-primary quote-preview-next" type="button"
-                  @click="quoteWidgetPreview()">发送试播</button>
+          再点一次组上的「预览」可重发。
         </p>
         <p v-if="quotePreviewTarget === 'stage' && !quotePreviewLines" class="hint quote-preview-empty">
           点某组右侧的「预览」在这里看到它真显示在气泡里的样子（与挂件同一套渲染）。
@@ -8614,11 +9316,11 @@ onUnmounted(() => {
         <!-- 元信息跟着预览体走：台词全删光时 quotePreviewLines 变 null，这行也一起消失 -->
         <div v-if="quotePreviewTarget === 'stage' && quotePreviewLines !== null" class="quote-preview-meta">
           <p class="hint quote-preview-nav">
-            <template v-if="quotePreviewTextLines.length > 1">
-              第 {{ Math.min(quotePreviewLineIdx, quotePreviewTextLines.length - 1) + 1 }} / {{ quotePreviewTextLines.length }} 条
+            <template v-if="quotePreviewCount > 1">
+              第 {{ Math.min(quotePreviewLineIdx, quotePreviewCount - 1) + 1 }} / {{ quotePreviewCount }} 条
               <button class="export-btn utils-btn utils-outline quote-preview-next" type="button" @click="quotePreviewNext()">下一条</button>
             </template>
-            <template v-else-if="quotePreviewTextLines.length === 1">单条台词</template>
+            <template v-else-if="quotePreviewCount === 1">单条台词</template>
           </p>
           <p class="hint quote-preview-tip">
             <span v-if="quotePreviewGroup && quotePreviewGroup.kind === 'card'">卡片内容按当前余额 / 时段现算，这里显示示例值。</span>
@@ -13567,12 +14269,13 @@ input[type='checkbox'] {
   display: block;
   width: 100%;
   box-sizing: border-box;
+  margin-top: 2px;
   padding: 7px 9px;
   font-size: 13px;
   font-family: inherit;
   line-height: 1.5;
   resize: vertical;
-  border: 1px solid var(--line);
+  border: 1px solid var(--card-border);
   border-radius: 8px;
   background: var(--input-bg);
   color: var(--fg);
@@ -13582,18 +14285,44 @@ input[type='checkbox'] {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px rgba(83, 107, 169, 0.18);
 }
-/* 随机台词组：一行一组，表头（类型 / 权重 / 字号 / 排序 / 删除）+ 台词框 */
+/* 随机台词组：一行一组，表头（类型 / 权重 / 字号 / 排序 / 删除）+ 台词框。
+   卡内嵌卡：card-bg 半透明叠一层做出层级，边框用更安静的 card-border，悬停再亮回 line */
 .quote-group {
-  margin-bottom: 8px;
-  padding: 8px;
-  border: 1px solid var(--line);
+  margin-bottom: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--card-border);
+  border-radius: 10px;
+  background: var(--card-bg);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+.quote-group:hover {
+  border-color: var(--line);
+}
+/* 正在预览的组：整卡亮起（此前只有「预览」按钮变色，卡片多了得来回找是哪组在播 */
+.quote-group-on {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-weak);
+}
+/* 组序号徽标：锚定卡片 + 可视化顺序（「依次播放」按这里的先后顺序出场） */
+.quote-group-no {
+  flex: 0 0 auto;
+  min-width: 22px;
+  padding: 2px 6px;
   border-radius: 9px;
+  background: var(--accent-weak);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+  text-align: center;
 }
 .quote-group-head {
   display: flex;
   align-items: center;
   gap: 8px;
   margin-bottom: 6px;
+  /* 加入组级音效下拉后表头变宽，窗口窄时固定不换行会把右侧按钮顶出卡片边框 */
+  flex-wrap: wrap;
 }
 /* 行内下拉/输入框：全局规则是 width:100%，在表头里会把其余控件挤出去 */
 .quote-group-head select,
@@ -13625,9 +14354,243 @@ input[type='checkbox'] {
   font-size: 12px;
   color: var(--fg-dim);
 }
+/* 行×段编辑器（第 3 期）：行头 / chips / 段字段区 */
+.quote-adv-row,
+.quote-add-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+.quote-tpl-select {
+  width: auto;
+  flex: 0 0 auto;
+}
+/* 组级音效下拉：宽度压到内容附近，表头空间紧（预览灰字负责让步） */
+.quote-sound-select {
+  max-width: 140px;
+}
+.quote-row {
+  margin-bottom: 6px;
+}
+.quote-row-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+.quote-row-no {
+  font-size: 12px;
+  color: var(--fg-dim);
+  flex: 0 0 auto;
+}
+.quote-row-wrap {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 12px;
+  color: var(--fg-dim);
+}
+/* 停留秒数小输入框：三位数够用，别跟着 .num 默认宽度把行头撑折行 */
+.quote-dwell-in {
+  width: 52px;
+}
+.quote-row-sp {
+  flex: 1;
+}
+.quote-row-head .export-btn {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+.quote-seg-add {
+  width: auto;
+  flex: 0 0 auto;
+}
+/* 行条件 chip 与编辑条：chip 亮起 = 这行带条件；编辑条一行排开，窄了换行 */
+.quote-cond-chip {
+  border: 1px dashed var(--card-border);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--fg-dim);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  padding: 3px 8px;
+  cursor: pointer;
+  flex: 0 0 auto;
+  transition: border-color 0.15s ease, color 0.15s ease;
+}
+.quote-cond-chip:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.quote-cond-chip-on {
+  border-style: solid;
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.quote-cond-editor {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  margin: 2px 0 4px;
+  padding: 4px 8px;
+  border-radius: 8px;
+  background: var(--input-bg);
+}
+.quote-cond-type,
+.quote-cond-model {
+  width: auto;
+  flex: 0 0 auto;
+  font-size: 12px;
+}
+.quote-cond-num {
+  width: 72px;
+}
+.quote-cond-day {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  cursor: pointer;
+}
+.quote-cond-note {
+  opacity: .65;
+}
+.quote-row-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-height: 26px;
+  padding: 5px;
+  border: 1px dashed var(--card-border);
+  border-radius: 8px;
+}
+.quote-row-chips:focus-within {
+  border-color: var(--accent);
+}
+.quote-row-empty {
+  font-size: 12px;
+  color: var(--fg-dim);
+  align-self: center;
+}
+.quote-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  max-width: 200px;
+  padding: 2px 4px 2px 8px;
+  border: 1px solid var(--card-border);
+  border-radius: 6px;
+  background: var(--input-bg);
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+  overflow: hidden;
+}
+.quote-chip-image { background: rgba(83, 107, 169, 0.12); }
+.quote-chip-link { background: rgba(47, 162, 76, 0.12); }
+.quote-chip-model { background: rgba(180, 130, 60, 0.12); }
+.quote-chip-on {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(83, 107, 169, 0.25);
+}
+.quote-chip-x {
+  border: none;
+  background: none;
+  padding: 0 3px;
+  font-size: 12px;
+  line-height: 1;
+  color: var(--fg-faint);
+  cursor: pointer;
+  border-radius: 4px;
+}
+.quote-chip-x:hover {
+  color: var(--err);
+}
+.quote-seg-editor {
+  margin-top: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--card-border);
+  border-radius: 8px;
+  background: var(--input-bg);
+}
+.quote-seg-editor-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+  font-size: 12px;
+  color: var(--fg-dim);
+}
+.quote-seg-sp {
+  flex: 1;
+}
+.quote-seg-editor-head .export-btn {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+.quote-seg-t {
+  width: 100%;
+  margin-bottom: 6px;
+}
+.quote-seg-flags {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--fg-dim);
+}
+.quote-flag {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+.quote-seg-c {
+  width: 90px;
+}
+.quote-seg-note {
+  flex-basis: 100%;
+  font-size: 12px;
+  color: var(--fg-dim);
+}
+.quote-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  margin-top: 6px;
+}
+.quote-chip-row-label {
+  font-size: 12px;
+  color: var(--fg-dim);
+}
+.quote-chip-btn {
+  padding: 2px 8px;
+  border: 1px solid var(--card-border);
+  border-radius: 10px;
+  background: var(--input-bg);
+  font-size: 12px;
+  cursor: pointer;
+  color: var(--fg);
+  transition: border-color 0.15s ease, color 0.15s ease;
+}
+.quote-chip-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
 /* 占位撑开，把排序 / 删除推到右侧 */
 .quote-group-sp {
   flex: 1;
+}
+/* 表头右侧操作按钮打包成整体：单行时与原布局一致，换行时四个按钮整组落到第二行，不会散开或溢出 */
+.quote-group-acts {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
 }
 .quote-group-note {
   margin: 0;

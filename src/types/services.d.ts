@@ -1291,10 +1291,11 @@ export interface AssetsExportResult {
   canceled?: boolean
   path?: string
   exportedAt?: string
-  // 包内形象张数、音效段数与气泡图张数
+  // 包内形象张数、音效段数、气泡图张数与台词组个数
   skins?: number
   sounds?: number
   bubbles?: number
+  quotes?: number
   error?: string
 }
 
@@ -1305,11 +1306,13 @@ export interface AssetsPreviewResult {
   path?: string
   exportedAt?: string
   appVersion?: string
-  has?: { skins: number; sounds: number; bubbles: number }
+  has?: { skins: number; sounds: number; bubbles: number; quotes: number }
   // 包内形象/气泡图文件名（最多 40 条）与音效槽位，仅供预览展示
   skinNames?: string[]
   soundRoles?: string[]
   bubbleNames?: string[]
+  // 包内台词组个数（老版本导出的包没有 quotes 清单项，恒为 0）
+  quoteCount?: number
   error?: string
 }
 
@@ -1322,6 +1325,8 @@ export interface AssetsApplyResult {
   sounds?: { applied: number }
   // 气泡图也是「补充」：skipped = 因已达上限（8 张）未导入的张数
   bubbles?: { added: number; skipped: number }
+  // 台词组是「追加」：勾选且包里有组时才有值，added = 清洗后实际进配置的组数
+  quotes?: { added: number }
   errors?: string[]
   error?: string
 }
@@ -1783,7 +1788,8 @@ export interface WhaleServices {
   // 手动校准今日已用（仅记账模式有意义；令牌模式下平台返回会覆盖）
   calibrateTodayUsage(amount: number): CalibrateResult
   // —— 自定义音效（按压/释放两段 + 四类提醒各一组；文件复制进 userData/whale-sounds） ——
-  getSounds(): Record<SoundRole, SoundMeta[]>
+  // shared 槽位（共享音效库）只在 getSounds 的返回里出现：台词组「组级音效」下拉的选项来源
+  getSounds(): Record<SoundRole | 'shared', SoundMeta[]>
   // 音效本体（base64 data URL 数组），供设置页试听
   getSoundData(): Record<SoundRole, string[]>
   importSound(role: SoundRole): SoundImportResult
@@ -1858,8 +1864,8 @@ export interface WhaleServices {
   assetsExport(): AssetsExportResult
   // 选择素材包并解析预览（不写任何数据）
   assetsPick(): AssetsPreviewResult
-  // 按勾选项写入：形象/气泡图补充（新 id）、音效同槽位覆盖
-  assetsApply(opts: { skins?: boolean; sounds?: boolean; bubbles?: boolean }): AssetsApplyResult
+  // 按勾选项写入：形象/气泡图补充（新 id）、音效同槽位覆盖、台词组追加到现有组尾部
+  assetsApply(opts: { skins?: boolean; sounds?: boolean; bubbles?: boolean; quotes?: boolean }): AssetsApplyResult
   // 放弃本次选择
   assetsCancel(): { ok: boolean }
   // Codex 本地会话统计：读 ~/.codex/sessions 下的 rollout JSONL，按天/模型聚合
@@ -1988,8 +1994,9 @@ export interface WhaleServices {
   copyText(text: string): boolean
   redirectHotKeySetting(cmdLabel?: string): boolean
   isWidgetVisible(): boolean
-  // 台词试播到挂件：整组台词按会话发去悬浮页（steps 一屏一条，挂件点气泡顺序翻；挂件未显示时 ok:false）
-  quotePreview(payload: { steps: Array<Array<{ t: string; s: string; c?: string; w?: boolean } | null>> }): { ok: boolean; error?: string }
+  // 台词试播到挂件：整组台词按会话发去悬浮页（一屏一步，挂件点气泡顺序翻；挂件未显示时 ok:false）。
+  // 步 = 旧三行数组（含 null 占位）或 v2 行组 { rows }（富文本组，行/段结构见 spec §六）
+  quotePreview(payload: { steps: Array<Array<{ t: string; s: string; c?: string; w?: boolean } | null> | { rows: unknown[] }> }): { ok: boolean; error?: string }
   // 诊断日志（落盘于 %TEMP%\whale-debug.log，进程被 uTools 结束也不丢）
   getDebugLog(): DebugLogResult
   openLogFile(): { ok: boolean; path: string }

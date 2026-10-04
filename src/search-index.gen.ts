@@ -1,0 +1,32 @@
+// 由 scripts/gen-search-index.mjs 自动生成 —— DO NOT EDIT。
+// 来源：App.vue + views/*.vue 模板里每张卡片（data-search 锚点）的可见文本（h2 卡头 + label 字段名），
+// 已做归一化（小写 + 删空白）。模板改动后由 prebuild 重新生成；手改会被 --check 拦下。
+export const CARD_TEXT: Record<string, string> = {
+  credentials: "apikey平台token",
+  look: "挂件外观大小形象内置形象也参与随机界面深浅色气泡主题峰谷文案思考气泡小鲸鱼报时挂件右上角菜单按钮点按依次播放音效开关音色音量",
+  assetsOverview: "资源概览导入素材形象音效气泡图形象气泡图音效台词组",
+  assetsSkins: "导入的形象",
+  assetsBubbles: "导入的气泡图",
+  assetsSounds: "导入的音效",
+  assetsBuiltin: "形象下载源",
+  assetsSharedSkins: "共享角色",
+  assetsSharedSounds: "共享音效库",
+  quotes: "文案随机台词组",
+  usage: "用量与账本用量历史保留自定义单价币种汇率额度总量",
+  notify: "提醒与通知峰谷切换提醒计时到点通知记住计时状态计时气泡常驻计时中只显示计时倒计时时长到点提醒我到点后给休息快捷键休息时长低余额预警预警阈值今日预算提醒每日预算余额大幅波动通知波动阈值系统通知邮件通知smtp服务器端口ssl/tls直连账号授权码发件人收件人发件人显示名主题前缀计时到点也发邮件提醒停留时长免打扰时段免打扰起止",
+  models: "模型与余额厂商模板名称类型币种apikey接口地址baseurl余额字段路径已用百分比字段路径取值倍数scale认证方式已用额度字段路径已用额度倍数已用额度接口地址剩余百分比字段路径剩余量字段路径总量字段路径重置时刻字段路径低余额提醒提醒阈值",
+  window: "挂件窗口进入插件时窗口置顶锁定位置窗口透明度鼠标穿透自动避让任务栏贴边间距吸附与翻转吸附区宽度避让滚动条滚动条宽度",
+  help: "使用帮助",
+  privacy: "数据与隐私凭据挂件设置账本用量记录窗口位置与更新缓存导入的素材",
+  backup: "备份与恢复包含凭据备份密码备份密码",
+  dshMain: "deepseekharness状态更新版本进入开发者页自动刷新版本实际使用全局安装插件目录npmlatest版本说明最近命令页面地址webui端口npm注册源node.js目录启动时不自动打开浏览器更新前重新下载utools退出后保留dsh",
+  dshDiagnose: "dsh环境诊断点击展开诊断环境",
+  dshDump: "dsh配置转储点击展开读取概览",
+  dshExport: "dsh全量导出点击展开查看来源目录预计导出包含凭据跳过依赖",
+  dshUsage: "dsh用量统计今日tokens·本月点击展开查看数据目录数据来源会话",
+  dshIsolate: "dsh插件开关点击展开读取写入位置保留份数",
+  dshMarket: "dsh插件市场数据来源写入位置关键词",
+  codex: "codex会话统计今日tokens·本月点击展开查看会话目录会话文件订阅窗口",
+  about: "关于与更新自动检查更新当前版本",
+  ghAccel: "github加速启用github加速实际状态上次刷新",
+}

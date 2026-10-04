@@ -192,6 +192,17 @@ function quoteGroupShape(marker) {
   }
 }
 
+// 台词库 v2 字号档表两份副本（11 档）：渲染器 FONT_TIERS（段渲染按 fz 取字号）与
+// 宿主 store.js 的 QUOTE_FONT_TIERS（清洗 clamp 用）。不一致会让「设置页配的字号」
+// 与「挂件实际显示的字号」对不上，且无任何报错
+function fontTiers(src, file) {
+  const m = src.match(/(?:FONT_TIERS|QUOTE_FONT_TIERS)\s*=\s*\[([^\]]+)\]/)
+  if (!m) throw new Error(`${file} 里找不到 FONT_TIERS / QUOTE_FONT_TIERS`)
+  const nums = m[1].match(/\d+/g)
+  if (!nums || !nums.length) throw new Error(`${file} 里字号档表是空的`)
+  return nums.join(',')
+}
+
 // 气泡三行字号（label / amount / period）外加 hint：CSS 里是**未缩小时的默认值**（字号写在
 // .dshwv-xxx 规则里），floating-page.js 的 BUBBLE_FONT 是**超框缩小时的基准**。两份值必须相等，
 // 否则「内容超框」前后字号会跳变（页面写行内 calc(var(--dshw-u) * N) 覆盖 CSS，基准不一样就断层）。
@@ -532,6 +543,15 @@ const CHECKS = [
     parts: [
       { file: FLOATING_BUBBLE_CSS, pick: uDivisorFromCss },
       { file: BUBBLE_RENDER, pick: uDivisorFromJsComment('const BUBBLE_FONT =') },
+    ],
+  },
+  // 台词库 v2 字号档表：渲染器 FONT_TIERS（按 fz 档取实际字号）与宿主 store.js 的
+  // QUOTE_FONT_TIERS（清洗 clamp 用）同表两份，不一致会让配的字号与显示的字号对不上。
+  {
+    name: '台词字号档表 FONT_TIERS',
+    parts: [
+      { file: BUBBLE_RENDER, pick: fontTiers },
+      { file: STORE, pick: fontTiers },
     ],
   },
   // 到点留言长度上限三处副本：宿主 constants（清洗用）、挂件页（菜单输入框取用）、

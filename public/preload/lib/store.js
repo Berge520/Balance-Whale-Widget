@@ -174,17 +174,28 @@ const QUOTES_DEFAULT = {
 }
 // 「不是随机组」的两项：报时模板与动图降级文案。它们不走抽签，固定就是这两份文案
 const QUOTE_TEXT_KEYS = ['time', 'gifFail']
-// 单条最长 60 字、每组最多 30 条：气泡只有三行，更长更多都显示不出来
+// 单条（段）最长 60 字、每组最多 30 条候选：气泡可用区域有限，更长更多都显示不出来
 const QUOTE_MAX_LEN = 60
 const QUOTE_MAX_COUNT = 30
 // 随机台词组：一组 = 一个抽签项，权重越大越常抽到。
-// card = 内置的余额 / 时段卡（内容按当前数据现算，文本不可编辑）；text = 用户自己填的台词
-// （一行一条候选，随机抽一条显示）；image = 抽一张自定义气泡图（没导入过就用内置 rua.webp）。
+// v2 起 text 组的内容是「行×段」：rows = 候选行列表，一行 = 段的水平内联拼接（br:1 的段后硬换行），
+// 段类型 text / image / link / model。image 不再是独立组型（旧 image 组迁移成单图段行），
+// 但 kind 白名单仍认 image —— QUOTE_GROUPS_DEFAULT 字面量与老配置都还是 v1 形态，得认出来才能迁移
 const QUOTE_GROUP_KINDS = ['card', 'text', 'image']
 const QUOTE_GROUP_MAX = 12
 const QUOTE_GROUP_W_MAX = 999
-// 文本组的两种字号：A = 普通（长句自动换行）、B = 大字（不换行，靠挂件按可用宽度整体缩放）
-const QUOTE_GROUP_STYLES = ['A', 'B']
+// 段字号档表（单位 u = 挂件基准 / 1026）：fz 是档位序号（1 起）。
+// fz7=72 / fz10=114 / fz11=140 与旧三行模型的 label / period / amount 字号精确对齐，v1 迁移映射靠它。
+// 与渲染器 src/bubble/bubble-render.js 的 FONT_TIERS 是同一份表的两处副本，check-shared 钉住
+const QUOTE_FONT_TIERS = [26, 32, 40, 48, 58, 66, 72, 90, 104, 114, 140]
+// 段类型白名单以 normSeg 逐型清洗为准（text / image / link / model）；
+// model 段取值键与悬浮页 linePlaceholderValue 认的那几个占位符一致
+const QUOTE_MODEL_KEYS = ['balance', 'today', 'peak', 'next']
+// 行条件类型白名单：peak/valley 工作日峰谷时段、balanceBelow 余额阈值、model 主显某模型、weekday 星期几
+const QUOTE_COND_TYPES = ['peak', 'valley', 'balanceBelow', 'model', 'weekday']
+const QUOTE_WEEKDAY_ALL = [1, 2, 3, 4, 5, 6, 0] // 周一..周日（getDay 口径，0 = 周日）
+const QUOTE_SEG_MAX = 12 // 单行段数上限：再多基本是在拿气泡当记事本了
+const QUOTE_URL_MAX = 300
 // 内置默认组：与挂件页面 defaultRandomGroups() 一一对应（顺序、权重、样式都要一致），
 // 权重沿用整理前写死在挂件页里的那套（45 / 7 / 7 / 10 / 3 / 1）
 const QUOTE_GROUPS_DEFAULT = [
@@ -197,11 +208,21 @@ const QUOTE_GROUPS_DEFAULT = [
 ]
 // 老结构（hint / chat / dsh / short 四个 key）里出现的 key 就认作「需要升级」
 const LEGACY_GROUP_KEYS = ['hint', 'chat', 'dsh', 'short']
-// 组列表深拷一层：默认值会被直接塞进配置对象，共用同一个数组实例会被后续编辑污染
-function cloneGroups(list) {
-  return list.map((g) => (Array.isArray(g.lines)
-    ? { kind: g.kind, w: g.w, style: g.style, lines: g.lines.slice() }
-    : { kind: g.kind, w: g.w }))
+// 未知字段透传（v2「只升级不删」的约定：以后加 ttl / cond / sound 等能力零迁移）。
+// 只拷 own 键；__proto__ 必须跳过 —— JSON.parse 会把它造成本 own 键，直接赋值会改掉原型
+function passOwn(v, known) {
+  const out = {}
+  for (const k of Object.keys(v)) {
+    if (k === '__proto__' || known.indexOf(k) >= 0) continue
+    out[k] = v[k]
+  }
+  return out
+}
+// 颜色 / 渐变不校验具体值（认不认是浏览器的事），只截长度；渐变另有形态门槛 ——
+// 乱写的值照单全收的话，background-clip:text 会把整段文字变透明
+const QUOTE_GRADIENT_RE = /^\s*(linear|radial|conic)-gradient\(/i
+function normQuoteColor(v, max) {
+  return String(v == null ? '' : v).trim().slice(0, max)
 }
 // 一组台词：null/非数组（设置页「恢复默认」传 null）→ 内置默认；空数组或全是空行 → 也回内置默认
 // （抽到空数组会渲染出 undefined，报时/降级文案更不能没字，所以「清空」按恢复默认处理）
@@ -215,58 +236,215 @@ function normQuoteList(v, dft) {
   }
   return out.length ? out : dft.slice()
 }
+// —— v2 段/行清洗 ——
+// 一行 = 段的水平内联拼接；br:1 的段后硬换行，行内剩下的段都失效（渲染侧同口径）——
+// v1 的「三行」靠它无损表达，迁移映射才能只用 style 一个键
+function normSeg(v) {
+  if (!v || typeof v !== 'object') return null
+  const br = v.br === 1 ? 1 : undefined
+  if (v.type === 'image') {
+    // img = 自定义气泡图下标；没给（undefined/null）按 0 存，渲染层再决定随机取哪张
+    const img = typeof v.img === 'undefined' || v.img === null
+      ? 0
+      : Math.round(clampNum(v.img, 0, 99, 0))
+    return Object.assign(passOwn(v, ['type', 'img', 'h', 'br']), {
+      type: 'image', img: img, h: Math.round(clampNum(v.h, 8, 300, 96)), br: br,
+    })
+  }
+  if (v.type === 'link') {
+    const url = String(v.url == null ? '' : v.url).trim().slice(0, QUOTE_URL_MAX)
+    if (!url) return null
+    const t = String(v.t == null ? '' : v.t).trim().slice(0, QUOTE_MAX_LEN)
+    return Object.assign(passOwn(v, ['type', 'url', 't', 'br']), {
+      type: 'link', url: url, t: t || url, br: br,
+    })
+  }
+  if (v.type === 'model') {
+    // model 段显示时现算成文本，取值键与悬浮页 linePlaceholderValue 认的占位符一致；
+    // 键不认就整段丢（留着会渲染出「undefined 余额」这类怪话）
+    const model = QUOTE_MODEL_KEYS.indexOf(v.model) >= 0 ? v.model : null
+    if (!model) return null
+    return Object.assign(passOwn(v, ['type', 'model', 'fz', 'br']), {
+      type: 'model', model: model,
+      fz: Math.round(clampNum(v.fz, 1, QUOTE_FONT_TIERS.length, 7)), br: br,
+    })
+  }
+  // text 段：默认型。type 缺省也算 text —— v1 的 lines（纯字符串数组）迁移成段时直接给 { t }
+  const t = String(v.t == null ? '' : v.t).trim().slice(0, QUOTE_MAX_LEN)
+  if (!t) return null
+  return Object.assign(passOwn(v, ['type', 't', 'fz', 'c', 'g', 'b', 'i', 'br']), {
+    type: 'text', t: t,
+    fz: Math.round(clampNum(v.fz, 1, QUOTE_FONT_TIERS.length, 7)),
+    c: normQuoteColor(v.c, 60),
+    g: QUOTE_GRADIENT_RE.test(String(v.g || '')) ? normQuoteColor(v.g, 200) : undefined,
+    b: v.b === 1 ? 1 : undefined,
+    i: v.i === 1 ? 1 : undefined,
+    br: br,
+  })
+}
+// 行条件：不满足时整行在挂件里塌缩（不参与抽选）。与段同层透传至今的字段，现在正式收编：
+// { type, value?, days? } —— peak/valley 无参、balanceBelow.value 余额阈值、model.value 主显模型 id、
+// weekday.days 星期几集合（getDay 口径 0=周日）。非法输入摘掉 cond 键（行退回无条件），不丢行
+function normRowCond(v) {
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return undefined
+  const type = String(v.type || '')
+  if (QUOTE_COND_TYPES.indexOf(type) < 0) return undefined
+  const out = { type: type }
+  if (type === 'balanceBelow') {
+    const n = Math.round(clampNum(v.value, 0, 1e9, 10))
+    if (!(n > 0)) return undefined
+    out.value = n
+  } else if (type === 'model') {
+    const id = String(v.value || '').trim().slice(0, 60)
+    if (!id) return undefined
+    out.value = id
+  } else if (type === 'weekday') {
+    const days = Array.isArray(v.days) ? v.days.map((d) => Math.round(Number(d))).filter((d) => QUOTE_WEEKDAY_ALL.indexOf(d) >= 0) : []
+    const uniq = days.filter((d, i) => days.indexOf(d) === i)
+    if (!uniq.length || uniq.length >= QUOTE_WEEKDAY_ALL.length) return undefined // 全选 = 恒真，没有意义
+    out.days = uniq
+  }
+  return out
+}
+// 条件求值（纯函数，仅导出给单测）。ctx 由悬浮页给：isPeak（工作日峰时）、balance（数值，null = 未知）、
+// mainModelId、day（getDay 值）。悬浮页是原生 JS 不能 require store，同 rowsFromV1Lines 先例：页面内联同口径副本
+function quoteCondOk(cond, ctx) {
+  if (!cond || typeof cond !== 'object') return true
+  const c = ctx || {}
+  if (cond.type === 'peak') return !!c.isPeak
+  if (cond.type === 'valley') return !c.isPeak
+  if (cond.type === 'balanceBelow') return c.balance != null && c.balance < cond.value
+  if (cond.type === 'model') return c.mainModelId === cond.value
+  if (cond.type === 'weekday') return QUOTE_WEEKDAY_ALL.indexOf(c.day) >= 0 && cond.days.indexOf(c.day) >= 0
+  return true
+}
+// 候选行：行对象 { segs, w?:1, d?:sec }，w = 行内允许软换行（对应 v1 style A 的折行语义），
+// d = 该行停留秒数（1–120，缺省 = 悬浮页按 BUBBLE_MS 5 秒收起；试播会话中到点自动翻下一屏）。
+// 数组输入按「纯段列表」、字符串输入按「单 text 段」处理（手写配置友好）；行里没有有效段 = 整行丢
+function normRow(v) {
+  let segsSrc = null
+  let rowOwn = {}
+  let wantWrap = false
+  if (typeof v === 'string' || Array.isArray(v)) segsSrc = v
+  else if (v && typeof v === 'object') {
+    segsSrc = v.segs
+    rowOwn = passOwn(v, ['segs', 'w', 'cond', 'd'])
+    wantWrap = v.w === 1
+    const cond = normRowCond(v.cond)
+    if (cond) rowOwn.cond = cond
+    // d 压到 1–120 的整数；非数值 / 超界外的脏值直接摘键（与 sound 同理，别让脏值穿到出口）
+    const d = Math.round(Number(v.d))
+    if (isFinite(d) && d >= 1 && d <= 120) rowOwn.d = d
+  }
+  const src = typeof segsSrc === 'string' ? [segsSrc] : segsSrc
+  if (!Array.isArray(src)) return null
+  const segs = []
+  for (let i = 0; i < src.length && segs.length < QUOTE_SEG_MAX; i++) {
+    // 字符串段按「单 text 段」吃下（手写配置友好）；normSeg 只认对象，这里先行包装
+    const s = normSeg(typeof src[i] === 'string' ? { t: src[i] } : src[i])
+    if (s) segs.push(s)
+  }
+  if (!segs.length) return null
+  const row = Object.assign(rowOwn, { segs: segs })
+  if (wantWrap) row.w = 1
+  return row
+}
+// 候选行列表：逐行清洗，空行丢（清空 = 这条候选不出现），全空 = 这组没有有效内容
+function normRows(v) {
+  if (!Array.isArray(v)) return []
+  const out = []
+  for (let i = 0; i < v.length && out.length < QUOTE_MAX_COUNT; i++) {
+    const r = normRow(v[i])
+    if (r) out.push(r)
+  }
+  return out
+}
+// v1 文本组 → v2 行：style A = 普通字号可折行 → fz7（=旧 label 的 72）+ 行 w:1；
+// style B = 大字不换行 → fz11（=旧 amount 的 140）。v1 一条候选就是一句纯文本，
+// 迁移成「单段单行」没有任何信息损失；字号档表见 QUOTE_FONT_TIERS
+function rowsFromV1(lines, style) {
+  const fz = style === 'B' ? QUOTE_FONT_TIERS.length : 7
+  const out = []
+  for (const t of lines) {
+    out.push(style === 'B' ? [{ t: t, fz: fz }] : { segs: [{ t: t, fz: fz }], w: 1 })
+  }
+  return out
+}
 // 单个组：kind 不认就按 text（老结构升级过来的都是文本组）；文本组没有有效台词就整组丢掉
 // —— 清空 = 这组不出现，比「悄悄变回内置文案」更符合直觉。
 // 权重压到 1–999：抽签是「累减权重」的循环，权重 0 的组不会被跳过、反而会被兜底抽到，
 // 留着 0 只会让人以为「设成 0 就不出现」。
+// 双认输入：rows（v2）优先，lines + style（v1）就地升级 —— patchConfig 的部分更新会把
+// 已是 v2 的现值回灌进来，清洗函数必须两种形态都吃得下。未知字段（cond/ttl…）原样透传
+// 组级音效 sound = 共享音效库的段名：store 是基础层，读不到 sounds 库（资源叶），只做字符串
+// 规整；名字在库里不存在时播放侧静音处理，不做存在性校验。sound 不在透传白名单里 —— 否则
+// 数字/对象等脏值会原样落库，悬浮页 match 永远落空还白占内存
+function normQuoteSound(v) {
+  if (typeof v !== 'string') return undefined
+  const s = v.trim().slice(0, 120)
+  return s || undefined
+}
 function normQuoteGroup(v) {
   if (!v || typeof v !== 'object') return null
   const kind = QUOTE_GROUP_KINDS.indexOf(v.kind) >= 0 ? v.kind : 'text'
   const w = Math.round(clampNum(v.w, 1, QUOTE_GROUP_W_MAX, 5))
-  if (kind !== 'text') return { kind: kind, w: w }
-  const lines = normQuoteList(v.lines, [])
-  if (!lines.length) return null
-  return { kind: 'text', w: w, style: QUOTE_GROUP_STYLES.indexOf(v.style) >= 0 ? v.style : 'A', lines: lines }
+  const sound = normQuoteSound(v.sound)
+  const base = sound ? { sound: sound } : {}
+  // sound 必须列进已知键从透传里排除：清不出名字（非字符串/空白）时 base 为空，
+  // 不排除的话原始脏值会穿过 passOwn 残留在出口
+  if (kind === 'card') return Object.assign(passOwn(v, ['kind', 'w', 'sound']), base, { kind: 'card', w: w })
+  // v1 image 组 → v2 拆成单图段行；img 省略 = 渲染层抽到时随机取一张（与旧「随机取一张」一致）。
+  // 行必须过 normRows：图段 img 缺省会被 normSeg 存成 0，直接写 [[{type:'image'}]] 的话
+  // 每次读写往返都会是「0 → 缺省 → 0」的形态漂移，幂等性就没了
+  if (kind === 'image') {
+    return Object.assign(passOwn(v, ['kind', 'w', 'sound']), base, { kind: 'text', w: w, rows: normRows([[{ type: 'image' }]]) })
+  }
+  let rows = null
+  if (Array.isArray(v.rows)) rows = normRows(v.rows)
+  else if (Array.isArray(v.lines)) rows = normRows(rowsFromV1(normQuoteList(v.lines, []), v.style))
+  if (!rows || !rows.length) return null
+  return Object.assign(passOwn(v, ['kind', 'w', 'style', 'lines', 'rows', 'sound']), base, { kind: 'text', w: w, rows: rows })
 }
 // 组列表：非数组（含 null）= 用内置默认；逐组清洗；一组不剩也回内置默认
-// —— 全空的话气泡会没内容，「随机台词」整个功能就没了
+// —— 全空的话气泡会没内容，「随机台词」整个功能就没了。
+// 默认字面量保持 v1 形态（check-shared 与悬浮页兜底都逐字比对它），出口处统一走清洗迁移成 v2
 function normQuoteGroups(v) {
-  if (!Array.isArray(v)) return cloneGroups(QUOTE_GROUPS_DEFAULT)
+  if (!Array.isArray(v)) return normQuoteGroups(QUOTE_GROUPS_DEFAULT)
   const out = []
   for (const it of v) {
     const g = normQuoteGroup(it)
     if (g) out.push(g)
     if (out.length >= QUOTE_GROUP_MAX) break
   }
-  return out.length ? out : cloneGroups(QUOTE_GROUPS_DEFAULT)
+  return out.length ? out : normQuoteGroups(QUOTE_GROUPS_DEFAULT)
 }
 // 老配置升级：hint / chat / dsh / short → 四个文本组，card 与 image 这两组在老结构里没有对应
-// key，按内置默认的权重补回原来的位置（顺序与权重都与升级前挂件里写死的那套完全一致）
+// key，按内置默认的权重补回原来的位置（顺序与权重都与升级前挂件里写死的那套完全一致）。
+// 先拼出 v1 形态再过一遍组清洗，迁移逻辑只写一处
 function groupsFromLegacy(src) {
-  return [
+  return normQuoteGroups([
     { kind: 'card', w: 45 },
     { kind: 'text', w: 7, style: 'B', lines: normQuoteList(src.hint, QUOTES_DEFAULT.hint) },
     { kind: 'text', w: 7, style: 'A', lines: normQuoteList(src.chat, QUOTES_DEFAULT.chat) },
     { kind: 'image', w: 10 },
     { kind: 'text', w: 3, style: 'A', lines: normQuoteList(src.dsh, QUOTES_DEFAULT.dsh) },
     { kind: 'text', w: 1, style: 'B', lines: normQuoteList(src.short, QUOTES_DEFAULT.short) },
-  ]
+  ])
 }
 // quotes 全量：v 不是对象（null/undefined）= 整份恢复默认；是对象则只处理它带的键，其余沿用 cur。
-// 三个字段：time / gifFail（固定文案）+ groups（可增删的随机组）。
-// 老结构（只有 hint / chat / dsh / short、没有 groups）在这里就地升级成组列表 ——
-// 不做单独的迁移步骤，下一次保存自然落成新结构
+// 出口恒为 v2（v:2 + groups 走行×段）：v1 形态（顶层老 key 或组内 lines/image 组）在读到的那一刻
+// 就地升级，不做单独的迁移步骤。组/行/段三层的未知字段原样透传，以后加能力零迁移
 function normQuotes(v, cur) {
   const src = v && typeof v === 'object' ? v : null
   const base = src && cur && typeof cur === 'object' ? cur : {}
-  const out = {}
+  const out = { v: 2 }
   for (const k of QUOTE_TEXT_KEYS) {
     if (!src) { out[k] = QUOTES_DEFAULT[k].slice(); continue }
     out[k] = k in src
       ? normQuoteList(src[k], QUOTES_DEFAULT[k])
       : (Array.isArray(base[k]) ? base[k].slice() : QUOTES_DEFAULT[k].slice())
   }
-  if (!src) out.groups = cloneGroups(QUOTE_GROUPS_DEFAULT)
+  if (!src) out.groups = normQuoteGroups(QUOTE_GROUPS_DEFAULT)
   else if ('groups' in src) out.groups = normQuoteGroups(src.groups)
   else if (LEGACY_GROUP_KEYS.some((k) => k in src)) out.groups = groupsFromLegacy(src)
   else out.groups = normQuoteGroups(base.groups)
@@ -1407,4 +1585,14 @@ module.exports = {
   DSB_KEEP_MAX,
   // 随机台词组的数量上限（仅导出给单测：测试里写死 12 会与实现脱钩，改上限时测试照样"通过"）
   QUOTE_GROUP_MAX,
+  // 台词库 v2（仅导出给单测）：组/行/段清洗、v1 迁移与字号档表
+  normSeg,
+  normRow,
+  normRows,
+  normRowCond,
+  quoteCondOk,
+  normQuoteGroup,
+  normQuoteSound,
+  rowsFromV1,
+  QUOTE_FONT_TIERS,
 }

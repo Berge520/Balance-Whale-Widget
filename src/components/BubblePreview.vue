@@ -7,9 +7,15 @@ import { onMounted, onUnmounted, ref, watch } from 'vue'
 import { createBubbleRenderer, THEMES } from '../bubble/bubble-render.js'
 
 interface PreviewLine { t: string; s: 'A' | 'B' | 'P' | 'C'; c?: string; w?: boolean }
+// rows 形态 = v2 行×段（富文本台词组真预览）：段结构由渲染器 normalizeRowInput 双认，
+// 这里只透传，不在前端再清洗
 const props = defineProps<{
-  lines: Array<PreviewLine | null> | { gif: true; src?: string }
+  lines: Array<PreviewLine | null> | { gif: true; src?: string } | { rows: unknown[] }
   theme?: string
+  // v2 段级回调：image 段取气泡图（按 listBubbles 的下标，0/缺省 = 随机）、model 段算占位符值。
+  // 不传时渲染器整段丢弃这两类段（与旧版一致），传了才能真预览富文本组
+  bubbleSrc?: (img: number) => string | null
+  modelText?: (model: string) => string
 }>()
 
 const stage = ref<HTMLElement | null>(null)
@@ -38,6 +44,10 @@ onMounted(() => {
     // 与悬浮窗同路径：设置页 index.html 也在 dist 根，./whale/rua.webp 可直接解析
     defaultGifUrl: './whale/rua.webp',
     onGifError() { /* 预览里图挂了就让它挂着，不做降级文案（那是挂件的运行时行为） */ },
+    // 段级回调透传：预览样本不取实时数据，img 段取当前气泡列表第 1 张（与挂件「随机抽一张」
+    // 同源但固定，预览要的是稳定可检查）、model 段走父组件的示例值替换
+    bubbleSrc: (img: number) => (props.bubbleSrc ? props.bubbleSrc(img) : null),
+    modelText: (model: string) => (props.modelText ? props.modelText(model) : ''),
   })
   // 预览里的气泡常开（不做收起状态机）：文本/动图的显隐全由 applyLines 按行模型控制
   renderer.els.bubbleBox.classList.add('dshwv-bubble-open')

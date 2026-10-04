@@ -17,7 +17,7 @@ const {
 const {
   ensureWidget, destroyWidget, winAlive, getWidgetError, getWindow,
   applyScaleToWindow, applyOnTop, pushConfig, queueLiveScale, repositionFromAnchor,
-  taskbarState, syncTaskbarWatch, sendToWidget,
+  taskbarState, syncTaskbarWatch, sendToWidget, quotedSoundNames,
 } = require('./widget')
 // dsh 一族合计 300KB+，且本模块在设置窗加载时会被求值。下面所有 dsh.xxx 的调用都在函数体内
 // （无模块求值期引用），故改成惰性：首次访问 dsh.* 时才 require，之后复用同一份。
@@ -1617,6 +1617,13 @@ function pushModels() {
   sendToWidget('whale:models', getModelsPayload())
 }
 
+// 组级台词音效：按「当前配置里被组引用的段名」定向推 data URL（name→dataURL）。
+// 与 whale:sounds 的全量六槽位不同，这里只搬真正被引用的几段 —— shared 素材池几十段，
+// 全推等于白搬几 MB 无用 base64。音效库或台词配置变了都要重推（被引用段可能被删/换）
+function pushQuoteSounds() {
+  sendToWidget('whale:quote-sounds', sounds.getQuoteSoundData(quotedSoundNames(readConfig())))
+}
+
 // GitHub 加速操作的统一包装：开 op 日志 → 跑任务 → 按「结论函数」定终态与摘要。
 // 五个操作（开启/关闭/刷新/校验/检测）原本各写一遍 then/catch 样板，既要重复 opEnd，
 // 又要手写「什么算成功/取消」—— 抽成一处，新增操作只需给 run + verdict 两个函数。
@@ -2371,6 +2378,8 @@ module.exports = {
     if (cfg.avoidTaskbar !== prev.avoidTaskbar) syncTaskbarWatch()
     if (cfg.onTop !== prev.onTop) applyOnTop(cfg.onTop)
     if (cfg.usageMode !== prev.usageMode) resetBalanceCache()
+    // 台词组变了（含组级 sound 增删换）：重推组音效数据，悬浮页立刻能播新段
+    if (patch && patch.quotes !== undefined) pushQuoteSounds()
     pushConfig()
     // 反向回推给设置页：saveConfig 是设置页自己调的，但设置页的 cfg 不一定等于落库结果 ——
     // 宿主 patchConfig 会做归一化（补齐 / 钳范围 / 清洗），不回推的话设置页手里的还是它自己拼的
@@ -2576,7 +2585,8 @@ module.exports = {
     })
   },
   // —— 自定义音效 ——
-  // 自定义音效元信息（每槽位一个数组），供设置页展示已导入的段落
+  // 自定义音效元信息（每槽位一个数组），供设置页展示已导入的段落；
+  // shared 槽位的段名同时是台词组「组级音效」下拉的选项来源
   getSounds() {
     return sounds.readMeta()
   },
@@ -2600,10 +2610,14 @@ module.exports = {
     if (r && r.ok) sendToWidget('whale:sounds', sounds.getSoundData())
     return r
   },
-  // 删一段（给 file）或清空整个槽位（不给 file，设置页的批量清除走这条）
+  // 删一段（给 file）或清空整个槽位（不给 file，设置页的批量清除走这条）。
+  // shared 段也可能正被台词组引用：连 quote-sounds 一起重推，让悬浮页及时收口
   removeSound(role, file) {
     const r = sounds.removeSound(role, file)
-    if (r && r.ok) sendToWidget('whale:sounds', sounds.getSoundData())
+    if (r && r.ok) {
+      sendToWidget('whale:sounds', sounds.getSoundData())
+      pushQuoteSounds()
+    }
     return r
   },
   // —— 自定义挂件形象（画廊） ——
@@ -2728,9 +2742,12 @@ module.exports = {
     return assetsPacks.readSharedSoundData(file)
   },
   // 从共享库里删一段：素材池那段 + 从它「选用」出去的实播槽位副本一起清（见 assets-packs 注释）。
-  // 返回值带 clearedRoles（被清空的实播槽位），设置页据此在提示里说明影响面
+  // 返回值带 clearedRoles（被清空的实播槽位），设置页据此在提示里说明影响面。
+  // 被删的段可能正被台词组当组级音效引用：重推 quote-sounds 让悬浮页收口（名字查不到即静音）
   removeSharedSound(file) {
-    return assetsPacks.removeSharedSound(file)
+    const r = assetsPacks.removeSharedSound(file)
+    pushQuoteSounds()
+    return r
   },
   // —— 数据目录：设置页「资源」页展示落盘位置并提供「打开」按钮 ——
   // 形象 / 音效 / 气泡各一个目录（导入的素材都复制进这里，不引用源文件）。
@@ -2762,22 +2779,32 @@ module.exports = {
     if (r && r.ok) sendToWidget('whale:bubbles', bubbles.getBubbleData())
     return r
   },
-  // —— 素材包（形象 + 音效 + 气泡图打包带走） ——
-  // 导出成一个 .whaleassets 单文件
+  // —— 素材包（形象 + 音效 + 气泡图 + 台词组打包带走） ——
+  // 导出成一个 .whaleassets 单文件（台词组由这里读出来传入，assets 不读配置）
   assetsExport() {
-    return assets.exportAssets()
+    const cur = readConfig().quotes
+    return assets.exportAssets(cur && cur.groups)
   },
   // 选择素材包并解析出预览（不写任何数据）
   assetsPick() {
     return assets.pickAssets()
   },
-  // 按勾选项写入（形象/气泡图补充、音效同槽位覆盖），写完把新素材推给挂件
+  // 按勾选项写入（形象/气泡图补充、音效同槽位覆盖、台词组追加），写完把新素材推给挂件
   assetsApply(opts) {
     const r = assets.applyAssets(opts)
     if (r && r.ok) {
       if (r.skins && r.skins.added > 0) sendToWidget('whale:skin', skins.getSkinData())
       if (r.sounds && r.sounds.applied > 0) sendToWidget('whale:sounds', sounds.getSoundData())
       if (r.bubbles && r.bubbles.added > 0) sendToWidget('whale:bubbles', bubbles.getBubbleData())
+      // 台词组追加：包里的组清洗后排到现有组尾部，超上限由 normQuoteGroups 截断。
+      // 落库走 patchConfig（normQuotes 清洗，未涉及的键自动沿用），再广播配置与组音效
+      if (Array.isArray(r.quoteGroups) && r.quoteGroups.length) {
+        const before = readConfig().quotes
+        const merged = patchConfig({ quotes: { groups: (before.groups || []).concat(r.quoteGroups) } }).quotes
+        pushConfig()
+        pushQuoteSounds()
+        r.quotes = { added: merged.groups.length - (before.groups || []).length }
+      }
     }
     return r
   },
@@ -2938,9 +2965,13 @@ module.exports = {
       destroyWidget()
       if (wasVisible) ensureWidget()
     }
-    // 音效被清除后把「无自定义音效」推给挂件，正在用「自定义」的音色会立刻回退内置音
+    // 音效被清除后把「无自定义音效」推给挂件，正在用「自定义」的音色会立刻回退内置音；
+    // 台词组的组级音效可能也被清了，quote-sounds 一起收口
     if (o.sounds) {
-      try { sendToWidget('whale:sounds', sounds.getSoundData()) } catch (err) { logErr('[whale][settings] 重置后推送音效失败', err && err.message) }
+      try {
+        sendToWidget('whale:sounds', sounds.getSoundData())
+        pushQuoteSounds()
+      } catch (err) { logErr('[whale][settings] 重置后推送音效失败', err && err.message) }
     }
     // 同理：自定义形象被清除后推空串，挂件立刻回退内置形象
     if (o.skins) {
@@ -3033,26 +3064,35 @@ module.exports = {
   // 悬浮页点挂件气泡按顺序翻条。传原始文本（占位符不替换）——悬浮页 renderLinePlaceholders
   // 用的 {balance}/{today} 等是真机实时值，比设置页的示例值更「所见即所得」；
   // 未显示挂件时返回 ok:false 由页面提示。
+  // 载荷双认：steps 每屏 = { rows }（v2 行载荷）或旧三行模型数组（就地转行，口径与悬浮页
+  // normPreviewStepRows 一致——A=fz7 带行 w:1 / B=fz11 / P=fz10 / C=fz7，B/P 补 b:1）
   quotePreview(payload) {
     const p = payload && typeof payload === 'object' ? payload : {}
-    // steps = 逐屏的三行模型 [{t,s,c,w}|null]×3，一屏 = 会话里可翻的一条
+    // steps = 逐屏载荷，一屏 = 会话里可翻的一条
     const steps = Array.isArray(p.steps) ? p.steps.slice(0, 30) : []
     if (!steps.length) return { ok: false, error: '没有可预览的台词' }
     const norm = []
-    for (const rows of steps) {
-      const arr = Array.isArray(rows) ? rows.slice(0, 3) : []
-      const out = []
-      for (const it of arr) {
-        const o = it && typeof it === 'object' ? it : {}
-        out.push({
-          t: String(o.t || '').slice(0, 500),
-          s: o.s === 'B' || o.s === 'P' || o.s === 'C' ? o.s : 'A',
-          c: String(o.c || '').slice(0, 40),
-          w: o.w === true,
-        })
+    for (const step of steps) {
+      let rows = null
+      if (step && typeof step === 'object' && Array.isArray(step.rows)) {
+        rows = step.rows.slice(0, 30)
+      } else if (Array.isArray(step)) {
+        const SZ = { A: 7, B: 11, P: 10, C: 7 }
+        rows = []
+        for (const it of step) {
+          const o = it && typeof it === 'object' ? it : {}
+          const t = String(o.t || '').slice(0, 500)
+          if (!t) continue
+          const s = o.s === 'B' || o.s === 'P' || o.s === 'C' ? o.s : 'A'
+          const seg = { type: 'text', t: t, fz: SZ[s], c: String(o.c || '').slice(0, 40) || undefined }
+          if (s === 'B' || s === 'P') seg.b = 1
+          rows.push({ segs: [seg], w: s === 'A' ? 1 : undefined })
+        }
       }
-      norm.push(out)
+      if (!rows || !rows.length) continue
+      norm.push({ rows: rows })
     }
+    if (!norm.length) return { ok: false, error: '没有可预览的台词' }
     if (!winAlive()) return { ok: false, error: '挂件未显示，先在设置页显示挂件再试播' }
     const sent = sendToWidget('whale:quote-preview', { steps: norm })
     return sent ? { ok: true } : { ok: false, error: '发送失败，挂件窗口可能正在重建' }

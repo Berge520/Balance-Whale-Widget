@@ -3,11 +3,13 @@
  *
  * 悬浮窗（floating.html）与主窗宿主（services.js）之间的薄桥接层：
  *  - 接收宿主推送：whale:init / whale:balance / whale:config / whale:snapped / whale:sounds
- *              / whale:skin / whale:bubbles / whale:models / whale:quote-preview
+ *              / whale:quote-sounds / whale:skin / whale:bubbles / whale:models
+ *              / whale:quote-preview
  *              （另有本地推送 dark：preload 轮询 utools.isDarkColors() 检测 uTools 深浅色变化）
  *  - 向宿主上报：whale:ready / whale:refresh / whale:config / whale:timer / whale:timer-done
- *              / whale:drag-begin / whale:drag-move / whale:drag-end / whale:ignore-mouse / whale:open-settings
- *              / whale:models-refresh / whale:set-main-model / whale:hide-widget
+ *              / whale:drag-begin / whale:drag-move / whale:drag-end / whale:ignore-mouse
+ *              / whale:open-settings（无载荷，只负责唤出主窗；不再带 target 导航）
+ *              / whale:models-refresh / whale:set-main-model / whale:hide-widget / whale:open-external
  *
  * 页面侧统一通过 window.whale 调用，不直接碰 electron / utools。
  */
@@ -24,7 +26,7 @@ log('[whale][floating] preload 已加载', {
   logFile: LOG_FILE || '(仅控制台)',
 })
 
-const handlers = { init: [], balance: [], config: [], snapped: [], dsh: [], sounds: [], skin: [], bubbles: [], models: [], dark: [], quotePreview: [] }
+const handlers = { init: [], balance: [], config: [], snapped: [], dsh: [], sounds: [], quoteSounds: [], skin: [], bubbles: [], models: [], dark: [], quotePreview: [] }
 
 function on(name, cb) {
   if (handlers[name] && typeof cb === 'function') handlers[name].push(cb)
@@ -45,6 +47,8 @@ ipcRenderer.on('whale:snapped', (event, data) => emit('snapped', data))
 ipcRenderer.on('whale:dsh', (event, data) => emit('dsh', data))
 // 自定义音效本体（base64 data URL；导入/删除后宿主重推）
 ipcRenderer.on('whale:sounds', (event, data) => emit('sounds', data))
+// 组级台词音效本体（name→dataURL，只含被台词组引用的段；配置/音效库变化后宿主重推）
+ipcRenderer.on('whale:quote-sounds', (event, data) => emit('quoteSounds', data))
 // 自定义挂件形象本体（base64 data URL；导入/删除后宿主重推，空串表示无自定义形象）
 ipcRenderer.on('whale:skin', (event, data) => emit('skin', data))
 // 自定义气泡图片本体（base64 data URL 数组；导入/删除后宿主重推，空数组表示回退内置 rua.webp）
@@ -83,6 +87,7 @@ const api = {
   onSnapped(cb) { on('snapped', cb) },
   onDsh(cb) { on('dsh', cb) },
   onSounds(cb) { on('sounds', cb) },
+  onQuoteSounds(cb) { on('quoteSounds', cb) },
   onSkin(cb) { on('skin', cb) },
   onBubbles(cb) { on('bubbles', cb) },
   onModels(cb) { on('models', cb) },
@@ -119,8 +124,10 @@ const api = {
   },
   // 切换挂件主显示的模型（'deepseek' 为内置）
   setMainModel(id) { send('whale:set-main-model', { id: String(id || '') }) },
-  // 请求宿主唤出 uTools 主窗（设置页），用于「只显示挂件」模式下的设置入口
+  // 请求宿主唤出 uTools 主窗（设置页）
   openSettings() { send('whale:open-settings') },
+  // 台词链接段点击：宿主校验 http(s) 后交给系统浏览器开（utools.shellOpenExternal）
+  openExternal(url) { send('whale:open-external', { url: String(url || '') }) },
   // 请求宿主隐藏挂件（销毁悬浮窗；下次「显示挂件」重新创建，加载最新页面）
   hideWidget() { send('whale:hide-widget') },
   // 把页面错误转交宿主落盘：页面侧只能打 console，此处让它进 %TEMP%\whale-debug.log

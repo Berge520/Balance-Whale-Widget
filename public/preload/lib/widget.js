@@ -6,7 +6,7 @@ const { execFileSync } = require('child_process')
 const { log, logErr } = require('./log')
 const { clampNum, readConfig, readAnchor, writeAnchor, defaultAnchor, readTimer } = require('./store')
 const { getCachedBalance, getModelsPayload } = require('./api')
-const { getSoundData } = require('./sounds')
+const { getSoundData, getQuoteSoundData } = require('./sounds')
 const { getSkinData } = require('./skins')
 const { getBubbleData } = require('./bubbles')
 
@@ -651,6 +651,20 @@ function sendToWidget(channel) {
   }
 }
 
+// 收集配置里被台词组引用的 sound 段名清单（去重、保序）。sound 已过 store 清洗（字符串），
+// 这里只按字符串筛 —— 悬浮页按段名匹配播放，名字对不上就静音
+function quotedSoundNames(cfg) {
+  const groups = cfg && cfg.quotes && Array.isArray(cfg.quotes.groups) ? cfg.quotes.groups : []
+  const out = []
+  const seen = {}
+  for (const g of groups) {
+    if (!g || typeof g.sound !== 'string' || !g.sound || seen[g.sound]) continue
+    seen[g.sound] = true
+    out.push(g.sound)
+  }
+  return out
+}
+
 function pushInit() {
   const cfg = readConfig()
   const anchor = readAnchor()
@@ -664,6 +678,9 @@ function pushInit() {
     timer: cfg.timerPersistOn ? readTimer() : null,
     // 自定义音效本体（base64 data URL；无自定义时两段均为 null）
     sounds: getSoundData(),
+    // 组级台词音效本体：只推「被台词组引用的段名」对应的 data URL（name→dataURL）。
+    // shared 素材池几十段，全推等于白搬几 MB 无用 base64
+    quoteSounds: getQuoteSoundData(quotedSoundNames(cfg)),
     // 自定义挂件形象本体（base64 data URL；未导入时为空串，页面回退内置形象）
     skin: getSkinData(),
     // 自定义气泡图片本体（base64 data URL 数组；空数组时页面回退内置 rua.webp）
@@ -912,6 +929,7 @@ module.exports = {
   destroyWidget,
   toggleWidget,
   sendToWidget,
+  quotedSoundNames,
   pushInit,
   pushConfig,
   pushSnapped,
