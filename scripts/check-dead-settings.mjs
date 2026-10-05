@@ -109,8 +109,7 @@ const ALLOW = process.env.CDS_ALLOW ? JSON.parse(process.env.CDS_ALLOW) : {
 const EXPECT_CONSUMERS = process.env.CDS_EXPECT ? JSON.parse(process.env.CDS_EXPECT) : {
   // 提醒音独立音量：悬浮窗解析三态音量的唯一地方（设置页只写不播）
   alertVols: ['public/floating-page.js'],
-  // 台词与提醒文案模板：悬浮窗是唯一运行时消费方
-  quotes: ['public/floating-page.js'],
+  // 提醒文案模板：悬浮窗是唯一运行时消费方
   alerts: ['public/floating-page.js'],
   // 免打扰时段：api.js 的 inQuietHours 判断（发系统通知前据此静默）
   quietOn: ['public/preload/lib/api.js'],

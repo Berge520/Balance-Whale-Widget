@@ -179,30 +179,6 @@ function whaleMp3Paths(marker) {
   }
 }
 
-// 随机台词组的内置默认：宿主是 `QUOTE_GROUPS_DEFAULT` 字面量，挂件页是 `defaultRandomGroups()` 的返回值。
-// 两边形态不同（台词分别来自 QUOTES_DEFAULT / QUOTES），但「组的顺序 + 类型 + 权重 + 字号」必须一致，
-// 否则设置页显示的内置六组与挂件实际抽签的六组对不上。抽成「kind,w,style|kind,w,…」再比对
-function quoteGroupShape(marker) {
-  return (src, file) => {
-    const body = jsLiteral(marker)(src, file)
-    const items = [...body.matchAll(/kind\s*:\s*'([a-z]+)'\s*,\s*w\s*:\s*(\d+)(?:\s*,\s*style\s*:\s*'([AB])')?/g)]
-      .map((m) => [m[1], m[2], m[3] || ''].join(','))
-    if (!items.length) throw new Error(`${file} 里「${marker}」没解析出任何台词组`)
-    return items.join('|')
-  }
-}
-
-// 台词库 v2 字号档表两份副本（11 档）：渲染器 FONT_TIERS（段渲染按 fz 取字号）与
-// 宿主 store.js 的 QUOTE_FONT_TIERS（清洗 clamp 用）。不一致会让「设置页配的字号」
-// 与「挂件实际显示的字号」对不上，且无任何报错
-function fontTiers(src, file) {
-  const m = src.match(/(?:FONT_TIERS|QUOTE_FONT_TIERS)\s*=\s*\[([^\]]+)\]/)
-  if (!m) throw new Error(`${file} 里找不到 FONT_TIERS / QUOTE_FONT_TIERS`)
-  const nums = m[1].match(/\d+/g)
-  if (!nums || !nums.length) throw new Error(`${file} 里字号档表是空的`)
-  return nums.join(',')
-}
-
 // 气泡三行字号（label / amount / period）外加 hint：CSS 里是**未缩小时的默认值**（字号写在
 // .dshwv-xxx 规则里），floating-page.js 的 BUBBLE_FONT 是**超框缩小时的基准**。两份值必须相等，
 // 否则「内容超框」前后字号会跳变（页面写行内 calc(var(--dshw-u) * N) 覆盖 CSS，基准不一样就断层）。
@@ -314,6 +290,14 @@ const FLOATING_BUBBLE_CSS = 'public/floating-bubble.css'
 const BUBBLE_RENDER = 'src/bubble/bubble-render.js'
 const STORE = 'public/preload/lib/store.js'
 const APP_VUE = 'src/App.vue'
+// 吸附区宽度上下限随「挂件窗口」卡一起抽到了 WindowView（默认值仍在 App.vue：被 cfg 默认
+// 值与 applyConfig 回填消费），所以这两项的抠取路径指向子组件
+const WINDOW_VIEW = 'src/views/WindowView.vue'
+// dsh 一族的设置页常量随整套逻辑抽到了 useDsh composable（见 src/composables/useDsh.ts），
+// MAX_BATCH / NEWEST_VERSION 两项的抠取路径指向这里；DEFAULT_DSH_PORT 仍留 App.vue（cfg 初始化消费）
+const USE_DSH = 'src/composables/useDsh.ts'
+// 内置音色试听清单随「资源」卡抽到了 AssetsView（BUILTIN_SOUND_SETS），抠取路径指向子组件
+const ASSETS_VIEW = 'src/views/AssetsView.vue'
 
 const CHECKS = [
   {
@@ -338,17 +322,20 @@ const CHECKS = [
     ],
   },
   {
-    name: '台词库默认值 QUOTES_DEFAULT',
+    name: '固定文案池默认值 QUOTE_TEXT_DEFAULT',
     parts: [
-      { file: STORE, pick: jsLiteral('const QUOTES_DEFAULT =') },
+      { file: STORE, pick: jsLiteral('const QUOTE_TEXT_DEFAULT =') },
       { file: FLOATING_PAGE, pick: jsLiteral('var QUOTES =') },
     ],
   },
+  // 拖拽台词内置默认两份：宿主 store.js 的 DRAG_LINES_DEFAULT（清洗回默认用）与挂件页的
+  // DRAG_LINES（浮动页没有 require，读不到宿主常量）。不一致会让「清空拖拽台词」后两边回默认不同。
+  // 新卡自带的 bubbleDragLines 默认（BUBBLE_DRAG_LINES_DFT）同源同值，这里用同一份比对兜住。
   {
-    name: '随机台词组默认顺序与权重 QUOTE_GROUPS_DEFAULT',
+    name: '拖拽台词默认值 DRAG_LINES_DEFAULT',
     parts: [
-      { file: STORE, pick: quoteGroupShape('const QUOTE_GROUPS_DEFAULT =') },
-      { file: FLOATING_PAGE, pick: quoteGroupShape('function defaultRandomGroups()') },
+      { file: STORE, pick: jsLiteral('const DRAG_LINES_DEFAULT =') },
+      { file: FLOATING_PAGE, pick: jsLiteral('var DRAG_LINES =') },
     ],
   },
   {
@@ -405,14 +392,14 @@ const CHECKS = [
     name: '吸附区宽度下限 SNAP_RATIO_MIN',
     parts: [
       { file: STORE, pick: jsNumber('const SNAP_RATIO_MIN') },
-      { file: APP_VUE, pick: jsNumber('const SNAP_RATIO_MIN') },
+      { file: WINDOW_VIEW, pick: jsNumber('const SNAP_RATIO_MIN') },
     ],
   },
   {
     name: '吸附区宽度上限 SNAP_RATIO_MAX',
     parts: [
       { file: STORE, pick: jsNumber('const SNAP_RATIO_MAX') },
-      { file: APP_VUE, pick: jsNumber('const SNAP_RATIO_MAX') },
+      { file: WINDOW_VIEW, pick: jsNumber('const SNAP_RATIO_MAX') },
     ],
   },
   {
@@ -481,7 +468,7 @@ const CHECKS = [
     name: '内置音效文件 SOUND_FILES',
     parts: [
       { file: FLOATING_PAGE, pick: whaleMp3Paths('var SOUND_FILES') },
-      { file: APP_VUE, pick: whaleMp3Paths('const BUILTIN_SOUND_SETS') },
+      { file: ASSETS_VIEW, pick: whaleMp3Paths('const BUILTIN_SOUND_SETS') },
     ],
   },
   // 一键隔离的单次写入上限：宿主 dsh-isolate.js 拿它做准入判断（超限直接拒绝），
@@ -491,7 +478,7 @@ const CHECKS = [
     name: '一键隔离写入上限 MAX_BATCH',
     parts: [
       { file: 'public/preload/lib/dsh-isolate.js', pick: jsNumber('const MAX_BATCH') },
-      { file: APP_VUE, pick: jsNumber('const DSH_ISOLATE_MAX_BATCH') },
+      { file: USE_DSH, pick: jsNumber('const DSH_ISOLATE_MAX_BATCH') },
     ],
   },
   // 「最新（含测试版）」哨兵值：宿主 constants.js 与设置页各一份 ——
@@ -502,7 +489,7 @@ const CHECKS = [
     name: '最新版哨兵值 NEWEST_VERSION',
     parts: [
       { file: CONSTANTS, pick: jsString('const NEWEST_VERSION') },
-      { file: APP_VUE, pick: jsString('const NEWEST_VERSION') },
+      { file: USE_DSH, pick: jsString('const NEWEST_VERSION') },
     ],
   },
   // dsh Web UI 的默认监听端口：宿主 constants.js 与设置页各一份 ——
@@ -545,15 +532,6 @@ const CHECKS = [
       { file: BUBBLE_RENDER, pick: uDivisorFromJsComment('const BUBBLE_FONT =') },
     ],
   },
-  // 台词库 v2 字号档表：渲染器 FONT_TIERS（按 fz 档取实际字号）与宿主 store.js 的
-  // QUOTE_FONT_TIERS（清洗 clamp 用）同表两份，不一致会让配的字号与显示的字号对不上。
-  {
-    name: '台词字号档表 FONT_TIERS',
-    parts: [
-      { file: BUBBLE_RENDER, pick: fontTiers },
-      { file: STORE, pick: fontTiers },
-    ],
-  },
   // 到点留言长度上限三处副本：宿主 constants（清洗用）、挂件页（菜单输入框取用）、
   // 设置页（输入框 maxLength）。改一处忘另一处会出现「界面能敲进去、宿主悄悄截掉」。
   {
@@ -562,15 +540,6 @@ const CHECKS = [
       { file: CONSTANTS, pick: jsNumber('const TIMER_NOTE_MAX') },
       { file: FLOATING_PAGE, pick: jsNumber('var TIMER_NOTE_MAX') },
       { file: APP_VUE, pick: jsNumber('const TIMER_NOTE_MAX') },
-    ],
-  },
-  // 随机台词组条目数上限两处副本：宿主 store.js 的 normQuoteGroups（超出的截掉）
-  // 与设置页的「+ 添加组」按钮（达上限禁用）。不一致会出现「按钮让加、宿主却截掉」。
-  {
-    name: '随机台词组上限 QUOTE_GROUP_MAX',
-    parts: [
-      { file: STORE, pick: jsNumber('const QUOTE_GROUP_MAX') },
-      { file: APP_VUE, pick: jsNumber('const QUOTE_GROUP_MAX') },
     ],
   },
   // 共享角色清单（36 张）：宿主 constants.js 的 SHARED_SKIN_PACK_SKINS（对象数组，含 sha256）

@@ -1,6 +1,6 @@
 <script lang="ts" setup>
 import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
-import type { AlertRole, AssetsApplyResult, AssetsExportResult, AssetsPreviewResult, BackupPreviewResult, BubbleMeta, CodexSummaryResult, CodexWindow, CodexWindows, DshBackupListResult, DshBackupSnapshot, DshDiagnoseFinding, DshDiagnoseItem, DshDiagnoseResult, DshDumpResult, DshExportPreviewResult, DshHostCompatCheckResult, DshHostCompatVerdict, DshIsolateCandidate, DshIsolateCandidatesResult, DshIsolatePlan, DshMarketCatalogResult, DshMarketInstallResult, DshMarketInstalledEntry, DshMarketPingEntry, DshMarketPlugin, DshMarketRegistryLatestEntry, DshMarketRegistryLatestResult, DshMarketStatusResult, DshMarketUninstallResult, DshMarketUpdateEntry, DshPatchItem, DshPatchListResult, DshUsageResult, DownloadProgress, LedgerDetailDay, LedgerDetailEntry, ModelUsageRow, SharedSkinList, SharedSoundItem, SharedSoundList, SkinGallery, SkinMeta, SkinPackList, SoundMeta, SoundRole, WhaleMailSecrets, WhaleModel, WhaleModelRow, WhaleModelTemplate, WhalePriceModel, WhaleServices, WhaleTokenPrice } from './types/services'
+import type { AlertRole, BubbleMeta, CodexWindow, CodexWindows, DshBackupListResult, DshBackupSnapshot, DshDiagnoseFinding, DshDiagnoseItem, DshDiagnoseResult, DshDumpResult, DshExportPreviewResult, DshHostCompatCheckResult, DshHostCompatVerdict, DshIsolateCandidate, DshIsolateCandidatesResult, DshIsolatePlan, DshMarketCatalogResult, DshMarketInstallResult, DshMarketInstalledEntry, DshMarketPingEntry, DshMarketPlugin, DshMarketRegistryLatestEntry, DshMarketRegistryLatestResult, DshMarketStatusResult, DshMarketUninstallResult, DshMarketUpdateEntry, DshPatchItem, DshPatchListResult, DshUsageResult, SharedSkinList, SharedSoundList, SkinGallery, SkinMeta, SkinPackList, SoundMeta, SoundRole, WhaleModel, WhaleModelRow, WhaleModelTemplate, WhalePriceModel, WhaleServices, WhaleTokenPrice } from './types/services'
 import SkinCropper from './components/SkinCropper.vue'
 import BubblePreview from './components/BubblePreview.vue'
 import SoundTrimmer from './components/SoundTrimmer.vue'
@@ -13,6 +13,48 @@ import { CARD_TEXT } from './search-index.gen'
 // 它只在「帮助」Tab 才渲染，抽成独立 chunk 后 App.vue 首屏包明显变小，其余 Tab 的打开更快。
 // 渲染时机不变（下面模板仍是 v-if="activeTab === 'help'"），首次切到帮助时才去取这段 JS
 const AccelView = defineAsyncComponent(() => import('./views/AccelView.vue'))
+// 「资源」Tab 整组（7 张卡）。含 7 张可独立命中的卡，故把 cardOn 作为 prop 传入、
+// 由组件内各 section 自行判定显隐，不能在本层包一层 v-if（那样搜索态只能整组显隐）。
+import AssetsView from './views/AssetsView.vue'
+// 「挂件窗口」整卡。widgetFlash / 显隐 / 复位 / 复制指令 / 新增快捷键都会写与「使用帮助」
+// 卡共用的消息槽，故这些函数与状态留在父级，本组件用 emit 触发。
+import WindowView from './views/WindowView.vue'
+// 「关于与更新」整卡。更新检查状态与 doCheckUpdate 留在父级——onMounted 里有
+// 「开关开启则启动时自动检查一次」，不随卡片是否可见而跑（卡片是 v-if），故这里用 emit 触发。
+import AboutView from './views/AboutView.vue'
+// 「数据与隐私」整卡。清除动作与勾选项内聚在组件内，清除后要刷新父级全局状态
+// （secrets / cfg / 账本 / 各素材卡片），子组件读不到，故用 emit('cleared') 交回父级做回显刷新。
+import PrivacyView from './views/PrivacyView.vue'
+// 「备份与恢复」整卡。导出 / 读取 / 勾选 / 恢复逻辑内聚在组件内（直接调 services.backup*）；
+// 恢复成功要刷新父级全局状态（cfg / 账本 / secrets），故用 emit('applied') 交回父级做回显刷新。
+import BackupView from './views/BackupView.vue'
+// 「挂件外观」整卡。素材状态（skinMeta / skinFlash / soundsMeta 等）与「资源」页共用，
+// 深浅色应用 / 随机形象 / 量表换算也要读父级全局，故这些都留父级，本组件按 props 收、emit 触发。
+import LookView from './views/LookView.vue'
+// 「用量与账本」整卡。账本快照与刷新入口（refreshHistory / refreshTodayModels）留在父级——
+// 窗口聚焦 / 挂载 / 恢复备份 / 清除数据后父级都要主动刷新，故这里用 props 收、emit 触发；
+// 卡片内需要父级同步结果的回填（账本截取所需数据）经 defineExpose 暴露方法，父级用模板 ref 调用。
+import UsageView from './views/UsageView.vue'
+// 「提醒与通知」整卡。计时时长 / 提醒开关与阈值 / 通知渠道 / SMTP 配置 / 提醒音音量 / 提醒文案
+// 都内聚在组件内；applyConfig 回填后要落「未保存」基线、挂载时要读回 SMTP 凭据、备份恢复后要
+// 刷新计时三段展示，这三处父级驱动，故组件用 defineExpose 暴露 syncAlertsBaseline / loadMailSecrets
+// / syncTimerHms，父级用模板 ref 调用。保存 / 恢复默认提醒文案需父级整份 applyConfig，故 emit('save-alerts')。
+import NotifyView from './views/NotifyView.vue'
+// 「模型与余额」整卡。行内表单 / 展开态 / 删除确认 / 测试 / 刷新 / 增删改都内聚在组件内；
+// 跨卡共享的运行时快照（models）、配置清单（modelConfigs）、主显示 id（modelsMainId）、
+// 模板与上限、以及 fmtTokens / codexWinText 仍留父级，故按 props 下传；保存 / 删除 / 刷新后
+// 需要父级 reloadModels 重新取快照，故 emit('reload')；主显示切换经 update:mainId 上抛。
+import ModelsView from './views/ModelsView.vue'
+// 「使用帮助」整卡：使用说明 / 快捷键绑定 / 挂件故障排查 / 挂件创建错误详情。
+// 卡片自身的折叠态与诊断日志入口内聚在组件内；挂件错误状态（errDetail / errFlash）与
+// checkWidgetError 由父级 onMounted、showWidget 驱动，故按 props 收、emit 触发；
+// 「复制指令名 / 新增快捷键」与窗口卡共用父级消息槽，「新手引导重开」的浮层在父级模板，故均 emit。
+import HelpView from './views/HelpView.vue'
+// 「Codex 会话统计」整卡：读 ~/.codex/sessions 的 rollout JSONL 做统计，纯本地不联网。
+// fmtTokens / codexWinText / codexDayLabel 与图表档位是跨卡共享的单一来源（模型列表行、
+// dsh 用量卡也在用），按 props 下传；本卡是否有窗口数据经 emit('windows') 上抛，并入父级的
+// 倒计时心跳 codexTickNeed。与其上 7 张 dsh 卡之间的 hr.group-sep 依赖 searchActive / activeTab，留父级。
+import CodexView from './views/CodexView.vue'
 
 // 主窗 preload（services.js）注入的宿主 API
 const services: Partial<WhaleServices> = window.services || {}
@@ -29,6 +71,9 @@ const PRICE_MODEL_MAX = 20
 // 账本历史保留天数范围与默认值，同样是宿主 store.js 里 HISTORY_KEEP_* 的同值副本
 // （下限 35 是为了「本月汇总」在 31 号能回溯到 1 号）
 const HISTORY_KEEP = { DEFAULT: 365, MIN: 35, MAX: 730 }
+
+// 计时到点留言长度上限，是宿主 constants.js TIMER_NOTE_MAX 的同值副本（下传给 NotifyView）
+const TIMER_NOTE_MAX = 60
 
 // 随包内置形象 id（= public/whale/ 下的图片文件名），数组顺序即「形象」下拉的顺序。
 // 也是同值副本：宿主 store.js 的 BUILTIN_SKINS 与挂件页面 floating-page.js 的 BUILTIN_SKINS
@@ -106,32 +151,22 @@ const SHARED_SKIN_PACK_SKINS = [
   { id: 'sf16b3b9610', name: '流萤' },
 ]
 
-// 形象下载源前缀长度上限（同值副本：宿主 lib/constants.js 的 SKIN_PACK_PREFIX_MAX，
-// 只用于输入框 maxlength 提示；归一化与拒绝逻辑在宿主 store.js#normSkinPackPrefix，
-// 未经 check-shared 比对，改任一处需两处同改）
-const SKIN_PACK_PREFIX_MAX = 200
-
 // 避让滚动条的默认留白像素，同宿主 store.js 的 SCROLL_GAP_DEFAULT（同值副本，
 // 由 scripts/check-shared.mjs 比对）
 const SCROLL_GAP_DEFAULT = 17
 
 // 吸附区宽度（可用区宽/高的百分比）范围与默认值，同宿主 store.js 的 SNAP_RATIO_*
 // （同值副本，由 scripts/check-shared.mjs 比对）
-const SNAP_RATIO_MIN = 1
-const SNAP_RATIO_MAX = 45
+// 下限 / 上限已被 WindowView.vue 随卡搬走（那里有副本），此处只留默认值
 const SNAP_RATIO_DEFAULT = 25
 
 // —— 密钥（加密存储） ——
 const secrets = reactive({ apiKey: '', platformToken: '' })
 // 获取教程默认折叠，点「如何获取？」按钮才展开
 const guides = reactive({ apiKey: false, token: false })
-// 「帮助」组里使用说明 / 故障排查的折叠态（默认收起，点标题才展开）
-const widgetFolds = reactive({ help: false, trouble: false })
+// 「帮助」组里使用说明 / 故障排查的折叠态已随 HelpView 迁走
 // 长卡片内部的折叠态：凭据（填一次就不动，默认收起）
 const toolOpen = reactive({ credentials: false })
-// 「挂件外观」卡内分组折叠：基础项（大小 / 形象）常改，留折叠外；
-// 气泡文案与音效属低频，默认收起，避免一屏铺开 11 组控件
-const lookFolds = reactive({ bubble: false, sound: false })
 // 「资源」页折叠态：内置资源纯查阅用，默认收起
 const assetFolds = reactive({ builtin: false })
 // —— 设置页顶部 Tab ——
@@ -274,7 +309,7 @@ const searchHits = computed(() => {
   return [...orScore.entries()].sort((a, b) => b[1] - a[1]).map(([k]) => k)
 })
 // 某张卡是否应该在当前搜索态下渲染：搜索中 → 只有命中的卡渲染（跨 Tab）；非搜索态 → 沿用原 Tab 判定
-function cardOn(tab: TabKey, key: string) {
+function cardOn(tab: string, key: string) {
   if (searchActive.value) return searchHits.value.includes(key)
   return activeTab.value === tab
 }
@@ -310,42 +345,6 @@ onMounted(() => {
   })
   tabBarRO.observe(tabBarEl.value)
 })
-// 点面板以外的地方收起卡头下拉（面板本身没做全屏遮罩，靠这个兜底）。
-// 用捕获阶段监听：面板内的点击也要先判定一次 —— 点空白处直接关，点面板内则不动。
-// 面板上的按钮各自 click 里已把 rndMenu 置空，这里主要处理「点其它地方」。
-onMounted(() => {
-  document.addEventListener('click', onDocClickForRndMenu, true)
-  document.addEventListener('mousemove', onDocMoveForRndMenu, true)
-})
-onUnmounted(() => {
-  document.removeEventListener('click', onDocClickForRndMenu, true)
-  document.removeEventListener('mousemove', onDocMoveForRndMenu, true)
-})
-function onDocClickForRndMenu(e: MouseEvent) {
-  if (!rndMenu.value) return
-  const t = e.target as HTMLElement | null
-  if (t && t.closest && t.closest('.rnd-menu')) return
-  rndMenu.value = ''
-}
-// 面板里「全部 N 张」是一族低频的整批动作，平时用不着；常驻展开会让面板比缩略图还高。
-// 收成「全部 N 张 ›」悬停展开：它没有自己的开关语义（点它不需要先满足什么条件），
-// 只是把一组动作挪到旁边，悬停比点击少一个「展开了没点动作怎么收」的状态。
-// 用「延迟 220ms 再收」而不是立刻收：面板与触发项之间有一道缝隙、手指也会划偏，
-// 立刻收会出现「还没移进去就没了」。移进面板或回到触发项都会把这笔定时清掉。
-// 触发项与面板同在一个 .rnd-menu-sub 里，所以指针在这两者之间移动时判定为「仍在菜单内」。
-function onDocMoveForRndMenu(e: MouseEvent) {
-  if (!rndMenu.value) return
-  const t = e.target as HTMLElement | null
-  const over = t && t.closest ? t.closest('.rnd-menu-sub') : null
-  if (over === rndSubHover.value) return
-  rndSubHover.value = over as HTMLElement | null
-  if (rndSubTimer) { clearTimeout(rndSubTimer); rndSubTimer = null }
-  // 指针落在这一族里就展开：不能等「已用过」才开 —— 子面板就挂在本区内，
-  // 若进区不置 true，指针停下时这条分支永远走不到开的那一步，面板根本没有打开的路径。
-  if (over) { rndSubOpen.value = true; return }
-  // 离开这一族 → 延迟 220ms 再收（缝隙 / 划偏的容错），期间指针移回来会清掉这笔定时
-  rndSubTimer = setTimeout(() => { rndSubOpen.value = false; rndSubTimer = null }, 220)
-}
 onUnmounted(() => {
   if (tabBarRO) { tabBarRO.disconnect(); tabBarRO = null }
 })
@@ -380,8 +379,9 @@ function applyUtoolsDark() {
 // 先调用会撞 TDZ（ReferenceError），整个 <script setup> 崩掉、设置页白屏（2026-10-03 踩过）。
 // 启动调用与轮询定时器挪到 cfg 声明之后。
 // 下拉改动：本地立即应用一次再落库 —— 等下一轮轮询或配置回推才变化，会让人以为没生效
-function onUiModeChange() {
-  cfg.uiMode = cfg.uiMode === 'light' || cfg.uiMode === 'dark' ? cfg.uiMode : 'auto'
+function onUiModeChange(mode: string) {
+  // 下拉改动：本地立即应用一次再落库 —— 等下一轮轮询或配置回推才变化，会让人以为没生效
+  cfg.uiMode = mode === 'light' || mode === 'dark' ? mode : 'auto'
   applyUtoolsDark()
   patchCfg({ uiMode: cfg.uiMode })
 }
@@ -548,42 +548,22 @@ const cfg = reactive({
 applyUtoolsDark()
 const darkPollTimer = window.setInterval(applyUtoolsDark, 1000)
 onUnmounted(() => { window.clearInterval(darkPollTimer) })
-// 邮件通知的 SMTP 凭据：与 cfg 分开，因为它在宿主侧进的是加密存储（不进备份）。
-// mailPass 回填的是占位掩码而不是真实授权码 —— 只在用户没重新输入时保留原值，避免明文回显
-const mail = reactive({
-  mailHost: '',
-  mailPort: 465,
-  mailSecure: true,
-  mailUser: '',
-  mailPass: '',
-})
-// 已保存过授权码时为 true：用于把密码框的 placeholder 提示成「留空 = 不修改」
-const mailPassSaved = ref(false)
+// 「提醒与通知」卡片的模板 ref：applyConfig 回填后要落「未保存」基线、挂载时要读回 SMTP 凭据、
+// 备份恢复 / 挂件菜单推送后要刷新计时三段展示 —— 这三处都由父级生命周期驱动，故用 ref 调组件暴露的方法。
+// 保存 / 恢复默认提醒文案要先写配置再整份 applyConfig 回读，涉及父级 onConfigChange 通路，故仍留父级。
+const notifyViewRef = ref<{ syncAlertsBaseline: () => void; loadMailSecrets: () => void; syncTimerHms: () => void } | null>(null)
+// 提醒文案保存 / 恢复默认：子组件整理好整份内容（或 null = 恢复默认）上抛，这里落盘并回读。
+// 与父级 patchCfg 同口径直接调用（宿主 saveConfig 是可选调用，失败由宿主侧留痕），子组件负责回显结果
+function onSaveAlerts(alerts: Record<string, string> | null) {
+  patchCfg({ alerts })
+  applyConfig(services.getConfig?.())
+}
 const widgetVisible = ref(true)
 const widgetFlash: Flash = useFlash()
 // 挂件错误查看：errDetail 为宿主记录的最后一条创建/加载错误，空串表示无错误
 const errDetail = ref('')
 const errFlash: Flash = useFlash()
-const clearConfirm = ref(false)
-// 「数据与隐私」按项清除：勾选的项才会被清除（凭据 / 设置 / 账本 / 窗口位置与更新缓存 / 导入的素材）
-// 素材三项（形象 / 气泡图 / 音效）合成一项，与「资源」页的「清除全部素材」等价，免得两个入口措辞还不一样
-const clearItems = reactive({ secrets: true, config: true, ledger: true, window: true, assets: true })
-const anyClearItem = computed(() => clearItems.secrets || clearItems.config || clearItems.ledger || clearItems.window || clearItems.assets)
-// 二次确认时把「将清除哪些项」写清楚，避免误删
-const clearItemNames = computed(() => {
-  const names: string[] = []
-  if (clearItems.secrets) names.push('凭据')
-  if (clearItems.config) names.push('挂件设置')
-  if (clearItems.ledger) names.push('账本用量记录')
-  if (clearItems.window) names.push('窗口位置与更新缓存')
-  if (clearItems.assets) names.push('导入的素材（形象 / 气泡图 / 音效）')
-  return names.join('、')
-})
-const dataFlash: Flash = useFlash()
-// 诊断日志：两版都同步落盘（%TEMP%\whale-debug.log），插件进程被 uTools 结束也不丢
-const diagFlash: Flash = useFlash()
-// 诊断日志入口恒显示：打包版同样落盘，不再按开发者模式隐藏
-const diagReady = true
+// 诊断日志入口与它的消息槽已随 HelpView 迁走
 
 // —— DeepSeek Harness（dsh，开发者） ——
 const dsh = reactive({
@@ -970,7 +950,6 @@ function toggleDevCard(key: 'dshUsage' | 'codex' | 'diagnose' | 'dshDump' | 'dsh
   if (!devFolds[key] || devStatsLoaded[key]) return
   devStatsLoaded[key] = true
   if (key === 'dshUsage') dshUsageRefresh()
-  else if (key === 'codex') codexRefresh()
   else if (key === 'dshDump') dshDumpRefresh()
   else if (key === 'dshExport') dshExportRefresh()
   else if (key === 'dshIsolate') { dshIsolateRefresh(); dshBackupRefresh() }
@@ -1514,38 +1493,18 @@ function dshQueryVersions() {
 // —— Codex 本地会话统计 ——
 // 数据来自 ~/.codex/sessions 下的 rollout JSONL（Codex CLI 自己写的明文日志），
 // 纯本地读取，不需要 API Key，也不发任何网络请求。
-const codex = ref<CodexSummaryResult | null>(null)
-const codexBusy = ref(false)
-const codexFlash: Flash = useFlash()
-const codexFolds = reactive({ help: false })
+// 卡片本体已迁至 CodexView.vue；下面只保留跨卡共享的展示函数（模型列表行的 codex 行、
+// dsh 用量卡、CodexView 都在用）与倒计时心跳。CodexView 有无窗口数据经 emit('windows') 上抛。
+const codexHasWindows = ref(false)
+function onCodexWindows(has: boolean) {
+  codexHasWindows.value = !!has
+}
 // token 数按万/亿缩写，避免长串数字撑破布局
 function fmtTokens(n?: number) {
   const v = Number(n) || 0
   if (v >= 1e8) return (v / 1e8).toFixed(2) + ' 亿'
   if (v >= 1e4) return (v / 1e4).toFixed(1) + ' 万'
   return String(v)
-}
-// 图表档位：宿主一次给 31 天（days31，索引 0 是今天），切档只改前端切片、不重扫
-const codexRange = ref(7)
-// 同 dshUsageDays：days31 是新→旧，最近 N 天在开头，故 slice(0, N)。
-// 原用 slice(-N) 取到的是最旧的 N 天（见 dshUsageDays 处的说明）。
-const codexDays = computed(() => ((codex.value && codex.value.days31) || []).slice(0, codexRange.value))
-// 30 天档标签抽稀：每 5 天一个，避免糊成一片
-const codexLabelEvery = computed(() => (codexRange.value >= 30 ? 5 : 1))
-const codexModels = computed(() => {
-  const bm = (codex.value && codex.value.byModel) || {}
-  return Object.keys(bm)
-    .map((k) => ({ name: k, ...bm[k] }))
-    .sort((a, b) => (Number(b.tokens) || 0) - (Number(a.tokens) || 0))
-})
-// 柱高百分比：最大值为满格（100%），最小留 2% 让「有量但极少」也看得见。
-// 最大值就地算：这份 days 已按档位切好、最多 31 个元素，不值得单开 computed，
-// 且共用组件拿不到这里的 computed，只能靠这个函数（见 UsageChart.vue 的 hasBars）。
-function codexBarHeight(tokens?: number) {
-  let max = 0
-  for (const d of codexDays.value) max = Math.max(max, Number(d.tokens) || 0)
-  if (!max) return '0%'
-  return Math.max(2, Math.round(((Number(tokens) || 0) / max) * 100)) + '%'
 }
 // 'YYYY-MM-DD' → 'M-D'（图表横轴，省宽度）
 function codexDayLabel(date: string) {
@@ -1555,7 +1514,6 @@ function codexDayLabel(date: string) {
 // —— Codex 订阅窗口（5h / 周）——
 // ChatGPT 订阅的 Codex 会在 token_count 事件里带 rate_limits 快照（API-key 计费没有这份数据），
 // 窗口是账号级状态，与本地 token 统计各自独立，所以单独一行展示。
-const codexWindows = computed(() => (codex.value && codex.value.windows) || null)
 // 窗口名：优先按日志里的窗口分钟数推断（各 Codex 版本给的值不一样），没给就按位置叫 5h / 周
 function codexWinLabel(w: CodexWindow, idx: number) {
   const mins = Number(w.windowMinutes) || 0
@@ -1590,52 +1548,6 @@ function codexWinText(w: CodexWindows | null) {
   }
   if (w.planType) parts.push(w.planType)
   return parts.join(' | ')
-}
-const codexWindowsText = computed(() => codexWinText(codexWindows.value))
-function codexRefresh() {
-  if (codexBusy.value) return
-  codexBusy.value = true
-  codexFlash.msg = ''
-  codexFlash.err = false
-  // 宿主侧是同步读文件（会话日志可能几十 MB），直接调会把「读取中…」和这次渲染一起卡住；
-  // 先让 Vue 渲染一帧，再在下一轮事件循环里执行
-  window.setTimeout(codexRefreshRun, 30)
-}
-function codexRefreshRun() {
-  try {
-    const r = services.codexSummary?.()
-    if (!r) {
-      codexFlash.err = true
-      codexFlash.msg = '宿主 API 不可用'
-      return
-    }
-    codex.value = r
-    if (!r.ok) {
-      codexFlash.err = true
-      codexFlash.msg = r.error || '读取失败'
-      return
-    }
-    codexFlash.msg = r.sessions
-      ? `已扫描 ${r.sessions} 个会话文件（${r.changed} 个有更新）`
-      : '未找到会话文件：确认 Codex CLI 用过、且 ~/.codex/sessions 里有 rollout-*.jsonl'
-    codexFlash.err = !r.sessions
-  } catch (err: any) {
-    codexFlash.err = true
-    codexFlash.msg = '读取失败：' + String(err?.message || err)
-  } finally {
-    codexBusy.value = false
-  }
-}
-// 清缓存后重新扫（用于日志被外部改动、或怀疑缓存不一致时）
-function codexClearCache() {
-  try {
-    services.clearCodexCache?.()
-    codex.value = null
-    codexRefresh()
-  } catch (err: any) {
-    codexFlash.err = true
-    codexFlash.msg = '清除失败：' + String(err?.message || err)
-  }
 }
 
 // —— dsh 本地用量统计 ——
@@ -4260,7 +4172,7 @@ function dshMarketTickStop() {
   dshMarketTicking.value = false
 }
 // 卸载时务必停表：定时器持有组件闭包，不停会一直空跑
-onUnmounted(() => { dshMarketTickStop(); dlTickStop() })
+onUnmounted(() => { dshMarketTickStop() })
 
 // 有新输出就滚到底：npm 的输出是追加式的，用户要看的是最新那几行；
 // 不自动滚的话进度区会一直停在最早那段，看起来像「卡住了」
@@ -4348,309 +4260,33 @@ const updateResult = ref<any>(null)
 const updateMsg = ref('')
 // 手动检查出「有新版本」时把结果行变成可点入口（点了直接去插件市场更新）
 const hasUpdate = computed(() => !!(updateResult.value && updateResult.value.ok && updateResult.value.hasUpdate))
-// 反馈入口是软性内容，与版本信息不同性质，收进折叠
-const aboutFolds = reactive({ feedback: false })
 
 // —— 用量趋势 ——
-// 宿主按「账本历史保留天数」给足（默认 365 天），图表按 usageRange 截尾部显示，「本月汇总」用整段算
+// 卡片本体（区间切换 / 图表 / 本月汇总 / 明细 / 额度 / 模型占比 / 校准）都在 UsageView.vue，
+// 这里只保留「父级生命周期与其它卡片也要用到的」部分：账本快照（usageHistory / usageCurrency，
+// 通知卡与清除数据后回显也要读）、金额格式化、拉取入口（窗口聚焦 / 挂载 / 恢复备份后要主动刷新）。
+const usageViewRef = ref<{ applyHistory: (h: any) => void; refreshTodayModels: () => void } | null>(null)
 const usageHistory = ref<Array<{ date: string; usage: number }>>([])
 const usageCurrency = ref('CNY')
-// 可选区间：上限就是保留天数，超出的天数账本里本来就没有
-const USAGE_RANGES = [7, 14, 30, 90, 180] as const
-type UsageRange = (typeof USAGE_RANGES)[number]
-// 区间是纯前端显示口径，不进宿主配置（没必要为它跑 IPC 与同步），但必须跨启动记住，
-// 否则每次重开插件都弹回 7 天。localStorage 在 uTools 的 file:// 下可用且按插件目录隔离
-const USAGE_RANGE_KEY = 'whale:usageRange'
-function loadUsageRange(): UsageRange {
-  try {
-    const n = Number(localStorage.getItem(USAGE_RANGE_KEY))
-    // 白名单校验：存过旧版本/被手改过的值可能已不在 USAGE_RANGES 里
-    if ((USAGE_RANGES as readonly number[]).includes(n)) return n as UsageRange
-  } catch (err) {}
-  return 7
-}
-const usageRange = ref<UsageRange>(loadUsageRange())
-function setUsageRange(r: UsageRange) {
-  usageRange.value = r
-  try { localStorage.setItem(USAGE_RANGE_KEY, String(r)) } catch (err) {}
-}
-// 保留天数之外的区间不显示（保留 35 天时点「180 天」只会看到一小段柱子，容易以为数据丢了）
-const usageRangeTabs = computed(() => USAGE_RANGES.filter((r) => r <= cfg.historyKeepDays))
-const exportFlash: Flash = useFlash()
-const importFlash: Flash = useFlash()
-// 今日被防误判拦下的余额变动（赠送额到期/异常跳变，未计入今日已用）
-const todayAdjust = ref(0)
-// 额度「不重置」口径的累计已用（宿主归档累计 + 今天；滚动累计不受历史裁剪影响，不能自己求和）
-const cumUsed = ref(0)
-const lastAdjustWhy = ref('')
-const lastAdjustAt = ref('')
-// 手动校准今日已用
-const calibrateInput = ref<number | null>(null)
-const calibrateFlash: Flash = useFlash()
-const adjustTimeText = computed(() => {
-  const t = Date.parse(lastAdjustAt.value)
-  if (!isFinite(t)) return ''
-  const d = new Date(t)
-  const p2 = (n: number) => String(n).padStart(2, '0')
-  return p2(d.getHours()) + ':' + p2(d.getMinutes())
-})
-// v-model.number 清空输入框时值为 ''（未输入时为 null），两种都视为未填
-const calibrateInputEmpty = computed(() =>
-  calibrateInput.value === null || (calibrateInput.value as unknown) === '')
-// 图表实际渲染的区间（尾部 usageRange 天）
-const chartDays = computed(() => usageHistory.value.slice(-usageRange.value))
-const historyMax = computed(() => {
-  let m = 0
-  for (const d of chartDays.value) if (d.usage > m) m = d.usage
-  return m
-})
-// 本月汇总：从 31 天里筛出本月日期。日均按「本月已过天数」摊（含今天），
-// 否则月初会被整月的空白天数摊薄成一个没意义的小数
-const monthStats = computed(() => {
-  const now = new Date()
-  const ym = now.getFullYear() + '-' + String(now.getMonth() + 1).padStart(2, '0')
-  const elapsed = now.getDate()
-  let total = 0
-  let peak = 0
-  for (const d of usageHistory.value) {
-    if (d.date.slice(0, 7) !== ym) continue
-    total += d.usage
-    if (d.usage > peak) peak = d.usage
-  }
-  return { total, peak, avg: elapsed > 0 ? total / elapsed : 0, elapsed }
-})
-// —— 额度（资源包 / 订阅）——
-// 已用按重置周期取口径：不重置 = 归档累计（cumUsed）/ 每月 = 本月累计 / 每日 = 今日
-// （usageHistory 按日期升序，最后一条就是今天，来源同「本月汇总」，不再单独请求）
-const quotaUsed = computed(() => {
-  if (cfg.quotaReset === 'never') return cumUsed.value
-  if (cfg.quotaReset === 'daily') return usageHistory.value.length ? usageHistory.value[usageHistory.value.length - 1].usage : 0
-  return monthStats.value.total
-})
-const quotaPeriodText = computed(() =>
-  cfg.quotaReset === 'never' ? '累计已用' : cfg.quotaReset === 'daily' ? '今日已用' : '本月已用')
-const quotaPct = computed(() =>
-  cfg.quotaTotal > 0 ? Math.min(100, Math.round((quotaUsed.value / cfg.quotaTotal) * 100)) : 0)
-const quotaLeft = computed(() => Math.max(0, cfg.quotaTotal - quotaUsed.value))
-// 柱子多的时候标签要抽稀（约每 6 个柱子留一个），否则会糊成一片
-const labelEvery = computed(() => Math.max(1, Math.round(usageRange.value / 6)))
-function dayLabel(date: string) {
-  return date.slice(5).replace('-', '/')
-}
-function barHeight(u: number) {
-  return historyMax.value > 0 ? Math.max(3, Math.round((u / historyMax.value) * 100)) : 0
-}
 function fmtMoney(v: number) {
   const num = Number(v) || 0
   return usageCurrency.value === 'CNY' ? '¥ ' + num.toFixed(2) : num.toFixed(2) + ' ' + usageCurrency.value
 }
-// 导出账本用量为 CSV（宿主弹系统保存框；用户取消时静默）
-function exportUsageCsv() {
-  exportFlash.msg = ''
-  exportFlash.err = false
-  try {
-    const r = services.exportUsageCsv?.(usageRange.value)
-    if (!r) {
-      exportFlash.err = true
-      exportFlash.msg = '导出失败：宿主 API 不可用'
-    } else if (r.ok) {
-      exportFlash.msg = '已导出到：' + (r.path || '')
-    } else if (!r.canceled) {
-      exportFlash.err = true
-      exportFlash.msg = '导出失败：' + (r.error || '未知错误')
-    }
-  } catch (err: any) {
-    exportFlash.err = true
-    exportFlash.msg = '导出失败：' + String(err?.message || err)
-  }
-}
-// 导入账本用量 CSV（宿主弹系统打开框；合并后刷新趋势；用户取消时静默）
-function importUsageCsv() {
-  importFlash.msg = ''
-  importFlash.err = false
-  try {
-    const r = services.importUsageCsv?.()
-    if (!r) {
-      importFlash.err = true
-      importFlash.msg = '导入失败：宿主 API 不可用'
-    } else if (r.ok) {
-      const ignored = r.invalid ? '，忽略 ' + r.invalid + ' 行非法数据' : ''
-      importFlash.msg = `已导入 ${r.imported} 天${ignored}；账本现有 ${r.kept} 天（${r.from} ~ ${r.to}）`
-      refreshHistory()
-    } else if (!r.canceled) {
-      importFlash.err = true
-      importFlash.msg = '导入失败：' + (r.error || '未知错误')
-    }
-  } catch (err: any) {
-    importFlash.err = true
-    importFlash.msg = '导入失败：' + String(err?.message || err)
-  }
-}
 // 用量趋势：令牌模式下挂件刷新后今日总量会写入账本，
 // 因此导入后、切用量模式、以及本窗口重新获得焦点时都要重新拉一次趋势。
-// 一次拉满保留天数（宿主上限），图表区间由 usageRange 在前端截取，避免切范围时重新请求
+// 一次拉满保留天数（宿主上限），区间截取与图表渲染都在 UsageView 内做。
 function refreshHistory() {
   const h = services.getUsageHistory?.(cfg.historyKeepDays)
   if (h && Array.isArray(h.days)) {
     usageHistory.value = h.days
     usageCurrency.value = h.currency || 'CNY'
-    todayAdjust.value = Number(h.todayAdjust) || 0
-    cumUsed.value = Number(h.cumUsed) || 0
-    lastAdjustWhy.value = h.lastAdjustWhy || ''
-    lastAdjustAt.value = h.lastAdjustAt || ''
   }
-  // 明细区展开着就顺手一起刷新（校准 / 导入 / 切用量模式后都要跟着变）
-  if (detailOpen.value) refreshDetail()
+  // 卡片内的「今日额外变动 / 累计已用 / 明细」也要回填（父级是这些数据的唯一入口）
+  usageViewRef.value?.applyHistory(h)
 }
-
-// —— 账本明细（可折叠）——
-// 数据源是宿主账本：每日用量 + 当天的「未计入用量的余额变动」「手动校准」记录。
-// 展开时才取一次（拉满保留天数），区间跟着上方区间切换在前端截取，筛选也在前端做。
-const detailOpen = ref(false)
-const detailDays = ref<LedgerDetailDay[]>([])
-const detailQuery = ref('')
-// 类型筛选：两类记录字段完全不同（adjust 是金额 + 原因，calibrate 是校准前后），
-// 混在一起时想只看校准只能靠关键词「校准」去猜，这里给个显式开关
-const detailKind = ref<'all' | 'adjust' | 'calibrate'>('all')
-const openDays = ref<string[]>([])
-function refreshDetail() {
-  const r = services.getUsageDetail?.(cfg.historyKeepDays)
-  detailDays.value = r && Array.isArray(r.days) ? r.days : []
-}
-function toggleDetail() {
-  detailOpen.value = !detailOpen.value
-  if (detailOpen.value) refreshDetail()
-}
-function toggleDay(date: string) {
-  const i = openDays.value.indexOf(date)
-  if (i >= 0) openDays.value.splice(i, 1)
-  else openDays.value.push(date)
-}
-// 是否处于筛选态（类型不是「全部」或有关键词）。筛选态下按「命中条目」展示，不筛时原样显示区间内所有天。
-const detailFiltered = computed(() => detailKind.value !== 'all' || !!detailQuery.value.trim())
-// 筛选命中做到「条目级」：只保留命中的条目，整天都没有命中条目就整天不显示。
-// 早先只做「整天保留」，某天有一条命中就把当天全部记录都列出来，还得逐天点开找是哪条。
-const detailRows = computed(() => {
-  const base = detailDays.value.slice(-usageRange.value)
-  const kw = detailQuery.value.trim().toLowerCase()
-  const kind = detailKind.value
-  if (kind === 'all' && !kw) return base
-  const out: LedgerDetailDay[] = []
-  for (const d of base) {
-    // 关键词命中日期串（如 09-12）时保留当天全部条目 —— 用户就是按日期找那一天
-    const dateHit = !!kw && d.date.indexOf(kw) >= 0
-    let entries = kind === 'all' ? d.entries : d.entries.filter((e) => e.kind === kind)
-    if (kw && !dateHit) entries = entries.filter((e) => entryText(e).toLowerCase().indexOf(kw) >= 0)
-    if (!dateHit && !entries.length) continue
-    out.push({ date: d.date, usage: d.usage, entries })
-  }
-  return out
-})
-const detailTotal = computed(() => detailRows.value.reduce((a, d) => a + d.usage, 0))
-// 筛选态下强制展开：否则命中了还要一天天点开才知道是哪条命中
-function dayOpen(date: string) {
-  return detailFiltered.value || openDays.value.indexOf(date) >= 0
-}
-// 当天「未计入用量」的变动合计（adjust 条目；calibrate 不是余额变动，不参与）
-function adjustSumOf(d: LedgerDetailDay) {
-  return d.entries.reduce((a, e) => a + (e.kind === 'adjust' ? Number(e.amount) || 0 : 0), 0)
-}
-function entryTime(e: LedgerDetailEntry) {
-  const t = Date.parse(e.at)
-  if (!isFinite(t)) return ''
-  const d = new Date(t)
-  const p2 = (n: number) => String(n).padStart(2, '0')
-  return `${p2(d.getHours())}:${p2(d.getMinutes())}`
-}
-function entryText(e: LedgerDetailEntry) {
-  if (e.kind === 'calibrate') return `手动校准：${fmtMoney(e.from || 0)} → ${fmtMoney(e.to || 0)}`
-  return `${fmtMoney(e.amount || 0)} 未计入用量${e.why ? '（' + e.why + '）' : ''}`
-}
-// 今日模型占比（仅令牌模式）：模型明细只有平台用量接口会给，记账模式拿不到，页面不显示
-const todayModels = ref<ModelUsageRow[]>([])
-const modelsLoading = ref(false)
-const modelsErr = ref('')
-const modelsAt = ref(0)
-// 占比条配色：与趋势柱的蓝色系区分开，方便一眼分辨不同模型
-const MODEL_COLORS = ['#5b7fd4', '#7fb0e8', '#57c2b0', '#e0a45c', '#b185d8', '#e07b8e']
-const modelsSum = computed(() => todayModels.value.reduce((a, r) => a + (Number(r.amount) || 0), 0))
-const modelsTimeText = computed(() => {
-  if (!modelsAt.value) return ''
-  const d = new Date(modelsAt.value)
-  const p2 = (n: number) => String(n).padStart(2, '0')
-  return `${p2(d.getHours())}:${p2(d.getMinutes())}`
-})
-// 模型显示名：平台用量接口回的是模型 id（如 deepseek-v4-flash），原样铺在占比条上不好读。
-// 只做「友好标注」，不合并数据、不改金额；原始 id 放 title 里悬浮可见。
-const MODEL_LABELS: Record<string, string> = {
-  'deepseek-chat': 'DeepSeek Chat',
-  'deepseek-reasoner': 'DeepSeek Reasoner',
-  'deepseek-v4-flash': 'DeepSeek V4 Flash',
-  'deepseek-v4-flash-vision-exp': 'DeepSeek V4 Flash 视觉版（实验）',
-  'deepseek-v4-pro': 'DeepSeek V4 Pro',
-}
-function modelLabel(m: string) {
-  if (!m) return '未知模型'
-  return MODEL_LABELS[m.toLowerCase()] || m
-}
-function modelPct(amount: number) {
-  return modelsSum.value > 0 ? Math.round((amount / modelsSum.value) * 100) : 0
-}
-// 拉取今日各模型金额：一次联网请求，只在令牌模式且本页可见时调用
-async function refreshTodayModels() {
-  if (cfg.usageMode !== 'token') {
-    todayModels.value = []
-    modelsErr.value = ''
-    return
-  }
-  modelsLoading.value = true
-  try {
-    const r = await services.getTodayModels?.()
-    if (r && r.ok) {
-      todayModels.value = Array.isArray(r.models) ? r.models : []
-      modelsErr.value = ''
-      modelsAt.value = Date.now()
-    } else {
-      todayModels.value = []
-      modelsErr.value = (r && r.error) || '宿主 API 不可用'
-    }
-  } catch (err: any) {
-    todayModels.value = []
-    modelsErr.value = String(err?.message || err)
-  } finally {
-    modelsLoading.value = false
-  }
-}
-// 手动校准今日已用：记账漏采/误判后可直接改成真实金额，余额基准不动，之后继续实时累加
-function calibrateToday() {
-  calibrateFlash.msg = ''
-  calibrateFlash.err = false
-  // v-model.number 清空输入框会得到 ''，Number('')===0，必须先拦掉，否则会误把用量清零
-  if (calibrateInputEmpty.value) {
-    calibrateFlash.err = true
-    calibrateFlash.msg = '请先输入实际金额'
-    return
-  }
-  const v = Number(calibrateInput.value)
-  if (!isFinite(v) || v < 0) {
-    calibrateFlash.err = true
-    calibrateFlash.msg = '请输入不小于 0 的金额'
-    return
-  }
-  try {
-    const r = services.calibrateTodayUsage?.(v)
-    if (!r || !r.ok) {
-      calibrateFlash.err = true
-      calibrateFlash.msg = '校准失败：' + (r?.error || '宿主 API 不可用')
-      return
-    }
-    calibrateFlash.msg = `已将今日已用校准为 ${fmtMoney(r.to ?? v)}（原 ${fmtMoney(r.from ?? 0)}），之后余额继续实时记账`
-    calibrateInput.value = null
-    refreshHistory()
-  } catch (err: any) {
-    calibrateFlash.err = true
-    calibrateFlash.msg = '校准失败：' + String(err?.message || err)
-  }
+// 卡片内的模型占比拉取：父级在窗口聚焦 / 挂载后要主动触发一次
+function refreshTodayModels() {
+  usageViewRef.value?.refreshTodayModels()
 }
 
 // —— 多厂商模型（余额 / 额度） ——
@@ -4661,35 +4297,11 @@ const modelConfigs = ref<WhaleModel[]>([])
 const modelsMainId = ref('deepseek')
 const modelTpls = ref<Record<string, WhaleModelTemplate>>({})
 const modelMax = ref(10)
-const modelsFlash: Flash = useFlash()
-// 正在测试的模型 id（'' = 空闲）：防连点，也让按钮能显示「测试中…」
-const modelTesting = ref('')
-const modelsRefreshing = ref(false)
-// 展开编辑的行：NEW_MODEL_ROW = 新增草稿，其余为模型 id，'' = 全部收起
-const modelOpen = ref('')
-// 行内密钥输入框（不回显已存密钥，只表示「本次要改成什么」；留空 = 不改）
-const modelKeys = reactive<Record<string, string>>({})
-// 每行的「高级」折叠（字段路径等低频项默认收起）
-const modelAdv = reactive<Record<string, boolean>>({})
-// 行内编辑表单（modelOpen 非空时有值）与它的校验提示
-const modelForm = ref<WhaleModel | null>(null)
-const modelFormErr = ref('')
-// 删除二次确认（与「数据与隐私」一致走行内确认条，不用 window.confirm）
-const modelDelConfirm = ref('')
-// 新增草稿的哨兵行 id：让草稿也走同一套行内表单，表单渲染逻辑不用写两份
+// 新增草稿的哨兵行 id：模型列表里过滤掉它（ModelsView 内用同名常量渲染草稿行）
 const NEW_MODEL_ROW = '__new'
-const modelRows = computed<WhaleModelRow[]>(() => {
-  if (modelOpen.value !== NEW_MODEL_ROW) return models.value
-  return models.value.concat([{
-    id: NEW_MODEL_ROW, name: modelForm.value?.name || '新模型', kind: 'balance', currency: 'CNY',
-    builtin: false, balance: null, todayUsage: null, usedPct: null, resetAt: 0, windows: null, at: 0,
-    tokens: null, monthTokens: null, codexWindows: null,
-    error: '', lowAlertOn: true, lowAlertAmount: 0,
-  }])
-})
 // Codex 订阅窗口的重置倒计时心跳：卡片与模型列表行都用到，任一处有窗口数据就跑（30s 一跳，
 // 够分钟级显示用）。放在 models 之后是因为要读它，写在前面会踩 const 的 TDZ
-const codexTickNeed = computed(() => !!codexWindows.value ||
+const codexTickNeed = computed(() => codexHasWindows.value ||
   models.value.some((m) => m.kind === 'codex' && !!m.codexWindows))
 const codexNow = ref(Date.now())
 let codexTickTimer = 0
@@ -4697,14 +4309,6 @@ watch(codexTickNeed, () => {
   if (codexTickNeed.value && !codexTickTimer) codexTickTimer = window.setInterval(() => { codexNow.value = Date.now() }, 30000)
   else if (!codexTickNeed.value && codexTickTimer) { window.clearInterval(codexTickTimer); codexTickTimer = 0 }
 }, { immediate: true })
-// 可选模板：内置 DeepSeek 已经占了列表第一行，不再作为可添加项（正在编辑的除外，否则下拉里没有当前值）
-const modelTplOptions = computed(() => {
-  const cur = modelForm.value ? modelForm.value.tpl : ''
-  return Object.keys(modelTpls.value)
-    .filter((k) => !modelTpls.value[k].builtin || k === cur)
-    .map((k) => ({ key: k, name: modelTpls.value[k].name }))
-})
-
 function reloadModels() {
   const r = services.getModels?.()
   if (r && Array.isArray(r.list)) {
@@ -4713,243 +4317,16 @@ function reloadModels() {
   }
   modelConfigs.value = services.getModelsConfig?.() || []
 }
+// ModelsView 内部已调 services.setMainModel 并回传宿主结果，这里只同步共享的 modelsMainId
+function onModelsMainChange(id: string) {
+  modelsMainId.value = id || 'deepseek'
+}
 function loadModelTemplates() {
   const r = services.getModelTemplates?.()
   if (!r) return
   modelTpls.value = r.templates || {}
   modelMax.value = Number(r.max) || 10
 }
-// 按模板预填一份新条目（宿主 normModel 会对每个字段再清洗一次，这里只求「填得像样」）
-function blankModel(tpl: string): WhaleModel {
-  const t = modelTpls.value[tpl] || ({} as WhaleModelTemplate)
-  const n = (v: number | undefined, d: number) => (typeof v === 'number' && isFinite(v) ? v : d)
-  return {
-    id: tpl, tpl: tpl,
-    name: t.name || '',
-    kind: t.kind || 'balance',
-    currency: t.currency || 'CNY',
-    auth: t.auth || 'bearer',
-    url: t.url || '',
-    baseUrl: '',
-    path: t.path || '',
-    scale: n(t.scale, 1),
-    usedUrl: t.usedUrl || '',
-    usedPath: t.usedPath || '',
-    usedScale: n(t.usedScale, 1),
-    usedPctPath: t.usedPctPath || '',
-    remainPctPath: t.remainPctPath || '',
-    remainPath: t.remainPath || '',
-    totalPath: t.totalPath || '',
-    resetPath: t.resetPath || '',
-    // 多窗口额度只由模板预填（设置页不提供编辑）；显式写空数组，
-    // 换模板时才能把上一个模板留下的窗口清掉
-    windows: (t.windows || []).map((w) => ({ ...w })),
-    lowAlertOn: true,
-    lowAlertAmount: LOW_ALERT_DEFAULT[t.currency === 'USD' ? 'USD' : 'CNY'],
-  }
-}
-// 模型 id 是密钥槽位的键，必须唯一（用户看不见它，由这里保证）
-function freeModelId(base: string) {
-  const used = modelConfigs.value.map((m) => m.id)
-  if (used.indexOf(base) < 0) return base
-  for (let i = 2; i < 100; i++) {
-    if (used.indexOf(base + '-' + i) < 0) return base + '-' + i
-  }
-  return base + '-' + Date.now().toString(36)
-}
-// 换模板 = 按新模板重新预填接口地址与字段路径（用户手填的路径会被覆盖，这是「换厂商」的预期）
-function applyModelTpl() {
-  const f = modelForm.value
-  if (!f) return
-  const t = modelTpls.value[f.tpl] || ({} as WhaleModelTemplate)
-  const n = (v: number | undefined, d: number) => (typeof v === 'number' && isFinite(v) ? v : d)
-  f.name = t.name || f.name
-  f.kind = t.kind || 'balance'
-  f.currency = t.currency || 'CNY'
-  f.auth = t.auth || 'bearer'
-  f.url = t.url || ''
-  f.path = t.path || ''
-  f.scale = n(t.scale, 1)
-  f.usedUrl = t.usedUrl || ''
-  f.usedPath = t.usedPath || ''
-  f.usedScale = n(t.usedScale, 1)
-  f.usedPctPath = t.usedPctPath || ''
-  f.remainPctPath = t.remainPctPath || ''
-  f.remainPath = t.remainPath || ''
-  f.totalPath = t.totalPath || ''
-  f.resetPath = t.resetPath || ''
-  f.windows = (t.windows || []).map((w) => ({ ...w }))
-  f.lowAlertAmount = LOW_ALERT_DEFAULT[t.currency === 'USD' ? 'USD' : 'CNY']
-  if (modelOpen.value === NEW_MODEL_ROW) {
-    // 草稿行的 id 跟着模板走，免得「先按 OpenRouter 建、又改成 Kimi」留下对不上的 id
-    const old = f.id
-    f.id = freeModelId(f.tpl)
-    if (modelKeys[old] !== undefined) { modelKeys[f.id] = modelKeys[old]; delete modelKeys[old] }
-  }
-}
-function openModelRow(id: string) {
-  modelFormErr.value = ''
-  modelDelConfirm.value = ''
-  if (modelOpen.value === id) { modelOpen.value = ''; return }
-  const c = modelConfigs.value.find((m) => m.id === id)
-  if (!c) return
-  modelForm.value = JSON.parse(JSON.stringify(c)) as WhaleModel
-  modelKeys[id] = ''
-  modelOpen.value = id
-}
-function openNewModel() {
-  modelsFlash.msg = ''
-  modelsFlash.err = false
-  modelFormErr.value = ''
-  if (modelConfigs.value.length >= modelMax.value) {
-    modelsFlash.err = true
-    modelsFlash.msg = `最多添加 ${modelMax.value} 个模型，请先删掉不用的`
-    return
-  }
-  const f = blankModel('openrouter')
-  f.id = freeModelId(f.tpl)
-  modelForm.value = f
-  modelKeys[f.id] = ''
-  modelOpen.value = NEW_MODEL_ROW
-}
-function closeModelForm() {
-  modelOpen.value = ''
-  modelForm.value = null
-  modelFormErr.value = ''
-}
-function saveModelForm() {
-  const f = modelForm.value
-  if (!f) return
-  modelFormErr.value = ''
-  if (!String(f.name || '').trim()) { modelFormErr.value = '请填写名称'; return }
-  // Codex 走本地会话统计，没有接口地址可填
-  if (f.kind !== 'codex' && !String(f.url || '').trim()) { modelFormErr.value = '请填写接口地址'; return }
-  const isNew = modelOpen.value === NEW_MODEL_ROW
-  const typed = modelKeys[f.id] || ''
-  try {
-    // 编辑时密钥留空 = 不动已存的那把（传 undefined）；新增时必须传（空串 = 先存配置、后补密钥）
-    const r = services.saveModel?.(f, isNew ? typed : (typed || undefined))
-    if (!r || !r.ok) { modelFormErr.value = '保存失败：' + (r?.error || '宿主 API 不可用'); return }
-    closeModelForm()
-    reloadModels()
-    modelsFlash.err = false
-    modelsFlash.msg = '已保存'
-  } catch (err: any) {
-    modelFormErr.value = '保存失败：' + String(err?.message || err)
-  }
-}
-async function testModelForm() {
-  const f = modelForm.value
-  if (!f) return
-  modelFormErr.value = ''
-  modelsFlash.msg = ''
-  modelTesting.value = f.id
-  try {
-    // 密钥留空 = 用该模型已保存的那把（宿主会回落到密钥槽位）
-    const r = await services.testModel?.(f, modelKeys[f.id] || '')
-    if (!r) { modelFormErr.value = '宿主接口不可用'; return }
-    if (!r.ok) { modelFormErr.value = '连接失败：' + (r.error || '未知错误'); return }
-    modelsFlash.err = false
-    if (typeof r.tokens === 'number') {
-      modelsFlash.msg = `${f.name}：今日 ${fmtTokens(r.tokens)} token`
-      return
-    }
-    const ws = r.windows
-    modelsFlash.msg = typeof r.usedPct === 'number'
-      ? (ws && ws.length > 1
-        // 多窗口接口：逐窗口列出已用%，只报首个窗口会漏掉周/月额度
-        ? `${f.name}：` + ws.map((w) => w.label + ' 已用 ' + w.usedPct + '%').join(' · ') + resetSuffix(r.resetAt)
-        : `${f.name}：已用 ${r.usedPct}%${resetSuffix(r.resetAt)}`)
-      : `${f.name}：余额 ${fmtModelMoney(r.balance, f.currency)}`
-  } catch (err: any) {
-    modelFormErr.value = '连接失败：' + String(err?.message || err)
-  } finally {
-    modelTesting.value = ''
-  }
-}
-function resetSuffix(at?: number) {
-  if (!at) return ''
-  const d = new Date(at)
-  const p2 = (n: number) => String(n).padStart(2, '0')
-  return `，${d.getMonth() + 1}-${d.getDate()} ${p2(d.getHours())}:${p2(d.getMinutes())} 重置`
-}
-// 余额一律按原币种显示（与挂件口径一致，不折算汇率）
-function fmtModelMoney(v: number | null | undefined, currency: string) {
-  const num = Number(v)
-  if (v === null || v === undefined || !isFinite(num)) return '—'
-  return currency === 'USD' ? '$' + num.toFixed(2) : '¥ ' + num.toFixed(2)
-}
-// 列表里的余额/额度展示：额度类是百分比，Codex 是 token 数，余额类按原币种显示
-function modelValueText(m: WhaleModelRow) {
-  if (m.kind === 'quota') return typeof m.usedPct === 'number' ? '已用 ' + m.usedPct + '%' : '—'
-  if (m.kind === 'codex') return typeof m.tokens === 'number' ? fmtTokens(m.tokens) : '—'
-  return fmtModelMoney(m.balance, m.currency)
-}
-function modelSubText(m: WhaleModelRow) {
-  if (m.error) return '查询失败：' + m.error
-  if (m.kind === 'codex') {
-    const base = typeof m.monthTokens === 'number' ? '今日 token · 本月 ' + fmtTokens(m.monthTokens) : ''
-    // 订阅窗口（5h / 周）：与 Codex 卡片同一份文案，没有订阅时只有上面的 token 数
-    const win = codexWinText(m.codexWindows)
-    return win ? (base ? base + ' | ' + win : win) : base
-  }
-  if (m.kind === 'quota') {
-    // 多窗口接口（OpenCode Go 的 5h/周/月、MiniMax 的 5h/周）：逐个列出，只显示首个窗口会漏掉周/月额度
-    if (m.windows && m.windows.length > 1) {
-      return m.windows.map((w) => w.label + ' ' + w.usedPct + '%').join(' · ') + resetSuffix(m.resetAt)
-    }
-    return m.resetAt ? resetSuffix(m.resetAt).replace(/^，/, '') : ''
-  }
-  if (typeof m.todayUsage === 'number') return '今日约 ' + fmtModelMoney(m.todayUsage, m.currency)
-  if (m.at) {
-    const d = new Date(m.at)
-    return '更新于 ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0')
-  }
-  return ''
-}
-function setMainModelRow(id: string) {
-  modelsFlash.msg = ''
-  const r = services.setMainModel?.(id)
-  if (!r || !r.ok) {
-    modelsFlash.err = true
-    modelsFlash.msg = '切换主显示失败：' + (r?.error || '宿主 API 不可用')
-    return
-  }
-  // 单选以宿主回值为准（它会把非法 id 回退成 DeepSeek）
-  modelsMainId.value = r.mainModelId || id
-  modelsFlash.err = false
-  modelsFlash.msg = id === 'deepseek' ? '挂件已切回 DeepSeek 余额' : '挂件主显示已切换'
-}
-async function refreshModelRows(ids?: string[]) {
-  if (modelsRefreshing.value) return
-  modelsRefreshing.value = true
-  modelsFlash.msg = ''
-  modelsFlash.err = false
-  try {
-    await services.refreshModels?.(ids && ids.length ? ids : null, true)
-    reloadModels()
-    modelsFlash.msg = '已刷新'
-  } catch (err: any) {
-    modelsFlash.err = true
-    modelsFlash.msg = '刷新失败：' + String(err?.message || err)
-  } finally {
-    modelsRefreshing.value = false
-  }
-}
-function removeModelRow(id: string) {
-  const r = services.removeModel?.(id)
-  if (!r || !r.ok) {
-    modelsFlash.err = true
-    modelsFlash.msg = '删除失败：' + (r?.error || '宿主 API 不可用')
-    return
-  }
-  modelDelConfirm.value = ''
-  if (modelOpen.value === id) closeModelForm()
-  reloadModels()
-  modelsFlash.err = false
-  modelsFlash.msg = '已删除'
-}
-
 const MIN_SCALE = 0.6
 const MAX_SCALE = 2.5
 // 大小档位 1–15 线性映射到 MIN_SCALE–MAX_SCALE（原为 1–20，档位 20 即 2.5 倍太大，
@@ -4964,15 +4341,17 @@ function numToScale(n: number) {
   const v = Math.max(1, Math.min(SCALE_STEPS, Math.round(n)))
   return MIN_SCALE + (v - 1) * ((MAX_SCALE - MIN_SCALE) / (SCALE_STEPS - 1))
 }
-function onScaleLive() {
-  // 拖动中：实时改窗口几何（不写存储），避免高频保存卡顿
-  const s = Math.round(Math.max(MIN_SCALE, Math.min(MAX_SCALE, Number(cfg.scale))) * 10) / 10
+// 大小输入：LookView 用 :value 绑定（不直接改 cfg），把数值 emit 上来，这里落 cfg 并落盘。
+// 拖动中只改窗口几何不写存储（__live），松手/失焦才一次性持久化。
+function onScaleLive(v: number) {
+  const s = Math.round(Math.max(MIN_SCALE, Math.min(MAX_SCALE, Number(v))) * 10) / 10
   cfg.scale = s
   cfg.scaleNum = scaleToNum(s)
   services.saveConfig?.({ scale: s, __live: true })
 }
-function onScaleNumLive() {
-  const s = numToScale(cfg.scaleNum)
+function onScaleNumLive(v: number) {
+  cfg.scaleNum = v
+  const s = numToScale(v)
   cfg.scale = s
   services.saveConfig?.({ scale: s, __live: true })
 }
@@ -4986,61 +4365,6 @@ function onScaleCommit() {
 function patchCfg(p: Record<string, any>) {
   services.saveConfig?.(p)
 }
-// 打开「今日预算提醒」时补一个可用金额，避免开关开着但金额为 0（等于不提醒）
-function onBudgetToggle() {
-  if (cfg.budgetOn && !(cfg.budgetAmount > 0)) cfg.budgetAmount = 10
-  patchCfg({ budgetOn: cfg.budgetOn, budgetAmount: cfg.budgetAmount })
-}
-// 同理：打开「余额大幅波动通知」时补一个可用阈值，避免开关开着但阈值为 0
-function onDropToggle() {
-  if (cfg.dropAlertOn && !(cfg.dropAlertAmount > 0)) cfg.dropAlertAmount = 5
-  patchCfg({ dropAlertOn: cfg.dropAlertOn, dropAlertAmount: cfg.dropAlertAmount })
-}
-// —— 计时：时长三段输入 / 到点留言 / 「休息」档 ——
-// 配置里只存总秒数（timerSec），三段输入是它的展示形态；
-// 拆出来的 h/m/s 单独放一份本地状态，避免每次输入都被折算回秒再拆回来导致光标跳动
-const TIMER_NOTE_MAX = 60
-const timerHms = reactive({ h: 0, m: 0, s: 0 })
-function syncTimerHms() {
-  const sec = Math.max(0, Math.min(86399, Math.round(Number(cfg.timerSec) || 0)))
-  timerHms.h = Math.floor(sec / 3600)
-  timerHms.m = Math.floor((sec % 3600) / 60)
-  timerHms.s = sec % 60
-}
-// 三段全填 0 时按 25 分钟兜底：否则「填了 0 就开不了计时」，且宿主侧清洗也会把它拉回默认值
-function commitTimerHms() {
-  const sec = Math.round(Number(timerHms.h) || 0) * 3600 + Math.round(Number(timerHms.m) || 0) * 60 + Math.round(Number(timerHms.s) || 0)
-  cfg.timerSec = Math.max(1, Math.min(86399, sec || 1500))
-  syncTimerHms()
-  patchCfg({ timerSec: cfg.timerSec })
-}
-// 「休息」档：0 分钟 = 不显示休息按钮（与挂件菜单 hideBubble 后的按钮显隐同口径）
-const timerBreakOn = computed({
-  get: () => cfg.timerBreakMin > 0,
-  set: (v: boolean) => { if (v && !(cfg.timerBreakMin > 0)) cfg.timerBreakMin = 5 },
-})
-const timerBreakMinEdit = computed({
-  get: () => Math.max(1, cfg.timerBreakMin || 5),
-  set: (v: number) => { cfg.timerBreakMin = Math.max(1, Math.min(120, Math.round(Number(v) || 5))) },
-})
-function onTimerBreakToggle() {
-  patchCfg({ timerBreakMin: timerBreakOn.value ? (cfg.timerBreakMin > 0 ? cfg.timerBreakMin : 5) : 0 })
-}
-function commitTimerBreak() {
-  patchCfg({ timerBreakMin: timerBreakMinEdit.value })
-}
-// —— 窗口透明度：拖动实时预览（只推 CSS opacity 不写存储），松手持久化 ——
-function clampOpacity(v: number) {
-  return Math.round(Math.max(20, Math.min(100, Number(v) || 100)))
-}
-function onOpacityLive() {
-  cfg.opacity = clampOpacity(cfg.opacity)
-  services.saveConfig?.({ opacity: cfg.opacity, __live: true })
-}
-function onOpacityCommit() {
-  cfg.opacity = clampOpacity(cfg.opacity)
-  services.saveConfig?.({ opacity: cfg.opacity })
-}
 // —— 自定义音效（按压/释放两段 + 四类提醒各一组，文件复制进本地数据目录） ——
 // 每个槽位只保留一段：再导入就是替换掉旧的（挂件端不再有「随机播」这回事）
 // 同值副本：preload 不参与打包，设置页读不到宿主常量（见 public/preload/lib/sounds.js 的 ROLES / ROLE_LABEL）
@@ -5051,44 +4375,6 @@ const ALERT_SOUND_ROLES: AlertRole[] = ['low', 'budget', 'peak', 'pass']
 const SOUND_ROLE_LABEL: Record<SoundRole, string> = {
   press: '按压音效', release: '释放音效',
   low: '低余额提醒音', budget: '预算提醒音', peak: '峰谷提醒音', pass: '穿透提醒音',
-}
-// 提醒音「什么时候响」：写进 label 的 title，免得用户猜
-const ALERT_SOUND_WHEN: Record<string, string> = {
-  low: '余额首次跌破预警阈值时',
-  budget: '今日用量首次超出预算时',
-  peak: '进入峰时段 / 谷时段时',
-  pass: '切换鼠标穿透时',
-}
-// —— 提醒音独立音量（三态：跟随全局 / 独立生效，语义对齐悬浮窗 alertVolumeOf） ——
-// 展示值：未显式设置（volSet=false）时显示全局音量当「跟随值」，滑块以此为起点
-function alertVolShown(r: AlertRole): number {
-  if (cfg.alertVols[r].volSet) return cfg.alertVols[r].vol
-  return typeof cfg.vol === 'number' && isFinite(cfg.vol) ? cfg.vol : 0.9
-}
-function alertVolSummary(r: AlertRole): string {
-  const av = cfg.alertVols[r]
-  return av.volSet ? Math.round(av.vol * 100) + '%' : '跟随 ' + Math.round(alertVolShown(r) * 100) + '%'
-}
-// 拖动 = 显式设置（volSet=true，此后不再跟随全局）；「恢复」= 回到跟随（音量复位默认 100%）
-function setAlertVol(r: AlertRole, v: number, set: boolean) {
-  const n = Number(v)
-  cfg.alertVols[r].vol = Math.round(Math.min(1, Math.max(0, isFinite(n) ? n : 0)) * 100) / 100
-  cfg.alertVols[r].volSet = set
-  // 整份传：宿主 patchConfig 按 alertVols 键整体归一化。浅拷贝防 reactive 代理过 contextBridge
-  patchCfg({
-    alertVols: {
-      low: { ...cfg.alertVols.low },
-      budget: { ...cfg.alertVols.budget },
-      peak: { ...cfg.alertVols.peak },
-      pass: { ...cfg.alertVols.pass },
-    },
-  })
-}
-function resetAlertVol(r: AlertRole) {
-  setAlertVol(r, 1, false)
-}
-function onAlertVolInput(r: AlertRole, e: Event) {
-  setAlertVol(r, Number((e.target as HTMLInputElement).value), true)
 }
 // 六槽位统一初始化：宿主返回值缺键时也保证是空值（模板里到处取值）
 function blankSoundMap<T>(fill: T): Record<SoundRole, T> {
@@ -5282,17 +4568,15 @@ function removePriceModel(i: number) {
   cfg.tokenPrice.models.splice(i, 1)
   onTokenPriceChange()
 }
-// 账本历史保留天数改动：宿主按这个窗口裁剪与返回数据，改完要重新取一次；
-// 顺带把超出新窗口的区间收回到可选范围内（否则图表只剩一小段，看着像数据被清了）
+// 账本历史保留天数改动：宿主按这个窗口裁剪与返回数据，改完要重新取一次。
+// 区间收敛（超出新窗口的区间收回到可选范围）随 usageRange / usageRangeTabs 一起搬进 UsageView，
+// 由子组件 watch(cfg.historyKeepDays) 自行处理，这里不再重复
 function onHistoryKeepChange() {
   const n = Number(cfg.historyKeepDays)
   const v = isFinite(n) ? Math.round(Math.min(HISTORY_KEEP.MAX, Math.max(HISTORY_KEEP.MIN, n))) : HISTORY_KEEP.DEFAULT
   cfg.historyKeepDays = v
   patchCfg({ historyKeepDays: v })
-  const tabs = usageRangeTabs.value
-  if (tabs.indexOf(usageRange.value) < 0) setUsageRange(tabs[tabs.length - 1])
   refreshHistory()
-  refreshDetail()
 }
 
 // —— 自定义挂件形象画廊（多张图片，复制进本地数据目录） ——
@@ -5319,59 +4603,9 @@ const thumbBroken = reactive<Record<string, boolean>>({})
 // 「导入的形象」卡片底部操作说明的展开态：默认收起，把「当前使用 + 随机规则」压成一行，
 // 免得 30+ 格的画廊下面再堆三行说明
 const skinHintOpen = ref(false)
-// 卡头「整理」下拉的展开态。值就是**当前展开的那个下拉的名字**，空串 = 全收起。
-//
-// 早先这里是布尔 rndMenuOpen，而卡头上有「选中操作」「随机设置」两个下拉 —— 一个布尔
-// 同时控制两个面板，点任意一个两个都展开；箭头又各自渲染自己的表达式，于是并排出现
-// 两个面板、箭头方向还相反，看着像两个互不相干的菜单各自抽风。
-// 现在只有一个下拉，仍保留「带名字」的形式而不用布尔：以后若再加第二个下拉，
-// 直接写第二个名字即可，天然互斥，不会再退化成上面那种双开。
-const rndMenu = ref<'' | 'organize'>('')
-// 「全部 N 张」那一族的悬停展开态（见 onDocMoveForRndMenu）。只在打开「整理」时重置，
-// 不随指针每次划过都清 —— 指针在别的菜单项上掠过不该把用户已经展开的那段收掉。
-const rndSubOpen = ref(false)
-const rndSubHover = ref<HTMLElement | null>(null)
-// 是否用过这一族里的动作：用过一次就当长期偏好，之后开「整理」默认替用户展一瞬（见 toggleRndMenu）
-const rndSubUsed = ref(false)
-// 是否已经看过这一族的展开态（含自动展的那一瞬）：只自动展一次，
-// 让「全部参与随机」这些入口的存在可见 —— 之后改由用户自己悬停，不再自动打断
-const rndSubSeen = ref(false)
-let rndSubTimer: ReturnType<typeof setTimeout> | null = null
-// 面板坐标（fixed，相对视口）。面板之所以不用 absolute 挂在卡头下沿，见 .rnd-menu-panel 的样式注释：
-// 吸顶的 .tab-bar 自成一格层叠上下文，会把卡头里的下拉切掉一半。
-// 右边缘与卡头按钮右对齐、上边缘贴按钮下沿 —— 用按钮自己的 rect 算，而不是面板的（面板还没渲染）。
-const rndPanelPos = ref<{ right: number; top: number; minWidth: number }>({ right: 0, top: 0, minWidth: 0 })
-function toggleRndMenu(e: MouseEvent) {
-  if (rndMenu.value) { rndMenu.value = ''; return }
-  const btn = (e.currentTarget as HTMLElement).getBoundingClientRect()
-  rndPanelPos.value = {
-    right: Math.max(8, window.innerWidth - btn.right),
-    top: btn.bottom + 4,
-    // 面板至少与按钮同宽：菜单项比按钮窄时悬停高亮会比按钮还短，看着像没对齐
-    minWidth: btn.width,
-  }
-  rndMenu.value = 'organize'
-  rndSubOpen.value = false
-  if (rndSubTimer) { clearTimeout(rndSubTimer); rndSubTimer = null; return }
-  // 只自动展一次：没看过就让这一族替用户亮一瞬（1.2s），之后收起交给悬停。
-  // 用过里面动作的（rndSubUsed）也走这条 —— 已经用得上的人更该一眼看到入口。
-  // 看过之后（rndSubSeen）不再自动展，否则每次开面板都自己弹一下，比常驻展开更烦。
-  if (rndSubSeen.value) return
-  // 用 setTimeout(0) 等 DOM 出来再量高度，否则元素还没插入
-  rndSubTimer = setTimeout(() => {
-    rndSubOpen.value = true
-    rndSubSeen.value = true
-    rndSubTimer = setTimeout(() => { rndSubOpen.value = false; rndSubTimer = null }, 1200)
-  }, 0)
-}
-// 这一族里的动作用过就记下来（下次开「整理」仍替用户亮一瞬），随后照常收起面板
+// 批量随机设置（卡片内「随机设置」下拉的各项动作）：组件只转发，落到 doBatchSkinRandom
 function doBatchRandom(mode: 'all' | 'none' | 'keepCurrent') {
-  rndSubUsed.value = true
   doBatchSkinRandom(mode)
-  rndMenu.value = ''
-}
-function onThumbError(key: string) {
-  thumbBroken[key] = true
 }
 // 裁剪弹层：非空时显示（选图片 → 裁剪 → 确认后才落盘）
 const skinCrop = ref<{ dataUrl: string; name: string } | null>(null)
@@ -5499,9 +4733,6 @@ async function onSkinCropConfirm(p: { dataUrl: string; name: string }) {
 }
 // 随机换一张形象。抽签池 = 画廊里所有「未取消参与随机」的项（含用户自己导入的），
 // 再加上随包内置那张 —— 但内置是否参与由「内置形象也参与随机」开关决定（默认参与）。
-// randomSkinPool 只做展示（卡片提示里显示参与随机的张数）：只数画廊项，
-// 内置那张不在画廊里，若算进计数用户会数不上。
-const randomSkinPool = computed(() => skinGallery.value.items.filter(it => it.random !== false).map(it => it.id))
 // 抽签用全集：内置 id（仅在开关打开时）去重后合并画廊里参与随机的项
 const allSkinChoices = computed(() => {
   const out: string[] = []
@@ -5644,8 +4875,8 @@ function applyPickedRandom(on: boolean) {
   }
 }
 // 调整画廊顺序（可批量）：把 ids 里的项按原相对顺序整体搬到 index 落点，不影响正在使用的那张。
-// 调用方：置顶（index=0）/ 置底（index=items.length）/ 拖拽（落点下标），见 doPinPicked /
-// doBottomPicked / onSkinDrop。
+// 调用方：置顶（index=0）/ 置底（index=items.length）/ 拖拽（落点下标，组件内算好），
+// 见 doPinPicked / doBottomPicked。
 // 关键：**本地先重排（乐观更新），不调 refreshSkin()**。
 // 每动一次就整屏重建列表的话，会闪一下、悬停态丢失，鼠标停的位置还可能换成另一张，根本没法连点。
 // 这里只把 items 数组重新排一次 —— Vue 以 it.id 为 key 复用 DOM，只有顺序变化被 patch。
@@ -5704,50 +4935,10 @@ function doMoveSkins(ids: string[], index: number, label?: 'top' | 'bottom') {
     refreshSkin()
   }
 }
-// —— 拖拽排序 ——
-// draggingId 是被拖的那张（拖拽中给源格半透明、给落点格一条插入指示线）。
-// 落点用「鼠标在目标格左半 / 右半」决定插到它前面还是后面，符合列表拖拽的通用直觉。
-const draggingId = ref('')
-const dragOverId = ref('')
-const dragOverAfter = ref(false)
-function onSkinDragStart(id: string, e: DragEvent) {
-  draggingId.value = id
-  if (e.dataTransfer) {
-    e.dataTransfer.effectAllowed = 'move'
-    e.dataTransfer.setData('text/plain', id)  // Firefox 需要设了 data 才会真正启动拖拽
-  }
-}
-function onSkinDragOver(it: { id: string }, e: DragEvent) {
-  if (!draggingId.value || draggingId.value === it.id) return
-  e.preventDefault()  // 不 preventDefault 就不会触发 drop
-  if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'
-  const box = (e.currentTarget as HTMLElement).getBoundingClientRect()
-  dragOverId.value = it.id
-  dragOverAfter.value = e.clientX > box.left + box.width / 2
-}
-function onSkinDragEnd() {
-  draggingId.value = ''
-  dragOverId.value = ''
-  dragOverAfter.value = false
-}
-function onSkinDrop(it: { id: string }, e: DragEvent) {
-  e.preventDefault()
-  const id = draggingId.value
-  const after = dragOverAfter.value
-  onSkinDragEnd()
-  if (!id || id === it.id) return
-  // 目标格的下标 ± 1 得到「插到哪」；doMoveSkins 内部会再夹一次范围
-  const items = skinGallery.value.items
-  const targetIdx = items.findIndex(x => x.id === it.id)
-  if (targetIdx < 0) return
-  const want = after ? targetIdx + 1 : targetIdx
-  doMoveSkins([id], want)
-}
 // 批量改「参与随机」：mode = all（全启用）/ none（全停用）/ keepCurrent（只留当前使用那张）。
 // 走宿主的 setSkinRandomBatch —— 整张清单只读改写盘一次；逐张改会做 N 次全量读改写盘
 // （37 张 = 37 次），这里不再那么干。
 function doBatchSkinRandom(mode: 'all' | 'none' | 'keepCurrent') {
-  rndMenu.value = ''
   skinFlash.msg = ''
   skinFlash.err = false
   const items = skinGallery.value.items
@@ -5910,28 +5101,6 @@ function assetSize(m: { size?: number } | null) {
   const n = Number(m && m.size) || 0
   return n > 0 ? fmtBytes(n) : '体积未知'
 }
-function assetAt(m: { at?: number } | null) {
-  const t = Number(m && m.at) || 0
-  if (!t) return ''
-  const d = new Date(t)
-  const p2 = (x: number) => String(x).padStart(2, '0')
-  return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}`
-}
-// 同一天的日期在列表里是纯噪声（同一槽位的几段多半是同一天导入的），只留时分。
-// 隔天的才带上「昨天 / MM-DD」。用来在多个同名段之间分辨「哪个是刚加的那个」。
-function assetAtShort(m: { at?: number } | null) {
-  const t = Number(m && m.at) || 0
-  if (!t) return ''
-  const d = new Date(t)
-  const now = new Date()
-  const p2 = (x: number) => String(x).padStart(2, '0')
-  const hm = `${p2(d.getHours())}:${p2(d.getMinutes())}`
-  const sameDay = d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate()
-  if (sameDay) return `今天 ${hm}`
-  const y = new Date(now.getTime() - 86400000)
-  const isYday = d.getFullYear() === y.getFullYear() && d.getMonth() === y.getMonth() && d.getDate() === y.getDate()
-  return isYday ? `昨天 ${hm}` : `${p2(d.getMonth() + 1)}-${p2(d.getDate())} ${hm}`
-}
 // 全部清除：形象 + 气泡图 + 六段音效（与「数据与隐私」里的按项清除同源，但只清素材、不动其它数据）。
 // 清完把形象/音色从「自定义」回退为内置，避免停在「自定义」却无素材可用
 function doClearAssets() {
@@ -5980,69 +5149,8 @@ function doClearAssets() {
   }
 }
 
-// —— 「资源」Tab：素材总览 / 素材包 / 内置资源对照 ——
-// 素材包容器格式与导入语义见 public/preload/lib/assets.js；这里只做界面编排。
-// 素材包不落配置（导完就完事），所以不涉及「配置四处同步铁律」。
-const assetsFold = reactive({ open: false })
-// 三个素材大卡的折叠状态：网格一屏铺几十格很占地方，默认收起，点标题展开。
-// 与「素材包 / 数据目录」那两个 .fold 分开管 —— 它们是卡片内的子块，这几个是整卡收起
-const galleryFolds = reactive({ skins: false, sharedSkins: false, sharedSounds: false })
-// 卡片实际是否展开 = 用户手动状态 或 搜索态。搜索会把跨 Tab 的命中卡渲染出来，
-// 这时若还收着，用户搜到「共享角色」却只看到一行「共 N 张，点标题展开」—— 等于搜索失效。
-// 只在搜索期强制展开，不写回 galleryFolds：退出搜索后仍尊重用户原来的折叠选择。
-function galleryOpen(key: 'skins' | 'sharedSkins' | 'sharedSounds') {
-  return searchActive.value || galleryFolds[key]
-}
-const assetsFlash: Flash = useFlash()
-// 素材落盘目录（形象 / 音效 / 气泡）。路径由宿主给（只有它知道 userData 在哪），这里只接展开展示。
-// 惰性取：点「数据目录」时才问宿主，免得每次进资源页都多打一次 IPC
-const dataDirs = ref<{ skins: string; sounds: string; bubbles: string } | null>(null)
-const dataDirsOpen = ref(false)
-function toggleDataDirs() {
-  dataDirsOpen.value = !dataDirsOpen.value
-  if (dataDirsOpen.value && !dataDirs.value) {
-    try {
-      const r = services.dataDirs?.()
-      dataDirs.value = r || null
-    } catch {
-      dataDirs.value = null
-    }
-  }
-}
-function openDataDir(p: string) {
-  if (!p) return
-  assetsFlash.msg = ''
-  assetsFlash.err = false
-  try {
-    // openDir 是同步的 shellOpenPath，失败走返回值而不是抛异常 —— 只看 catch 的话，
-    // 目录不存在 / 被占用这类真失败会静默吞掉，用户点了「打开」以为没反应
-    const r = services.openDir?.(p)
-    if (!r || !r.ok) {
-      assetsFlash.err = true
-      assetsFlash.msg = '打开目录失败，可手动复制上面的路径到文件管理器'
-    }
-  } catch (err: any) {
-    assetsFlash.err = true
-    assetsFlash.msg = '打开目录失败：' + String(err?.message || err)
-  }
-}
+// —— 「资源」Tab 素材包 / 下载进度（模板已迁至 AssetsView.vue；此处保留被其它域共用的部分） ——
 const assetsBusy = ref(false)
-const assetsPack = ref<AssetsPreviewResult | null>(null)
-const assetsPicks = reactive({ skins: true, sounds: true, bubbles: true, quotes: true })
-const assetsConfirm = ref(false)
-const assetsAnyItem = computed(() => (assetsPicks.skins && !!assetsPack.value?.has?.skins)
-  || (assetsPicks.sounds && !!assetsPack.value?.has?.sounds)
-  || (assetsPicks.bubbles && !!assetsPack.value?.has?.bubbles)
-  || (assetsPicks.quotes && !!assetsPack.value?.has?.quotes))
-// 内置音色（同值副本：public/floating-page.js 的 SOUND_FILES，加一组要两处一起改）
-const BUILTIN_SOUND_SETS: Array<{ key: string; label: string; press: string; release: string }> = [
-  { key: 'duck', label: '小黄鸭', press: './whale/Ya1.mp3', release: './whale/Ya2.mp3' },
-  { key: 'fx1', label: '音效 1', press: './whale/D1.mp3', release: './whale/D2.mp3' },
-]
-// 内置形象图片路径：同值副本（public/floating-page.js 的 BUILTIN_SKINS），一律 .webp
-function builtinSkinUrl(id: string) {
-  return './whale/' + encodeURIComponent(id) + '.webp'
-}
 const builtinFlash: Flash = useFlash()
 function doPreviewBuiltin(url: string) {
   builtinFlash.msg = ''
@@ -6050,75 +5158,13 @@ function doPreviewBuiltin(url: string) {
   playAudioUrl(url, builtinFlash)
 }
 
-// —— 可下载的内置形象（v1.7.x 起随包只留默认那张，其余挂 Release 按需下） ——
-// 缩略图是构建期生成的静态资源（public/whale-pack/thumbs/<id>.webp；v1.8.0 起精简到 1 张
-// 约 4KB，随插件包分发、但不含素材包本体），不下载也能看见长什么样 —— 让用户「下手前有数」。
-// 走 Vite 的相对路径加载（大件 skins-pack.whaleassets 与 manifest.json 已在 vite.config.js 里排除）。
-function skinPackThumb(id: string) {
-  return './whale-pack/thumbs/' + encodeURIComponent(id) + '.webp'
-}
-
-// —— 素材包下载进度（三张资源卡片共用一份快照）——
-// 宿主没有推送通道，沿用 dsh 那套「同步只读快照 + 前端轮询」（见 dshMarketTick）。
-// 为什么要轮询而不是等 Promise：下载 40.6MB 的共享角色包时用户要的是**过程中**的字节数，
-// 而 await 只有结束那一刻才有结果 —— 用户原话「看不见下载进度，一直显示正在下载」。
-const dlProgress = ref<DownloadProgress | null>(null)
-let dlTickTimer = 0
-// 250ms 一下：进度条要跟得上，又不能太密（宿主快照是纯内存读，但每次都要跨模块拷一份对象）
-const DL_TICK_MS = 250
-// 终态（done / failed）保留多久。保留是为了让用户看清「经哪个源、下了多大」，
-// 过期后清掉，否则下次进设置页进度区还杵着一条早就结束的记录
-const DL_DONE_KEEP_MS = 8000
-// 快照时间戳与本地时钟可能有微妙偏差（宿主与设置页各算各的 Date.now），
-// 判「是否过期」时留一点宽限，避免刚下完就把终态判没了
-const DL_CLOCK_SLACK_MS = 2000
-function dlTick() {
-  let s: DownloadProgress | null = null
-  try {
-    s = services.downloadProgress?.() || null
-  } catch (err) { /* 预期分支：宿主快照读不到就当作没有进度，不影响下载本身 */ }
-  if (s && (s.phase === 'done' || s.phase === 'failed')
-    && Date.now() - Number(s.at || 0) > DL_DONE_KEEP_MS + DL_CLOCK_SLACK_MS) {
-    s = null
-  }
-  dlProgress.value = s
-  // 没有进度在跑就停表，省得空转（下次开下载时再起）
-  if (!s || s.phase === 'done' || s.phase === 'failed') dlTickStop()
-}
-function dlTickStart() {
-  dlTick()
-  if (!dlTickTimer) dlTickTimer = window.setInterval(dlTick, DL_TICK_MS)
-}
-function dlTickStop() {
-  if (dlTickTimer) { window.clearInterval(dlTickTimer); dlTickTimer = 0 }
-}
-// 进度条百分比：总量未知时回 null（模板据此显示不确定进度条，而不是假装 0%）
-const dlPercent = computed<number | null>(() => {
-  const s = dlProgress.value
-  if (!s || !s.totalKnown || !(s.total > 0)) return null
-  return Math.max(0, Math.min(100, Math.round((Number(s.received) || 0) / s.total * 100)))
-})
-// 已下载 / 总量文案。总量未知时只报已下载（不说谎）
-const dlAmountText = computed<string>(() => {
-  const s = dlProgress.value
-  if (!s) return ''
-  const got = fmtBytes(Number(s.received) || Number(s.bytes) || 0)
-  return s.totalKnown && s.total > 0 ? `${got} / ${fmtBytes(s.total)}` : got
-})
-
 const skinPackList = ref<SkinPackList | null>(null)
-const skinPackBusy = ref(false)
-const skinPackFlash: Flash = useFlash()
 // 已装状态从宿主清单来（以磁盘为准），而不是本地信心 —— 用户在「导入的形象」里删掉后这里要跟着变
 const skinPackInstalled = computed<Record<string, boolean>>(() => {
   const out: Record<string, boolean> = {}
   for (const it of (skinPackList.value?.items || [])) out[it.id] = it.installed === true
   return out
 })
-const skinPackItems = computed(() => skinPackList.value?.items || [])
-const skinPackInstalledCount = computed(() => skinPackItems.value.filter(it => it.installed).length)
-const skinPackInstalledAny = computed(() => skinPackInstalledCount.value > 0)
-const skinPackAllInstalled = computed(() => !!skinPackItems.value.length && skinPackInstalledCount.value >= skinPackItems.value.length)
 // 「正在使用的形象当前拿不到」：配置里选的是历史内置形象（已移出插件包），但本地还没下载回来
 // —— 挂件此刻只能回退显示默认形象，对用户是**静默降级**（不下到「资源」页根本看不出）。
 // 判据走 LEGACY_BUILTIN_SKINS 与皮肤包清单，不新增存储键；「未下载」以宿主清单的 installed 为准
@@ -6129,7 +5175,6 @@ const skinInUseMissing = computed<boolean>(() => {
   if (!LEGACY_BUILTIN_SKINS.includes(s)) return false
   return skinPackInstalled.value[s] !== true
 })
-const missingSkinName = computed(() => (skinInUseMissing.value ? cfg.skin : ''))
 // 首次判定出缺失时自动展开「内置资源」折叠区（否则提示藏在收起区里等于没有）。
 // 只在「从未展开过」时替用户展开一次，之后尊重他的手动收起（不反复弹开）
 const builtinFoldAutoOpened = ref(false)
@@ -6139,43 +5184,9 @@ watch(skinInUseMissing, (v) => {
     assetFolds.builtin = true
   }
 }, { immediate: true })
-// 未装部分的体积（按钮文案用「下载剩余 x 张（约 y）」比「已装 z/1」更直观）
-const skinPackRemainBytes = computed(() => skinPackItems.value.reduce((n, it) => n + (it.installed ? 0 : Number(it.size) || 0), 0))
-const skinPackBytes = computed(() => SKIN_PACK_SKINS.reduce((n, s) => n + (Number(s.size) || 0), 0))
 function refreshSkinPacks() {
   const r = services.listSkinPacks?.()
   skinPackList.value = r && Array.isArray(r.items) ? r : null
-}
-// 下载整包（宿主侧防重入，这里再加一层按钮禁用）。成功后刷新画廊（新形象已在里面）与清单（已装状态）
-async function doDownloadSkinPacks() {
-  if (skinPackBusy.value) return
-  skinPackFlash.msg = ''
-  skinPackFlash.err = false
-  skinPackBusy.value = true
-  dlTickStart()
-  try {
-    // 把用户自填的加速前缀交给宿主排进候选链最前（空串 = 只用内置链：ghfast.top → 直连兜底）
-    const r = await services.downloadSkinPacks?.(cfg.skinPackSrc || '')
-    refreshSkin()
-    refreshSkinPacks()
-    if (!r || !r.ok) {
-      skinPackFlash.msg = (r && r.error) || '下载失败，请稍后重试'
-      skinPackFlash.err = true
-      return
-    }
-    const n = (r.installed || []).length
-    skinPackFlash.msg = n ? `已下载 ${n} 张形象`
-      : (r.errors && r.errors.length ? `部分形象未能写入：${r.errors[0]}` : '形象已是最新，无需重复下载')
-    skinPackFlash.err = !!(r.errors && r.errors.length)
-  } finally {
-    skinPackBusy.value = false
-  }
-}
-// 点缩略图：未装 → 下载（下完自动切到这张，省得再点一次）；已装 → 直接选用
-async function doSkinPackCell(id: string) {
-  if (skinPackInstalled.value[id]) { doUseSkin(id); return }
-  await doDownloadSkinPacks()
-  if (skinPackInstalled.value[id]) doUseSkin(id)
 }
 
 // —— 共享素材（角色图 36 张 + 音效库 45 个，上游 QQ 群素材，挂 Release 按需下） ——
@@ -6205,262 +5216,19 @@ async function sharedSkinThumbDataUrl(id: string): Promise<string> {
   }
 }
 const sharedSkinList = ref<SharedSkinList | null>(null)
-const sharedSkinBusy = ref(false)
-const sharedSkinFlash: Flash = useFlash()
-const sharedSkinInstalled = computed<Record<string, boolean>>(() => {
-  const out: Record<string, boolean> = {}
-  for (const it of (sharedSkinList.value?.items || [])) out[it.id] = it.installed === true
-  return out
-})
-const sharedSkinItems = computed(() => sharedSkinList.value?.items || [])
-const sharedSkinInstalledCount = computed(() => sharedSkinItems.value.filter(it => it.installed).length)
-const sharedSkinAllInstalled = computed(() => !!sharedSkinItems.value.length && sharedSkinInstalledCount.value >= sharedSkinItems.value.length)
-const sharedSkinRemainBytes = computed(() => Number(sharedSkinList.value?.totalSize || 0)
-  - sharedSkinItems.value.reduce((n, it) => n + (it.installed ? (Number(it.size) || 0) : 0), 0))
-const sharedSkinTotalBytes = computed(() => Number(sharedSkinList.value?.totalSize || 0))
-// 名字按 id 查本地清单（宿主清单里也带 name，但中文名以设置页这份为准，两边由 check-shared 比对）
-const sharedSkinNames = computed<Record<string, string>>(() => {
-  const out: Record<string, string> = {}
-  for (const s of SHARED_SKIN_PACK_SKINS) out[s.id] = s.name
-  return out
-})
 function refreshSharedSkins() {
   const r = services.listSharedSkins?.()
   sharedSkinList.value = r && Array.isArray(r.items) ? r : null
-}
-async function doDownloadSharedSkins() {
-  if (sharedSkinBusy.value) return
-  sharedSkinFlash.msg = ''
-  sharedSkinFlash.err = false
-  sharedSkinBusy.value = true
-  dlTickStart()
-  try {
-    // 单张下载：把没装的逐张串行拉下来（点「下载全部」才走这里；单张走 doSharedSkinCell）。
-    // 单张失败不 break —— 一个源抖动不该拖垮剩余全部，继续下完再把失败项聚合上报。
-    const todo = sharedSkinItems.value.filter(it => !it.installed)
-    const failed: string[] = []
-    for (const it of todo) {
-      const r = await services.downloadSharedSkin?.(it.id, cfg.skinPackSrc || '',
-        await sharedSkinThumbDataUrl(it.id))
-      if (!r || !r.ok) failed.push(it.name + '：' + ((r && r.error) || '下载失败'))
-      // 逐张刷新：整批跑完才刷的话，前面下好的几张在界面上一直灰着（亮不起来），
-      // 用户会以为「下载全部」没生效。单张耗时不高，这点重复开销换即时反馈值得。
-      refreshSharedSkins()
-      refreshSkin()
-    }
-    const okCount = todo.length - failed.length
-    if (failed.length) {
-      sharedSkinFlash.msg = `已下载 ${okCount} 张，${failed.length} 张失败 —— ${failed[0]}`
-      sharedSkinFlash.err = true
-      return
-    }
-    sharedSkinFlash.msg = todo.length ? `已下载 ${todo.length} 张共享角色` : '共享角色已是最新，无需重复下载'
-    sharedSkinFlash.err = false
-  } finally {
-    sharedSkinBusy.value = false
-  }
-}
-// 点缩略图：未装 → 下这一张（下完自动切到这张）；已装 → 直接选用
-async function doSharedSkinCell(id: string) {
-  if (sharedSkinInstalled.value[id]) { doUseSkin(id); return }
-  if (sharedSkinBusy.value) return
-  sharedSkinFlash.msg = ''
-  sharedSkinFlash.err = false
-  sharedSkinBusy.value = true
-  dlTickStart()
-  try {
-    const r = await services.downloadSharedSkin?.(id, cfg.skinPackSrc || '',
-      await sharedSkinThumbDataUrl(id))
-    refreshSkin()
-    refreshSharedSkins()
-    if (!r || !r.ok) {
-      sharedSkinFlash.msg = (r && r.error) || '下载失败，请稍后重试'
-      sharedSkinFlash.err = true
-      return
-    }
-    sharedSkinFlash.msg = `已下载「${r.name || id}」`
-    sharedSkinFlash.err = false
-    doUseSkin(id)
-  } finally {
-    sharedSkinBusy.value = false
-  }
 }
 
 // —— 共享音效库（45 个，与共享角色同一个包来源，但落 sounds 的 shared 槽位） ——
 // shared 是「素材池」，不直接参与实播 —— 用户在下面从池子里「选用」到某个实播槽位才生效，
 // 否则一装几十段、把原本选好的音效挤掉。
 const sharedSoundList = ref<SharedSoundList | null>(null)
-const sharedSoundBusy = ref(false)
-const sharedSoundFlash: Flash = useFlash()
-const sharedSoundItems = computed(() => sharedSoundList.value?.items || [])
-const sharedSoundInstalledCount = computed(() => sharedSoundItems.value.filter(it => it.installed).length)
-const sharedSoundAllInstalled = computed(() => !!sharedSoundItems.value.length && sharedSoundInstalledCount.value >= sharedSoundItems.value.length)
-const sharedSoundTotalBytes = computed(() => Number(sharedSoundList.value?.totalSize || 0))
-// 列表按「是否已下载」分组渲染（见模板注释）：混排时两类行的控件数差 3 个，列对不齐。
-// 未下载那组默认收起 —— 45 段全列出来会把已下载的部分推到屏外。
-const sharedSoundInstalledItems = computed(() => sharedSoundItems.value.filter(it => it.installed))
-const sharedSoundPendingItems = computed(() => sharedSoundItems.value.filter(it => !it.installed))
-const sharedSoundPendingOpen = ref(false)
-// 正在试听的共享音效 id（null = 没在放）。用于把那一行的按钮切成「停止」并高亮。
-// 按 id 而不是 file：id 是列表项的稳定标识，refreshSharedSounds 后不变。
-const previewingSharedId = ref<string | null>(null)
-// 「删」的二次确认：值 = 已点过一次待确认的那一项 id。第一次点只切按钮文案，
-// 再点才真删；3 秒不点自动复原（timer 见 doRemoveSharedSound）。
-const removeConfirmId = ref<string | null>(null)
-let removeConfirmTimer: ReturnType<typeof setTimeout> | null = null
-const sharedSoundRemainBytes = computed(() => Number(sharedSoundList.value?.totalSize || 0)
-  - sharedSoundItems.value.reduce((n, it) => n + (it.installed ? (Number(it.size) || 0) : 0), 0))
 function refreshSharedSounds() {
   const r = services.listSharedSounds?.()
   sharedSoundList.value = r && Array.isArray(r.items) ? r : null
 }
-async function doDownloadSharedSounds() {
-  if (sharedSoundBusy.value) return
-  sharedSoundFlash.msg = ''
-  sharedSoundFlash.err = false
-  sharedSoundBusy.value = true
-  dlTickStart()
-  try {
-    // 单段下载：把没装的逐段串行拉下来（「下载全部」按钮走这里；单段走 doDownloadSharedSound）。
-    // 单段失败不 break，继续下完再聚合上报失败项。
-    const todo = sharedSoundItems.value.filter(it => !it.installed)
-    const failed: string[] = []
-    for (const it of todo) {
-      const r = await services.downloadSharedSound?.(it.id, cfg.skinPackSrc || '')
-      if (!r || !r.ok) failed.push(it.name + '：' + ((r && r.error) || '下载失败'))
-      // 同上：逐段刷新，让下好的那几段立刻变亮
-      refreshSharedSounds()
-      refreshSounds()
-    }
-    const okCount = todo.length - failed.length
-    if (failed.length) {
-      sharedSoundFlash.msg = `已下载 ${okCount} 段，${failed.length} 段失败 —— ${failed[0]}`
-      sharedSoundFlash.err = true
-      return
-    }
-    sharedSoundFlash.msg = todo.length ? `已下载 ${todo.length} 段音效（存进「共享音效库」，可到下面选用）` : '共享音效已是最新，无需重复下载'
-    sharedSoundFlash.err = false
-  } finally {
-    sharedSoundBusy.value = false
-  }
-}
-// 点某段共享音效的下载按钮：只拉这一段
-async function doDownloadSharedSound(it: SharedSoundItem) {
-  if (sharedSoundBusy.value || it.installed) return
-  sharedSoundFlash.msg = ''
-  sharedSoundFlash.err = false
-  sharedSoundBusy.value = true
-  dlTickStart()
-  try {
-    const r = await services.downloadSharedSound?.(it.id, cfg.skinPackSrc || '')
-    refreshSounds()
-    refreshSharedSounds()
-    if (!r || !r.ok) {
-      sharedSoundFlash.msg = (r && r.error) || '下载失败，请稍后重试'
-      sharedSoundFlash.err = true
-      return
-    }
-    sharedSoundFlash.msg = `已下载「${r.name || it.name}」`
-    sharedSoundFlash.err = false
-  } finally {
-    sharedSoundBusy.value = false
-  }
-}
-// 从共享音效库删一段：按落盘文件名（it.file）定位，name 不唯一。
-// 宿主会连「从这段选用出去的实播槽位副本」一起清掉（clearedRoles），否则用户删了池里这段、
-// 槽位那份照旧在响，看着就是「删了没删干净」。
-// 误点代价高（删完只能重新下载），所以先要一次二次确认：第一次点把按钮切成「确认删」，
-// 3 秒内不再点就自己复原（见 removeConfirmId / removeConfirmTimer）。
-function doRemoveSharedSound(it: SharedSoundItem) {
-  if (removeConfirmId.value !== it.id) {
-    removeConfirmId.value = it.id
-    if (removeConfirmTimer) clearTimeout(removeConfirmTimer)
-    removeConfirmTimer = setTimeout(() => { removeConfirmId.value = null }, 3000)
-    return
-  }
-  if (removeConfirmTimer) { clearTimeout(removeConfirmTimer); removeConfirmTimer = null }
-  removeConfirmId.value = null
-  sharedSoundFlash.msg = ''
-  sharedSoundFlash.err = false
-  const r = services.removeSharedSound?.(it.file || '')
-  if (!r || !r.ok) {
-    sharedSoundFlash.msg = (r && r.error) || '删除失败'
-    sharedSoundFlash.err = true
-    return
-  }
-  refreshSharedSounds()
-  refreshSounds()
-  // 清掉这一段残留的「选用到哪个槽位」选中值：不清的话，用户再下载回同一 id，
-  // 下拉框会带着上次的选择复现（看着像「删了没删干净」，而且一点「选用」就写进实播槽位）
-  delete sharedSoundUseRole[it.id]
-  // 试听中的正是这一段的话，停掉：音频已删，继续放着像没删成功
-  if (previewingSharedId.value === it.id) stopPreviewSound()
-  const cleared = (r.clearedRoles || [])
-  sharedSoundFlash.msg = `已删除「${it.name}」`
-    + (cleared.length ? `，并清掉了它在${cleared.map((x) => SOUND_ROLE_LABEL[x] || x).join(' / ')}上的选用` : '')
-}
-// 共享库里的一段「选用」到实播槽位。成功后刷新音效元信息（实播槽位多了一段）
-const sharedSoundUseRole = reactive<Record<string, SoundRole>>({})
-async function doUseSharedSound(it: SharedSoundItem) {
-  const role = sharedSoundUseRole[it.id]
-  // 这里不需要「没选槽位」的兜底：按钮 :disabled="!sharedSoundUseRole[it.id]"，没选就点不动。
-  // 原先留了一句提示文案，属于永远触发不到的死代码，已删（真要兜底也应是改按钮语义，不是加提示）。
-  if (!role) return
-  // 传 it.file 而不是 it.name：宿主 useSharedSound(file) 是按「落盘文件名」在 meta.shared 里定位的
-  // （name 不唯一，同名的会误伤，见 SharedSoundItem.file 与 services.d.ts 的签名注释）。
-  // 这里原先传 name，与宿主查找键对不上 → 恒走「共享库中没有这段音效」分支，选用永远失败。
-  const r = services.useSharedSound?.(it.file, role)
-  refreshSounds()
-  if (r && r.ok) {
-    // 「按压 / 释放」是音色的两段，只在「音色 = 自定义」时才参与播放
-    // （挂件侧 floating-page.js 的 applySoundSet 有此前置判断）。
-    // 不在这里顺手把音色切过去的话，用户在这张卡里选用了却听不到任何变化 ——
-    // 数据写对了、也推给挂件了，只是没被消费，看着像「选用没生效」。
-    // 只对这两类切：四类提醒音与音色无关，不能因为选了提醒音就把用户的音色改掉；
-    // 关闭音效开关时也不切（切了也放不出声，反而让用户以为设置乱了）。
-    let switched = false
-    if (cfg.soundOn && cfg.soundSet !== 'custom' && (role === 'press' || role === 'release')) {
-      cfg.soundSet = 'custom'
-      patchCfg({ soundSet: 'custom' })
-      switched = true
-    }
-    sharedSoundFlash.msg = `已把「${it.name}」选用到${SOUND_ROLE_LABEL[role] || role}`
-      + (switched ? '，并把「音色」切到了「自定义」' : '')
-    // 选用成功就把这一行的下拉复位：不清的话，下一段再点「选用」时残留着上次的槽位，
-    // 一点就顶掉；而且「已选用到 press」的提示挂在那儿，用户容易把残留值当成「这段已选用」。
-    delete sharedSoundUseRole[it.id]
-    sharedSoundFlash.err = false
-  } else {
-    sharedSoundFlash.msg = (r && r.error) || '选用失败'
-    sharedSoundFlash.err = true
-  }
-}
-// 试听共享库里的一段。shared 槽位不在 soundData（宿主只推实播槽位），
-// 按落盘文件名从宿主临时取一段 data URL 来播（同名的段靠 file 区分，按 name 会误取第一条）。
-// 再点正在放的那一段 = 停止：45 段的池子里试听是高频动作，没有停止态的话第二次点击是
-// 「停掉再从头放」，听感上像没响应；previewingSharedId 让按钮显示成「停止」并高亮当前那段。
-function doPreviewSharedSound(it: SharedSoundItem) {
-  sharedSoundFlash.msg = ''
-  sharedSoundFlash.err = false
-  if (previewingSharedId.value === it.id) { stopPreviewSound(); return }
-  const r = services.readSharedSoundData?.(it.file)
-  if (!r || !r.ok || !r.url) {
-    sharedSoundFlash.msg = (r && r.error) || '没有可试听的音效'
-    sharedSoundFlash.err = true
-    return
-  }
-  previewingSharedId.value = it.id
-  playAudioUrl(r.url, sharedSoundFlash, () => { previewingSharedId.value = null })
-}
-// 导入素材的总占用与段数：单个文件缺失时 size 为 0，不影响其它项的统计
-const importedSoundCount = computed(() => SOUND_ROLES.reduce((n, r) => n + soundsMeta.value[r].length, 0))
-const assetTotalBytes = computed(() => {
-  let n = 0
-  for (const it of skinGallery.value.items) n += Number(it.size) || 0
-  for (const it of bubbleItems.value) n += Number(it.size) || 0
-  for (const r of SOUND_ROLES) for (const it of soundsMeta.value[r]) n += Number(it.size) || 0
-  return n
-})
 // 「未使用」= 磁盘上有、但按当前设置不会播放 / 显示的素材：
 // 形象：画廊里除正在使用的那张以外的每一张（形象选的是内置时，整柜都没在用）
 // 音效：音效开关关 → 全部未使用；按压/释放看「音色」是否自定义；四类提醒音看对应提醒开关
@@ -6481,7 +5249,6 @@ const unusedSoundRoles = computed(() => {
   }
   return out
 })
-const unusedCount = computed(() => unusedSkinIds.value.length + unusedSoundRoles.value.length)
 function doClearUnused() {
   // 先快照：删完 computed 会变 0，消息里的数量得用删除前的
   const skinIds = unusedSkinIds.value.slice()
@@ -6514,124 +5281,6 @@ function doClearUnused() {
     skinFlash.msg = '清除失败：' + String(err?.message || err)
   }
 }
-// 素材包：导出 / 选择预览 / 确认写入（与「备份与恢复」同一套三段式，见 backupExport / backupPick / backupApply）
-function doExportAssets() {
-  if (assetsBusy.value) return
-  assetsBusy.value = true
-  assetsFlash.msg = ''
-  assetsFlash.err = false
-  try {
-    const r: AssetsExportResult | undefined = services.assetsExport?.()
-    if (!r || (!r.ok && !r.canceled)) {
-      assetsFlash.err = true
-      assetsFlash.msg = '导出失败：' + ((r && r.error) || '未知错误')
-    } else if (r.canceled) {
-      assetsFlash.msg = '已取消导出'
-    } else {
-      assetsFlash.msg = `已导出素材包（形象 ${r.skins || 0} 张 · 气泡图 ${r.bubbles || 0} 张 · 音效 ${r.sounds || 0} 段 · 台词组 ${r.quotes || 0} 个）：${r.path}`
-    }
-  } catch (err: any) {
-    assetsFlash.err = true
-    assetsFlash.msg = '导出失败：' + String(err?.message || err)
-  } finally {
-    assetsBusy.value = false
-  }
-}
-function doPickAssets() {
-  if (assetsBusy.value) return
-  assetsBusy.value = true
-  assetsFlash.msg = ''
-  assetsFlash.err = false
-  assetsConfirm.value = false
-  assetsPack.value = null
-  try {
-    const r: AssetsPreviewResult | undefined = services.assetsPick?.()
-    if (!r || (!r.ok && !r.canceled)) {
-      assetsFlash.err = true
-      assetsFlash.msg = '读取失败：' + ((r && r.error) || '未知错误')
-    } else if (r.canceled) {
-      assetsFlash.msg = '已取消导入'
-    } else {
-      assetsPack.value = r
-      assetsPicks.skins = !!r.has?.skins
-      assetsPicks.sounds = !!r.has?.sounds
-      assetsPicks.bubbles = !!r.has?.bubbles
-      assetsPicks.quotes = !!r.has?.quotes
-      assetsFlash.msg = '已读取素材包，勾选要导入的内容后点「导入选中项」'
-    }
-  } catch (err: any) {
-    assetsFlash.err = true
-    assetsFlash.msg = '读取失败：' + String(err?.message || err)
-  } finally {
-    assetsBusy.value = false
-  }
-}
-function doApplyAssets() {
-  if (assetsBusy.value || !assetsAnyItem.value) return
-  if (!assetsConfirm.value) {
-    assetsConfirm.value = true
-    assetsFlash.msg = ''
-    assetsFlash.err = false
-    return
-  }
-  assetsConfirm.value = false
-  assetsBusy.value = true
-  try {
-    const r: AssetsApplyResult | undefined = services.assetsApply?.({
-      skins: assetsPicks.skins, sounds: assetsPicks.sounds, bubbles: assetsPicks.bubbles, quotes: assetsPicks.quotes,
-    })
-    if (!r || !r.ok) {
-      assetsFlash.err = true
-      assetsFlash.msg = '导入失败：' + ((r && r.error) || '未知错误')
-    } else {
-      const parts: string[] = []
-      if (r.skins) parts.push(`形象新增 ${r.skins.added} 张${r.skins.skipped ? `（${r.skins.skipped} 张因画廊已满跳过）` : ''}`)
-      if (r.bubbles) parts.push(`气泡图新增 ${r.bubbles.added} 张${r.bubbles.skipped ? `（${r.bubbles.skipped} 张因已满跳过）` : ''}`)
-      if (r.sounds) parts.push(`音效写入 ${r.sounds.applied} 段`)
-      if (r.quotes) parts.push(`台词组追加 ${r.quotes.added} 个`)
-      let msg = '已导入素材包：' + (parts.join(' · ') || '没有可写入的内容') + '。'
-      assetsFlash.err = false
-      if (r.errors && r.errors.length) { msg += r.errors.join('；'); assetsFlash.err = true }
-      assetsFlash.msg = msg
-      assetsPack.value = null
-      refreshSkin()
-      refreshSkinPacks()
-      refreshSharedSkins()
-      refreshBubbles()
-      refreshSounds()
-      // 台词组进了配置：宿主 patchConfig 会 emitConfigChange 广播，onConfigChange → applyConfig
-      // 自动重建组列表（保存基线也随之落新），这里无需也不能再手动刷一遍
-    }
-  } catch (err: any) {
-    assetsFlash.err = true
-    assetsFlash.msg = '导入失败：' + String(err?.message || err)
-  } finally {
-    assetsBusy.value = false
-  }
-}
-function doCancelAssets() {
-  assetsPack.value = null
-  assetsConfirm.value = false
-  assetsFlash.msg = ''
-  try { services.assetsCancel?.() } catch (err) {}
-}
-// 预览里列出包内音效槽位（宿主只给 role 字符串，转成中文标签）
-function roleLabelOf(r: string) {
-  return SOUND_ROLE_LABEL[r as SoundRole] || r
-}
-const assetsSkinNames = computed(() => (assetsPack.value?.skinNames || []).join('、'))
-const assetsBubbleNames = computed(() => (assetsPack.value?.bubbleNames || []).join('、'))
-const assetsSoundNames = computed(() => (assetsPack.value?.soundRoles || []).map(roleLabelOf).join('、'))
-// 台词组没有逐个列名的价值（就是一段段台词），只报数量；包里没有 quotes 键时 packLine 显示「没有这一项」
-const assetsQuoteLine = computed(() => {
-  const n = assetsPack.value?.quoteCount
-  return n ? `${n} 个台词组（追加到现有组尾部）` : ''
-})
-// 预览里的一行说明：包里有这一项就列出内容，没有就说清楚
-function packLine(n: number | undefined, unit: string, detail: string) {
-  return n ? `${n} ${unit}：${detail}` : '包里没有这一项'
-}
-
 // —— 台词库（随机台词组 + 报时 / 动图降级文案） ——
 // 一组 = 一个抽签项：权重越大越常抽到，顺序决定「依次播放」的出场次序。
 // card 是内置的余额 / 时段卡（内容按当前数据现算，文字改不了）；text 是自己填的台词；image 是抽一张气泡图
@@ -7301,207 +5950,6 @@ function resetQuotes() {
   }
 }
 
-// —— 提醒文案（低余额 / 今日预算 / 峰谷切换 / 鼠标穿透四类自动提醒的气泡与系统通知文案） ——
-// 模板按行映射到气泡三行：第 1 行标题 / 第 2 行大字 / 第 3 行说明；系统通知取全文（换行合并成一行）
-const ALERT_FIELDS: Array<{ key: string; label: string; hint: string }> = [
-  { key: 'low', label: '低余额预警', hint: '余额低于预警阈值时提醒；{balance} = 当前余额，{threshold} = 预警阈值' },
-  { key: 'budget', label: '今日预算', hint: '今日用量超出预算时提醒；{used} = 今日已用，{budget} = 预算额，{over} = 超出金额' },
-  { key: 'peakOn', label: '进入峰时', hint: '进入高峰时段时提醒；{schedule} = 峰时时段表（如 峰时9-12/14-18点）' },
-  { key: 'peakOff', label: '进入谷时', hint: '进入低谷时段时提醒；{schedule} = 峰时时段表（如 峰时9-12/14-18点）' },
-  { key: 'passOn', label: '穿透开启', hint: '开启鼠标穿透时提醒（无占位符）' },
-  { key: 'passOff', label: '穿透关闭', hint: '关闭鼠标穿透时提醒（无占位符）' },
-]
-const alertFlash: Flash = useFlash()
-const alertResetConfirm = ref(false)
-let alertFlashTimer: number | undefined
-function alertFlashShow(msg: string, err = false) {
-  alertFlash.msg = msg
-  alertFlash.err = err
-  if (alertFlashTimer) clearTimeout(alertFlashTimer)
-  alertFlashTimer = window.setTimeout(() => { alertFlash.msg = '' }, 3000)
-}
-// 保存：整份交给宿主清洗（去空白 / 丢空行 / 限长），再回读一次拿到清洗后的结果
-function saveAlerts() {
-  alertResetConfirm.value = false
-  const alerts: Record<string, string> = {}
-  for (const f of ALERT_FIELDS) alerts[f.key] = String(cfg.alerts[f.key] || '')
-  try {
-    patchCfg({ alerts })
-    applyConfig(services.getConfig?.())
-    alertFlashShow('已保存')
-  } catch (err: any) {
-    alertFlashShow('保存失败：' + String(err?.message || err), true)
-  }
-}
-// 恢复默认：整组传 null，由宿主填回内置文案。同样会覆盖全部自定义文案，先要一次二次确认
-function resetAlerts() {
-  if (!alertResetConfirm.value) {
-    alertResetConfirm.value = true
-    alertFlash.msg = ''
-    return
-  }
-  alertResetConfirm.value = false
-  try {
-    patchCfg({ alerts: null })
-    applyConfig(services.getConfig?.())
-    alertFlashShow('已恢复默认文案')
-  } catch (err: any) {
-    alertFlashShow('恢复失败：' + String(err?.message || err), true)
-  }
-}
-
-// 提醒文案折叠：与上面的开关同属「提醒」主题，收在「提醒与通知」卡里，不再单独占「外观」页一张卡
-const alertFolds = reactive({ open: false })
-// 同「文案」卡：与上次回填的内容比对，用于「未保存」提示
-const alertsBaseline = ref<string | null>(null)
-const alertsDirty = computed(() => alertsBaseline.value !== null && JSON.stringify(cfg.alerts) !== alertsBaseline.value)
-
-// —— 邮件通知（SMTP） ——
-const mailFlash: Flash = useFlash()
-const mailTesting = ref(false)
-// SMTP 配置区的展开态。三个来源共同决定，见下面 mailOpen 的注释
-const mailFold = reactive({ open: false, touched: false })
-// 配置是否已齐全：服务器 / 发件人 / 收件人。只看「有没有填过」这个持久事实，
-// 不看本次测试成没成 —— 折叠态要能跨会话稳定重现，不依赖一次性的运行时结果。
-// **刻意不要求账号与授权码**：账号留空是合法用法（多数服务器直接拿发件人地址当账号，
-// 宿主 SmtpClient.send 也是 `if (user)` 才发 AUTH），授权码同理 —— 本机可匿名中继的
-// 内网 SMTP 根本不需要。早先要求这两项非空，用户账号留空时永远判「未配置」，
-// 于是每次重载都弹回整张空表格，看着就像「保存丢了」
-const mailConfigured = computed(() => !!(
-  mail.mailHost.trim() && cfg.mailFrom.trim() && cfg.mailTo.trim()
-))
-// 展开条件：手动展开过、或配置还没齐（空表格就是要催用户去填）、或刚点了「重新配置」。
-// 配置齐全且用户没动过 → 收起，只留一行「已配置」摘要，把卡片位置让给上面的提醒开关。
-// `touched` 是关键：否则用户点「修改」展开后，一改动输入框就会因「已配置」立刻收起，
-// 出现「点开就自动关上」的失焦感
-const mailOpen = computed(() => mailFold.touched || !mailConfigured.value || mailFold.open)
-// 通知渠道自测（「通知方式」小节的「测试通知」按钮）：与邮件测试分开两个消息态，
-// 因为它同时覆盖系统通知渠道，消息文案也不同
-const notifyFlash: Flash = useFlash()
-const notifyTesting = ref(false)
-let notifyFlashTimer: number | undefined
-function notifyFlashShow(msg: string, err = false) {
-  notifyFlash.msg = msg
-  notifyFlash.err = err
-  if (notifyFlashTimer) clearTimeout(notifyFlashTimer)
-  notifyFlashTimer = window.setTimeout(() => { notifyFlash.msg = '' }, 4000)
-}
-let mailFlashTimer: number | undefined
-function mailFlashShow(msg: string, err = false) {
-  mailFlash.msg = msg
-  mailFlash.err = err
-  if (mailFlashTimer) clearTimeout(mailFlashTimer)
-  mailFlashTimer = window.setTimeout(() => { mailFlash.msg = '' }, 4000)
-}
-// 从宿主读回 SMTP 凭据：授权码不返明文，只回「有没有存过」的标记，
-// 所以密码框留空提交时后端会沿用旧值（见 saveMailSecrets）。
-// 入参是「SMTP 凭据本体」（**两种来源形状必须一致**）：
-//   - getSecrets() 返回整个 WhaleSecrets，SMTP 挂在 `notifyMail` 子对象下，要下沉一层
-//   - saveMailSecrets() 直接返回该子对象（WhaleMailSecrets），不能下沉
-// 早先这里写成 `s.mailHost` 取顶层、而 saveMailSecrets 又直接返回子对象，
-// 两条路径形状对不上，回填恒为空 → 每次重启都判「未配置」
-function applyMailSecrets(m: WhaleMailSecrets | undefined) {
-  if (!m || typeof m !== 'object') return
-  mail.mailHost = String(m.mailHost || '')
-  mail.mailPort = Number(m.mailPort) > 0 ? Number(m.mailPort) : 465
-  mail.mailSecure = m.mailSecure !== false
-  mail.mailUser = String(m.mailUser || '')
-  mailPassSaved.value = !!m.mailPass
-  mail.mailPass = ''
-}
-function loadMailSecrets() {
-  // 预期分支：读存储失败/宿主未就绪时保持空表单，用户重填即可
-  try { applyMailSecrets(services.getSecrets?.()?.notifyMail) } catch (err) {}
-}
-// 「重新配置 / 收起」：touched 一旦置位就不再自动收起，把展开态完全交还给用户，
-// 避免填到一半被 computed 判成「已配置」而自己合上
-function toggleMailFold() {
-  mailFold.touched = true
-  mailFold.open = !mailFold.open
-}
-function saveMailSettings() {
-  mailFlash.msg = ''
-  try {
-    // 非敏感字段（开关 / 收件人 / 主题前缀）进配置；服务器与授权码进加密存储，两条路分开写
-    patchCfg({
-      notifySystemOn: cfg.notifySystemOn,
-      notifyMailOn: cfg.notifyMailOn,
-      mailFrom: cfg.mailFrom.trim(),
-      mailTo: cfg.mailTo.trim(),
-      mailFromName: cfg.mailFromName.trim(),
-      mailSubjectPrefix: cfg.mailSubjectPrefix.trim(),
-    })
-    const saved = services.saveMailSecrets?.({
-      mailHost: mail.mailHost.trim(),
-      mailPort: Number(mail.mailPort) || 465,
-      mailSecure: mail.mailSecure,
-      mailUser: mail.mailUser.trim(),
-      mailPass: mail.mailPass,
-    })
-    applyMailSecrets(saved)
-    mailFlashShow('已保存')
-  } catch (err: any) {
-    mailFlashShow('保存失败：' + String(err?.message || err), true)
-  }
-}
-async function testNotify() {
-  if (notifyTesting.value) return
-  notifyTesting.value = true
-  notifyFlash.msg = ''
-  try {
-    const r = await services.testNotify?.()
-    if (r && r.ok) {
-      const sys = (r.on || []).includes('系统通知')
-      notifyFlashShow(sys
-        ? '已按当前渠道发出：' + (r.on || []).join(' + ') + '（系统通知应已弹出，邮件请查收含垃圾箱）'
-        : '已发出：' + (r.on || []).join(' + ') + '，请查收（含垃圾箱）')
-      // 邮件这条渠道也验证通过 → 与「发送测试邮件」同样收起配置区
-      if ((r.on || []).includes('邮件')) mailFold.open = false
-    } else {
-      // 邮件渠道失败时展开配置区，否则错误提示会被折叠藏住
-      if ((r && r.on || []).includes('邮件')) mailFold.open = true
-      notifyFlashShow('发送失败：' + ((r && r.error) || '未知错误'), true)
-    }
-  } catch (err: any) {
-    notifyFlashShow('发送失败：' + String(err?.message || err), true)
-  } finally {
-    notifyTesting.value = false
-  }
-}
-async function testMail() {
-  if (mailTesting.value) return
-  mailTesting.value = true
-  mailFlash.msg = ''
-  try {
-    const r = await services.sendTestMail?.({
-      mailHost: mail.mailHost.trim(),
-      mailPort: Number(mail.mailPort) || 465,
-      mailSecure: mail.mailSecure,
-      mailUser: mail.mailUser.trim(),
-      mailPass: mail.mailPass,
-      // 发件人 / 收件人在「当前表单」里（cfg），不在凭据区 —— 漏传就会被宿主判成空串，
-      // 报「发件邮箱格式不正确」，用户看表单里明明填了
-      mailFrom: cfg.mailFrom.trim(),
-      mailTo: cfg.mailTo.trim(),
-      mailFromName: cfg.mailFromName.trim(),
-    })
-    if (r && r.ok) {
-      mailFlashShow('测试邮件已发出，请查收（含垃圾箱）')
-      // 发信成功 = 这组参数确实能送达，此时自动收起配置区，卡片回到「一行摘要」的清爽态。
-      // 只清 open、留 touched=true：展开权已交给用户，之后不会再自己弹开
-      mailFold.open = false
-    } else {
-      // 失败时反而要展开，否则错误提示会跟着配置区一起藏在折叠里，用户只看到一片空白
-      mailFold.open = true
-      mailFlashShow('发送失败：' + ((r && r.error) || '未知错误'), true)
-    }
-  } catch (err: any) {
-    mailFold.open = true
-    mailFlashShow('发送失败：' + String(err?.message || err), true)
-  } finally {
-    mailTesting.value = false
-  }
-}
 
 function saveSecrets() {
   const r = services.saveSecrets?.({ apiKey: secrets.apiKey.trim(), platformToken: secrets.platformToken.trim() })
@@ -7673,176 +6121,36 @@ function copyWidgetError() {
   errFlash.msg = ok ? '错误信息已复制到剪贴板。' : '复制失败，请手动选中上方文本复制。'
 }
 // 清除本地数据：按勾选项清除，需二次确认，避免误触
-function clearSelectedData() {
-  if (!anyClearItem.value) return
-  if (!clearConfirm.value) {
-    clearConfirm.value = true
-    dataFlash.msg = ''
-    dataFlash.err = false
-    return
+// 清除数据（勾选与二次确认）已内聚到 PrivacyView.vue，由它调用 services.clearAllData；
+// 这里只做「清除成功后的回显刷新」——要读父级全局状态（secrets / cfg / 账本 / 各素材卡片）。
+// picked 由组件按同一语义拆好：素材三项（sounds/skins/bubbles）同开关一起下发。
+function onDataCleared(picked: { secrets: boolean; config: boolean; ledger: boolean; window: boolean; sounds: boolean; skins: boolean; bubbles: boolean }) {
+  if (picked.secrets) {
+    secrets.apiKey = ''
+    secrets.platformToken = ''
+    secretsFlash.msg = ''
   }
-  clearConfirm.value = false
-  const picked = { secrets: clearItems.secrets, config: clearItems.config, ledger: clearItems.ledger, window: clearItems.window, sounds: clearItems.assets, skins: clearItems.assets, bubbles: clearItems.assets }
-  // 清音效/形象时宿主会把音色、形象从「自定义」回退为内置，先记下原值用于提示文案
-  const wasCustomSound = cfg.soundSet === 'custom'
-  const wasCustomSkin = cfg.skin === 'custom'
-  try {
-    const r = services.clearAllData?.(picked) || { ok: false }
-    dataFlash.err = !(r && r.ok)
-    if (r && r.ok) {
-      const names: string[] = []
-      if (picked.secrets) names.push('凭据')
-      if (picked.config) names.push('挂件设置')
-      if (picked.ledger) names.push('账本用量记录')
-      if (picked.window) names.push('窗口位置与更新缓存')
-      if (picked.sounds) names.push('导入的素材（形象 / 气泡图 / 音效）')
-      dataFlash.msg = `已清除：${names.join('、')}。`
-        + (picked.config || picked.window ? '挂件已按默认配置重建。' : '')
-        // 素材三项已合成一项，回退提示按同一开关走；清设置时挂件本就按默认重建，不必再逐项说
-        + (picked.sounds && !picked.config
-            ? (wasCustomSound ? '音色已回退为「小黄鸭」。' : '')
-              + (wasCustomSkin ? '形象已回退为「默认形象」。' : '')
-              + '挂件气泡图已回退为内置动图。'
-            : '')
-      if (picked.secrets) {
-        secrets.apiKey = ''
-        secrets.platformToken = ''
-        secretsFlash.msg = ''
-      }
-      // 清音效/形象可能改了音色与形象（自定义 → 内置），因此与清设置一样要重新套用配置
-      if (picked.config || picked.sounds || picked.skins) applyConfig(services.getConfig?.())
-      if (picked.ledger) usageHistory.value = []
-      else refreshHistory()
-      if (picked.sounds) refreshSounds() // 音效卡片（音色「自定义」）回显为「未导入」
-      if (picked.skins) refreshSkin()   // 形象画廊回显为空（只剩「＋ 导入」）
-      if (picked.bubbles) refreshBubbles() // 气泡图网格回显为空
-    } else {
-      dataFlash.msg = '清除失败：' + ((r && r.error) || '未知错误')
-    }
-  } catch (err: any) {
-    dataFlash.err = true
-    dataFlash.msg = '清除失败：' + String(err?.message || err)
-  }
+  // 清音效/形象可能改了音色与形象（自定义 → 内置），因此与清设置一样要重新套用配置
+  if (picked.config || picked.sounds || picked.skins) applyConfig(services.getConfig?.())
+  if (picked.ledger) usageHistory.value = []
+  else refreshHistory()
+  if (picked.sounds) refreshSounds() // 音效卡片（音色「自定义」）回显为「未导入」
+  if (picked.skins) refreshSkin()   // 形象画廊回显为空（只剩「＋ 导入」）
+  if (picked.bubbles) refreshBubbles() // 气泡图网格回显为空
 }
 // —— 备份与恢复（「数据」页独立卡片）——
-const backupWithSecrets = ref(false)
-const backupPassword = ref('')
-const backupBusy = ref(false)
-const backupFlash: Flash = useFlash()
-const backupConfirm = ref(false)
-const backupPreview = ref<BackupPreviewResult | null>(null)
-const backupPicks = reactive<Record<string, boolean>>({ config: true, ledger: true, window: true, timer: true, secrets: true })
-const backupItems: Array<{ key: string; label: string; note: string }> = [
-  { key: 'config', label: '挂件设置', note: '（同名覆盖）' },
-  { key: 'ledger', label: '账本用量记录', note: '（同日覆盖，保留最近 30 天）' },
-  { key: 'window', label: '窗口位置', note: '（恢复后挂件重建一次）' },
-  { key: 'timer', label: '计时状态', note: '（重载插件后恢复）' },
-  { key: 'secrets', label: '凭据', note: '（用备份密码解密）' },
-]
-const backupHas = (key: string) => !!backupPreview.value?.has?.[key as 'config']
-const backupAnyItem = computed(() => backupItems.some((it) => backupPicks[it.key] && backupHas(it.key)))
-const backupItemLabel = (key: string) => (backupItems.find((i) => i.key === key) || { label: key }).label
-const backupNames = (list?: string[]) => (list || []).map(backupItemLabel).join('、')
-function backupExport() {
-  if (backupBusy.value) return
-  backupBusy.value = true
-  backupFlash.msg = ''
-  backupFlash.err = false
-  try {
-    const r = services.backupExport?.({ secrets: backupWithSecrets.value, password: backupPassword.value })
-    if (!r || (!r.ok && !r.canceled)) {
-      backupFlash.err = true
-      backupFlash.msg = '导出失败：' + ((r && r.error) || '未知错误')
-    } else if (r.canceled) {
-      backupFlash.msg = '已取消导出'
-    } else {
-      backupPassword.value = '' // 密码不留在内存/界面上
-      backupFlash.msg = '已导出备份：' + r.path + (r.withSecrets ? '（含加密凭据）' : '（不含凭据）')
+// 导出 / 读取 / 勾选 / 恢复全部内聚到 BackupView.vue（由它调用 services.backup*）；
+// 这里只做「恢复成功后的回显刷新」——要读父级全局状态（cfg / 账本 / secrets）。
+function onBackupApplied(applied: string[]) {
+  if (applied.indexOf('config') >= 0) applyConfig(services.getConfig?.())
+  if (applied.indexOf('ledger') >= 0) refreshHistory()
+  if (applied.indexOf('secrets') >= 0) {
+    const s = services.getSecrets?.()
+    if (s) {
+      secrets.apiKey = s.apiKey || ''
+      secrets.platformToken = s.platformToken || ''
     }
-  } catch (err: any) {
-    backupFlash.err = true
-    backupFlash.msg = '导出失败：' + String(err?.message || err)
-  } finally {
-    backupBusy.value = false
   }
-}
-function backupPick() {
-  if (backupBusy.value) return
-  backupBusy.value = true
-  backupFlash.msg = ''
-  backupFlash.err = false
-  backupConfirm.value = false
-  backupPreview.value = null
-  try {
-    const r = services.backupPick?.()
-    if (!r || (!r.ok && !r.canceled)) {
-      backupFlash.err = true
-      backupFlash.msg = '读取失败：' + ((r && r.error) || '未知错误')
-    } else if (r.canceled) {
-      backupFlash.msg = '已取消导入'
-    } else {
-      backupPreview.value = r as BackupPreviewResult
-      backupItems.forEach((it) => { backupPicks[it.key] = backupHas(it.key) })
-      backupFlash.msg = '已读取备份，请勾选要恢复的项，再点「恢复选中项」'
-    }
-  } catch (err: any) {
-    backupFlash.err = true
-    backupFlash.msg = '读取失败：' + String(err?.message || err)
-  } finally {
-    backupBusy.value = false
-  }
-}
-function backupApply() {
-  if (backupBusy.value || !backupAnyItem.value) return
-  if (!backupConfirm.value) {
-    backupConfirm.value = true
-    backupFlash.msg = ''
-    backupFlash.err = false
-    return
-  }
-  backupConfirm.value = false
-  backupBusy.value = true
-  try {
-    const r = services.backupApply?.({
-      config: backupPicks.config, ledger: backupPicks.ledger, window: backupPicks.window,
-      timer: backupPicks.timer, secrets: backupPicks.secrets, password: backupPassword.value,
-    })
-    const applied = (r && r.applied) || []
-    if (!r || !r.ok) {
-      backupFlash.err = true
-      backupFlash.msg = '恢复失败：' + ((r && (r.errors || [])[0]) || (r && r.error) || '未知错误')
-    } else {
-      let msg = '已恢复：' + backupNames(applied) + '。'
-      if (r.skipped && r.skipped.length) msg += '备份里没有：' + backupNames(r.skipped) + '。'
-      if (r.widgetRebuilt) msg += '挂件已按恢复的设置重建。'
-      backupFlash.err = false
-      if (r.errors && r.errors.length) { msg += r.errors.join('；'); backupFlash.err = true }
-      backupPassword.value = ''
-      backupPreview.value = null
-      backupFlash.msg = msg
-      // 让页面回显跟上：设置 / 账本 / 凭据分别刷新
-      if (applied.indexOf('config') >= 0) applyConfig(services.getConfig?.())
-      if (applied.indexOf('ledger') >= 0) refreshHistory()
-      if (applied.indexOf('secrets') >= 0) {
-        const s = services.getSecrets?.()
-        if (s) {
-          secrets.apiKey = s.apiKey || ''
-          secrets.platformToken = s.platformToken || ''
-        }
-      }
-    }
-  } catch (err: any) {
-    backupFlash.err = true
-    backupFlash.msg = '恢复失败：' + String(err?.message || err)
-  } finally {
-    backupBusy.value = false
-  }
-}
-function backupCancelPick() {
-  backupPreview.value = null
-  backupConfirm.value = false
-  backupFlash.msg = ''
-  try { services.backupCancel?.() } catch (err) {}
 }
 // 复制指令名，便于粘贴到 uTools「全局功能」新增全局快捷键
 function copyHotkeyCmd(label = '显示/隐藏挂件') {
@@ -7861,40 +6169,6 @@ function addHotkey(label = '显示/隐藏挂件') {
     ? `已跳转 uTools「全局功能」并新增一条待绑定项（指令：${label}），按下组合键即可完成绑定。`
     : '跳转失败，请手动打开 uTools 设置 → 全局功能 添加。'
 }
-// 复制诊断日志：uTools 结束插件进程会连带清空控制台，日志已同步落盘，可从文件取回
-function copyDebugLog() {
-  try {
-    const r = services.getDebugLog?.()
-    const text = (r && r.text) || ''
-    if (!text) {
-      diagFlash.err = true
-      diagFlash.msg = '暂无可复制的日志：日志文件尚未产生（插件重启后才会写入）。'
-      return
-    }
-    const ok = services.copyText?.(text)
-    diagFlash.err = !ok
-    diagFlash.msg = ok
-      ? `已复制诊断日志末尾 ${text.split('\n').length} 行。文件：${(r && r.path) || ''}`
-      : '复制失败，可点「打开日志文件」手动查看。'
-  } catch (err: any) {
-    diagFlash.err = true
-    diagFlash.msg = '读取失败：' + String(err?.message || err)
-  }
-}
-// 用系统默认程序打开日志文件，便于人工查看或另存
-function openLogFile() {
-  try {
-    const r = services.openLogFile?.()
-    diagFlash.err = !(r && r.ok)
-    diagFlash.msg = r && r.ok
-      ? '已用系统默认程序打开日志文件：' + (r.path || '')
-      : '打开失败：' + ((r && r.path) ? r.path : '日志文件尚未产生（插件重启后才会写入）。')
-  } catch (err: any) {
-    diagFlash.err = true
-    diagFlash.msg = '打开失败：' + String(err?.message || err)
-  }
-}
-
 function doCheckUpdate(force: boolean) {
   if (!services.checkUpdate) return
   updateChecking.value = true
@@ -7910,21 +6184,6 @@ function doCheckUpdate(force: boolean) {
       updateMsg.value = '检查失败：' + String(err?.message || err)
     })
     .finally(() => { updateChecking.value = false })
-}
-function openHomepage() {
-  services.openExternal?.('https://github.com/Berge520/Balance-Whale-Widget')
-}
-// 跳 uTools 插件应用市场并搜索本插件（走「管理中心 → 插件应用市场 → 搜一搜」那条路径）。
-// 原理：utools.redirect(label) 在已装插件里查不到该指令名时，底座会提示「未找到功能…已为您跳转
-// 插件市场搜索」并自动打开市场搜索页 —— 这是官方文档写明的降级行为，正好用来做「去市场搜索」。
-// 坑：redirect 按前缀匹配指令名，本插件 cmds 含「小鲸鱼」「小鲸鱼余额」「余额挂件」等，
-// 所以「小鲸鱼余额挂件」会被「小鲸鱼余额」吃掉、直接打开本插件。必须用不撞任何 cmd 前缀的词：
-// 这里传「鲸鱼余额挂件」（以「鲸」开头），实测能稳定落到市场搜索分支并搜到本插件。
-// 若底座版本过旧不支持（返回 false），兜底用系统浏览器打开市场搜索页。
-const MARKET_SEARCH_KEYWORD = '鲸鱼余额挂件'
-function marketSearch() {
-  const ok = services.redirectToMarket?.(MARKET_SEARCH_KEYWORD)
-  if (!ok) services.openExternal?.('https://www.u-tools.cn/plugins/?keyword=' + encodeURIComponent(MARKET_SEARCH_KEYWORD))
 }
 // 教程里的链接用系统浏览器打开，避免在插件窗口内导航
 function openDoc(url: string) {
@@ -7986,7 +6245,7 @@ function applyConfig(c: any) {
   cfg.timerSec = typeof c.timerSec === 'number' && c.timerSec > 0 ? Math.round(c.timerSec) : 1500
   cfg.timerNote = typeof c.timerNote === 'string' ? c.timerNote : ''
   cfg.timerBreakMin = typeof c.timerBreakMin === 'number' ? c.timerBreakMin : 5
-  syncTimerHms()
+  notifyViewRef.value?.syncTimerHms()
   cfg.enterMode = c.enterMode === 'widget' || c.enterMode === 'settings' ? c.enterMode : 'both'
   cfg.dshNodeDir = typeof c.dshNodeDir === 'string' ? c.dshNodeDir : ''
   cfg.dshKeepAlive = c.dshKeepAlive === true
@@ -8084,13 +6343,9 @@ function applyConfig(c: any) {
     return { kind: 'text', w: typeof g?.w === 'number' ? g.w : 5, style: g?.style === 'B' ? 'B' : 'A', lines: '', rows, sound: snd }
   }) as QuoteGroupEdit[]
   // 提醒文案模板：宿主回的就是含换行的字符串，原样显示（缺字段/异常值按空处理）
-  const al = c.alerts && typeof c.alerts === 'object' ? c.alerts : {}
-  for (const f of ALERT_FIELDS) {
-    cfg.alerts[f.key] = typeof al[f.key] === 'string' ? al[f.key] : ''
-  }
   // 回填完成即等于「已保存状态」，在这里落基线，供「未保存」提示比对
+  notifyViewRef.value?.syncAlertsBaseline()
   quotesBaseline.value = JSON.stringify(cfg.quotes)
-  alertsBaseline.value = JSON.stringify(cfg.alerts)
   // 模型列表与主显示也走配置（挂件菜单里切换主显示时会广播过来，本页单选要跟着变）
   reloadModels()
 }
@@ -8143,7 +6398,7 @@ onMounted(() => {
       secrets.apiKey = s.apiKey || ''
       secrets.platformToken = s.platformToken || ''
     }
-    loadMailSecrets()
+    notifyViewRef.value?.loadMailSecrets()
     widgetVisible.value = services.isWidgetVisible?.() !== false
     checkWidgetError(true)
     appVersion.value = services.getVersion?.() || ''
@@ -8302,760 +6557,93 @@ onUnmounted(() => {
     <!-- [外观] 挂件外观：大小 / 形象 / 气泡（主题 · 峰谷文案 · 开关）/ 音效（开关 · 音色 · 音量）。
          素材的「导入 / 删除 / 试听 / 素材包」都在「资源」页，这里只选「用哪个」——
          所以素材说明统一放在卡片开头一句，各设置项下面只留「当前用的是什么」的状态 -->
-    <section v-if="cardOn('look', 'look')" class="card" data-search="look">
-      <h2>挂件外观</h2>
-
-      <p class="hint">
-        素材都会复制到本地数据目录（不引用源文件），单文件 ≤5MB。导入 / 删除 / 试听、素材占用与素材包导出
-        都在「资源」页；未导入时分别回退为「默认形象」与「小黄鸭」。
-      </p>
-
-      <label class="field row">
-        <span class="label">大小</span>
-        <input class="range" type="range" min="0.6" max="2.5" step="0.1" v-model.number="cfg.scale"
-               @input="onScaleLive" @change="onScaleCommit" />
-        <input class="num" type="number" min="1" :max="SCALE_STEPS" step="1" v-model.number="cfg.scaleNum"
-               @input="onScaleNumLive" @change="onScaleCommit" />
-      </label>
-
-      <label class="field row">
-        <span class="label">形象</span>
-        <select v-model="cfg.skin" @change="patchCfg({ skin: cfg.skin })">
-          <option v-for="s in BUILTIN_SKINS" :key="s" :value="s">{{ s }}</option>
-          <!-- 老配置里存的可能是已移出包的历史内置形象：补一个 option，
-               否则 select 显示空白；下载回来之前挂件回退默认形象显示，不误导 -->
-          <option v-if="!BUILTIN_SKINS.includes(cfg.skin) && cfg.skin !== 'custom' && LEGACY_BUILTIN_SKINS.includes(cfg.skin)"
-                  :value="cfg.skin">{{ cfg.skin }}（未下载）</option>
-          <!-- 「自定义」只是个语义占位，真正用哪张由宿主 current 决定。
-               直接显示「自定义」用户会以为没生效，这里映射成实际形象名 -->
-          <option value="custom">{{ skinMeta ? '自定义 · ' + skinMeta.name : '自定义' }}</option>
-        </select>
-        <button class="export-btn utils-btn utils-outline" type="button" title="从所有勾选了「参与随机」的形象里随机换一张" @click="doRandomSkin()">随机</button>
-      </label>
-      <label class="field row check">
-        <span class="label">内置形象也参与随机 <em>（关掉后随机池只剩你勾选「参与随机」的形象）</em></span>
-        <input type="checkbox" :checked="cfg.randomIncludeBuiltin !== false"
-               @change="onToggleIncludeBuiltin(($event.target as HTMLInputElement).checked)" />
-      </label>
-      <p v-if="cfg.skin === 'custom' && !skinMeta" class="hint">
-        还没有导入形象，去「资源」页加一张后这里才有「自定义」可用（当前会回退为「默认形象」）。
-      </p>
-      <p v-else-if="skinUnused" class="hint">
-        已导入但当前未使用：「形象」选的不是「自定义」。
-      </p>
-      <p v-else-if="skinMeta" class="hint">
-        当前使用：{{ skinMeta.name }}（{{ assetSize(skinMeta) }}）。
-      </p>
-      <!-- 随机按钮的反馈：skinFlash 原本只在「资源」页画廊渲染，用户停在「外观」页按随机会看不到结果 -->
-      <p v-if="skinFlash.msg" class="msg" :class="msgCls(skinFlash)">{{ skinFlash.msg }}</p>
-
-      <label class="field row">
-        <span class="label">界面深浅色</span>
-        <select v-model="cfg.uiMode" @change="onUiModeChange()">
-          <option value="auto">跟随 uTools</option>
-          <option value="light">浅色</option>
-          <option value="dark">深色</option>
-        </select>
-      </label>
-      <p class="hint">
-        设置页与挂件菜单面板的深浅形态，一般选「跟随 uTools」。手动固定后将与 uTools 主题相反；
-        不影响气泡配色（在下方「气泡与文案」里单独设置）。
-      </p>
-
-      <div class="fold">
-        <button class="link-btn utils-btn utils-secondary" @click="lookFolds.bubble = !lookFolds.bubble">{{ lookFolds.bubble ? '收起气泡与文案' : '气泡与文案（主题 · 峰谷 · 报时 · 点按播放）' }}</button>
-        <div v-if="lookFolds.bubble">
-          <label class="field row">
-            <span class="label">气泡主题</span>
-            <select v-model="cfg.theme" @change="patchCfg({ theme: cfg.theme })">
-              <option value="default">默认（蓝白）</option>
-              <option value="dark">深色</option>
-              <option value="sakura">樱花</option>
-            </select>
-          </label>
-
-          <label class="field row">
-            <span class="label">峰谷文案</span>
-            <select v-model="cfg.peakMode" @change="patchCfg({ peakMode: cfg.peakMode })">
-              <option value="default">默认（空闲/高峰）</option>
-              <option value="liangwen">梁文峰谷</option>
-              <option value="qiangqiang">!?强强?!</option>
-            </select>
-          </label>
-
-          <label class="field row check">
-            <span class="label">思考气泡</span>
-            <input type="checkbox" v-model="cfg.bubbleOn" @change="patchCfg({ bubbleOn: cfg.bubbleOn })" />
-          </label>
-
-          <label class="field row check">
-            <span class="label">小鲸鱼报时 <em>（气泡首行显示当前时间）</em></span>
-            <input type="checkbox" v-model="cfg.timeBubbleOn" @change="patchCfg({ timeBubbleOn: cfg.timeBubbleOn })" />
-          </label>
-
-          <label class="field row check">
-            <span class="label">挂件右上角菜单按钮</span>
-            <input type="checkbox" v-model="cfg.menuBtn" @change="patchCfg({ menuBtn: cfg.menuBtn })" />
-          </label>
-
-          <label class="field row check">
-            <span class="label">点按依次播放 <em>（点气泡按顺序播放台词，播完才收起；关闭则每次随机一组）</em></span>
-            <input type="checkbox" v-model="cfg.clickQueueOn" @change="patchCfg({ clickQueueOn: cfg.clickQueueOn })" />
-          </label>
-        </div>
-      </div>
-
-      <div class="fold">
-        <button class="link-btn utils-btn utils-secondary" @click="lookFolds.sound = !lookFolds.sound">{{ lookFolds.sound ? '收起音效' : '音效（开关 · 音色 · 音量）' }}</button>
-        <div v-if="lookFolds.sound">
-          <label class="field row check">
-            <span class="label">音效开关</span>
-            <input type="checkbox" v-model="cfg.soundOn" @change="patchCfg({ soundOn: cfg.soundOn })" />
-          </label>
-
-          <label class="field row">
-            <span class="label">音色</span>
-            <select v-model="cfg.soundSet" :disabled="!cfg.soundOn" @change="patchCfg({ soundSet: cfg.soundSet })">
-              <option value="duck">小黄鸭</option>
-              <option value="fx1">音效 1</option>
-              <option value="custom">自定义</option>
-            </select>
-          </label>
-
-          <label class="field row">
-            <span class="label">音量</span>
-            <input class="range" type="range" min="0" max="1" step="0.05" v-model.number="cfg.vol"
-                   :disabled="!cfg.soundOn" @input="patchCfg({ vol: cfg.vol })" />
-            <span class="num-text">{{ Math.round(cfg.vol * 100) }}%</span>
-          </label>
-
-          <p v-if="cfg.soundSet === 'custom' && !soundsMeta.press.length" class="hint">
-            还没有导入按压音，去「资源」页加一个后这里才有「自定义」可用（当前会回退为「小黄鸭」）。
-          </p>
-          <p v-else-if="soundUnused" class="hint">
-            已导入但当前未使用：「音效开关」没开，或「音色」选的不是「自定义」。
-          </p>
-          <p v-else-if="soundsMeta.press.length" class="hint">
-            自定义音色：按压音 {{ soundLabel('press') }}<template v-if="soundsMeta.release.length"> · 释放音 {{ soundLabel('release') }}</template><template v-else> · 释放音未导入（松开时静音）</template>。
-          </p>
-          <p class="hint">
-            四类提醒音（低余额 / 预算 / 峰谷 / 穿透）留空 = 静音，不打扰是默认，
-            只在对应提醒真的弹出时响一次（系统通知不受影响）。各类提醒音的独立音量在「用量」页的「提醒与通知」里调。
-          </p>
-        </div>
-      </div>
-    </section>
+    <LookView v-if="cardOn('look', 'look')"
+              :cfg="cfg"
+              :builtin-skins="BUILTIN_SKINS"
+              :legacy-builtin-skins="LEGACY_BUILTIN_SKINS"
+              :skin-meta="skinMeta"
+              :skin-unused="skinUnused"
+              :skin-flash="skinFlash"
+              :asset-size="assetSize"
+              :sounds-meta="soundsMeta"
+              :sound-label="soundLabel"
+              :sound-unused="soundUnused"
+              :scale-steps="SCALE_STEPS"
+              @patch="patchCfg"
+              @scale-live="onScaleLive"
+              @scale-num-live="onScaleNumLive"
+              @scale-commit="onScaleCommit"
+              @random-skin="doRandomSkin"
+              @toggle-include-builtin="onToggleIncludeBuiltin"
+              @ui-mode-change="onUiModeChange" />
 
     <!-- [资源] 素材集中管理：概览（占用 / 清理 / 素材包）· 导入的形象 · 导入的音效 · 内置资源对照。
-         与「挂件外观」分工：那边只选「用哪个」，这里管「导了什么、占多大、要不要删、换机器怎么带走」 -->
-    <section v-if="cardOn('assets', 'assetsOverview')" class="card" data-search="assetsOverview">
-      <div class="card-head">
-        <h2>资源概览</h2>
-        <div class="head-actions">
-          <button class="export-btn utils-btn utils-outline" type="button" :disabled="!unusedCount" @click="doClearUnused()">
-            清除未使用{{ unusedCount ? `（${unusedCount}）` : '' }}
-          </button>
-          <button class="export-btn utils-btn utils-outline" type="button" :disabled="!hasAssets" @click="doClearAssets()">清除全部素材</button>
-        </div>
-      </div>
-      <label class="field row">
-        <span class="label">导入素材</span>
-        <span class="asset-meta">
-          形象 {{ skinGallery.items.length }} 张 · 气泡图 {{ bubbleItems.length }} 张 · 音效 {{ importedSoundCount }} 段 · 合计 {{ fmtBytes(assetTotalBytes) }}
-        </span>
-      </label>
-      <p class="hint">
-        「清除未使用」只删当前设置不会用到的素材（画廊里没在用形象、已关掉的提醒音等），正在使用的一律保留；
-        「清除全部素材」把导入的形象、气泡图与音效全删掉，形象 / 音色一并回退为内置（与「数据」页勾「导入的素材」是同一操作）。
-        两者都只动素材，不影响其它设置。
-      </p>
-
-      <div class="fold">
-        <button class="link-btn utils-btn utils-secondary" @click="toggleDataDirs()">
-          {{ dataDirsOpen ? '收起数据目录' : '数据目录（导入 / 下载的素材存在哪）' }}
-        </button>
-        <div v-if="dataDirsOpen" class="guide">
-          <p class="guide-use">
-            导入的形象、气泡图与下载回来的共享素材都<strong>复制</strong>进插件的用户数据目录，不引用你选的原文件。
-            换机器 / 清理前想直接看看有哪些文件，可以在这里打开对应目录：
-          </p>
-          <div class="field row" v-if="dataDirs">
-            <span class="label">形象</span>
-            <code class="dir-path" :title="dataDirs.skins">{{ dataDirs.skins }}</code>
-            <button class="export-btn utils-btn utils-outline" type="button" @click="openDataDir(dataDirs.skins)">打开</button>
-          </div>
-          <div class="field row" v-if="dataDirs">
-            <span class="label">音效</span>
-            <code class="dir-path" :title="dataDirs.sounds">{{ dataDirs.sounds }}</code>
-            <button class="export-btn utils-btn utils-outline" type="button" @click="openDataDir(dataDirs.sounds)">打开</button>
-          </div>
-          <div class="field row" v-if="dataDirs">
-            <span class="label">气泡图</span>
-            <code class="dir-path" :title="dataDirs.bubbles">{{ dataDirs.bubbles }}</code>
-            <button class="export-btn utils-btn utils-outline" type="button" @click="openDataDir(dataDirs.bubbles)">打开</button>
-          </div>
-          <p v-if="dataDirsOpen && !dataDirs" class="hint">宿主未提供数据目录信息。</p>
-          <p v-if="assetsFlash.msg" class="msg" :class="msgCls(assetsFlash)">{{ assetsFlash.msg }}</p>
-        </div>
-      </div>
-
-      <div class="fold">
-        <button class="link-btn utils-btn utils-secondary" @click="assetsFold.open = !assetsFold.open">
-          {{ assetsFold.open ? '收起素材包' : '素材包（换机器一次带走）' }}
-        </button>
-        <div v-if="assetsFold.open" class="guide">
-          <p class="guide-use">
-            <strong>导出：</strong>把导入的形象、气泡图与音效打包成一个 <code>.whaleassets</code> 文件。
-            <strong>导入：</strong>形象与气泡图是<strong>补充</strong>（每张都新增，不动现有画廊与在用的那张），
-            音效按<strong>槽位覆盖</strong>（同名槽位换成本包里的那段）。内置形象与内置音色不在包里，换机器后本来就有。
-          </p>
-          <div class="btn-row">
-            <button class="secondary utils-btn utils-secondary" :disabled="assetsBusy || !hasAssets" @click="doExportAssets">导出素材包…</button>
-            <button class="secondary utils-btn utils-secondary" :disabled="assetsBusy" @click="doPickAssets">导入素材包…</button>
-            <button v-if="assetsPack" class="secondary utils-btn utils-secondary" @click="doCancelAssets">取消导入</button>
-          </div>
-
-          <div v-if="assetsPack">
-            <p class="guide-use">
-              已选文件：<code>{{ assetsPack.path }}</code><br />
-              导出时间：{{ assetsPack.exportedAt || '未知' }} · 插件版本：{{ assetsPack.appVersion || '未知' }}
-            </p>
-            <label class="field row check">
-              <span class="label">形象 <em>{{ packLine(assetsPack.has?.skins, '张', assetsSkinNames) }}</em></span>
-              <input type="checkbox" v-model="assetsPicks.skins" :disabled="!assetsPack.has?.skins" @change="assetsConfirm = false" />
-            </label>
-            <label class="field row check">
-              <span class="label">气泡图 <em>{{ packLine(assetsPack.has?.bubbles, '张', assetsBubbleNames) }}</em></span>
-              <input type="checkbox" v-model="assetsPicks.bubbles" :disabled="!assetsPack.has?.bubbles" @change="assetsConfirm = false" />
-            </label>
-            <label class="field row check">
-              <span class="label">音效 <em>{{ packLine(assetsPack.has?.sounds, '段', assetsSoundNames) }}</em></span>
-              <input type="checkbox" v-model="assetsPicks.sounds" :disabled="!assetsPack.has?.sounds" @change="assetsConfirm = false" />
-            </label>
-            <!-- 台词组：追加进现有组尾部（上限 12 组，超了截断），老包没有这个键时整行禁用 -->
-            <label class="field row check">
-              <span class="label">台词组 <em>{{ packLine(assetsPack.has?.quotes, '个', assetsQuoteLine) }}</em></span>
-              <input type="checkbox" v-model="assetsPicks.quotes" :disabled="!assetsPack.has?.quotes" @change="assetsConfirm = false" />
-            </label>
-            <div class="btn-row">
-              <button class="danger utils-btn utils-danger" :disabled="assetsBusy || !assetsAnyItem" @click="doApplyAssets">
-                {{ assetsConfirm ? '确认导入？同名音效槽位会被覆盖' : '导入选中项' }}
-              </button>
-              <button v-if="assetsConfirm" class="secondary utils-btn utils-secondary" @click="assetsConfirm = false">取消</button>
-            </div>
-          </div>
-          <p v-if="assetsFlash.msg" class="msg" :class="msgCls(assetsFlash)">{{ assetsFlash.msg }}</p>
-        </div>
-      </div>
-    </section>
-
-    <!-- [资源] 导入的形象：画廊（点缩略图切换、置顶、删除、勾选参与随机） -->
-    <section v-if="cardOn('assets', 'assetsSkins')" class="card" data-search="assetsSkins">
-      <div class="card-head">
-        <button class="fold-title" type="button" @click="galleryFolds.skins = !galleryFolds.skins; rndMenu = ''; skinPicked = []">
-          <span class="fold-caret">{{ galleryOpen('skins') ? '▾' : '▸' }}</span>
-          导入的形象
-        </button>
-        <div class="head-actions">
-            <button class="export-btn utils-btn utils-outline" type="button" @click="doRandomSkin()">随机一张</button>
-            <button class="export-btn utils-btn utils-outline" type="button" @click="doImportSkin()">导入图片…</button>
-            <!-- 卡头唯一的整理入口。原来这里是「选中操作」「随机设置」两个下拉并列，两处很别扭：
-                 1) 面板与箭头都在表达「我有独立状态」，但实际共用一个布尔，点一个两个同时展开；
-                 2) 「设为参与随机」在两边各有一份（选中批量 / 全部批量），用户要在两个面板间找；
-                 3) 卡头一行四个按钮已经偏挤。
-                 现在收成一个「整理」，面板内按**作用范围**分成两段，段内动作都天然可批量：
-                 上段作用于单击选中那批（未选中时收起，只留一行引导），下段作用于整张清单。
-                 选中态因此回到它本来的角色 —— 「接下来要操作哪几张」的选择器，
-                 而不是「必须先点开某个下拉」的前置条件：整清单的动作用不着先选任何东西。
-
-                 面板内部**一个层级**：曾把整批动作收成悬停二级菜单来压高度又撤掉（只为「看着短」，
-                 代价是多一层悬停）；这一轮改回来，但只收**低频**的那一族（「全部 N 张」），
-                 日常那 6 项（使用 / 排序 / 随机 / 删除）照旧平铺直取。收法见 onDocMoveForRndMenu：
-                 悬停展开 + 220ms 延迟收 + 首次开面板自动展一瞬（新用户不必先发现那里能悬停）。 -->
-            <div class="rnd-menu">
-              <button class="export-btn utils-btn utils-outline" type="button"
-                      :class="{ 'has-sel': !!pickedSkinned.length }"
-                      :title="pickedSkinned.length
-                        ? `已选中 ${pickedSkinned.length} 张，可整理它们`
-                        : '整理形象：使用 / 排序 / 删除 / 是否参与随机'"
-                      @click="toggleRndMenu">
-                {{ pickedSkinned.length ? `已选 ${pickedSkinned.length} 张` : '整理' }}
-                <span class="rnd-menu-caret">{{ rndMenu ? '▴' : '▾' }}</span>
-              </button>
-              <!-- 坐标在 toggleRndMenu 里按按钮实测（见 rndPanelPos）；面板是 fixed 定位，
-                   所以 .rnd-menu 只作为「哪些点击算面板内部」的判定锚点（onDocClickForRndMenu） -->
-              <div v-if="rndMenu" class="rnd-menu-panel"
-                   :style="{ right: rndPanelPos.right + 'px', top: rndPanelPos.top + 'px', minWidth: rndPanelPos.minWidth + 'px' }">
-                <!-- 第一段：作用于选中的那批。**未选中时整段不渲染**，只留一行可点的引导。
-                     原来是把 6 个按钮原样摆着置灰 —— 面板一下多出 6 行灰条，比能用的项还长，
-                     还会让人先去点一下试试是不是坏了。 -->
-                <template v-if="pickedSkinned.length">
-                  <p class="rnd-menu-title">选中的 {{ pickedSkinned.length }} 张</p>
-                  <button type="button" @click="doUsePicked(); rndMenu = ''">使用这张</button>
-                  <button type="button"
-                          :disabled="pickedSkinned.length === skinGallery.items.length"
-                          @click="doPinPicked(); rndMenu = ''">移到最前</button>
-                  <button type="button"
-                          :disabled="pickedSkinned.length === skinGallery.items.length"
-                          @click="doBottomPicked(); rndMenu = ''">移到最后</button>
-                  <button type="button" @click="applyPickedRandom(true); rndMenu = ''">参与随机</button>
-                  <button type="button" @click="applyPickedRandom(false); rndMenu = ''">不参与随机</button>
-                  <!-- 删除是这一列里唯一不可逆的动作，用一条分隔线与上面五项拉开：
-                       连点「不参与随机」时手滑一下就删掉几张，只靠红字挡不住 -->
-                  <div class="rnd-menu-sep"></div>
-                  <button type="button" class="danger"
-                          @click="doRemovePicked(); rndMenu = ''">删除选中的</button>
-                </template>
-                <button v-else class="rnd-menu-guide" type="button"
-                        title="去缩略图上点一下"
-                        @click="skinFlash.err = false; skinFlash.msg = '在缩略图上点一下即可选中，可连点多张'; rndMenu = ''">
-                  选中缩略图后可整理它们
-                </button>
-                <div class="rnd-menu-sep"></div>
-                <!-- 第二段：整张清单，无需先选中任何东西。低频，悬停展开（见 onDocMoveForRndMenu） -->
-                <div class="rnd-menu-sub">
-                  <p class="rnd-menu-title rnd-sub-trigger">
-                    全部 {{ skinGallery.items.length }} 张
-                    <span class="rnd-sub-caret">{{ rndSubOpen ? '▾' : '▸' }}</span>
-                  </p>
-                  <div v-show="rndSubOpen" class="rnd-sub-panel">
-                    <button type="button"
-                            :disabled="skinGallery.items.length > 0 && randomSkinPool.length >= skinGallery.items.length"
-                            @click="doBatchRandom('all')">全部参与随机</button>
-                    <button type="button" :disabled="randomSkinPool.length === 0"
-                            @click="doBatchRandom('none')">全部不参与随机</button>
-                    <button type="button"
-                            :disabled="randomSkinPool.length === 1 && skinGallery.items.some(it => it.id === skinGallery.current)"
-                            @click="doBatchRandom('keepCurrent')">只保留使用中那张</button>
-                  </div>
-                </div>
-              </div>
-            </div>
-        </div>
-      </div>
-      <p v-if="!galleryOpen('skins')" class="hint">
-        共 {{ skinGallery.items.length }} 张{{ skinMeta ? `，当前使用「${skinMeta.name}」` : '' }}。默认收起，点标题展开。
-      </p>
-      <template v-if="galleryOpen('skins')">
-      <div class="skin-grid">
-        <div v-for="(it, idx) in skinGallery.items" :key="it.id" class="skin-cell"
-             :class="{ active: it.id === skinGallery.current, picked: skinPicked.indexOf(it.id) >= 0, broken: thumbBroken[it.id], noprev: !it.thumb && !thumbBroken[it.id], dragging: draggingId === it.id, 'drop-before': dragOverId === it.id && !dragOverAfter, 'drop-after': dragOverId === it.id && dragOverAfter }"
-             :draggable="true"
-             @dragstart="onSkinDragStart(it.id, $event)"
-             @dragover="onSkinDragOver(it, $event)"
-             @drop="onSkinDrop(it, $event)"
-             @dragend="onSkinDragEnd()">
-          <!-- 序号：让「移到最前 / 拖拽」的效果可验证（操作后看序号变化），也方便描述「第几张」 -->
-          <span class="skin-cell-idx">{{ idx + 1 }}</span>
-          <div class="skin-box">
-            <!-- 单击 = 切换选中（「整理」面板里「选中的 N 张」那一段作用于它），
-                 双击 = 切换使用。可多选：连点几张就能对它们一起排序 / 删除 / 改随机。
-                 原先每张图上挂一套按钮太占画面，收敛到卡头后图本身清爽，
-                 功能靠「选中」这一个中间态承接。 -->
-            <button class="skin-cell-pick" type="button"
-                    :title="`${it.name}（${assetSize(it)} · ${assetAt(it)}）· 单击选中（可多选），双击切换使用`"
-                    @click="pickSkin(it.id)"
-                    @dblclick="doUseSkinPick(it.id)">
-              <img v-if="it.thumb && !thumbBroken[it.id]" class="skin-cell-img" :src="it.thumb" :alt="it.name"
-                   @error="onThumbError(it.id)" />
-              <span v-else-if="thumbBroken[it.id]" class="skin-cell-broken">预览失败</span>
-              <span v-else class="skin-cell-none">无预览</span>
-            </button>
-            <span v-if="it.id === skinGallery.current" class="skin-cell-tag">使用中</span>
-          </div>
-        </div>
-        <button class="skin-cell skin-cell-add" type="button" title="导入图片" @click="doImportSkin()">
-          <span class="skin-cell-add-plus">＋</span>
-          <span class="skin-cell-add-txt">导入</span>
-        </button>
-      </div>
-      <p v-if="skinMeta" class="hint">
-        当前使用：{{ skinMeta.name }}（{{ assetSize(skinMeta) }} · {{ assetAt(skinMeta) }}）
-        <button class="link-btn" type="button" @click="skinHintOpen = !skinHintOpen">{{ skinHintOpen ? '收起说明' : '操作说明' }}</button>
-      </p>
-      <p v-if="skinMeta && skinHintOpen" class="hint">
-        单击缩略图选中（可连点多张），再点卡片上方「整理」，可对它们：切换使用 / 移到最前 / 移到最后 / 参与随机 / 不参与随机 / 删除；
-        双击缩略图也能直接切换使用，最多保留 20 张；
-        直接拖动缩略图可排到任意位置；
-        参与随机的共 {{ randomSkinPool.length }} 张（随包内置那张始终参与），「随机一张」会从它们里挑；
-        「整理 → 全部」那一段不用先选中，可整批切换参与随机。
-      </p>
-      <p v-else-if="!skinMeta" class="hint">
-        还没有导入形象。点「导入图片…」加一张，支持 png / jpg / webp / gif / apng（动图不裁剪，保留动画）。
-      </p>
-      <p v-if="skinUnused" class="hint">
-        已导入但当前未使用：「挂件外观 → 形象」选的不是「自定义」。
-      </p>
-      <p v-if="skinFlash.msg" class="msg" :class="msgCls(skinFlash)">{{ skinFlash.msg }}</p>
-      </template>
-    </section>
-
-    <!-- [资源] 导入的气泡图：点小鲸鱼抽到「动图组」时随机显示一张。
-         与形象不同 —— 没有「当前用哪张」（有图就随机抽，删光即回退内置动图），所以没有「使用中」标记与置顶 -->
-    <section v-if="cardOn('assets', 'assetsBubbles')" class="card" data-search="assetsBubbles">
-      <div class="card-head">
-        <h2>导入的气泡图</h2>
-        <div class="head-actions">
-          <button class="export-btn utils-btn utils-outline" type="button" @click="doImportBubble()">导入图片…</button>
-        </div>
-      </div>
-      <div class="skin-grid">
-        <div v-for="it in bubbleItems" :key="it.id" class="skin-cell"
-             :class="{ broken: thumbBroken[it.id], noprev: !it.thumb && !thumbBroken[it.id] }">
-          <div class="skin-box">
-            <span class="skin-cell-pick" :title="`${it.name}（${assetSize(it)} · ${assetAt(it)}）`">
-              <img v-if="it.thumb && !thumbBroken[it.id]" class="skin-cell-img" :src="it.thumb" :alt="it.name"
-                   @error="onThumbError(it.id)" />
-              <span v-else-if="thumbBroken[it.id]" class="skin-cell-broken">预览失败</span>
-              <span v-else class="skin-cell-none">无预览</span>
-            </span>
-            <span class="skin-cell-ops">
-              <button class="skin-op danger" type="button" title="删除这张" @click.stop="doRemoveBubble(it.id)">删</button>
-            </span>
-          </div>
-        </div>
-        <button class="skin-cell skin-cell-add" type="button" title="导入图片" @click="doImportBubble()">
-          <span class="skin-cell-add-plus">＋</span>
-          <span class="skin-cell-add-txt">导入</span>
-        </button>
-      </div>
-      <p v-if="bubbleItems.length" class="hint">
-        点小鲸鱼抽到「动图组」时，从这 {{ bubbleItems.length }} 张里随机显示一张；删光即回退内置动图，最多保留 8 张。
-      </p>
-      <p v-else class="hint">
-        还没有导入气泡图，点小鲸鱼时显示内置动图。点「导入图片…」加一张，支持 png / jpg / webp / gif / apng（动图不裁剪，保留动画）。
-      </p>
-      <p v-if="bubbleFlash.msg" class="msg" :class="msgCls(bubbleFlash)">{{ bubbleFlash.msg }}</p>
-    </section>
-
-    <!-- [资源] 导入的音效：六槽位（按压 / 释放 + 四类提醒音），每槽位只保留一段 -->
-    <section v-if="cardOn('assets', 'assetsSounds')" class="card" data-search="assetsSounds">
-      <h2>导入的音效</h2>
-      <!-- 六个槽位各成一个块（.sound-group 有底色与描边）。
-           每个槽位最多一段：再导入就是替换掉旧的，所以没有「第 1 段 / 第 2 段」的编号，
-           也不需要「哪几段属于谁」的分组暗示。 -->
-      <div class="sound-group" v-for="r in SOUND_ROLES" :key="r">
-        <div class="sound-group-head">
-          <span class="label" :title="ALERT_SOUND_WHEN[r]">{{ SOUND_ROLE_LABEL[r] }}</span>
-          <!-- 概览只报有没有，不报名字：名字就在同一行的右侧（.sound-file），复述一遍纯属重复 -->
-          <span class="asset-meta">
-            <template v-if="soundMetaOf(r).length">已导入</template>
-            <template v-else>{{ (ALERT_SOUND_ROLES as string[]).indexOf(r) >= 0 ? '未导入（静音）' : '未导入（可选）' }}</template>
-          </span>
-          <button class="export-btn utils-btn utils-outline" type="button" @click="doImportSound(r)">
-            {{ soundMetaOf(r).length ? '替换' : '导入' }}
-          </button>
-        </div>
-        <!-- 单段时直接并进槽位头一行：既然只有一个，再单起一行纯属浪费纵向空间 -->
-        <div class="sound-seg" v-for="(it, i) in soundMetaOf(r)" :key="it.file">
-          <span class="sound-file" :title="it.name">{{ it.name }}</span>
-          <span class="seg-ops">
-            <button class="export-btn utils-btn utils-outline" type="button" @click="doPreviewSound(r, i)">试听</button>
-            <button class="export-btn utils-btn utils-outline" type="button" @click="doRemoveSound(r, it.file)">删除</button>
-          </span>
-          <!-- 体积与导入时间都是次要信息，合成一行放在最下面 -->
-          <span class="seg-time" :title="assetAt(it)">{{ assetSize(it) }} · {{ assetAtShort(it) }}</span>
-        </div>
-      </div>
-      <p v-if="cfg.soundSet === 'custom' && !soundsMeta.press.length" class="hint">
-        还没有导入按压音，「挂件外观 → 音色」的「自定义」当前会回退为「小黄鸭」。
-      </p>
-      <p v-if="soundUnused" class="hint">
-        按压 / 释放音已导入但当前未使用：「音效开关」没开，或「音色」选的不是「自定义」。
-      </p>
-      <p class="hint">
-        <strong>一个槽位只保留一段</strong> —— 再导入（按钮显示「替换」）会顶掉旧的。
-        提醒音留空 = 静音（不打扰是默认），只在对应提醒真的弹出时响一次；播放跟随「挂件外观」里的音效开关与音量。
-        音效支持 mp3 / wav / ogg 等，导入时可先拖选片段试听（最长 10 秒），结果转成单声道 WAV。
-      </p>
-      <p v-if="soundFlash.msg" class="msg" :class="msgCls(soundFlash)">{{ soundFlash.msg }}</p>
-    </section>
-
-    <!-- [资源] 内置资源：随插件附带、不可删，只作对照（选哪个在「挂件外观」）。
-         纯查阅用，默认收起，避免与「导入的…」三张卡一起铺满一屏 -->
-    <section v-if="cardOn('assets', 'assetsBuiltin')" class="card" data-search="assetsBuiltin">
-      <div class="fold">
-        <button class="link-btn utils-btn utils-secondary" @click="assetFolds.builtin = !assetFolds.builtin">{{ assetFolds.builtin ? '收起内置资源' : '内置资源（随插件附带，只作对照）' }}</button>
-        <div v-if="assetFolds.builtin">
-          <p class="hint">随插件附带、不可删除，列在这里只作对照；换形象 / 音色请到「挂件外观」。</p>
-          <p v-if="skinInUseMissing" class="msg err">
-            你正在使用的形象「{{ missingSkinName }}」随新版移出了插件包，挂件暂用默认形象显示。
-            点下方它的缩略图即可下载找回（也可整体「下载全部」）。
-          </p>
-          <p class="group-title">内置形象 <em>（随包 {{ BUILTIN_SKINS.length }} 张 · 可下载 {{ SKIN_PACK_SKINS.length }} 张，共约 {{ fmtBytes(skinPackBytes) }}；当前：{{ cfg.skin === 'custom' ? '自定义' : cfg.skin }}）</em></p>
-          <div class="skin-grid">
-            <div v-for="s in BUILTIN_SKINS" :key="'b-' + s" class="skin-cell" :class="{ active: cfg.skin === s }">
-              <div class="skin-box">
-                <img class="skin-cell-img" :src="builtinSkinUrl(s)" :alt="s" :title="s" />
-                <span class="skin-cell-tag">{{ s }}</span>
-              </div>
-            </div>
-            <!-- 可下载的那批（v1.8.0 起只剩 1 张）：未装灰底 + 下载角标（缩略图是设置页内嵌的，不下载也能看见长什么样）；
-                 已装则与「导入的形象」共用一套展示（缩略图从画廊来），可选用 / 可删 -->
-            <div v-for="s in skinPackItems" :key="'p-' + s.id" class="skin-cell"
-                 :class="{ active: cfg.skin === s.id, 'is-remote': !skinPackInstalled[s.id] }">
-              <div class="skin-box">
-                <button class="skin-cell-pick" type="button"
-                        :title="skinPackInstalled[s.id] ? `${s.id}（已下载，点选用）`
-                          : `${s.id}（未下载，点一下下载，下完自动切到这张）`"
-                        @click="doSkinPackCell(s.id)">
-                  <img class="skin-cell-img" :src="skinPackThumb(s.id)" :alt="s.id" />
-                </button>
-                <!-- 角标写「下载」：v1.8.0 起这批只剩 1 张，「下载全部」显得莫名其妙 -->
-                <span v-if="!skinPackInstalled[s.id]" class="skin-cell-badge">下载</span>
-                <!-- 名字与警示标签二选一：两个都贴 bottom:0，同时渲染会叠在一起看不清。
-                     「正在使用 · 未下载」本身已含「是哪张」的信息（它只可能出现在 cfg.skin 那张上） -->
-                <span v-if="skinInUseMissing && s.id === cfg.skin" class="skin-cell-tag warn">正在使用 · 未下载</span>
-                <span v-else class="skin-cell-tag">{{ s.id }}</span>
-                <span v-if="skinPackInstalled[s.id]" class="skin-cell-ops">
-                  <button class="skin-op danger" type="button" title="从本地删除这张（可重新下载）"
-                          @click.stop="doRemoveSkin(s.id)">删</button>
-                </span>
-              </div>
-            </div>
-          </div>
-          <div class="btn-row">
-            <button class="export-btn utils-btn utils-primary" type="button"
-                    :disabled="skinPackBusy || skinPackAllInstalled"
-                    @click="doDownloadSkinPacks()">
-              {{ skinPackBusy ? '正在下载…'
-                : skinPackAllInstalled ? '已全部下载'
-                  : skinPackInstalledAny ? `下载剩余 ${SKIN_PACK_SKINS.length - skinPackInstalledCount} 张（约 ${fmtBytes(skinPackRemainBytes)}）`
-                      : (SKIN_PACK_SKINS.length === 1 ? `下载（约 ${fmtBytes(skinPackBytes)}）`
-                         : `下载全部 ${SKIN_PACK_SKINS.length} 张（约 ${fmtBytes(skinPackBytes)}）`) }}
-            </button>
-          </div>
-          <div v-if="dlProgress && dlProgress.pack === 'skins'" class="dl-box">
-            <div class="dl-track" :class="{ indet: dlPercent === null }">
-              <div class="dl-bar" :class="{ indet: dlPercent === null, done: dlProgress.phase === 'done', err: dlProgress.phase === 'failed' }"
-                   :style="dlPercent === null ? undefined : { width: dlPercent + '%' }"></div>
-            </div>
-            <div class="dl-line">
-              <span class="dl-label">{{ dlProgress.label }}</span>
-              <span class="dl-amt">{{ dlAmountText }}</span>
-              <span v-if="dlPercent !== null" class="dl-pct">{{ dlPercent }}%</span>
-            </div>
-            <div v-if="dlProgress.url" class="dl-src">
-              <span class="dl-src-tag">下载源</span>
-              <a class="dl-src-url" :href="dlProgress.url" target="_blank" rel="noreferrer" :title="dlProgress.url">{{ dlProgress.url }}</a>
-            </div>
-          </div>
-          <p class="hint">
-            <strong>一次操作下载的是整包</strong>：形象打包在同一个 Release 文件里，没有按张分片，所以无论点缩略图还是点上面按钮，
-            都会把未下载的那几张一起下回来（已下载的自动跳过，不重复占体积），下完自动切到你点的那张。
-            已下载的缩略图悬停可「删」单张，删了能重新下载。下载回来的形象存本地、不占导入配额（「导入的形象」最多 20 张另算）。
-          </p>
-          <!-- 下载源：留空即内置候选链（ghfast.top 加速 → 直连 github.com 兜底）。
-               自填须是 http(s) 绝对 URL 前缀，宿主会归一化（非法串回空并回落内置），末尾 '/' 可省略 -->
-          <label class="field row">
-            <span class="label">形象下载源 <em>（留空用内置：ghfast.top，失败自动直连 github.com）</em></span>
-            <input type="text" :maxlength="SKIN_PACK_PREFIX_MAX" spellcheck="false" autocomplete="off"
-                   placeholder="https://ghfast.top/"
-                   :value="cfg.skinPackSrc"
-                   @change="patchCfg({ skinPackSrc: ($event.target as HTMLInputElement).value })" />
-          </label>
-          <p v-if="skinPackFlash.msg" class="msg" :class="msgCls(skinPackFlash)">{{ skinPackFlash.msg }}</p>
-          <p class="group-title">内置音色 <em>（两组，在「挂件外观 → 音色」里选；提醒音没有内置回落）</em></p>
-          <div class="field row" v-for="g in BUILTIN_SOUND_SETS" :key="g.key">
-            <span class="label">{{ g.label }}</span>
-            <span class="sound-file">按压 {{ g.press }} · 释放 {{ g.release }}</span>
-            <button class="export-btn utils-btn utils-outline" type="button" @click="doPreviewBuiltin(g.press)">试听按压</button>
-            <button class="export-btn utils-btn utils-outline" type="button" @click="doPreviewBuiltin(g.release)">试听释放</button>
-          </div>
-          <p class="hint">
-            内置音色是插件包里的文件，不占本地数据目录空间，也不会被「清除素材」删掉。
-          </p>
-          <p v-if="builtinFlash.msg" class="msg" :class="msgCls(builtinFlash)">{{ builtinFlash.msg }}</p>
-        </div>
-      </div>
-    </section>
-
-    <!-- [资源] 共享角色：上游 QQ 群素材（36 张），v1.9.0 起按需单张下载（走 raw 直链，不再整包）。
-         点缩略图 = 下这一张；顶上按钮 = 逐张串行把未下载的补齐 -->
-    <section v-if="cardOn('assets', 'assetsSharedSkins')" class="card" data-search="assetsSharedSkins">
-      <div class="card-head">
-        <button class="fold-title" type="button" @click="galleryFolds.sharedSkins = !galleryFolds.sharedSkins">
-          <span class="fold-caret">{{ galleryOpen('sharedSkins') ? '▾' : '▸' }}</span>
-          共享角色
-        </button>
-        <div class="head-actions">
-          <button class="export-btn utils-btn utils-primary" type="button"
-                  :disabled="sharedSkinBusy || sharedSkinAllInstalled"
-                  @click="doDownloadSharedSkins()">
-            {{ sharedSkinBusy ? '正在下载…'
-              : sharedSkinAllInstalled ? '已全部下载'
-                : sharedSkinInstalledCount ? `下载剩余 ${sharedSkinItems.length - sharedSkinInstalledCount} 张（约 ${fmtBytes(sharedSkinRemainBytes)}）`
-                  : `下载全部 ${sharedSkinItems.length} 张（约 ${fmtBytes(sharedSkinTotalBytes)}）` }}
-          </button>
-        </div>
-      </div>
-      <p v-if="!galleryOpen('sharedSkins')" class="hint">
-        共 {{ sharedSkinItems.length }} 张，已下载 {{ sharedSkinInstalledCount }} 张。默认收起，点标题展开。
-      </p>
-      <template v-if="galleryOpen('sharedSkins')">
-      <div v-if="dlProgress && dlProgress.pack === 'shared-skins'" class="dl-box">
-        <div class="dl-track" :class="{ indet: dlPercent === null }">
-          <div class="dl-bar" :class="{ indet: dlPercent === null, done: dlProgress.phase === 'done', err: dlProgress.phase === 'failed' }"
-               :style="dlPercent === null ? undefined : { width: dlPercent + '%' }"></div>
-        </div>
-        <div class="dl-line">
-          <span class="dl-label">{{ dlProgress.label }}</span>
-          <span class="dl-amt">{{ dlAmountText }}</span>
-          <span v-if="dlPercent !== null" class="dl-pct">{{ dlPercent }}%</span>
-        </div>
-        <div v-if="dlProgress.url" class="dl-src">
-          <span class="dl-src-tag">下载源</span>
-          <a class="dl-src-url" :href="dlProgress.url" target="_blank" rel="noreferrer" :title="dlProgress.url">{{ dlProgress.url }}</a>
-        </div>
-      </div>
-      <div class="skin-grid">
-        <div v-for="s in sharedSkinItems" :key="'sh-' + s.id" class="skin-cell"
-             :class="{ active: cfg.skin === s.id, 'is-remote': !sharedSkinInstalled[s.id] }">
-          <div class="skin-box">
-            <button class="skin-cell-pick" type="button"
-                    :title="sharedSkinInstalled[s.id] ? `${sharedSkinNames[s.id] || s.id}（已下载，点选用）`
-                      : `${sharedSkinNames[s.id] || s.id}（未下载，点一下下载这张，下完自动切到这张）`"
-                    @click="doSharedSkinCell(s.id)">
-              <img v-if="!thumbBroken['sh-' + s.id]" class="skin-cell-img" :src="sharedSkinThumb(s.id)"
-                   :alt="sharedSkinNames[s.id] || s.id" @error="onThumbError('sh-' + s.id)" />
-              <span v-else class="skin-cell-broken">预览加载失败</span>
-            </button>
-            <!-- 单张点击只下这一张，但 40MB 整包时代留下的「下载全部」措辞要改成「下载」 -->
-            <span v-if="!sharedSkinInstalled[s.id]" class="skin-cell-badge">下载</span>
-            <span class="skin-cell-tag">{{ sharedSkinNames[s.id] || s.id }}</span>
-            <span v-if="sharedSkinInstalled[s.id]" class="skin-cell-ops">
-              <button class="skin-op danger" type="button" title="从本地删除这张（可重新下载）"
-                      @click.stop="doRemoveSkin(s.id)">删</button>
-            </span>
-          </div>
-        </div>
-      </div>
-      <p v-if="!sharedSkinItems.length" class="hint">暂无可下载的共享角色。</p>
-      <p class="hint">
-        这些角色来自上游 QQ 群分享，<strong>不随插件包分发</strong>，改为按需从 GitHub 直链下载。
-        <strong>点缩略图只下载这一张</strong>（约 1~2MB），下完自动切到这张；
-        点上方的按钮会把还没下载的<strong>逐张</strong>下回来（已下载的自动跳过）。
-        已下载的可悬停「删」单张，删了能重新下载；下载回来的角色存本地，不占「导入的形象」的 20 张配额。
-      </p>
-      <p v-if="sharedSkinFlash.msg" class="msg" :class="msgCls(sharedSkinFlash)">{{ sharedSkinFlash.msg }}</p>
-      </template>
-    </section>
-
-    <!-- [资源] 共享音效库：与共享角色同一批上游素材（45 段），落 sounds 的 shared 槽位。
-         它是「素材池」不直接参与实播 —— 要到下面选一个实播槽位「选用」才生效，
-         否则一装几十段、把原本选好的音效挤掉 -->
-    <section v-if="cardOn('assets', 'assetsSharedSounds')" class="card" data-search="assetsSharedSounds">
-      <div class="card-head">
-        <button class="fold-title" type="button" @click="galleryFolds.sharedSounds = !galleryFolds.sharedSounds">
-          <span class="fold-caret">{{ galleryOpen('sharedSounds') ? '▾' : '▸' }}</span>
-          共享音效库
-        </button>
-        <div class="head-actions">
-          <button class="export-btn utils-btn utils-primary" type="button"
-                  :disabled="sharedSoundBusy || sharedSoundAllInstalled"
-                  @click="doDownloadSharedSounds()">
-            {{ sharedSoundBusy ? '正在下载…'
-              : sharedSoundAllInstalled ? '已全部下载'
-                : sharedSoundInstalledCount ? `下载剩余 ${sharedSoundItems.length - sharedSoundInstalledCount} 段（约 ${fmtBytes(sharedSoundRemainBytes)}）`
-                  : `下载全部 ${sharedSoundItems.length} 段（约 ${fmtBytes(sharedSoundTotalBytes)}）` }}
-          </button>
-        </div>
-      </div>
-      <p v-if="!galleryOpen('sharedSounds')" class="hint">
-        共 {{ sharedSoundItems.length }} 段，已下载 {{ sharedSoundInstalledCount }} 段。默认收起，点标题展开。
-      </p>
-      <template v-if="galleryOpen('sharedSounds')">
-      <div v-if="dlProgress && dlProgress.pack === 'shared-sounds'" class="dl-box">
-        <div class="dl-track" :class="{ indet: dlPercent === null }">
-          <div class="dl-bar" :class="{ indet: dlPercent === null, done: dlProgress.phase === 'done', err: dlProgress.phase === 'failed' }"
-               :style="dlPercent === null ? undefined : { width: dlPercent + '%' }"></div>
-        </div>
-        <div class="dl-line">
-          <span class="dl-label">{{ dlProgress.label }}</span>
-          <span class="dl-amt">{{ dlAmountText }}</span>
-          <span v-if="dlPercent !== null" class="dl-pct">{{ dlPercent }}%</span>
-        </div>
-        <div v-if="dlProgress.url" class="dl-src">
-          <span class="dl-src-tag">下载源</span>
-          <a class="dl-src-url" :href="dlProgress.url" target="_blank" rel="noreferrer" :title="dlProgress.url">{{ dlProgress.url }}</a>
-        </div>
-      </div>
-      <!-- 列表按「是否已下载」分两组：两组的控件数量差 3 个（未下载行没有试听/下拉/选用/删），
-           混排会让整列文件名的右边界在两种行之间来回跳，45 行看下来就是锯齿。
-           分组后同组内控件结构一致，列能对齐；未下载的那组默认收进 .fold 里，
-           免得 45 行未下载项把「已下载」这半截推到屏外。 -->
-      <div class="shs-list">
-        <template v-if="sharedSoundInstalledItems.length">
-          <p class="group-title">已下载 <em>（{{ sharedSoundInstalledItems.length }} 段，可试听 / 选用 / 删）</em></p>
-          <div class="shs-row" v-for="it in sharedSoundInstalledItems" :key="'shs-' + it.id">
-            <!-- 主线：文件名是这一行唯一需要读的信息，独占剩余宽度、不再被控件挤到截断 -->
-            <div class="shs-main">
-              <span class="sound-file" :title="it.name">{{ it.name }}</span>
-              <span class="asset-meta">{{ fmtBytes(it.size) }}</span>
-            </div>
-            <!-- 副线：三个动作归到一行，与文件名左对齐。原先 4 个控件横铺在文件名右边，
-                 「选择要加入的音效段…」这个全场最长的文案还逐行重复，把文件名压成了 AUGH#H -->
-            <div class="shs-ops">
-              <!-- 下拉按语义分组：按压 / 释放是「音色」的两段（要配合音色=自定义才响），
-                   另外四类是独立的提醒音。混在一个平铺列表里，用户看不出这层区别 -->
-              <select class="sound-role-pick" :value="sharedSoundUseRole[it.id] || ''"
-                      @change="sharedSoundUseRole[it.id] = ($event.target as HTMLSelectElement).value as SoundRole">
-                <option value="">选用到槽位…</option>
-                <optgroup label="音色 · 按压 / 释放">
-                  <option value="press">{{ SOUND_ROLE_LABEL.press }}</option>
-                  <option value="release">{{ SOUND_ROLE_LABEL.release }}</option>
-                </optgroup>
-                <optgroup label="提醒音 · 四类提醒">
-                  <option v-for="r in ALERT_SOUND_ROLES" :key="'sr-' + r" :value="r">{{ SOUND_ROLE_LABEL[r] }}</option>
-                </optgroup>
-              </select>
-              <button class="export-btn utils-btn utils-primary" type="button"
-                      :disabled="!sharedSoundUseRole[it.id]" @click="doUseSharedSound(it)">选用</button>
-              <button class="export-btn utils-btn utils-outline" type="button"
-                      :class="{ 'preview-on': previewingSharedId === it.id }"
-                      @click="doPreviewSharedSound(it)">{{ previewingSharedId === it.id ? '停止' : '试听' }}</button>
-              <button class="export-btn utils-btn" type="button"
-                      :class="removeConfirmId === it.id ? 'utils-danger' : 'utils-outline'"
-                      :title="removeConfirmId === it.id ? '再点一次确认删除（3 秒后自动取消）' : '从共享音效库删掉这一段；若已选用到槽位，槽位上的那份也一并清掉'"
-                      @click="doRemoveSharedSound(it)">{{ removeConfirmId === it.id ? '确认删' : '删' }}</button>
-            </div>
-          </div>
-        </template>
-        <p v-else class="hint">共享音效库暂时是空的 —— 上方按钮若显示「下载全部 N 段」，点它把音效拉回来。</p>
-
-        <div class="fold" v-if="sharedSoundPendingItems.length">
-          <button class="link-btn utils-btn utils-secondary" type="button"
-                  @click="sharedSoundPendingOpen = !sharedSoundPendingOpen">
-            未下载 {{ sharedSoundPendingItems.length }} 段<span class="fold-caret">{{ sharedSoundPendingOpen ? '▾' : '▸' }}</span>
-          </button>
-          <template v-if="sharedSoundPendingOpen">
-            <div class="shs-row" v-for="it in sharedSoundPendingItems" :key="'shs-' + it.id">
-              <div class="shs-main">
-                <span class="sound-file" :title="it.name">{{ it.name }}</span>
-                <span class="asset-meta">{{ fmtBytes(it.size) }}</span>
-              </div>
-              <div class="shs-ops">
-                <!-- 措辞带上「这一段」：顶部还有一个「下载剩余 N 段」（逐段串行下完），
-                     两个按钮的量级差 40 倍，都写「下载」会让人以为点了就是整包 -->
-                <button class="export-btn utils-btn utils-primary" type="button"
-                        :disabled="sharedSoundBusy" @click="doDownloadSharedSound(it)">下载这一段</button>
-              </div>
-            </div>
-          </template>
-        </div>
-      </div>
-      <p class="hint">
-        这些音效来自上游 QQ 群分享，<strong>不随插件包分发</strong>，改为按需从 GitHub 直链下载。
-        <strong>「下载这一段」只拉当前这一条</strong>；卡头的按钮是把还没下载的<strong>逐段</strong>串行下回来。
-        下载后先进「共享音效库」这个素材池，<strong>不会自动播放</strong> —— 从下拉里选一个音效段（按压 / 释放 / 四类提醒音）再点「选用」，
-        才会把这段放进那个槽位（一个槽位只保留一段，再选用就是顶掉旧的）。
-        这样不会一装几十段、把原本选好的音效挤掉。
-        <br>「选用」是<strong>另存一份</strong>到槽位，所以这里点「删」时，<strong>槽位上那份也会跟着清掉</strong>
-        （不然删完挂件还在响，像是没删干净）；清掉了哪个槽位会写在下面的提示里。
-      </p>
-      <p v-if="sharedSoundFlash.msg" class="msg" :class="msgCls(sharedSoundFlash)">{{ sharedSoundFlash.msg }}</p>
-      </template>
-    </section>
+         与「挂件外观」分工：那边只选「用哪个」，这里管「导了什么、占多大、要不要删、换机器怎么带走」
+         模板已迁至 AssetsView.vue：组件内含多张可独立命中的卡，故整个块不加 v-if，
+         显隐由组件内部逐段按 cardOn('assets', key) 判定（传函数 prop，见下） -->
+    <AssetsView
+      :cfg="cfg"
+      :card-on="cardOn"
+      :search-active="searchActive"
+      :services="services"
+      :skin-gallery="skinGallery"
+      :skin-meta="skinMeta"
+      :skin-picked="skinPicked"
+      :picked-skinned="pickedSkinned"
+      :thumb-broken="thumbBroken"
+      :skin-hint-open="skinHintOpen"
+      :sounds-meta="soundsMeta"
+      :shared-sounds="sharedSounds"
+      :sound-data="soundData"
+      :sound-flash="soundFlash"
+      :bubble-items="bubbleItems"
+      :bubble-flash="bubbleFlash"
+      :has-assets="hasAssets"
+      :skin-unused="skinUnused"
+      :sound-unused="soundUnused"
+      :builtin-fold="assetFolds.builtin"
+      :assets-busy="assetsBusy"
+      :shared-skin-thumb-data-url="sharedSkinThumbDataUrl"
+      :builtin-skins="BUILTIN_SKINS"
+      :legacy-builtin-skins="LEGACY_BUILTIN_SKINS"
+      :skin-pack-skins="SKIN_PACK_SKINS"
+      :shared-skin-pack-skins="SHARED_SKIN_PACK_SKINS"
+      @patch="patchCfg"
+      @import-skin="doImportSkin"
+      @use-skin="doUseSkin"
+      @pick-skin="pickSkin"
+      @use-skin-pick="doUseSkinPick"
+      @remove-skin="doRemoveSkin"
+      @remove-skins="doRemoveSkins"
+      @use-picked="doUsePicked"
+      @pin-picked="doPinPicked"
+      @bottom-picked="doBottomPicked"
+      @apply-picked-random="applyPickedRandom"
+      @remove-picked="doRemovePicked"
+      @batch-random="doBatchRandom"
+      @move-skins="doMoveSkins"
+      @random-skin="doRandomSkin"
+      @toggle-include-builtin="onToggleIncludeBuiltin"
+      @thumb-error="(k: string) => { thumbBroken[k] = true }"
+      @toggle-builtin-fold="(on: boolean) => { assetFolds.builtin = on }"
+      @preview-sound="doPreviewSound"
+      @import-sound="doImportSound"
+      @remove-sound="doRemoveSound"
+      @import-bubble="doImportBubble"
+      @remove-bubble="doRemoveBubble"
+      @clear-unused="doClearUnused"
+      @clear-assets="doClearAssets"
+      @clear-picked="skinPicked = []"
+      @toggle-skin-hint="skinHintOpen = !skinHintOpen"
+      @preview-builtin="doPreviewBuiltin"
+      @stop-preview="stopPreviewSound"
+      @refresh-sounds="refreshSounds"
+      @refresh-skin="refreshSkin"
+      @refresh-bubbles="refreshBubbles"
+      @refresh-skin-packs="refreshSkinPacks"
+      @refresh-shared-skins="refreshSharedSkins"
+      @refresh-shared-sounds="refreshSharedSounds"
+    />
 
     <!-- [外观] 文案：只剩台词库（随机台词组 + 6 个多行文本 + 保存 / 恢复默认）。
          提醒文案结构相同但属「提醒」主题，已并入「用量 → 提醒与通知」卡，免得调一类提醒要跳两个 Tab -->
@@ -9363,900 +6951,82 @@ onUnmounted(() => {
 
     <!-- [用量] 用量与账本：用量口径（记账 / 令牌）+ 趋势 + 明细 + 额度 + 校准。
          口径原先在「挂件行为」卡片里，与它影响的图表分家，现在挪到图表上方 -->
-    <section v-if="cardOn('usage', 'usage')" class="card" data-search="usage">
-      <div class="card-head">
-        <h2>用量与账本</h2>
-        <div class="head-actions">
-          <!-- 区间切换：同一组按钮在下方 UsageChart 组件里还有一份（那才是主入口，
-               本行是卡片头部就近快捷）。样式走 main.css 的 utils 基类，与组件内那份一致。 -->
-          <div class="range-tabs">
-            <button v-for="r in usageRangeTabs" :key="r" class="range-tab utils-btn"
-                    :class="usageRange === r ? 'utils-primary' : 'utils-secondary'" @click="setUsageRange(r)">{{ r }} 天</button>
-          </div>
-          <button class="export-btn utils-btn utils-outline" @click="importUsageCsv">导入 CSV</button>
-          <button class="export-btn utils-btn utils-outline" :disabled="historyMax <= 0" @click="exportUsageCsv">导出 CSV</button>
-        </div>
-      </div>
-
-      <label class="field row">
-        <span class="label">用量</span>
-        <select v-model="cfg.usageMode" @change="onUsageModeChange">
-          <option value="ledger">小鲸鱼记账（推荐）</option>
-          <option value="token">实时·令牌（需平台 Token）</option>
-        </select>
-      </label>
-
-      <!-- 历史保留：账本按这个窗口裁剪，趋势图 / 明细 / 导出的可选区间也跟着它 -->
-      <label class="field row">
-        <span class="label">历史保留</span>
-        <input class="num" type="number" :min="HISTORY_KEEP.MIN" :max="HISTORY_KEEP.MAX" step="1"
-               v-model.number="cfg.historyKeepDays" @change="onHistoryKeepChange" />
-        <span class="num-text">天</span>
-        <span class="hint">{{ HISTORY_KEEP.MIN }}–{{ HISTORY_KEEP.MAX }} 天，默认 {{ HISTORY_KEEP.DEFAULT }}；保留越久账本越大</span>
-      </label>
-
-      <!-- 自定义单价（可选）：官方调价没跟上、或走中转站按自己的价目结算时用。
-           填的是谷价，峰价按官方规则（谷价 × 2）自动翻倍；美元单价按汇率折成人民币记账。
-           两种覆盖方式可分别使用：全局开关（对所有模型）与「按模型覆盖」的条目（只改列出的） -->
-      <div v-if="cfg.usageMode === 'token'" class="price-box">
-        <label class="field row check">
-          <span class="label">自定义单价</span>
-          <input type="checkbox" v-model="cfg.tokenPrice.on" @change="onTokenPriceChange" />
-          <span class="hint">整表覆盖（关闭 = 全部用内置价目表）</span>
-        </label>
-        <div v-if="cfg.tokenPrice.on" class="price-row">
-          <label class="price-cell">
-            <span class="price-name">缓存命中</span>
-            <input class="num" type="number" min="0" step="0.01" v-model.number="cfg.tokenPrice.hit"
-                   @change="onTokenPriceChange" />
-          </label>
-          <label class="price-cell">
-            <span class="price-name">缓存未命中</span>
-            <input class="num" type="number" min="0" step="0.01" v-model.number="cfg.tokenPrice.miss"
-                   @change="onTokenPriceChange" />
-          </label>
-          <label class="price-cell">
-            <span class="price-name">输出</span>
-            <input class="num" type="number" min="0" step="0.01" v-model.number="cfg.tokenPrice.out"
-                   @change="onTokenPriceChange" />
-          </label>
-        </div>
-        <label class="field row">
-          <span class="label">币种</span>
-          <select v-model="cfg.tokenPrice.cur" @change="onTokenPriceChange">
-            <option value="CNY">人民币 CNY</option>
-            <option value="USD">美元 USD</option>
-          </select>
-          <template v-if="cfg.tokenPrice.cur === 'USD'">
-            <span class="label">汇率</span>
-            <input class="num" type="number" min="0" step="0.01" v-model.number="cfg.tokenPrice.rate"
-                   @change="onTokenPriceChange" />
-            <span class="num-text">元/USD</span>
-          </template>
-        </label>
-        <p class="hint">
-          单价单位：{{ cfg.tokenPrice.cur === 'USD' ? '美元' : '元' }} / 百万 token，填谷价（峰价自动翻倍）。
-          <template v-if="cfg.tokenPrice.cur === 'USD'">按上方汇率折成人民币后记账。</template>
-          改动后下次刷新余额时更新今日已用。
-        </p>
-
-        <p class="group-title">
-          按模型覆盖 <em>（只改列出的模型，其余仍用内置价目表；名称按子串匹配）</em>
-        </p>
-        <div v-for="(it, i) in cfg.tokenPrice.models" :key="i" class="price-row">
-          <label class="price-cell price-cell-model">
-            <span class="price-name">模型名</span>
-            <input class="num" type="text" spellcheck="false" placeholder="deepseek-v4-pro"
-                   v-model="it.name" @change="onTokenPriceChange" />
-          </label>
-          <label class="price-cell">
-            <span class="price-name">缓存命中</span>
-            <input class="num" type="number" min="0" step="0.01" v-model.number="it.hit"
-                   @change="onTokenPriceChange" />
-          </label>
-          <label class="price-cell">
-            <span class="price-name">缓存未命中</span>
-            <input class="num" type="number" min="0" step="0.01" v-model.number="it.miss"
-                   @change="onTokenPriceChange" />
-          </label>
-          <label class="price-cell">
-            <span class="price-name">输出</span>
-            <input class="num" type="number" min="0" step="0.01" v-model.number="it.out"
-                   @change="onTokenPriceChange" />
-          </label>
-          <button class="export-btn price-del utils-btn utils-outline" type="button" title="删除这一条"
-                  @click="removePriceModel(i)">删</button>
-        </div>
-        <button class="export-btn utils-btn utils-outline" type="button"
-                :disabled="cfg.tokenPrice.models.length >= PRICE_MODEL_MAX"
-                @click="addPriceModel()">＋ 添加模型</button>
-      </div>
-
-      <div v-if="historyMax > 0" class="chart"
-           :class="{ 'chart-dense': usageRange >= 14, 'chart-ultra': usageRange >= 90 }">
-        <div v-for="(d, i) in chartDays" :key="d.date" class="bar-col">
-          <div class="bar-val">{{ d.usage > 0 && usageRange <= 14 ? fmtMoney(d.usage) : '' }}</div>
-          <div class="bar-track">
-            <div class="bar" :style="{ height: barHeight(d.usage) + '%' }"></div>
-          </div>
-          <div class="bar-day">{{ i % labelEvery === 0 ? dayLabel(d.date) : '' }}</div>
-        </div>
-      </div>
-      <p v-else class="hint">暂无用量记录（挂件运行并记账后自动显示）。</p>
-      <!-- 「累计已用」是账本的滚动累计（quotaUsed + 今天），不受历史保留期裁剪影响，故与上方区间无关 -->
-      <p v-if="historyMax > 0 || cumUsed > 0" class="hint month-sum">
-        本月累计 <strong>{{ fmtMoney(monthStats.total) }}</strong>
-        · 日均 {{ fmtMoney(monthStats.avg) }}（按已过 {{ monthStats.elapsed }} 天）
-        · 最高单日 {{ fmtMoney(monthStats.peak) }}
-        · 累计已用 <strong>{{ fmtMoney(cumUsed) }}</strong>
-      </p>
-      <!-- 账本明细：按日展开当天的异常变动与校准记录。区间跟随上方区间，筛选在本地做 -->
-      <div v-if="historyMax > 0 || detailDays.length" class="detail">
-        <div class="detail-head">
-          <button class="detail-toggle utils-btn utils-outline" @click="toggleDetail">
-            {{ detailOpen ? '收起账本明细' : '展开账本明细' }}
-          </button>
-          <input v-if="detailOpen" class="detail-search" type="search" v-model="detailQuery"
-                 placeholder="按日期或原因检索（如 09-12、到期）" />
-          <select v-if="detailOpen" class="detail-kind" v-model="detailKind">
-            <option value="all">全部记录</option>
-            <option value="adjust">只看未计入</option>
-            <option value="calibrate">只看校准</option>
-          </select>
-          <span v-if="detailOpen" class="hint detail-sum">
-            近 {{ usageRange }} 天 {{ detailRows.length }} 天 · 合计 {{ fmtMoney(detailTotal) }}
-          </span>
-        </div>
-        <template v-if="detailOpen">
-          <div v-for="d in detailRows" :key="d.date" class="detail-day">
-            <div class="detail-day-row" @click="toggleDay(d.date)">
-              <span class="detail-caret">{{ dayOpen(d.date) ? '▾' : '▸' }}</span>
-              <span class="detail-date">{{ d.date }}</span>
-              <span class="detail-usage">{{ fmtMoney(d.usage) }}</span>
-              <span class="detail-tags">
-                <span v-if="adjustSumOf(d) > 0" class="detail-tag">
-                  另有 {{ fmtMoney(adjustSumOf(d)) }} 未计入
-                </span>
-                <span v-else-if="d.entries.length" class="detail-tag detail-tag-mute">
-                  {{ d.entries.length }} 条记录
-                </span>
-              </span>
-            </div>
-            <div v-if="dayOpen(d.date)" class="detail-entries">
-              <div v-for="(e, i) in d.entries" :key="i" class="detail-entry">
-                <span class="detail-time">{{ entryTime(e) }}</span>
-                <span>{{ entryText(e) }}</span>
-              </div>
-              <p v-if="!d.entries.length" class="hint">当天无异常变动或校准记录。</p>
-            </div>
-          </div>
-          <p v-if="!detailRows.length" class="hint">没有匹配的记录。</p>
-        </template>
-      </div>
-      <!-- 额度（资源包 / 订阅）：总量与重置周期存配置，已用按周期从账本取（不新增存储与请求） -->
-      <div class="quota">
-        <label class="field row">
-          <span class="label">额度总量</span>
-          <input class="num" type="number" min="0" step="1" v-model.number="cfg.quotaTotal"
-                 @change="patchCfg({ quotaTotal: cfg.quotaTotal })" />
-          <span class="num-text">{{ usageCurrency === 'CNY' ? '元' : '美元' }}</span>
-          <select class="quota-reset" v-model="cfg.quotaReset" @change="patchCfg({ quotaReset: cfg.quotaReset })">
-            <option value="monthly">每月重置</option>
-            <option value="daily">每日重置</option>
-            <option value="never">不重置</option>
-          </select>
-        </label>
-        <template v-if="cfg.quotaTotal > 0">
-          <div class="quota-line">
-            {{ quotaPeriodText }} <strong>{{ fmtMoney(quotaUsed) }}</strong> / {{ fmtMoney(cfg.quotaTotal) }}
-            · 剩余 <strong>{{ fmtMoney(quotaLeft) }}</strong>（{{ quotaPct }}%）
-          </div>
-          <div class="quota-track">
-            <div class="quota-fill" :class="{ 'quota-fill-warn': quotaPct >= 90 }" :style="{ width: quotaPct + '%' }"></div>
-          </div>
-        </template>
-        <p v-else class="hint">填「额度总量」后这里显示进度与剩余（0 = 不显示）。额度只做展示，不影响余额与记账口径。</p>
-      </div>
-      <!-- 今日模型占比：模型明细只有平台用量接口会给，因此只在令牌模式显示 -->
-      <div v-if="cfg.usageMode === 'token'" class="model-share">
-        <div class="model-share-head">
-          <span class="model-share-title">今日模型占比</span>
-          <span class="hint model-share-sub">
-            <template v-if="modelsLoading">读取中…</template>
-            <template v-else-if="modelsErr">读取失败：{{ modelsErr }}</template>
-            <template v-else-if="!todayModels.length">今日暂无用量记录</template>
-            <template v-else>共 {{ fmtMoney(modelsSum) }} · 更新于 {{ modelsTimeText }}</template>
-          </span>
-        </div>
-        <div v-for="(row, i) in todayModels" :key="row.model || 'unknown'" class="model-row">
-          <span class="model-name" :title="row.model || '未知模型'">{{ modelLabel(row.model) }}</span>
-          <div class="model-track">
-            <div class="model-fill"
-                 :style="{ width: modelPct(row.amount) + '%', background: MODEL_COLORS[i % MODEL_COLORS.length] }"></div>
-          </div>
-          <span class="model-pct">{{ modelPct(row.amount) }}%</span>
-          <span class="model-cost">{{ fmtMoney(row.amount) }}</span>
-        </div>
-      </div>
-      <p v-if="cfg.usageMode === 'ledger' && todayAdjust > 0" class="hint adjust-note">
-        今日另有 <strong>{{ fmtMoney(todayAdjust) }}</strong> 余额变动未计入用量<template v-if="lastAdjustWhy">（{{ lastAdjustWhy }}<template v-if="adjustTimeText">，{{ adjustTimeText }}</template>）</template>；如确为消费可用下方校准补回。
-      </p>
-      <div v-if="cfg.usageMode === 'ledger'" class="calibrate-row">
-        <span class="calibrate-label">校准今日已用</span>
-        <input class="num calibrate-input" type="number" min="0" step="0.01"
-               v-model.number="calibrateInput" placeholder="实际金额" @keyup.enter="!isImeComposing($event) && calibrateToday()" />
-        <button class="export-btn utils-btn utils-outline" :disabled="calibrateInputEmpty" @click="calibrateToday">校准</button>
-      </div>
-      <p v-else class="hint">当前为「平台令牌」用量模式，今日已用以平台返回为准，无需校准。</p>
-      <p v-if="calibrateFlash.msg" class="msg" :class="msgCls(calibrateFlash)">{{ calibrateFlash.msg }}</p>
-      <p v-if="exportFlash.msg" class="msg" :class="msgCls(exportFlash)">{{ exportFlash.msg }}</p>
-      <p v-if="importFlash.msg" class="msg" :class="msgCls(importFlash)">{{ importFlash.msg }}</p>
-    </section>
+    <UsageView v-if="cardOn('usage', 'usage')" ref="usageViewRef"
+               :cfg="cfg" :services="services"
+               :usage-history="usageHistory" :usage-currency="usageCurrency"
+               :fmt-money="fmtMoney" :is-ime-composing="isImeComposing"
+               :history-keep="HISTORY_KEEP" :price-model-max="PRICE_MODEL_MAX"
+               :token-price-default="TOKEN_PRICE_DEFAULT"
+               @patch="patchCfg" @usage-mode-change="onUsageModeChange"
+               @token-price-change="onTokenPriceChange" @history-keep-change="onHistoryKeepChange"
+               @refresh="refreshHistory" @add-price-model="addPriceModel"
+               @remove-price-model="removePriceModel" />
 
     <!-- [用量] 提醒与通知：四类自动提醒（峰谷切换 / 低余额 / 今日预算 / 余额大幅波动）+ 计时通知 + 提醒文案。
          原先开关挤在「挂件行为」那张 106 行的卡里、文案挂在「外观 → 文案」卡里，调一类提醒要跳两个 Tab，
          现在按「提醒」这个主题收成一张卡，文案作为卡内折叠 -->
-    <section v-if="cardOn('usage', 'notify')" class="card" data-search="notify">
-      <h2>提醒与通知</h2>
+    <NotifyView v-if="cardOn('usage', 'notify')" ref="notifyViewRef"
+                :cfg="cfg" :services="services" :usage-currency="usageCurrency"
+                :timer-note-max="TIMER_NOTE_MAX"
+                :alert-sound-roles="ALERT_SOUND_ROLES" :sound-role-label="SOUND_ROLE_LABEL"
+                @patch="patchCfg" @save-alerts="onSaveAlerts" />
 
-      <label class="field row check">
-        <span class="label">峰谷切换提醒 <em>（进入峰/谷时段时气泡提示，需开启思考气泡）</em></span>
-        <input type="checkbox" v-model="cfg.peakRemindOn" @change="patchCfg({ peakRemindOn: cfg.peakRemindOn })" />
-      </label>
-
-      <label class="field row check">
-        <span class="label">计时到点通知 <em>（挂件菜单「计时」到点时弹系统通知）</em></span>
-        <input type="checkbox" v-model="cfg.timerNotifyOn" @change="patchCfg({ timerNotifyOn: cfg.timerNotifyOn })" />
-      </label>
-
-      <label class="field row check">
-        <span class="label">记住计时状态 <em>（重载插件 / 重建挂件后继续计时）</em></span>
-        <input type="checkbox" v-model="cfg.timerPersistOn" @change="patchCfg({ timerPersistOn: cfg.timerPersistOn })" />
-      </label>
-
-      <!-- 计时气泡口径：原先只在挂件菜单「计时 → 更多」里，那层嵌套折叠已去掉，挪到本页 -->
-      <label class="field row check">
-        <span class="label">计时气泡常驻 <em>（开启：计时中气泡一直显示；关闭：只在开始时短暂显示，点小鲸鱼可随时查看）</em></span>
-        <input type="checkbox" v-model="cfg.timerBubblePin" @change="patchCfg({ timerBubblePin: cfg.timerBubblePin })" />
-      </label>
-      <label class="field row check">
-        <span class="label">计时中只显示计时 <em>（开启：气泡只显示计时；关闭：气泡照常显示余额、今日用量等全部内容）</em></span>
-        <input type="checkbox" v-model="cfg.timerBubbleOnly" @change="patchCfg({ timerBubbleOnly: cfg.timerBubbleOnly })" />
-      </label>
-
-      <!-- 计时时长：与挂件菜单「倒计时」三段输入同一份配置（cfg.timerSec 存秒），
-           这里用三个数字框拆开展示，任一段改动都折算回秒提交 -->
-      <div class="field row">
-        <span class="label">倒计时时长 <em>（挂件菜单「计时」里也能改；0 时 0 分 0 秒按 25 分钟算）</em></span>
-        <input class="num" type="number" min="0" max="23" step="1" v-model.number="timerHms.h" @change="commitTimerHms" />
-        <span class="num-text">时</span>
-        <input class="num" type="number" min="0" max="59" step="1" v-model.number="timerHms.m" @change="commitTimerHms" />
-        <span class="num-text">分</span>
-        <input class="num" type="number" min="0" max="59" step="1" v-model.number="timerHms.s" @change="commitTimerHms" />
-        <span class="num-text">秒</span>
-      </div>
-
-      <label class="field row">
-        <span class="label">到点提醒我 <em>（开始计时前写一句「结束后要做什么」，到点时显示在气泡与通知里）</em></span>
-        <input type="text" v-model="cfg.timerNote" :maxlength="TIMER_NOTE_MAX" placeholder="例如：起来喝水、活动一下"
-               @change="patchCfg({ timerNote: cfg.timerNote })" />
-      </label>
-
-      <label class="field row check">
-        <span class="label">到点后给「休息」快捷键 <em>（气泡旁的按钮点一下直接开始休息计时）</em></span>
-        <input type="checkbox" v-model="timerBreakOn" @change="onTimerBreakToggle" />
-      </label>
-      <label v-if="timerBreakOn" class="field row">
-        <span class="label">休息时长</span>
-        <input class="num" type="number" min="1" max="120" step="1" v-model.number="timerBreakMinEdit" @change="commitTimerBreak" />
-        <span class="num-text">分钟</span>
-      </label>
-
-      <label class="field row check">
-        <span class="label">低余额预警 <em>（余额低于阈值时数字变红，并弹一次提醒气泡 + 每天一次系统通知）</em></span>
-        <input type="checkbox" v-model="cfg.lowAlertOn" @change="patchCfg({ lowAlertOn: cfg.lowAlertOn })" />
-      </label>
-      <label v-if="cfg.lowAlertOn" class="field row">
-        <span class="label">预警阈值</span>
-        <input class="num" type="number" min="0" step="1" v-model.number="cfg.lowAlertAmount"
-               @change="patchCfg({ lowAlertAmount: cfg.lowAlertAmount })" />
-        <span class="num-text">{{ usageCurrency === 'CNY' ? '元' : '美元' }}</span>
-      </label>
-
-      <label class="field row check">
-        <span class="label">今日预算提醒 <em>（今日用量超出预算时气泡提示，并每天弹一次系统通知）</em></span>
-        <input type="checkbox" v-model="cfg.budgetOn" @change="onBudgetToggle" />
-      </label>
-      <label v-if="cfg.budgetOn" class="field row">
-        <span class="label">每日预算</span>
-        <input class="num" type="number" min="0" step="1" v-model.number="cfg.budgetAmount"
-               @change="patchCfg({ budgetAmount: cfg.budgetAmount })" />
-        <span class="num-text">{{ usageCurrency === 'CNY' ? '元' : '美元' }}</span>
-      </label>
-
-      <label class="field row check">
-        <span class="label">余额大幅波动通知 <em>（单次采样余额下降超过阈值时弹一次系统通知）</em></span>
-        <input type="checkbox" v-model="cfg.dropAlertOn" @change="onDropToggle" />
-      </label>
-      <label v-if="cfg.dropAlertOn" class="field row">
-        <span class="label">波动阈值</span>
-        <input class="num" type="number" min="0" step="1" v-model.number="cfg.dropAlertAmount"
-               @change="patchCfg({ dropAlertAmount: cfg.dropAlertAmount })" />
-        <span class="num-text">{{ usageCurrency === 'CNY' ? '元' : '美元' }}</span>
-      </label>
-      <p v-if="cfg.dropAlertOn" class="hint">
-        每发生一次「余额一次少掉 ≥ 阈值」就通知一次（不受「每天一次」限制）。被防误判拦下的下降（赠送额到期、异常跳变）也会通知，并注明原因；
-        跨天、换币种、换 API Key 时两边余额不可比，不会误报。免打扰时段内静默不发通知。
-      </p>
-
-      <!-- 通知渠道：上面这些提醒「用什么方式送达」。系统通知 = 桌面弹窗；邮件 = SMTP 直发。
-           渠道是总开关，与具体哪几类提醒要开无关 —— 后者在上面各自的开关里 -->
-      <h3 class="sub">通知方式</h3>
-
-      <label class="field row check">
-        <span class="label">系统通知 <em>（桌面弹窗；关闭后所有自动提醒与计时都不再弹窗）</em></span>
-        <input type="checkbox" v-model="cfg.notifySystemOn" @change="patchCfg({ notifySystemOn: cfg.notifySystemOn })" />
-      </label>
-
-      <label class="field row check">
-        <span class="label">邮件通知 <em>（把提醒发到邮箱；需先填下方 SMTP 配置）</em></span>
-        <input type="checkbox" v-model="cfg.notifyMailOn" @change="patchCfg({ notifyMailOn: cfg.notifyMailOn })" />
-      </label>
-
-      <!-- 测试按钮：按当前开着的渠道各发一条，用来确认「开关 + 配置」确实能送达。
-           系统通知渠道 = 宿主 notifySystem；邮件 = 宿主 sendMailAsync；都不做「每天一次」去重 -->
-      <div class="btn-row">
-        <button class="export-btn utils-btn utils-outline" type="button" :disabled="notifyTesting" @click="testNotify()">
-          {{ notifyTesting ? '发送中…' : '测试通知' }}
-        </button>
-      </div>
-      <p v-if="notifyFlash.msg" class="msg" :class="msgCls(notifyFlash)">{{ notifyFlash.msg }}</p>
-
-      <!-- SMTP 配置：只在「邮件通知」开着时出现。配置齐全后自动收起成一行摘要，
-           把卡片位置让回给上面的提醒开关；点「重新配置」可再展开（见 mailOpen） -->
-      <div v-if="cfg.notifyMailOn" class="fold">
-        <p v-if="mailConfigured && !mailOpen" class="mail-summary">
-          <span class="ok-tag">已配置</span>
-          {{ mail.mailHost }}:{{ mail.mailPort }} → {{ cfg.mailTo || '（未填收件人）' }}
-          <button class="link-btn inline utils-btn utils-secondary" type="button" @click="toggleMailFold()">重新配置</button>
-        </p>
-        <button v-else class="link-btn utils-btn utils-secondary" type="button" @click="toggleMailFold()">
-          {{ mailConfigured ? '收起 SMTP 配置' : 'SMTP 配置（必填）' }}
-        </button>
-
-        <div v-if="mailOpen" class="guide">
-          <label class="field row">
-            <span class="label">SMTP 服务器</span>
-            <input v-model="mail.mailHost" type="text" placeholder="smtp.qq.com" autocomplete="off" />
-          </label>
-          <label class="field row">
-            <span class="label">端口</span>
-            <input class="num" type="number" min="1" max="65535" v-model.number="mail.mailPort" />
-          </label>
-          <label class="field row check">
-            <span class="label">SSL/TLS 直连 <em>（465 端口勾上；587 / 25 取消勾选，连上后自动 STARTTLS 升级）</em></span>
-            <input type="checkbox" v-model="mail.mailSecure" />
-          </label>
-
-          <label class="field row">
-            <span class="label">账号</span>
-            <input v-model="mail.mailUser" type="text" placeholder="you@qq.com" autocomplete="off" />
-          </label>
-          <label class="field row">
-            <span class="label">授权码</span>
-            <input v-model="mail.mailPass" type="password" :placeholder="mailPassSaved ? '已保存，留空则不修改' : '邮箱授权码（非登录密码）'" autocomplete="off" />
-          </label>
-          <p class="hint">
-            授权码存于 uTools 加密存储，<b>不进备份文件</b>；填过一次后留空即表示沿用已保存的值。
-            多数邮箱（QQ / 163 / Gmail）需要在邮箱设置里单独开启 SMTP 并生成授权码，不能直接填登录密码。
-          </p>
-
-          <label class="field row">
-            <span class="label">发件人</span>
-            <input v-model="cfg.mailFrom" type="text" placeholder="与上方账号一致" autocomplete="off" />
-          </label>
-          <label class="field row">
-            <span class="label">收件人</span>
-            <input v-model="cfg.mailTo" type="text" placeholder="收提醒的邮箱（可与发件人相同）" autocomplete="off" />
-          </label>
-          <label class="field row">
-            <span class="label">发件人显示名</span>
-            <input v-model="cfg.mailFromName" type="text" placeholder="小鲸鱼余额挂件" autocomplete="off" />
-          </label>
-          <label class="field row">
-            <span class="label">主题前缀</span>
-            <input v-model="cfg.mailSubjectPrefix" type="text" placeholder="[小鲸鱼余额挂件]" autocomplete="off" />
-          </label>
-
-          <label class="field row check">
-            <span class="label">计时到点也发邮件 <em>（除系统通知外，到点另发一封邮件；关掉则只有系统通知）</em></span>
-            <input type="checkbox" v-model="cfg.timerMailOn" @change="patchCfg({ timerMailOn: cfg.timerMailOn })" />
-          </label>
-
-          <div class="btn-row">
-            <button class="export-btn utils-btn utils-outline" type="button" @click="saveMailSettings()">保存邮件设置</button>
-            <button class="export-btn utils-btn utils-outline" type="button" :disabled="mailTesting" @click="testMail()">
-              {{ mailTesting ? '发送中…' : '发送测试邮件' }}
-            </button>
-          </div>
-          <p v-if="mailFlash.msg" class="msg" :class="msgCls(mailFlash)">{{ mailFlash.msg }}</p>
-          <p class="hint">
-            测试邮件用的是上方「当前填的内容」（未保存也会用），方便先验证再保存；<b>发送成功会自动收起本区</b>。
-            改完记得点「保存邮件设置」——上方「测试通知」读的是已保存的配置，两者分工不同。
-            免打扰时段内邮件与系统通知一并静默（计时到点不受免打扰影响）。
-          </p>
-        </div>
-      </div>
-
-      <!-- 提醒音独立音量：语义上属于「提醒」，放这页比折叠在「外观」的音效条里更好找；
-           音效开关/音色/全局音量仍在「外观」的音效折叠条里 -->
-      <div v-for="r in ALERT_SOUND_ROLES" :key="'av-' + r" class="field row">
-        <span class="label">{{ SOUND_ROLE_LABEL[r] }}</span>
-        <input class="range" type="range" min="0" max="1" step="0.05"
-               :value="alertVolShown(r)" :disabled="!cfg.soundOn"
-               @input="onAlertVolInput(r, $event)" />
-        <span class="num-text">{{ alertVolSummary(r) }}</span>
-        <button v-if="cfg.alertVols[r].volSet" class="link-btn utils-btn utils-secondary"
-                type="button" :disabled="!cfg.soundOn" @click="resetAlertVol(r)">恢复跟随</button>
-      </div>
-      <p class="hint">
-        提醒音量默认跟随「外观」页的全局音量；单独拖动某一类后即独立生效（不再跟随），
-        点「恢复跟随」回到随全局音量变化。提醒音的导入与静音（留空）在「资源」页。
-      </p>
-
-      <!-- 低频的「提醒表现 + 时段 + 文案」收在一处折叠，卡片默认只留「哪几类提醒要开」 -->
-      <div class="fold">
-        <button class="link-btn utils-btn utils-secondary" @click="alertFolds.open = !alertFolds.open">
-          {{ alertFolds.open ? '收起更多提醒设置' : '更多提醒设置（停留时长 / 免打扰 / 文案）' }}
-        </button>
-        <div v-if="alertFolds.open" class="guide">
-          <label class="field row">
-            <span class="label">提醒停留时长</span>
-            <select v-model.number="cfg.remindSec" @change="patchCfg({ remindSec: cfg.remindSec })">
-              <option :value="0">常驻（手动点掉）</option>
-              <option :value="5">5 秒</option>
-              <option :value="8">8 秒</option>
-              <option :value="15">15 秒</option>
-            </select>
-          </label>
-          <p class="hint">峰谷切换 / 今日预算 / 低余额 / 穿透说明这几类提醒气泡的停留时间（随机台词不受影响）。</p>
-
-          <label class="field row check">
-            <span class="label">免打扰时段 <em>（时段内只弹气泡，不弹自动提醒的系统通知；跨午夜如 23:00–07:00 也支持）</em></span>
-            <input type="checkbox" v-model="cfg.quietOn" @change="patchCfg({ quietOn: cfg.quietOn })" />
-          </label>
-          <label v-if="cfg.quietOn" class="field row">
-            <span class="label">免打扰起止</span>
-            <input class="time" type="time" v-model="cfg.quietFrom" @change="patchCfg({ quietFrom: cfg.quietFrom })" />
-            <em class="time-sep">至</em>
-            <input class="time" type="time" v-model="cfg.quietTo" @change="patchCfg({ quietTo: cfg.quietTo })" />
-          </label>
-          <p v-if="cfg.quietOn" class="hint">
-            免打扰静默「今日预算」「低余额」「余额大幅波动」三类自动通知（邮件一并静默）：前两类不占用当天名额（出时段后仍会补发一次），
-            波动通知本身就是一次性的、不补发。计时到点是你主动设定的一次性提醒，照常通知。
-          </p>
-
-          <!-- 提醒文案：四类自动提醒（低余额 / 预算 / 峰谷 / 穿透）的气泡与系统通知文案 -->
-          <label v-for="f in ALERT_FIELDS" :key="f.key" class="field">
-            <span class="label">{{ f.label }}</span>
-            <textarea class="quote-input" rows="3" spellcheck="false"
-                      v-model="cfg.alerts[f.key]" :placeholder="f.hint"></textarea>
-          </label>
-
-          <p class="hint">
-            低余额 / 今日预算 / 峰谷切换 / 鼠标穿透这几类自动提醒的<b>气泡与系统通知共用这里的文案</b>。
-            <b>最多三行</b>，依次对应气泡的「标题 / 大字 / 说明」；行数不够则后面的行留空，多于三行的并进说明行。
-            系统通知取全文（换行合并成一行）。空行会被丢掉，清空某一条 = 该条恢复内置默认。
-            占位符按各输入框里的提示填写，写错的会原样显示出来。改完点「保存」才生效，挂件已开着的话立即生效。
-          </p>
-          <p class="hint">
-            注意：低余额文案用于内置 DeepSeek 的预警；多厂商模型的余额通知带模型名，不受这里影响。
-          </p>
-          <p v-if="alertResetConfirm" class="hint">
-            将丢弃全部自定义提醒文案，恢复为内置默认，此操作不可撤销。
-          </p>
-          <div class="btn-row">
-            <span v-if="alertsDirty" class="dirty-tag">未保存</span>
-            <button class="export-btn utils-btn utils-outline" type="button" @click="saveAlerts()">保存</button>
-            <button class="export-btn utils-btn" :class="alertResetConfirm ? 'utils-danger' : 'utils-outline'" type="button" @click="resetAlerts()">
-              {{ alertResetConfirm ? '确认恢复默认？' : '恢复默认' }}
-            </button>
-            <button v-if="alertResetConfirm" class="export-btn utils-btn utils-outline" type="button" @click="alertResetConfirm = false">取消</button>
-          </div>
-          <p v-if="alertFlash.msg" class="msg" :class="msgCls(alertFlash)">{{ alertFlash.msg }}</p>
-        </div>
-      </div>
-    </section>
 
     <!-- [用量] 多厂商模型：注册表存配置、余额存运行时快照；挂件菜单里可切换主显示的是哪一个 -->
-    <section v-if="cardOn('usage', 'models')" class="card" data-search="models">
-      <div class="card-head">
-        <h2>模型与余额</h2>
-        <div class="head-actions">
-          <button class="export-btn utils-btn utils-outline" :disabled="modelsRefreshing" @click="refreshModelRows()">
-            {{ modelsRefreshing ? '刷新中…' : '刷新全部' }}
-          </button>
-          <button class="export-btn utils-btn utils-outline" :disabled="modelConfigs.length >= modelMax" @click="openNewModel">添加模型</button>
-        </div>
-      </div>
-      <p class="hint">
-        挂件默认显示 DeepSeek 余额；这里添加的厂商模型（{{ modelConfigs.length }}/{{ modelMax }}）可在挂件菜单里切换成主显示。
-        余额按原币种展示、不折算汇率，只在本机查询；密钥用 uTools 加密存储，不写进备份文件。
-      </p>
-      <div class="mm-list">
-        <div v-for="m in modelRows" :key="m.id" class="mm-item">
-          <div v-if="m.id !== NEW_MODEL_ROW" class="mm-row">
-            <input class="mm-radio" type="radio" name="mm-main" :value="m.id" v-model="modelsMainId"
-                   :title="modelsMainId === m.id ? '当前挂件主显示' : '设为挂件主显示'"
-                   @change="setMainModelRow(m.id)" />
-            <span class="mm-name" :title="m.name">{{ m.name }}</span>
-            <span class="mm-val" :class="{ 'mm-val-err': !!m.error }">{{ modelValueText(m) }}</span>
-            <span class="mm-sub" :title="modelSubText(m)">{{ modelSubText(m) }}</span>
-            <span v-if="m.builtin" class="mm-tag">内置</span>
-            <template v-else>
-              <button class="link-btn mm-act utils-btn utils-secondary" @click="openModelRow(m.id)">{{ modelOpen === m.id ? '收起' : '设置' }}</button>
-              <button class="link-btn mm-act utils-btn utils-secondary" :disabled="modelsRefreshing" @click="refreshModelRows([m.id])">刷新</button>
-              <button class="link-btn mm-act mm-del utils-btn utils-secondary"
-                      @click="modelDelConfirm = modelDelConfirm === m.id ? '' : m.id">删除</button>
-            </template>
-          </div>
-          <div v-if="m.id !== NEW_MODEL_ROW && modelDelConfirm === m.id" class="mm-confirm">
-            <span>删除「{{ m.name }}」？它的密钥与余额记录会一并清除。</span>
-            <button class="export-btn utils-btn utils-outline" @click="removeModelRow(m.id)">确认删除</button>
-            <button class="link-btn mm-act utils-btn utils-secondary" @click="modelDelConfirm = ''">取消</button>
-          </div>
-          <!-- 行内编辑：新增草稿（NEW_MODEL_ROW）与编辑已有模型共用这一套表单 -->
-          <div v-if="modelOpen === m.id && modelForm" class="mm-form">
-            <div class="mm-grid">
-              <label class="field">
-                <span class="label">厂商模板</span>
-                <select v-model="modelForm.tpl" @change="applyModelTpl">
-                  <option v-for="t in modelTplOptions" :key="t.key" :value="t.key">{{ t.name }}</option>
-                </select>
-              </label>
-              <label class="field">
-                <span class="label">名称</span>
-                <input v-model="modelForm.name" maxlength="40" placeholder="挂件菜单里显示的名字" />
-              </label>
-              <label class="field">
-                <span class="label">类型</span>
-                <select v-model="modelForm.kind">
-                  <option value="balance">余额（金额）</option>
-                  <option value="quota">订阅额度（百分比）</option>
-                  <option value="codex">Codex 本地会话（token）</option>
-                </select>
-              </label>
-              <label v-if="modelForm.kind !== 'codex'" class="field">
-                <span class="label">币种</span>
-                <select v-model="modelForm.currency">
-                  <option value="CNY">人民币 ¥</option>
-                  <option value="USD">美元 $</option>
-                </select>
-              </label>
-            </div>
-            <p v-if="modelForm.kind === 'codex'" class="hint">
-              Codex 本地会话统计：读取本机 ~/.codex 下的会话日志（rollout JSONL）统计今日 token 用量，
-              不需要 API Key、也不发网络请求。挂件上按今日 token 显示，点「测试连接」可立即统计一次。
-            </p>
-            <label v-if="modelForm.kind !== 'codex'" class="field">
-              <span class="label">API Key <em>（留空 = 不改动已存的；本机加密存储）</em></span>
-              <input v-model="modelKeys[modelForm.id]" type="password" placeholder="该厂商的 API Key" autocomplete="off" />
-            </label>
-            <label v-if="modelForm.kind !== 'codex'" class="field">
-              <span class="label">接口地址</span>
-              <input v-model="modelForm.url" placeholder="https://..." />
-            </label>
-            <label v-if="modelForm.kind !== 'codex' && (modelForm.url.indexOf('{base}') >= 0 || modelForm.baseUrl)" class="field">
-              <span class="label">Base URL <em>（替换接口地址里的 {base}）</em></span>
-              <input v-model="modelForm.baseUrl" placeholder="https://your-gateway.com" />
-            </label>
-            <label v-if="modelForm.kind === 'balance'" class="field">
-              <span class="label">余额字段路径</span>
-              <input v-model="modelForm.path" placeholder="data.available_balance" />
-            </label>
-            <label v-else-if="modelForm.kind === 'quota'" class="field">
-              <span class="label">已用百分比字段路径</span>
-              <input v-model="modelForm.usedPctPath" placeholder="data.limits[0].TOKENS_LIMIT.percentage" />
-            </label>
-            <label v-if="modelForm.kind === 'balance'" class="field">
-              <span class="label">取值倍数 scale <em>（接口单位与展示单位不一致时用，如 0.0001）</em></span>
-              <input class="num" type="number" step="any" min="0" v-model.number="modelForm.scale" />
-            </label>
-            <button v-if="modelForm.kind !== 'codex'" class="link-btn utils-btn utils-secondary" @click="modelAdv[modelForm.id] = !modelAdv[modelForm.id]">
-              {{ modelAdv[modelForm.id] ? '收起高级设置' : '高级设置（字段路径 / 认证方式）' }}
-            </button>
-            <div v-if="modelAdv[modelForm.id] && modelForm.kind !== 'codex'" class="mm-grid">
-              <label class="field">
-                <span class="label">认证方式</span>
-                <select v-model="modelForm.auth">
-                  <option value="bearer">Bearer（多数厂商）</option>
-                  <option value="raw">原始值（如智谱）</option>
-                </select>
-              </label>
-              <template v-if="modelForm.kind === 'balance'">
-                <label class="field">
-                  <span class="label">已用额度字段路径 <em>（余额 = 上面的余额 - 本项 × 倍数）</em></span>
-                  <input v-model="modelForm.usedPath" placeholder="data.total_usage" />
-                </label>
-                <label class="field">
-                  <span class="label">已用额度倍数</span>
-                  <input class="num" type="number" step="any" min="0" v-model.number="modelForm.usedScale" />
-                </label>
-                <label class="field">
-                  <span class="label">已用额度接口地址 <em>（留空 = 与余额同接口）</em></span>
-                  <input v-model="modelForm.usedUrl" placeholder="https://..." />
-                </label>
-              </template>
-              <template v-else>
-                <label class="field">
-                  <span class="label">剩余百分比字段路径</span>
-                  <input v-model="modelForm.remainPctPath" placeholder="model_remains[0].current_interval_remaining_percent" />
-                </label>
-                <label class="field">
-                  <span class="label">剩余量字段路径 <em>（与总量一起算百分比）</em></span>
-                  <input v-model="modelForm.remainPath" placeholder="usage.remaining" />
-                </label>
-                <label class="field">
-                  <span class="label">总量字段路径</span>
-                  <input v-model="modelForm.totalPath" placeholder="usage.limit" />
-                </label>
-              </template>
-              <label class="field">
-                <span class="label">重置时刻字段路径</span>
-                <input v-model="modelForm.resetPath" placeholder="usage.resetTime" />
-              </label>
-            </div>
-            <label v-if="modelForm.kind !== 'codex'" class="field row check">
-              <span class="label">低余额提醒 <em>（低于阈值时弹系统通知，每模型每天一次；额度类看剩余百分比）</em></span>
-              <input type="checkbox" v-model="modelForm.lowAlertOn" />
-            </label>
-            <label v-if="modelForm.kind !== 'codex' && modelForm.lowAlertOn" class="field row">
-              <span class="label">提醒阈值</span>
-              <input class="num" type="number" min="0" step="any" v-model.number="modelForm.lowAlertAmount" />
-              <span class="num-text">{{ modelForm.currency === 'USD' ? '美元' : '元' }}</span>
-            </label>
-            <div class="btn-row">
-              <button class="utils-btn utils-primary" @click="saveModelForm">保存</button>
-              <button class="secondary utils-btn utils-secondary" :disabled="modelTesting === modelForm.id" @click="testModelForm">
-                {{ modelTesting === modelForm.id ? '测试中…' : '测试连接' }}
-              </button>
-              <button class="secondary utils-btn utils-secondary" @click="closeModelForm">取消</button>
-            </div>
-            <p v-if="modelFormErr" class="msg err">{{ modelFormErr }}</p>
-          </div>
-        </div>
-      </div>
-      <p v-if="modelsFlash.msg" class="msg" :class="msgCls(modelsFlash)">{{ modelsFlash.msg }}</p>
-    </section>
+    <ModelsView v-if="cardOn('usage', 'models')"
+                :services="services" :models="models" :model-configs="modelConfigs"
+                :models-main-id="modelsMainId" :model-tpls="modelTpls" :model-max="modelMax"
+                :low-alert-default="LOW_ALERT_DEFAULT"
+                :fmt-tokens="fmtTokens" :codex-win-text="codexWinText"
+                @reload="reloadModels" @update:main-id="onModelsMainChange" />
 
     <!-- [窗口] 挂件窗口：显隐、位置与窗口属性（使用说明 / 故障排查已挪到「帮助」组） -->
-    <section v-if="cardOn('window', 'window')" class="card" data-search="window">
-      <h2>挂件窗口</h2>
-      <label class="field row">
-        <span class="label">进入插件时</span>
-        <select v-model="cfg.enterMode" @change="patchCfg({ enterMode: cfg.enterMode })">
-          <option value="both">设置窗口 + 挂件</option>
-          <option value="widget">只显示挂件</option>
-          <option value="settings">只显示设置窗口</option>
-        </select>
-      </label>
-      <div class="btn-row">
-        <button class="utils-btn utils-primary" @click="showWidget">显示挂件</button>
-        <button class="secondary utils-btn utils-secondary" @click="hideWidget">隐藏挂件</button>
-      </div>
-
-      <label class="field row check">
-        <span class="label">窗口置顶</span>
-        <input type="checkbox" v-model="cfg.onTop" @change="patchCfg({ onTop: cfg.onTop })" />
-      </label>
-
-      <label class="field row check">
-        <span class="label">锁定位置 <em>（禁止拖拽与滚轮缩放，点击刷新仍可用）</em></span>
-        <input type="checkbox" v-model="cfg.dragLock" @change="patchCfg({ dragLock: cfg.dragLock })" />
-      </label>
-
-      <label class="field row">
-        <span class="label">窗口透明度</span>
-        <input class="range" type="range" min="20" max="100" step="5" v-model.number="cfg.opacity"
-               @input="onOpacityLive" @change="onOpacityCommit" />
-        <em class="range-val">{{ cfg.opacity }}%</em>
-      </label>
-      <p class="hint">透明度作用于整个挂件（含气泡与菜单）；拖动实时预览。</p>
-
-      <label class="field row check">
-        <span class="label">鼠标穿透 <em>（挂件完全不接收鼠标——点击/拖拽/菜单全部穿透；在鲸鱼上停留约 1 秒可临时接管）</em></span>
-        <input type="checkbox" v-model="cfg.passThrough" @change="patchCfg({ passThrough: cfg.passThrough })" />
-      </label>
-      <p class="hint">
-        穿透开启后挂件自身菜单也点不到，建议先绑定全局快捷键作为「逃生通道」：uTools 设置 → 全局功能 → 新增 → 指令填「切换鼠标穿透」→ 按下组合键。也可在鲸鱼上停留约 1 秒临时接管后再关。
-      </p>
-      <div class="btn-row">
-        <button class="secondary utils-btn utils-secondary" @click="copyHotkeyCmd('切换鼠标穿透')">复制「穿透」指令名</button>
-        <button class="secondary utils-btn utils-secondary" @click="addHotkey('切换鼠标穿透')">新增「穿透」快捷键</button>
-      </div>
-
-      <label class="field row check">
-        <span class="label">自动避让任务栏 <em>（实时识别任务栏隐藏/显示，弹出时让位、收起后贴回）</em></span>
-        <input type="checkbox" v-model="cfg.avoidTaskbar" @change="patchCfg({ avoidTaskbar: cfg.avoidTaskbar })" />
-      </label>
-      <p class="hint taskbar-hint">
-        任务栏：{{ taskbarText }}
-        <em v-if="!cfg.avoidTaskbar">（避让已关闭，挂件位置不再跟随任务栏变化）</em>
-      </p>
-
-      <label class="field row">
-        <span class="label">贴边间距</span>
-        <span class="edge-row">
-          <em>上</em><input class="num" type="number" min="0" max="400" step="4" v-model.number="cfg.edgeTop" @change="patchCfg({ edgeTop: cfg.edgeTop })" />
-          <em>右</em><input class="num" type="number" min="0" max="400" step="4" v-model.number="cfg.edgeRight" @change="patchCfg({ edgeRight: cfg.edgeRight })" />
-          <em>下</em><input class="num" type="number" min="0" max="400" step="4" v-model.number="cfg.edgeBottom" @change="patchCfg({ edgeBottom: cfg.edgeBottom })" />
-          <em>左</em><input class="num" type="number" min="0" max="400" step="4" v-model.number="cfg.edgeLeft" @change="patchCfg({ edgeLeft: cfg.edgeLeft })" />
-        </span>
-      </label>
-      <p class="hint">贴边间距：挂件贴到该边时留出的像素数（0＝紧贴）。开了「自动避让任务栏」时，任务栏占位的那条边会自动让位；任务栏收起后又回到这里设定的贴边位置。</p>
-
-      <label class="field row">
-        <span class="label">吸附与翻转</span>
-        <select v-model="cfg.snapMode" @change="patchCfg({ snapMode: cfg.snapMode })">
-          <option value="ratio">比例吸附</option>
-          <option value="off">关闭（自由摆放）</option>
-        </select>
-      </label>
-      <label class="field row" v-if="cfg.snapMode === 'ratio'">
-        <span class="label">吸附区宽度</span>
-        <input class="num" type="number" :min="SNAP_RATIO_MIN" :max="SNAP_RATIO_MAX" step="1" v-model.number="cfg.snapRatio" @change="patchCfg({ snapRatio: cfg.snapRatio })" />
-        <span class="num-text">%</span>
-      </label>
-      <p class="hint">
-        吸附：拖拽松手时，挂件中心落进某条边的吸附区就贴到那条边（吸附区宽度按可用区宽/高算，默认 25%＝左右各 1/4、上下各 1/4）。
-        关掉吸附后松手停在哪就是哪，不再自动贴边。
-      </p>
-      <p class="hint">
-        朝向不用配：锚在屏幕左半边就朝右、右半边就朝左，鲸鱼始终面向屏幕内侧（关掉吸附也一样）。
-      </p>
-
-      <label class="field row check">
-        <span class="label">避让滚动条 <em>（挂件贴右边缘时留出像素，避免盖住最大化窗口的纵向滚动条）</em></span>
-        <input type="checkbox" v-model="cfg.scrollGapOn" @change="patchCfg({ scrollGapOn: cfg.scrollGapOn })" />
-      </label>
-      <label class="field row" v-if="cfg.scrollGapOn">
-        <span class="label">滚动条宽度</span>
-        <input class="num" type="number" min="0" max="100" step="1" v-model.number="cfg.scrollGapPx" @change="patchCfg({ scrollGapPx: cfg.scrollGapPx })" />
-        <span class="num-text">px</span>
-      </label>
-      <p class="hint" v-if="cfg.scrollGapOn">Windows 默认滚动条约 17px；填 0 等于贴边（与关闭开关等效）。与「贴边间距 → 右」取较大值，不会叠加。</p>
-
-      <div class="btn-row">
-        <button class="secondary utils-btn utils-secondary" @click="resetWidgetPos">复位窗口位置</button>
-      </div>
-      <p class="hint">把挂件挪回默认位置（右下角、紧贴边缘）——换显示器、改分辨率或拖出屏幕后用。</p>
-      <p v-if="widgetFlash.msg" class="msg" :class="msgCls(widgetFlash)">{{ widgetFlash.msg }}</p>
-    </section>
-
-    <!-- [帮助] 使用帮助：使用说明 / 快捷键绑定 / 挂件故障排查。
-         这些原先都堆在「挂件窗口」卡尾（一次性配置 + 排查 + 说明），日常要调的窗口项被埋在一堆说明下面。
-         这里叫「挂件故障排查」以区别 dsh 卡里的「dsh 故障排查」—— 前者是插件自身日志，后者是 dsh 子进程日志 -->
-    <section v-if="cardOn('help', 'help')" class="card" data-search="help">
-      <h2>使用帮助</h2>
-      <p class="hint">给「显示/隐藏挂件」绑定一个全局快捷键（想给「鼠标穿透」也绑一个，见「窗口」组）。</p>
-      <div class="btn-row">
-        <button class="secondary utils-btn utils-secondary" @click="copyHotkeyCmd()">复制指令名</button>
-        <button class="secondary utils-btn utils-secondary" @click="addHotkey()">新增快捷键</button>
-      </div>
-      <!-- 新手引导入口：首次引导只弹一次（guideDone），之后从帮助 Tab 重开。
-           与「使用说明」「故障排查」同为折叠块、同一视觉语言，不额外占版面 -->
-      <div class="fold">
-        <button class="link-btn utils-btn utils-secondary" @click="onGuideReopen()">新手引导（填 DeepSeek 凭据）</button>
-      </div>
-      <div class="fold">
-        <button class="link-btn utils-btn utils-secondary" @click="widgetFolds.help = !widgetFolds.help">{{ widgetFolds.help ? '收起使用说明' : '使用说明' }}</button>
-        <div v-if="widgetFolds.help" class="guide">
-          <p class="guide-use"><strong>进入插件时：</strong>选含挂件的模式后，挂件出现时会抢走焦点、本设置窗口自动收起；改设置请点挂件右上角菜单（或右键）→「打开设置」唤回本窗口。</p>
-          <p class="guide-use"><strong>挂件操作：</strong>可拖拽到屏幕四边吸附（吸附区宽度与开关见「挂件窗口」卡片），鲸鱼始终朝屏幕内侧；点击鲸鱼刷新余额，悬停后点右上角菜单调整设置。</p>
-          <p class="guide-use"><strong>快捷键：</strong>按 Ctrl+, 打开 uTools 设置 → 全局功能 → 新增 → 指令填「显示/隐藏挂件」→ 按下组合键。可点上方「复制指令名」快速复制。想给「鼠标穿透」也绑一个，指令名填「切换鼠标穿透」。</p>
-          <p class="guide-use"><strong>常驻：</strong>退出到后台挂件保留；关闭 Ctrl+D 分离窗口会直接结束插件运行、挂件消失，分离后请用「最小化」；重进插件会自动重建，配置不丢。</p>
-        </div>
-      </div>
-      <div v-if="diagReady" class="fold">
-        <button class="link-btn utils-btn utils-secondary" @click="widgetFolds.trouble = !widgetFolds.trouble">{{ widgetFolds.trouble ? '收起挂件故障排查' : '挂件故障排查' }}</button>
-        <div v-if="widgetFolds.trouble" class="guide">
-          <!-- 标题与日志按钮都带「挂件」前缀：dsh 卡里另有一块「dsh 故障排查」讲 dsh 子进程日志，
-               两块都叫「故障排查」时用户会把两处的日志当成同一份 -->
-          <p class="guide-use">挂件消失或显示异常时，可复制插件自身的诊断日志（%TEMP%\whale-debug.log）或用系统程序打开日志文件。<strong>这只含挂件与插件自身的日志</strong>；dsh 的日志见「开发者 → dsh」卡里的「查看 dsh 日志」。</p>
-          <div class="btn-row">
-            <button class="secondary utils-btn utils-secondary" @click="copyDebugLog">复制挂件日志</button>
-            <button class="secondary utils-btn utils-secondary" @click="openLogFile">打开挂件日志文件</button>
-          </div>
-          <p v-if="diagFlash.msg" class="msg" :class="msgCls(diagFlash)">{{ diagFlash.msg }}</p>
-        </div>
-      </div>
-      <div v-if="errDetail" class="err-block">
-        <p class="err-title">挂件窗口创建失败</p>
-        <pre class="err-box">{{ errDetail }}</pre>
-        <div class="btn-row">
-          <button class="secondary utils-btn utils-secondary" @click="copyWidgetError">复制错误信息</button>
-          <button class="secondary utils-btn utils-secondary" @click="checkWidgetError()">重新检查</button>
-        </div>
-      </div>
-      <button v-else class="link-btn utils-btn utils-secondary" @click="checkWidgetError()">挂件异常？查看错误详情</button>
-      <p v-if="errFlash.msg" class="msg" :class="msgCls(errFlash)">{{ errFlash.msg }}</p>
-    </section>
+    <!-- [外观] 挂件窗口：显隐、位置与窗口属性（使用说明 / 故障排查在「帮助」组）。
+         模板已迁至 WindowView.vue：widgetFlash / 显隐 / 复位 / 复制指令 / 新增快捷键
+         都写与「使用帮助」卡共用的消息槽，故仍留在父级，这里用 emit 触发 -->
+    <WindowView
+      v-if="cardOn('window', 'window')"
+      :cfg="cfg"
+      :services="services"
+      :taskbar-text="taskbarText"
+      :widget-flash="widgetFlash"
+      @patch="patchCfg"
+      @show-widget="showWidget"
+      @hide-widget="hideWidget"
+      @reset-pos="resetWidgetPos"
+      @copy-cmd="copyHotkeyCmd"
+      @add-hotkey="addHotkey"
+    />
+    <!-- [帮助] 使用帮助：使用说明 / 快捷键绑定 / 挂件故障排查 / 挂件创建错误详情。
+         模板已迁至 HelpView.vue：卡片折叠态与诊断日志入口内聚在组件内；挂件错误状态与
+         checkWidgetError 由父级 onMounted / showWidget 驱动，「复制指令名 / 新增快捷键」
+         与窗口卡共用父级消息槽，故按 props 收、emit 触发 -->
+    <HelpView
+      v-if="cardOn('help', 'help')"
+      :services="services"
+      :err-detail="errDetail"
+      :err-flash="errFlash"
+      @copy-cmd="copyHotkeyCmd"
+      @add-hotkey="addHotkey"
+      @guide-reopen="onGuideReopen"
+      @check-widget-error="checkWidgetError"
+      @copy-widget-error="copyWidgetError"
+    />
 
     <!-- [数据] 数据与隐私：按项清除 + 备份与恢复 -->
-    <section v-if="cardOn('data', 'privacy')" class="card" data-search="privacy">
-      <h2>数据与隐私</h2>
-      <p class="hint">API Key 与平台 Token 通过 uTools 加密存储，账本、窗口位置与导入的素材（形象 / 气泡图 / 音效）也只保存在本机，不会上传到任何第三方服务器。</p>
-      <p class="hint">卸载 uTools 插件不会自动删除这些数据，需要彻底清除时请勾选下方要清除的内容（<strong>清除前建议先导出一份备份</strong>，见下方「备份与恢复」）：</p>
-      <label class="field row check">
-        <span class="label">凭据 <em>（API Key / 平台 Token）</em></span>
-        <input type="checkbox" v-model="clearItems.secrets" @change="clearConfirm = false" />
-      </label>
-      <label class="field row check">
-        <span class="label">挂件设置 <em>（大小 / 音效 / 开关等，清除后按默认值重建挂件）</em></span>
-        <input type="checkbox" v-model="clearItems.config" @change="clearConfirm = false" />
-      </label>
-      <label class="field row check">
-        <span class="label">账本用量记录 <em>（今日已用与用量趋势）</em></span>
-        <input type="checkbox" v-model="clearItems.ledger" @change="clearConfirm = false" />
-      </label>
-      <label class="field row check">
-        <span class="label">窗口位置与更新缓存 <em>（挂件回到默认位置）</em></span>
-        <input type="checkbox" v-model="clearItems.window" @change="clearConfirm = false" />
-      </label>
-      <label class="field row check">
-        <span class="label">导入的素材 <em>（形象 / 气泡图 / 音效文件，删后回退为内置；等同「资源」页的「清除全部素材」）</em></span>
-        <input type="checkbox" v-model="clearItems.assets" @change="clearConfirm = false" />
-      </label>
-      <div class="btn-row">
-        <button class="danger utils-btn utils-danger" :disabled="!anyClearItem" @click="clearSelectedData()">
-          {{ clearConfirm ? '确认清除选中数据？不可恢复' : '清除选中数据' }}
-        </button>
-        <button v-if="clearConfirm" class="secondary utils-btn utils-secondary" @click="clearConfirm = false">取消</button>
-      </div>
-      <p v-if="clearConfirm" class="hint">将清除：{{ clearItemNames || '（未选中任何项）' }}。此操作不可撤销。</p>
-      <p v-if="dataFlash.msg" class="msg" :class="msgCls(dataFlash)">{{ dataFlash.msg }}</p>
-    </section>
+    <!-- [数据] 数据与隐私：模板已迁至 PrivacyView.vue。清除动作与勾选项内聚在组件内，
+         清除成功后的回显刷新（secrets / cfg / 账本 / 各素材卡片）读父级全局状态，故用 emit('cleared') 交回 -->
+    <PrivacyView
+      v-if="cardOn('data', 'privacy')"
+      :services="services"
+      @cleared="onDataCleared"
+    />
 
     <!-- [数据] 备份与恢复。原先折在「数据与隐私」卡的 .fold 里，但「数据」组 desc 一直把它
          当并列的第三张卡来写（「凭据设置 · 清除数据 · 备份与恢复」），搜索索引里也没提它 ——
          即 desc 承诺是卡、实际是别人卡里的折叠。提升为独立卡，三者对齐；也更好找。
          卡内内容原样搬来，交互与状态（backupFlash 等）不变。 -->
-    <section v-if="cardOn('data', 'backup')" class="card" data-search="backup">
-      <h2>备份与恢复</h2>
-      <p class="hint">把「挂件设置 / 账本 / 窗口位置 / 计时」打包成一个 JSON 文件（不含 dsh 开发者配置与 Node 路径）；<strong>凭据默认不导出</strong>，勾选「包含凭据」后必须设密码，凭据会用 scrypt + AES-256-GCM 加密后才写入文件（文件里没有明文）。<strong>安全提示：</strong>密码不会保存到任何地方，忘记就无法解密（其余项仍可正常恢复）；备份文件本身含你的设置与用量记录，请妥善保管。</p>
-      <label class="field row check">
-        <span class="label">包含凭据 <em>（需设密码，加密后写入）</em></span>
-        <input type="checkbox" v-model="backupWithSecrets" @change="backupFlash.msg = ''" />
-      </label>
-      <label v-if="backupWithSecrets" class="field row">
-        <span class="label">备份密码</span>
-        <input type="password" v-model="backupPassword" placeholder="至少 6 位，导入时要用" autocomplete="new-password" />
-      </label>
-      <div class="btn-row">
-        <button class="secondary utils-btn utils-secondary" :disabled="backupBusy" @click="backupExport">导出备份…</button>
-        <button class="secondary utils-btn utils-secondary" :disabled="backupBusy" @click="backupPick">导入备份…</button>
-        <button v-if="backupPreview" class="secondary utils-btn utils-secondary" @click="backupCancelPick">取消导入</button>
-      </div>
-
-      <div v-if="backupPreview">
-        <p class="guide-use">已选文件：<code>{{ backupPreview.path }}</code><br />导出时间：{{ backupPreview.exportedAt || '未知' }} · 插件版本：{{ backupPreview.appVersion || '未知' }}</p>
-        <label v-for="it in backupItems" :key="it.key" class="field row check">
-          <span class="label">{{ it.label }} <em>{{ it.note }}{{ backupHas(it.key) ? '' : '：备份里没有这一项' }}</em></span>
-          <input type="checkbox" v-model="backupPicks[it.key]" :disabled="!backupHas(it.key)" @change="backupConfirm = false" />
-        </label>
-        <label v-if="backupHas('secrets')" class="field row">
-          <span class="label">备份密码</span>
-          <input type="password" v-model="backupPassword" placeholder="导出时设的密码（用于解密凭据）" autocomplete="off" />
-        </label>
-        <div class="btn-row">
-          <button class="danger utils-btn utils-danger" :disabled="backupBusy || !backupAnyItem" @click="backupApply">
-            {{ backupConfirm ? '确认覆盖写入？不可撤销' : '恢复选中项' }}
-          </button>
-          <button v-if="backupConfirm" class="secondary utils-btn utils-secondary" @click="backupConfirm = false">取消</button>
-        </div>
-      </div>
-      <p v-if="backupFlash.msg" class="msg" :class="msgCls(backupFlash)">{{ backupFlash.msg }}</p>
-    </section>
+    <BackupView v-if="cardOn('data', 'backup')" :services="services" @applied="onBackupApplied" />
 
     <!-- [开发者] DeepSeek Harness（dsh） -->
     <section v-if="cardOn('dev', 'dshMain')" class="card dsh-card" data-search="dshMain">
@@ -11899,139 +8669,35 @@ onUnmounted(() => {
          上方 7 张卡都属于 dsh，这张不是 —— 用一条纯分界线隔开即可，不写字：
          写字会和紧邻的卡标题「Codex 会话统计」重复，反而更啰嗦。 -->
     <hr v-if="!searchActive && activeTab === 'dev'" class="group-sep">
-    <section v-if="cardOn('dev', 'codex')" class="card dsh-card" data-search="codex">
-      <div class="card-head">
-        <h2 class="card-toggle" @click="toggleDevCard('codex')">
-          <span class="caret">{{ devFolds.codex ? '▾' : '▸' }}</span>Codex 会话统计
-          <!-- 收起态摘要：只在「本会话已展开读过」后才显示，否则不预读、直接提示点开 -->
-          <span v-if="!devFolds.codex" class="card-sum">
-            <template v-if="devStatsLoaded.codex && codex && codex.ok">今日 {{ fmtTokens(codex.todayTokens) }} tokens · 本月 {{ fmtTokens(codex.monthTokens) }}</template>
-            <template v-else>点击展开查看</template>
-          </span>
-        </h2>
-      </div>
-      <template v-if="devFolds.codex">
-      <p class="hint">
-        直接读 Codex CLI 写在 <code>~/.codex/sessions</code> 的会话日志（<code>rollout-*.jsonl</code>）做统计，
-        <strong>纯本地读取、不需要 API Key、不发任何网络请求</strong>。用量取累计量的差值，天然免疫重复计数。
-      </p>
-      <div class="btn-row">
-        <!-- 首次展开已自动读过一次，按钮主要当「刷新」用 -->
-        <button class="utils-btn utils-primary" :disabled="codexBusy" @click="codexRefresh">{{ codexBusy ? '读取中…' : (codex ? '刷新' : '读取统计') }}</button>
-        <button v-if="codex" class="secondary utils-btn utils-secondary" :disabled="codexBusy" @click="codexClearCache">清除缓存并重扫</button>
-      </div>
-      <p v-if="codexFlash.msg" class="msg" :class="msgCls(codexFlash)">{{ codexFlash.msg }}</p>
+    <!-- [dsh] Codex 本地会话统计：模板已迁至 CodexView.vue。父级用一条 hr.group-sep 隔开
+         （依赖 searchActive / activeTab，留父级）。fmtTokens / codexWinText / codexDayLabel
+         与图表档位仍留父级（跨卡共享），按 props 下传；本卡是否有窗口数据经 emit('windows') 上抛，
+         并入父级的倒计时心跳 codexTickNeed。 -->
+    <CodexView
+      v-if="cardOn('dev', 'codex')"
+      :services="services"
+      :ranges="DSH_USAGE_RANGES"
+      :fmt-tokens="fmtTokens"
+      :codex-win-text="codexWinText"
+      :codex-day-label="codexDayLabel"
+      @windows="onCodexWindows"
+    />
 
-      <template v-if="codex && codex.ok">
-        <label class="field row">
-          <span class="label">会话目录</span>
-          <span class="cmdline">{{ codex.home }}</span>
-        </label>
-        <label class="field row">
-          <span class="label">会话文件</span>
-          <span class="ver">{{ codex.sessions }} 个</span>
-        </label>
-
-        <!-- 与 dsh 用量卡保持同一套指标格：原先「今日」「累计」各占一行、数值与单位混排，
-             「累计」的括号里还塞了三个分项、长度逼近两行。改成等宽格后横向可比，
-             分项另起一行小格（见下方 .stat-break）。
-             Codex 无金额口径（showCost=false），故 .stat-sub 不放成本：
-             今日那格改放轮次，其余留空不渲染（空 span 会让该格多占一行高度）。 -->
-        <div class="stat-grid">
-          <div class="stat-cell" title="今日消耗的 token 数（含输出 / 推理 / 缓存命中）">
-            <span class="stat-num">{{ fmtTokens(codex.todayTokens) }}</span>
-            <span class="stat-label">今日</span>
-            <span class="stat-sub">{{ codex.turns || 0 }} 轮</span>
-          </div>
-          <div class="stat-cell" title="本月消耗的 token 数">
-            <span class="stat-num">{{ fmtTokens(codex.monthTokens) }}</span>
-            <span class="stat-label">本月</span>
-          </div>
-          <div class="stat-cell" title="有记录以来的累计 token 数">
-            <span class="stat-num">{{ fmtTokens(codex.totalTokens) }}</span>
-            <span class="stat-label">累计</span>
-          </div>
-          <div class="stat-cell" title="会话文件个数（~/.codex/sessions 下的 rollout-*.jsonl）">
-            <span class="stat-num">{{ codex.sessions || 0 }}</span>
-            <span class="stat-label">会话</span>
-          </div>
-        </div>
-
-        <!-- 累计的 token 构成：三项本来塞在「累计」那一行的括号里，与总数混排 -->
-        <div class="stat-break">
-          <span class="stat-chip"><em>输出</em>{{ fmtTokens(codex.outTokens) }}</span>
-          <span class="stat-chip"><em>推理</em>{{ fmtTokens(codex.reasonTokens) }}</span>
-          <span class="stat-chip"><em>缓存命中</em>{{ fmtTokens(codex.cachedTokens) }}</span>
-        </div>
-
-        <!-- 订阅窗口：只有日志里带 rate_limits（ChatGPT 订阅）时才有内容，没有就整行不渲染。
-             是相对倒计时的整句文本，与上面的短数值不同形，仍留 .field row。 -->
-        <label v-if="codexWindowsText" class="field row">
-          <span class="label">订阅窗口</span>
-          <span class="ver">{{ codexWindowsText }}</span>
-        </label>
-
-        <UsageChart
-          v-model:range="codexRange"
-          :ranges="DSH_USAGE_RANGES"
-          :days="codexDays"
-          :label-every="codexLabelEvery"
-          :bar-height="codexBarHeight"
-          :day-label="codexDayLabel"
-          :models="codexModels"
-          turns-label="轮"
-          :show-cost="false"
-          :fmt-cost="() => ''"
-        />
-
-        <div class="fold">
-          <button class="link-btn utils-btn utils-secondary" @click="codexFolds.help = !codexFolds.help">{{ codexFolds.help ? '收起说明' : '说明' }}</button>
-          <div v-if="codexFolds.help" class="guide">
-            <p class="guide-use"><strong>统计口径：</strong>优先用 <code>total_token_usage</code> 的累计差值（单调递增，一次轮次写多条 <code>token_count</code> 也不会重复计数）；累计缺失时退回 <code>last_token_usage</code>。</p>
-            <p class="guide-use"><strong>模型归属：</strong>按 <code>turn_context</code> 事件里的 <code>model</code> 归类，未标注的记为 <code>codex</code>。</p>
-            <p class="guide-use"><strong>订阅窗口：</strong>ChatGPT 订阅的 Codex 会在 <code>token_count</code> 事件里带 <code>rate_limits</code> 快照（5h 与周两个窗口的已用% 与重置时间），字段名各版本不一致，已做多候选键容错；API-key 计费或没有订阅时日志里没有这份快照，这一行不显示。窗口是账号级状态，与上面的本地 token 统计各自独立。</p>
-            <p class="guide-use"><strong>缓存：</strong>按文件的 size/mtime 判断是否变化，只有变过的文件才重新解析（会话日志可能几十 MB）。缓存里只有聚合数与文件指纹，<strong>不含任何凭据</strong>。</p>
-            <p class="guide-use"><strong>读不到数据：</strong>确认 Codex CLI 至少跑过一次、且 <code>~/.codex/sessions</code>（或 <code>$CODEX_HOME</code> 指向的目录）里有 <code>rollout-*.jsonl</code>。</p>
-          </div>
-        </div>
-      </template>
-      </template>
-    </section>
-
-    <!-- [帮助] 关于与更新 -->
-    <section v-if="cardOn('help', 'about')" class="card" data-search="about">
-      <h2>关于与更新</h2>
-      <!-- 上游要求衍生版必须标注「个人衍生版」：既避免被误认成官方版，也说明售后归属 -->
-      <p class="hint">本插件是 <strong>个人衍生版</strong>，移植自 <a href="#" @click.prevent="openDoc('https://github.com/MeteorNOX/DeepSeek-Balance-Whale-Widget')">MeteorNOX/DeepSeek-Balance-Whale-Widget</a>（MIT License）。<strong>非官方版本，与 DeepSeek、uTools 官方均无关联</strong>，无官方支持与售后 —— 上游作者不对本衍生版负责，问题请走下方反馈入口。</p>
-      <label class="field row check">
-        <span class="label">自动检查更新</span>
-        <input type="checkbox" v-model="cfg.updateCheckOn" @change="patchCfg({ updateCheckOn: cfg.updateCheckOn })" />
-      </label>
-      <label class="field row">
-        <span class="label">当前版本</span>
-        <span class="ver">v{{ appVersion }}</span>
-      </label>
-      <div class="btn-row">
-        <button class="secondary utils-btn utils-secondary" :disabled="updateChecking" @click="doCheckUpdate(true)">
-          {{ updateChecking ? '检查中…' : '立即检查更新' }}
-        </button>
-        <button class="secondary utils-btn utils-secondary" @click="marketSearch">插件市场</button>
-        <button class="secondary utils-btn utils-secondary" @click="openHomepage">项目主页</button>
-      </div>
-      <p v-if="updateMsg" class="msg" :class="[updateResult && updateResult.ok ? 'ok' : 'err', hasUpdate ? 'clickable' : '']"
-         :title="hasUpdate ? '点击前往插件市场更新' : ''"
-         @click="hasUpdate && marketSearch()">{{ updateMsg }}</p>
-      <p class="hint">开启后每次呼出插件自动检查一次（12 小时内最多一次），发现新版本会弹出系统通知。</p>
-
-      <div class="fold">
-        <button class="link-btn utils-btn utils-secondary" @click="aboutFolds.feedback = !aboutFolds.feedback">
-          {{ aboutFolds.feedback ? '收起反馈与建议' : '反馈与建议' }}
-        </button>
-        <div v-if="aboutFolds.feedback" class="guide">
-          <p class="hint">用得还顺手吗？想要的新功能、碰到的 bug，或者只是想吐槽两句，都欢迎告诉鲸鱼娘～可以去 <a href="#" @click.prevent="openDoc('https://www.u-tools.cn/plugins/detail/%E5%B0%8F%E9%B2%B8%E9%B1%BC%E4%BD%99%E9%A2%9D%E6%8C%82%E4%BB%B6/')">插件市场详情页</a> 的「留言」区，也可以在 <a href="#" @click.prevent="openDoc('https://github.com/Berge520/Balance-Whale-Widget/issues')">GitHub Issues</a> 里提，每条我都会认真看完，顺手给个五星好评就更开心啦 (๑•̀ㅂ•́)و✧</p>
-        </div>
-      </div>
-    </section>
+    <!-- [帮助] 关于与更新：模板已迁至 AboutView.vue。更新检查状态与 doCheckUpdate
+         留在父级（onMounted 里有启动时自动检查一次，不随卡片可见性而跑），这里用 emit 触发 -->
+    <AboutView
+      v-if="cardOn('help', 'about')"
+      :cfg="cfg"
+      :services="services"
+      :app-version="appVersion"
+      :update-checking="updateChecking"
+      :update-msg="updateMsg"
+      :has-update="hasUpdate"
+      :update-ok="!!(updateResult && updateResult.ok)"
+      @patch="patchCfg"
+      @doc="openDoc"
+      @check-update="doCheckUpdate"
+    />
 
     <!-- [帮助] GitHub 加速（hosts 方案）：已抽成独立组件，显隐仍由本页的 Tab / 搜索态决定 -->
     <AccelView

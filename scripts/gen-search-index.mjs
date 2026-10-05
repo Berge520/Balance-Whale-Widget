@@ -51,7 +51,7 @@ function extractCardText(segment) {
   const raws = []
   const h = segment.match(/<h2[^>]*>([\s\S]*?)<\/h2>/)
   if (h) raws.push(h[1])
-  // 画廊类卡片（assetsSkins / quotes 等）不用 h2，卡头是 <button class="fold-title">，
+  // 画廊类卡片（assetsSkins / assetsSounds 等）不用 h2，卡头是 <button class="fold-title">，
   // 内部还嵌着折叠箭头 span，一并剥掉
   for (const m of segment.matchAll(/<button class="fold-title[^"]*"[^>]*>([\s\S]*?)<\/button>/g)) raws.push(m[1])
   for (const m of segment.matchAll(/<span class="label[^"]*">([\s\S]*?)<\/span>/g)) raws.push(m[1])
