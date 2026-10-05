@@ -129,9 +129,11 @@ test('挂件视觉类配置键在消费方（挂件页 / 宿主建窗）里都�
     // 声音
     'vol', 'soundOn', 'soundSet',
     // 气泡 / 台词
-    'bubbleOn', 'quotes', 'timeBubbleOn', 'usageMode', 'peakMode', 'peakRemindOn',
+    'bubbleOn', 'timeBubbleOn', 'usageMode', 'peakMode', 'peakRemindOn',
+    // 台词：全局停留时长 / 点按推进 / 拖拽台词（都由挂件页消费）
+    'bubbleDwell', 'tapAdvance', 'dragLines',
     // 提醒 / 计时
-    'lowAlertOn', 'lowAlertAmount', 'budgetOn', 'budgetAmount', 'clickQueueOn', 'remindSec',
+    'lowAlertOn', 'lowAlertAmount', 'budgetOn', 'budgetAmount', 'remindSec',
     'timerMode', 'timerSec', 'timerAt', 'timerNote', 'timerBreakMin', 'timerRemindSec',
     'timerBubblePin', 'timerBubbleOnly', 'timerNotifyOn', 'timerMailOn', 'timerPersistOn',
     'notifyMailOn',

@@ -1,13 +1,13 @@
 <script lang="ts" setup>
-// 台词预览舞台：挂载共享渲染器（src/bubble/bubble-render.js），与悬浮窗气泡
-// 同一套 DOM / 主题变量 / 字号自适应算法，台词库编辑时所见即所得。
+// 泡泡预览舞台：挂载共享渲染器（src/bubble/bubble-render.js），与悬浮窗气泡
+// 同一套 DOM / 主题变量 / 字号自适应算法，按压气泡编辑时所见即所得。
 // 悬浮窗走 esbuild 打的 IIFE（window.BubbleRender），这里直接 ESM import 同一源文件——
 // 两边共享的正是这份源码，而不是各自维护的副本。
 import { onMounted, onUnmounted, ref, watch } from 'vue'
 import { createBubbleRenderer, THEMES } from '../bubble/bubble-render.js'
 
 interface PreviewLine { t: string; s: 'A' | 'B' | 'P' | 'C'; c?: string; w?: boolean }
-// rows 形态 = v2 行×段（富文本台词组真预览）：段结构由渲染器 normalizeRowInput 双认，
+// rows 形态 = 模块行（泡泡多模块真预览）：段结构由渲染器 normalizeRowInput 双认，
 // 这里只透传，不在前端再清洗
 const props = defineProps<{
   lines: Array<PreviewLine | null> | { gif: true; src?: string } | { rows: unknown[] }
@@ -16,6 +16,8 @@ const props = defineProps<{
   // 不传时渲染器整段丢弃这两类段（与旧版一致），传了才能真预览富文本组
   bubbleSrc?: (img: number) => string | null
   modelText?: (model: string) => string
+  // v2 randimg 段取图：从「已装共享角色图」池随机抽一张。不传时渲染器整段丢弃
+  randImgSrc?: () => string | null
 }>()
 
 const stage = ref<HTMLElement | null>(null)
@@ -48,6 +50,7 @@ onMounted(() => {
     // 同源但固定，预览要的是稳定可检查）、model 段走父组件的示例值替换
     bubbleSrc: (img: number) => (props.bubbleSrc ? props.bubbleSrc(img) : null),
     modelText: (model: string) => (props.modelText ? props.modelText(model) : ''),
+    randImgSrc: () => (props.randImgSrc ? props.randImgSrc() : null),
   })
   // 预览里的气泡常开（不做收起状态机）：文本/动图的显隐全由 applyLines 按行模型控制
   renderer.els.bubbleBox.classList.add('dshwv-bubble-open')

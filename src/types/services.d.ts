@@ -40,8 +40,6 @@ export interface WhaleConfig {
   // 余额大幅波动通知：单次采样余额下降 ≥ dropAlertAmount 时弹系统通知（不做每天一次去重）；0 表示未设置
   dropAlertOn: boolean
   dropAlertAmount: number
-  // 点气泡依次播放台词（false = 每次随机一组）
-  clickQueueOn: boolean
   // 提醒气泡（峰谷/预算/低余额/穿透说明）停留秒数；0 = 常驻，等用户点掉
   remindSec: 0 | 5 | 8 | 15
   // 免打扰时段：时段内只弹挂件气泡、不弹系统通知（支持跨午夜，如 23:00–07:00）
@@ -72,8 +70,9 @@ export interface WhaleConfig {
   theme: 'default' | 'dark' | 'sakura'
   // 界面深浅色（设置页与挂件面板共用）：auto 跟 uTools isDarkColors / 手动固定 light / dark
   uiMode: 'auto' | 'light' | 'dark'
-  // 台词库（设置页可编辑，一行一条；空组 = 恢复内置默认）
-  quotes: WhaleQuotes
+  // 按压气泡模型（上游「自定义泡泡」形态）：on 开启时挂件改走它；
+  // 与顶层交互项（tapAdvance / bubbleDwell / dragLines）各管各，仅本模型生效时用
+  bubble: WhaleBubble
   // 提醒文案模板（设置页可编辑；低余额 / 预算 / 峰谷 / 穿透四类提醒的气泡与系统通知共用一份）
   alerts: WhaleAlerts
   // 额度（资源包 / 订阅）：总量（元，0 = 未设置）与重置周期；已用由账本按周期算，不落配置
@@ -161,23 +160,100 @@ export interface WhaleConfig {
   mailSubjectPrefix: string
 }
 
-// 台词库：groups 是可增删的随机台词组（一组 = 一个抽签项），time 是白天报时模板（{t} = 当前时间），
-// gifFail 是动图加载失败时的顶替文案；后两项不走抽签，固定就是这两份
-export interface WhaleQuotes {
-  groups: WhaleQuoteGroup[]
-  time: string[]
-  gifFail: string[]
+// 按压气泡模型（上游「自定义泡泡」）：v 固定 1（结构版本）。items 是点击序列（首次 + 再次…），
+// 每步是单选 WhaleBubbleBubble 或并列 WhaleBubbleChoice；lib 是可复用的模块库。
+// tapAdvance / dwell / dragLines 是本模型自带的交互项，与顶层同名键各管各。
+export interface WhaleBubble {
+  v: 1
+  on: boolean
+  items: WhaleBubbleStep[]
+  lib: WhaleBubbleLibItem[]
+  // 点角色是否推进泡泡队列（上游默认关）
+  tapAdvance: boolean
+  // 泡泡停留秒数（3–60）
+  dwell: number
+  // 本模型自带的拖拽台词（空 = 回退顶层 dragLines）
+  dragLines: string[]
+  // 固定文案池：time/timeEarly/timeMorning/timeEve 是报时四池（{t} = 当前时间），
+  // gifFail 是动图加载失败时的顶替文案；不走抽签，挂件按当前时段取词
+  system: Record<string, string[]>
 }
 
-// 随机台词组：kind = card（内置余额 / 时段卡，内容现算、文字不可编辑）/ text（用户填的台词）/
-// image（抽一张自定义气泡图）。w 是权重（1–999，越大越常抽到）；style 只对文本组有效：
-// A = 普通字号（长句自动换行）、B = 大字（不换行，靠挂件按可用宽度整体缩放）
-export interface WhaleQuoteGroup {
-  kind: 'card' | 'text' | 'image'
-  w: number
-  style?: 'A' | 'B'
-  lines?: string[]
+// 一个步骤：单选泡（有 modules）或并列候选（kind='choice'，有 options）
+export type WhaleBubbleStep = WhaleBubbleBubble | WhaleBubbleChoice
+
+// 单个泡：kind 恒为 'custom'（上游出口形态），modules 是模块扁平数组（用 row 键表达行分组）
+export interface WhaleBubbleBubble {
+  kind?: 'custom'
+  modules: WhaleBubbleMod[]
 }
+
+// 并列泡：按权重 w（1–99，缺省 1）抽一个候选项
+export interface WhaleBubbleChoice {
+  kind: 'choice'
+  options: WhaleBubbleOption[]
+}
+
+export interface WhaleBubbleOption {
+  w?: number
+  item: WhaleBubbleBubble
+}
+
+// 模块库条目：另存一个模块复用（name 最长 20 字）
+export interface WhaleBubbleLibItem {
+  id: string
+  name: string
+  module: WhaleBubbleMod
+}
+
+// 气泡模块：type 决定内容形态，其余为公共样式字段。行分组用 row 键（1–6）表达：
+// 相邻模块 row 键相同且非空 = 同一行；单模块行 / 图片行无 row 键
+export interface WhaleBubbleMod {
+  type: WhaleBubbleModType
+  // 公共样式
+  size: number
+  color?: string
+  rgb?: string
+  bg?: string
+  bgRgb?: string
+  bold?: boolean
+  italic?: boolean
+  ul?: boolean
+  fontFamily?: string
+  row?: number
+  // 内容模板（含占位符，如 {balance_ds} / {expense_ds} / {status} / {countdown}）
+  tpl?: string
+  // text：静态文本
+  text?: string
+  // random：随机语句池（字符串或加权对象 { t, wt }）
+  lines?: Array<string | { t: string; wt?: number }>
+  // link：超链接
+  url?: string
+  // image：自定义气泡图下标
+  imgId?: string
+  // randimg：随机图片下标池
+  imgs?: string[]
+  // image / randimg：图片缩放（0.1–1）
+  imgScale?: number
+  // peak：峰/谷两态颜色、跑马灯、显示样式（mini 简式 / text 文字 / count 倒计时）
+  peakColor?: string
+  offColor?: string
+  peakRgb?: string
+  offRgb?: string
+  peakBg?: string
+  offBg?: string
+  peakStyle?: 'mini' | 'text' | 'count'
+  // session：对话名保留字数
+  len?: number
+  // quota / plan：按 API 模型实例化（本插件暂无数据源，渲染显示占位「—」）
+  modelId?: string
+  planWin?: 'all' | '5h' | 'week' | 'month'
+}
+
+// 模块类型白名单
+export type WhaleBubbleModType =
+  | 'text' | 'time' | 'balance' | 'bonus' | 'recharge' | 'today' | 'peak'
+  | 'session' | 'random' | 'link' | 'image' | 'randimg' | 'quota' | 'plan'
 
 // 自定义单价（「实时·令牌」模式可选）：覆盖内置价目表。填的是谷价（币种 / 百万 token），
 // 峰价按官方规则（谷价 × 2）自动翻倍；cur 为 USD 时按 rate（元/USD）折成人民币后记账。
@@ -1291,11 +1367,10 @@ export interface AssetsExportResult {
   canceled?: boolean
   path?: string
   exportedAt?: string
-  // 包内形象张数、音效段数、气泡图张数与台词组个数
+  // 包内形象张数、音效段数与气泡图张数
   skins?: number
   sounds?: number
   bubbles?: number
-  quotes?: number
   error?: string
 }
 
@@ -1306,13 +1381,11 @@ export interface AssetsPreviewResult {
   path?: string
   exportedAt?: string
   appVersion?: string
-  has?: { skins: number; sounds: number; bubbles: number; quotes: number }
+  has?: { skins: number; sounds: number; bubbles: number }
   // 包内形象/气泡图文件名（最多 40 条）与音效槽位，仅供预览展示
   skinNames?: string[]
   soundRoles?: string[]
   bubbleNames?: string[]
-  // 包内台词组个数（老版本导出的包没有 quotes 清单项，恒为 0）
-  quoteCount?: number
   error?: string
 }
 
@@ -1325,8 +1398,6 @@ export interface AssetsApplyResult {
   sounds?: { applied: number }
   // 气泡图也是「补充」：skipped = 因已达上限（8 张）未导入的张数
   bubbles?: { added: number; skipped: number }
-  // 台词组是「追加」：勾选且包里有组时才有值，added = 清洗后实际进配置的组数
-  quotes?: { added: number }
   errors?: string[]
   error?: string
 }
@@ -1757,6 +1828,9 @@ export interface WhaleServices {
   getConfig(): WhaleConfig
   // 订阅配置变更（挂件菜单改设置时宿主广播过来），返回退订函数
   onConfigChange(cb: (cfg: WhaleConfig) => void): () => void
+  // 订阅导航指令（挂件菜单「气泡设置」→ 宿主唤窗并投递 target，设置页据此切 Tab 并展开目标卡）；
+  // 返回退订函数。target 目前只有 'bubble'（按压气泡卡），未知值前端忽略
+  onNavigate(cb: (target: string) => void): () => void
   // 任务栏当前状态：visible = 正在占位（常显/自动隐藏已弹出）/ hidden = 已自动收起 / none = 未识别到
   getTaskbarState(): TaskbarState
   getVersion(): string
@@ -1788,7 +1862,7 @@ export interface WhaleServices {
   // 手动校准今日已用（仅记账模式有意义；令牌模式下平台返回会覆盖）
   calibrateTodayUsage(amount: number): CalibrateResult
   // —— 自定义音效（按压/释放两段 + 四类提醒各一组；文件复制进 userData/whale-sounds） ——
-  // shared 槽位（共享音效库）只在 getSounds 的返回里出现：台词组「组级音效」下拉的选项来源
+  // shared 槽位（共享音效库）只在 getSounds 的返回里出现：按压气泡「气泡音效」下拉的选项来源
   getSounds(): Record<SoundRole | 'shared', SoundMeta[]>
   // 音效本体（base64 data URL 数组），供设置页试听
   getSoundData(): Record<SoundRole, string[]>
@@ -1864,8 +1938,8 @@ export interface WhaleServices {
   assetsExport(): AssetsExportResult
   // 选择素材包并解析预览（不写任何数据）
   assetsPick(): AssetsPreviewResult
-  // 按勾选项写入：形象/气泡图补充（新 id）、音效同槽位覆盖、台词组追加到现有组尾部
-  assetsApply(opts: { skins?: boolean; sounds?: boolean; bubbles?: boolean; quotes?: boolean }): AssetsApplyResult
+  // 按勾选项写入：形象/气泡图补充（新 id）、音效同槽位覆盖
+  assetsApply(opts: { skins?: boolean; sounds?: boolean; bubbles?: boolean }): AssetsApplyResult
   // 放弃本次选择
   assetsCancel(): { ok: boolean }
   // Codex 本地会话统计：读 ~/.codex/sessions 下的 rollout JSONL，按天/模型聚合
@@ -1994,9 +2068,6 @@ export interface WhaleServices {
   copyText(text: string): boolean
   redirectHotKeySetting(cmdLabel?: string): boolean
   isWidgetVisible(): boolean
-  // 台词试播到挂件：整组台词按会话发去悬浮页（一屏一步，挂件点气泡顺序翻；挂件未显示时 ok:false）。
-  // 步 = 旧三行数组（含 null 占位）或 v2 行组 { rows }（富文本组，行/段结构见 spec §六）
-  quotePreview(payload: { steps: Array<Array<{ t: string; s: string; c?: string; w?: boolean } | null> | { rows: unknown[] }> }): { ok: boolean; error?: string }
   // 诊断日志（落盘于 %TEMP%\whale-debug.log，进程被 uTools 结束也不丢）
   getDebugLog(): DebugLogResult
   openLogFile(): { ok: boolean; path: string }

@@ -71,7 +71,7 @@ const PATCH_FIXTURES = {
   bubbleOn: { bubbleOn: false }, menuBtn: { menuBtn: false }, onTop: { onTop: false },
   lowAlertOn: { lowAlertOn: false }, lowAlertAmount: { lowAlertAmount: 123 }, budgetOn: { budgetOn: true },
   budgetAmount: { budgetAmount: 55 }, dropAlertOn: { dropAlertOn: true }, dropAlertAmount: { dropAlertAmount: 66 },
-  clickQueueOn: { clickQueueOn: true }, remindSec: { remindSec: 5 }, quietOn: { quietOn: true },
+  remindSec: { remindSec: 5 }, quietOn: { quietOn: true },
   quietFrom: { quietFrom: '01:02' }, quietTo: { quietTo: '03:04' }, timeBubbleOn: { timeBubbleOn: false },
   updateCheckOn: { updateCheckOn: true }, dragLock: { dragLock: true }, enterMode: { enterMode: 'widget' },
   timerNotifyOn: { timerNotifyOn: false }, timerMailOn: { timerMailOn: false }, timerPersistOn: { timerPersistOn: false },
@@ -89,7 +89,11 @@ const PATCH_FIXTURES = {
   edgeBottom: { edgeBottom: 13 }, edgeLeft: { edgeLeft: 14 }, scrollGapOn: { scrollGapOn: true },
   scrollGapPx: { scrollGapPx: 33 }, snapMode: { snapMode: 'off' }, snapRatio: { snapRatio: 40 },
   opacity: { opacity: 66 }, passThrough: { passThrough: true }, skin: { skin: 'custom' },
-  theme: { theme: 'dark' }, uiMode: { uiMode: 'light' }, quotes: { quotes: { time: ['改过的报时'] } },
+  theme: { theme: 'dark' }, uiMode: { uiMode: 'light' },
+  // 拖拽台词：默认 null（用内置文案），随便给一条非空串即可判为「改过」
+  bubbleDwell: { bubbleDwell: 12 }, dragLines: { dragLines: ['改过的拖拽台词'] }, tapAdvance: { tapAdvance: true },
+  // 新按压气泡模型：默认 { v:1, on:false, items:[], lib:[] ... }，随便开一个总开关即可判为「改过」
+  bubble: { bubble: { v: 1, on: true, items: [], lib: [], tapAdvance: true, dwell: 9, dragLines: '改过的拖拽台词' } },
   alerts: { alerts: { low: '改过的低额模板' } },
   // 0 是合法音量（静音），夹具特意用 0 而不是随便一个非默认值，防止解析侧用 || 兜底把 0 吃掉
   alertVols: { alertVols: { low: { vol: 0, volSet: true }, peak: { vol: 0.25 } } },

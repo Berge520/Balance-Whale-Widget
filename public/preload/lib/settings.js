@@ -9,6 +9,7 @@ const {
   clampNum, readConfig, patchConfig, readSecrets, writeSecrets, readLedger, historyKeepDays,
   resetAnchorCache, mergeLedgerHistory, clearTimer, calibrateTodayUsage,
   defaultAnchor, writeAnchor, normModelId, normModel, sanitizeKey, dropModelState,
+  normBubble,
 } = require('./store')
 const {
   fetchBalanceWith, fetchPlatformUsage, checkUpdate, resetBalanceCache,
@@ -17,7 +18,7 @@ const {
 const {
   ensureWidget, destroyWidget, winAlive, getWidgetError, getWindow,
   applyScaleToWindow, applyOnTop, pushConfig, queueLiveScale, repositionFromAnchor,
-  taskbarState, syncTaskbarWatch, sendToWidget, quotedSoundNames,
+  taskbarState, syncTaskbarWatch, sendToWidget,
 } = require('./widget')
 // dsh 一族合计 300KB+，且本模块在设置窗加载时会被求值。下面所有 dsh.xxx 的调用都在函数体内
 // （无模块求值期引用），故改成惰性：首次访问 dsh.* 时才 require，之后复用同一份。
@@ -1612,16 +1613,20 @@ function emitConfigChange() {
   }
 }
 
+// 导航订阅（设置页 ← 宿主）。挂件菜单的「气泡设置」按钮请求唤出设置页并直达某张卡片时，
+// 宿主先 showMainWindow、再调 emitNavigate 让已打开的设置窗切到对应 Tab 并展开目标卡。
+// 与 configListeners 分开：这里是「一次性动作」，不重复回放给后来订阅者。
+const navListeners = []
+function emitNavigate(target) {
+  if (!navListeners.length) return
+  for (const cb of navListeners) {
+    try { cb(target) } catch (err) { logErr('[whale][nav] 订阅回调异常', err && err.message) }
+  }
+}
+
 // 模型列表/主显示变化后推给挂件（挂件菜单里的「模型」分组要立即跟着变）
 function pushModels() {
   sendToWidget('whale:models', getModelsPayload())
-}
-
-// 组级台词音效：按「当前配置里被组引用的段名」定向推 data URL（name→dataURL）。
-// 与 whale:sounds 的全量六槽位不同，这里只搬真正被引用的几段 —— shared 素材池几十段，
-// 全推等于白搬几 MB 无用 base64。音效库或台词配置变了都要重推（被引用段可能被删/换）
-function pushQuoteSounds() {
-  sendToWidget('whale:quote-sounds', sounds.getQuoteSoundData(quotedSoundNames(readConfig())))
 }
 
 // GitHub 加速操作的统一包装：开 op 日志 → 跑任务 → 按「结论函数」定终态与摘要。
@@ -1784,6 +1789,16 @@ module.exports = {
     }
   },
   emitConfigChange,
+  // 订阅导航指令（挂件菜单「气泡设置」→ 设置页切 Tab 并展开目标卡），返回退订函数
+  onNavigate(cb) {
+    if (typeof cb !== 'function') return function () {}
+    navListeners.push(cb)
+    return function () {
+      const i = navListeners.indexOf(cb)
+      if (i >= 0) navListeners.splice(i, 1)
+    }
+  },
+  emitNavigate,
   // 任务栏「当前」状态（设置页显示）：visible = 正在占位 / hidden = 已自动收起 / none = 未识别到
   getTaskbarState() {
     try { return taskbarState() } catch (err) { return { state: 'none', edge: '', thickness: 0 } }
@@ -2378,8 +2393,6 @@ module.exports = {
     if (cfg.avoidTaskbar !== prev.avoidTaskbar) syncTaskbarWatch()
     if (cfg.onTop !== prev.onTop) applyOnTop(cfg.onTop)
     if (cfg.usageMode !== prev.usageMode) resetBalanceCache()
-    // 台词组变了（含组级 sound 增删换）：重推组音效数据，悬浮页立刻能播新段
-    if (patch && patch.quotes !== undefined) pushQuoteSounds()
     pushConfig()
     // 反向回推给设置页：saveConfig 是设置页自己调的，但设置页的 cfg 不一定等于落库结果 ——
     // 宿主 patchConfig 会做归一化（补齐 / 钳范围 / 清洗），不回推的话设置页手里的还是它自己拼的
@@ -2586,7 +2599,7 @@ module.exports = {
   },
   // —— 自定义音效 ——
   // 自定义音效元信息（每槽位一个数组），供设置页展示已导入的段落；
-  // shared 槽位的段名同时是台词组「组级音效」下拉的选项来源
+  // shared 槽位的段名同时是按压气泡「气泡音效」下拉的选项来源
   getSounds() {
     return sounds.readMeta()
   },
@@ -2611,12 +2624,10 @@ module.exports = {
     return r
   },
   // 删一段（给 file）或清空整个槽位（不给 file，设置页的批量清除走这条）。
-  // shared 段也可能正被台词组引用：连 quote-sounds 一起重推，让悬浮页及时收口
   removeSound(role, file) {
     const r = sounds.removeSound(role, file)
     if (r && r.ok) {
       sendToWidget('whale:sounds', sounds.getSoundData())
-      pushQuoteSounds()
     }
     return r
   },
@@ -2681,13 +2692,20 @@ module.exports = {
   },
   removeSkin(id) {
     const r = skins.removeSkin(id)
-    if (r && r.ok) sendToWidget('whale:skin', skins.getSkinData())
+    if (r && r.ok) {
+      sendToWidget('whale:skin', skins.getSkinData())
+      // 删掉的若是官方图（共享角色/内置），随机图池要同步缩水
+      sendToWidget('whale:shared-skins', skins.getBuiltinData())
+    }
     return r
   },
   // 批量删除：设置页选中一批后点「删除」，一趟读改写盘删完
   removeSkins(ids) {
     const r = skins.removeSkins(ids)
-    if (r && r.ok && r.removed) sendToWidget('whale:skin', skins.getSkinData())
+    if (r && r.ok && r.removed) {
+      sendToWidget('whale:skin', skins.getSkinData())
+      sendToWidget('whale:shared-skins', skins.getBuiltinData())
+    }
     return r
   },
   // —— 可选下载的内置形象（v1.7.x 起随包只留默认那张，其余挂 Release 按需下）——
@@ -2715,7 +2733,11 @@ module.exports = {
   // 宿主定位不到插件目录（只有渲染进程知道相对路径），故缩略图必须由调用方给。
   async downloadSharedSkin(id, prefix, thumb) {
     const r = await assetsPacks.downloadSharedSkin(id, { prefix: prefix, thumb: thumb })
-    if (r && r.ok && !r.skipped) sendToWidget('whale:skin', skins.getSkinData())
+    if (r && r.ok && !r.skipped) {
+      sendToWidget('whale:skin', skins.getSkinData())
+      // 新装的共享角色进「随机图池」：randimg 段要立刻能抽到它，重推一次图池
+      sendToWidget('whale:shared-skins', skins.getBuiltinData())
+    }
     return r
   },
   // 下载并安装单个共享音效到 shared 槽位。shared 不参与实播，无需推给挂件
@@ -2743,10 +2765,8 @@ module.exports = {
   },
   // 从共享库里删一段：素材池那段 + 从它「选用」出去的实播槽位副本一起清（见 assets-packs 注释）。
   // 返回值带 clearedRoles（被清空的实播槽位），设置页据此在提示里说明影响面。
-  // 被删的段可能正被台词组当组级音效引用：重推 quote-sounds 让悬浮页收口（名字查不到即静音）
   removeSharedSound(file) {
     const r = assetsPacks.removeSharedSound(file)
-    pushQuoteSounds()
     return r
   },
   // —— 数据目录：设置页「资源」页展示落盘位置并提供「打开」按钮 ——
@@ -2779,32 +2799,25 @@ module.exports = {
     if (r && r.ok) sendToWidget('whale:bubbles', bubbles.getBubbleData())
     return r
   },
-  // —— 素材包（形象 + 音效 + 气泡图 + 台词组打包带走） ——
-  // 导出成一个 .whaleassets 单文件（台词组由这里读出来传入，assets 不读配置）
+  // —— 素材包（形象 + 音效 + 气泡图打包带走） ——
+  // 导出成一个 .whaleassets 单文件
   assetsExport() {
-    const cur = readConfig().quotes
-    return assets.exportAssets(cur && cur.groups)
+    return assets.exportAssets()
   },
   // 选择素材包并解析出预览（不写任何数据）
   assetsPick() {
     return assets.pickAssets()
   },
-  // 按勾选项写入（形象/气泡图补充、音效同槽位覆盖、台词组追加），写完把新素材推给挂件
+  // 按勾选项写入（形象/气泡图补充、音效同槽位覆盖），写完把新素材推给挂件
   assetsApply(opts) {
     const r = assets.applyAssets(opts)
     if (r && r.ok) {
-      if (r.skins && r.skins.added > 0) sendToWidget('whale:skin', skins.getSkinData())
+      if (r.skins && r.skins.added > 0) {
+        sendToWidget('whale:skin', skins.getSkinData())
+        sendToWidget('whale:shared-skins', skins.getBuiltinData())
+      }
       if (r.sounds && r.sounds.applied > 0) sendToWidget('whale:sounds', sounds.getSoundData())
       if (r.bubbles && r.bubbles.added > 0) sendToWidget('whale:bubbles', bubbles.getBubbleData())
-      // 台词组追加：包里的组清洗后排到现有组尾部，超上限由 normQuoteGroups 截断。
-      // 落库走 patchConfig（normQuotes 清洗，未涉及的键自动沿用），再广播配置与组音效
-      if (Array.isArray(r.quoteGroups) && r.quoteGroups.length) {
-        const before = readConfig().quotes
-        const merged = patchConfig({ quotes: { groups: (before.groups || []).concat(r.quoteGroups) } }).quotes
-        pushConfig()
-        pushQuoteSounds()
-        r.quotes = { added: merged.groups.length - (before.groups || []).length }
-      }
     }
     return r
   },
@@ -2965,17 +2978,19 @@ module.exports = {
       destroyWidget()
       if (wasVisible) ensureWidget()
     }
-    // 音效被清除后把「无自定义音效」推给挂件，正在用「自定义」的音色会立刻回退内置音；
-    // 台词组的组级音效可能也被清了，quote-sounds 一起收口
+    // 音效被清除后把「无自定义音效」推给挂件，正在用「自定义」的音色会立刻回退内置音
     if (o.sounds) {
       try {
         sendToWidget('whale:sounds', sounds.getSoundData())
-        pushQuoteSounds()
       } catch (err) { logErr('[whale][settings] 重置后推送音效失败', err && err.message) }
     }
     // 同理：自定义形象被清除后推空串，挂件立刻回退内置形象
     if (o.skins) {
-      try { sendToWidget('whale:skin', skins.getSkinData()) } catch (err) { logErr('[whale][settings] 重置后推送形象失败', err && err.message) }
+      try {
+        sendToWidget('whale:skin', skins.getSkinData())
+        // 官方图（共享角色/内置）也随「形象」一并清掉：随机图池同步推空
+        sendToWidget('whale:shared-skins', skins.getBuiltinData())
+      } catch (err) { logErr('[whale][settings] 重置后推送形象失败', err && err.message) }
     }
     // 同理：气泡图被清除后推空数组，挂件立刻回退内置 rua.webp
     if (o.bubbles) {
@@ -3060,41 +3075,15 @@ module.exports = {
     if (!winAlive()) return false
     try { return !!getWindow().isVisible() } catch (err) { return false }
   },
-  // 台词试播到挂件：把设置页当前编辑的组台词**整组一次**发给悬浮页挂成会话，
-  // 悬浮页点挂件气泡按顺序翻条。传原始文本（占位符不替换）——悬浮页 renderLinePlaceholders
-  // 用的 {balance}/{today} 等是真机实时值，比设置页的示例值更「所见即所得」；
-  // 未显示挂件时返回 ok:false 由页面提示。
-  // 载荷双认：steps 每屏 = { rows }（v2 行载荷）或旧三行模型数组（就地转行，口径与悬浮页
-  // normPreviewStepRows 一致——A=fz7 带行 w:1 / B=fz11 / P=fz10 / C=fz7，B/P 补 b:1）
-  quotePreview(payload) {
+  // 按压气泡试播到挂件：把设置页当前编辑的泡泡队列整份发去真弹一次。载荷即新模型的 items
+  // （泡数组），此处走 normBubble 的 items 归一化，保证与落库同口径；悬浮页点挂件按
+  // tapAdvance/dwell/dragLines 推进。未显示挂件时返回 ok:false 由页面提示。
+  bubblePreview(payload) {
     const p = payload && typeof payload === 'object' ? payload : {}
-    // steps = 逐屏载荷，一屏 = 会话里可翻的一条
-    const steps = Array.isArray(p.steps) ? p.steps.slice(0, 30) : []
-    if (!steps.length) return { ok: false, error: '没有可预览的台词' }
-    const norm = []
-    for (const step of steps) {
-      let rows = null
-      if (step && typeof step === 'object' && Array.isArray(step.rows)) {
-        rows = step.rows.slice(0, 30)
-      } else if (Array.isArray(step)) {
-        const SZ = { A: 7, B: 11, P: 10, C: 7 }
-        rows = []
-        for (const it of step) {
-          const o = it && typeof it === 'object' ? it : {}
-          const t = String(o.t || '').slice(0, 500)
-          if (!t) continue
-          const s = o.s === 'B' || o.s === 'P' || o.s === 'C' ? o.s : 'A'
-          const seg = { type: 'text', t: t, fz: SZ[s], c: String(o.c || '').slice(0, 40) || undefined }
-          if (s === 'B' || s === 'P') seg.b = 1
-          rows.push({ segs: [seg], w: s === 'A' ? 1 : undefined })
-        }
-      }
-      if (!rows || !rows.length) continue
-      norm.push({ rows: rows })
-    }
-    if (!norm.length) return { ok: false, error: '没有可预览的台词' }
+    const items = normBubble({ items: p.items }).items
+    if (!items.length) return { ok: false, error: '没有可预览的泡泡' }
     if (!winAlive()) return { ok: false, error: '挂件未显示，先在设置页显示挂件再试播' }
-    const sent = sendToWidget('whale:quote-preview', { steps: norm })
+    const sent = sendToWidget('whale:bubble-preview', { items: items })
     return sent ? { ok: true } : { ok: false, error: '发送失败，挂件窗口可能正在重建' }
   },
   // 诊断日志（同步落盘 %TEMP%\whale-debug.log，进程被 uTools 结束也不丢）。

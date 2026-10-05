@@ -697,7 +697,9 @@ function maybeNotifyAlerts(payload, cfg, drop, adjust) {
   maybeNotifyDrop(payload, cfg, drop, adjust)
 }
 
-async function getBalancePayload() {
+// manual=true 表示用户主动点刷新（区别于 60s 自动轮询）：只有自动刷新才把
+// 本次余额降幅写进 payload.change（挂件占位符 {change} 的数据源，见下）
+async function getBalancePayload(manual) {
   const secrets = readSecrets()
   const payload = await fetchBalanceWith(secrets.apiKey)
   if (!payload.ok) return payload
@@ -714,6 +716,11 @@ async function getBalancePayload() {
   full.isPeak = isPeakTime(nowSec)
   // 下次峰谷切换的绝对时刻（挂件按它显示「距峰时/谷时」倒计时，避免页面自己再实现一套时段规则）
   full.peakNextAt = nextPeakChangeAt(nowSec)
+  // 本次采样的余额下降量（挂件气泡占位符 {change} 用）：仅自动刷新有意义 ——
+  // 手动刷新会强制采样一次，得到的不是「距上次自动采样的变化」，会报出一个虚假的 0 或偏差值；
+  // 非消费下降（赠送额到期等，rec.adjust 非空）也不算「变化」，给 0。
+  // 正数=余额少了这么多（与账本 drop 同号），页面据此加「-」前缀
+  full.change = !manual && !rec.adjust ? Math.max(0, Number(rec.drop) || 0) : 0
   if (cfg.usageMode === 'token' && secrets.platformToken) {
     const u = await fetchPlatformUsage(secrets.platformToken, cfg.tokenPrice)
     if (u && u.amount !== undefined) {
@@ -743,13 +750,15 @@ function getBalance(force) {
     return Promise.resolve(balanceCache.payload)
   }
   if (balanceInFlight) return balanceInFlight
-  balanceInFlight = getBalancePayload()
+  balanceInFlight = getBalancePayload(!!force)
     .then((payload) => {
       if (payload.ok) {
         // 「未计入用量」提示只在真实新采样那一刻下发；缓存副本剥掉，
-        // 避免 TTL 内复用/挂件重建推快照时重复弹气泡
+        // 避免 TTL 内复用/挂件重建推快照时重复弹气泡。change（{change} 占位符）同理：
+        // 缓存副本归零，否则同一次降幅会在 TTL 内被反复当成「本轮变化」
         const cached = Object.assign({}, payload)
         delete cached.adjust
+        cached.change = 0
         balanceCache = { at: now, payload: cached }
         return payload
       }

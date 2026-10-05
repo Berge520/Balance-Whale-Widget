@@ -2180,7 +2180,7 @@ input[type='checkbox'] {
 .calibrate-input {
   width: 110px;
 }
-/* 通用输入框：按压气泡卡的文本 / 链接 / 行内容等都用它，允许竖向拉伸方便一次看多条 */
+/* 通用输入框：提醒文案卡的文本等都用它，允许竖向拉伸方便一次看多条 */
 .quote-input {
   display: block;
   width: 100%;
@@ -2201,8 +2201,7 @@ input[type='checkbox'] {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px rgba(83, 107, 169, 0.18);
 }
-/* 泡泡列表态：每行一枚泡泡，只留「序号 + 一句话摘要」，
-   点行进入该泡的编辑态。类型标签并进摘要，不再单独占位 */
+/* 泡泡 / 队列列表态：每行一枚泡泡，只留「序号 + 一句话摘要」 */
 .quote-list {
   margin-top: 4px;
 }
@@ -2248,65 +2247,6 @@ input[type='checkbox'] {
   white-space: nowrap;
   font-size: 12px;
   color: var(--fg-dim);
-}
-.quote-adv-row,
-.quote-add-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 8px;
-}
-/* 「＋ 添加组」虚线大按钮（对齐上游「+ 添加泡泡」）：撑满整行，点哪里都能加组 */
-.quote-add {
-  flex: 1 1 auto;
-  min-width: 0;
-  border: 1px dashed var(--card-border);
-  border-radius: 10px;
-  background: transparent;
-  color: var(--fg-dim);
-  font: inherit;
-  font-size: 13px;
-  padding: 9px 12px;
-  cursor: pointer;
-  transition: border-color 0.15s ease, color 0.15s ease;
-}
-.quote-add:hover:not(:disabled) {
-  border-color: var(--accent);
-  color: var(--fg);
-}
-.quote-add:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-/* 字段名旁的「?」小圆圈：把原常驻的一段说明收进悬停 tooltip */
-.quote-tip {
-  margin-left: 4px;
-  width: 14px;
-  height: 14px;
-  padding: 0;
-  border: 1px solid var(--card-border);
-  border-radius: 50%;
-  background: transparent;
-  color: var(--fg-faint);
-  font-size: 10px;
-  line-height: 1;
-  cursor: help;
-  vertical-align: middle;
-}
-.quote-tip:hover {
-  border-color: var(--accent);
-  color: var(--accent);
-}
-/* 卡片底部动作区：导出 / 导入 / 恢复默认 / 保存，右对齐收口 */
-.quote-actions {
-  display: flex;
-  justify-content: flex-end;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  margin-top: 12px;
-  padding-top: 10px;
-  border-top: 1px solid var(--card-border);
 }
 .sound-file {
   flex: 1;

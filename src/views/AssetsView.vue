@@ -224,12 +224,11 @@ function openDataDir(p: string) {
 }
 
 const assetsPack = ref<AssetsPreviewResult | null>(null)
-const assetsPicks = reactive({ skins: true, sounds: true, bubbles: true, quotes: true })
+const assetsPicks = reactive({ skins: true, sounds: true, bubbles: true })
 const assetsConfirm = ref(false)
 const assetsAnyItem = computed(() => (assetsPicks.skins && !!assetsPack.value?.has?.skins)
   || (assetsPicks.sounds && !!assetsPack.value?.has?.sounds)
-  || (assetsPicks.bubbles && !!assetsPack.value?.has?.bubbles)
-  || (assetsPicks.quotes && !!assetsPack.value?.has?.quotes))
+  || (assetsPicks.bubbles && !!assetsPack.value?.has?.bubbles))
 function doExportAssets() {
   if (props.assetsBusy) return
   assetsFlash.msg = ''
@@ -242,7 +241,7 @@ function doExportAssets() {
     } else if (r.canceled) {
       assetsFlash.msg = '已取消导出'
     } else {
-      assetsFlash.msg = `已导出素材包（形象 ${r.skins || 0} 张 · 气泡图 ${r.bubbles || 0} 张 · 音效 ${r.sounds || 0} 段 · 台词组 ${r.quotes || 0} 个）：${r.path}`
+      assetsFlash.msg = `已导出素材包（形象 ${r.skins || 0} 张 · 气泡图 ${r.bubbles || 0} 张 · 音效 ${r.sounds || 0} 段）：${r.path}`
     }
   } catch (err: any) {
     assetsFlash.err = true
@@ -267,7 +266,6 @@ function doPickAssets() {
       assetsPicks.skins = !!r.has?.skins
       assetsPicks.sounds = !!r.has?.sounds
       assetsPicks.bubbles = !!r.has?.bubbles
-      assetsPicks.quotes = !!r.has?.quotes
       assetsFlash.msg = '已读取素材包，勾选要导入的内容后点「导入选中项」'
     }
   } catch (err: any) {
@@ -286,7 +284,7 @@ function doApplyAssets() {
   assetsConfirm.value = false
   try {
     const r: AssetsApplyResult | undefined = services.value.assetsApply?.({
-      skins: assetsPicks.skins, sounds: assetsPicks.sounds, bubbles: assetsPicks.bubbles, quotes: assetsPicks.quotes,
+      skins: assetsPicks.skins, sounds: assetsPicks.sounds, bubbles: assetsPicks.bubbles,
     })
     if (!r || !r.ok) {
       assetsFlash.err = true
@@ -296,13 +294,11 @@ function doApplyAssets() {
       if (r.skins) parts.push(`形象新增 ${r.skins.added} 张${r.skins.skipped ? `（${r.skins.skipped} 张因画廊已满跳过）` : ''}`)
       if (r.bubbles) parts.push(`气泡图新增 ${r.bubbles.added} 张${r.bubbles.skipped ? `（${r.bubbles.skipped} 张因已满跳过）` : ''}`)
       if (r.sounds) parts.push(`音效写入 ${r.sounds.applied} 段`)
-      if (r.quotes) parts.push(`台词组追加 ${r.quotes.added} 个`)
       let msg = '已导入素材包：' + (parts.join(' · ') || '没有可写入的内容') + '。'
       assetsFlash.err = false
       if (r.errors && r.errors.length) { msg += r.errors.join('；'); assetsFlash.err = true }
       assetsFlash.msg = msg
       assetsPack.value = null
-      // 台词组进了配置：宿主 patchConfig 会广播，父级 applyConfig 自动重建，这里不手动刷
       emit('refresh-skin')
       emit('refresh-skin-packs')
       emit('refresh-shared-skins')
@@ -326,10 +322,6 @@ function roleLabelOf(r: string) {
 const assetsSkinNames = computed(() => (assetsPack.value?.skinNames || []).join('、'))
 const assetsBubbleNames = computed(() => (assetsPack.value?.bubbleNames || []).join('、'))
 const assetsSoundNames = computed(() => (assetsPack.value?.soundRoles || []).map(roleLabelOf).join('、'))
-const assetsQuoteLine = computed(() => {
-  const n = assetsPack.value?.quoteCount
-  return n ? `${n} 个台词组（追加到现有组尾部）` : ''
-})
 function packLine(n: number | undefined, unit: string, detail: string) {
   return n ? `${n} ${unit}：${detail}` : '包里没有这一项'
 }
@@ -941,11 +933,6 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds, expand
             <label class="field row check">
               <span class="label">音效 <em>{{ packLine(assetsPack.has?.sounds, '段', assetsSoundNames) }}</em></span>
               <input type="checkbox" v-model="assetsPicks.sounds" :disabled="!assetsPack.has?.sounds" @change="assetsConfirm = false" />
-            </label>
-            <!-- 台词组：追加进现有组尾部（上限 12 组，超了截断），老包没有这个键时整行禁用 -->
-            <label class="field row check">
-              <span class="label">台词组 <em>{{ packLine(assetsPack.has?.quotes, '个', assetsQuoteLine) }}</em></span>
-              <input type="checkbox" v-model="assetsPicks.quotes" :disabled="!assetsPack.has?.quotes" @change="assetsConfirm = false" />
             </label>
             <div class="btn-row">
               <button class="danger utils-btn utils-danger" :disabled="assetsBusy || !assetsAnyItem" @click="doApplyAssets">

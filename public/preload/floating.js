@@ -3,12 +3,12 @@
  *
  * 悬浮窗（floating.html）与主窗宿主（services.js）之间的薄桥接层：
  *  - 接收宿主推送：whale:init / whale:balance / whale:config / whale:snapped / whale:sounds
- *              / whale:quote-sounds / whale:skin / whale:bubbles / whale:models
- *              / whale:quote-preview
+ *              / whale:skin / whale:bubbles / whale:models
+ *              / whale:bubble-preview（设置页按压气泡试播）
  *              （另有本地推送 dark：preload 轮询 utools.isDarkColors() 检测 uTools 深浅色变化）
  *  - 向宿主上报：whale:ready / whale:refresh / whale:config / whale:timer / whale:timer-done
  *              / whale:drag-begin / whale:drag-move / whale:drag-end / whale:ignore-mouse
- *              / whale:open-settings（无载荷，只负责唤出主窗；不再带 target 导航）
+ *              / whale:open-settings（可带 { target } 直达某张设置卡，无载荷则只唤出主窗）
  *              / whale:models-refresh / whale:set-main-model / whale:hide-widget / whale:open-external
  *
  * 页面侧统一通过 window.whale 调用，不直接碰 electron / utools。
@@ -26,7 +26,7 @@ log('[whale][floating] preload 已加载', {
   logFile: LOG_FILE || '(仅控制台)',
 })
 
-const handlers = { init: [], balance: [], config: [], snapped: [], dsh: [], sounds: [], quoteSounds: [], skin: [], bubbles: [], models: [], dark: [], quotePreview: [] }
+const handlers = { init: [], balance: [], config: [], snapped: [], dsh: [], sounds: [], skin: [], bubbles: [], sharedSkins: [], models: [], dark: [], bubblePreview: [] }
 
 function on(name, cb) {
   if (handlers[name] && typeof cb === 'function') handlers[name].push(cb)
@@ -47,16 +47,16 @@ ipcRenderer.on('whale:snapped', (event, data) => emit('snapped', data))
 ipcRenderer.on('whale:dsh', (event, data) => emit('dsh', data))
 // 自定义音效本体（base64 data URL；导入/删除后宿主重推）
 ipcRenderer.on('whale:sounds', (event, data) => emit('sounds', data))
-// 组级台词音效本体（name→dataURL，只含被台词组引用的段；配置/音效库变化后宿主重推）
-ipcRenderer.on('whale:quote-sounds', (event, data) => emit('quoteSounds', data))
 // 自定义挂件形象本体（base64 data URL；导入/删除后宿主重推，空串表示无自定义形象）
 ipcRenderer.on('whale:skin', (event, data) => emit('skin', data))
 // 自定义气泡图片本体（base64 data URL 数组；导入/删除后宿主重推，空数组表示回退内置 rua.webp）
 ipcRenderer.on('whale:bubbles', (event, data) => emit('bubbles', data))
+// 已装「官方可下载形象」本体（base64 data URL 数组）：台词 v2 randimg 段的共享角色图池
+ipcRenderer.on('whale:shared-skins', (event, data) => emit('sharedSkins', data))
 // 多厂商模型列表（含内置 DeepSeek 那条）+ 主显示模型
 ipcRenderer.on('whale:models', (event, data) => emit('models', data))
-// 设置页「在挂件上试播」：把设置页当前编辑的组台词发来真弹一次（lines 已在宿主侧清洗过）
-ipcRenderer.on('whale:quote-preview', (event, data) => emit('quotePreview', data))
+// 设置页「按压气泡试播」：把设置页当前编辑的泡泡队列发来真弹一次（items 已在宿主侧归一化）
+ipcRenderer.on('whale:bubble-preview', (event, data) => emit('bubblePreview', data))
 
 // —— 深浅色跟随 uTools ——
 // 菜单/计时条等 UI 的深浅形态挂在 <html> 的 dark 类上（floating.css 消费）。判定源是
@@ -87,12 +87,12 @@ const api = {
   onSnapped(cb) { on('snapped', cb) },
   onDsh(cb) { on('dsh', cb) },
   onSounds(cb) { on('sounds', cb) },
-  onQuoteSounds(cb) { on('quoteSounds', cb) },
   onSkin(cb) { on('skin', cb) },
   onBubbles(cb) { on('bubbles', cb) },
+  onSharedSkins(cb) { on('sharedSkins', cb) },
   onModels(cb) { on('models', cb) },
-  // 设置页「在挂件上试播」：真弹一次设置页正在编辑的台词（宿主 whale:quote-preview 推送）
-  onQuotePreview(cb) { on('quotePreview', cb) },
+  // 设置页「按压气泡试播」：真弹一次设置页正在编辑的泡泡队列（宿主 whale:bubble-preview 推送）
+  onBubblePreview(cb) { on('bubblePreview', cb) },
   // uTools 深浅色变化（preload 轮询检测后本地推送，不经主窗）
   onDark(cb) { on('dark', cb) },
   // 同步读取当前深浅态：preload 的首条 dark 推送早于页面注册回调，页面启动时用这里补齐初值
@@ -124,8 +124,8 @@ const api = {
   },
   // 切换挂件主显示的模型（'deepseek' 为内置）
   setMainModel(id) { send('whale:set-main-model', { id: String(id || '') }) },
-  // 请求宿主唤出 uTools 主窗（设置页）
-  openSettings() { send('whale:open-settings') },
+  // 请求宿主唤出 uTools 主窗（设置页）。target 可选（如 'appearance' 直达对应卡片）；省略/传 null 只唤窗
+  openSettings(target) { send('whale:open-settings', target ? { target: String(target) } : null) },
   // 台词链接段点击：宿主校验 http(s) 后交给系统浏览器开（utools.shellOpenExternal）
   openExternal(url) { send('whale:open-external', { url: String(url || '') }) },
   // 请求宿主隐藏挂件（销毁悬浮窗；下次「显示挂件」重新创建，加载最新页面）

@@ -6,6 +6,9 @@
   // —— 常量 ——
   var MIN_SCALE = 0.6, MAX_SCALE = 2.5, CLICK_SQ = 9;
   var REFRESH_MS = 60000, CHANGE_MS = 900, ANIM_MS = 700, BUBBLE_MS = 5000;
+  // 出厂默认气泡停留时长（5s）。BUBBLE_MS 保留为「出厂常量」，运行期实际取值走 bubbleDwellMs，
+  // 由设置页 cfg.bubbleDwell（3–60 整数）覆盖；所有「按默认口径收起」的引用点都改读它
+  var bubbleDwellMs = BUBBLE_MS;
   // 提醒气泡（峰谷/预算/低余额/穿透说明）停留秒数，由设置页下发；0 = 常驻，手动点掉
   var remindSec = 8;
   var TIMER_PEEK_MS = 2000; // 「只显计时」关闭时，点小鲸鱼先显示计时的时长（随后切回常规内容）
@@ -43,7 +46,8 @@
   // 宿主桥接（preload/floating.js 注入）；缺省空实现，单独打开页面也不报错
   var whaleApi = window.whale || {
     onInit: function () {}, onBalance: function () {}, onConfig: function () {}, onSnapped: function () {},
-    onSounds: function () {}, onQuoteSounds: function () {}, onSkin: function () {}, onBubbles: function () {}, onModels: function () {}, onDark: function () {},
+    onSounds: function () {}, onSkin: function () {}, onBubbles: function () {}, onModels: function () {}, onDark: function () {},
+    onBubblePreview: function () {},
     ready: function () {}, refresh: function () {}, saveConfig: function () {},
     saveTimer: function () {}, notifyTimerDone: function () {},
     dragBegin: function () {}, dragMove: function () {}, dragEnd: function () {}, setIgnoreMouse: function () {}, setInputFocus: function () {},
@@ -389,6 +393,19 @@
   row5.appendChild(menuLabel('峰谷')); row5.appendChild(peakSelect);
   var row6 = menuRow();
   row6.appendChild(menuLabel('气泡')); row6.appendChild(bubbleToggle);
+  // 「气泡设置」：悬浮窗里没有好的文字/结构编辑环境（自定义泡泡是行×模块 + 占位符 + 预览的复杂编辑器），
+  // 直接跳到设置页「外观 → 按压气泡（自定义泡泡）」卡
+  var bubbleSettingsBtn = document.createElement('button');
+  bubbleSettingsBtn.type = 'button';
+  bubbleSettingsBtn.className = 'dshwv-menu-link';
+  bubbleSettingsBtn.textContent = '气泡设置';
+  bubbleSettingsBtn.title = '打开设置页的「按压气泡」卡，编辑点击气泡要显示的内容';
+  bubbleSettingsBtn.addEventListener('click', function (e) {
+    e.stopPropagation();
+    closeMenu();
+    openSettings('bubble');
+  });
+  row6.appendChild(bubbleSettingsBtn);
   var rowRemind = menuRow();
   rowRemind.appendChild(menuLabel('峰谷提醒')); rowRemind.appendChild(remindToggle);
   var row7 = menuRow();
@@ -684,12 +701,18 @@
     // bubbleSrc 图片段取图（下标语义见 bubbleImgSrc）；modelText 变量段按当前数据现算
     bubbleSrc: bubbleImgSrc,
     modelText: linePlaceholderValue,
+    randText: randSegText,
+    randImgSrc: randImgSrc,
+    // 按压气泡模块取值回调（v3 bubble 模型）：文本与图片都由页面按实时数据现算，渲染器只负责排版
+    modText: bubbleModText,
+    modImageSrc: bubbleModImageSrc,
   });
   var textBox = renderer.els.textBox;
   var labelEl = renderer.els.labelEl;
   var amountEl = renderer.els.amountEl;
   var hintEl = renderer.els.hintEl;
   var rowsBox = renderer.els.rowsBox;
+  var modsBox = renderer.els.modsBox;
   var bubbleBox = renderer.els.bubbleBox;
   var gifEl = renderer.els.gifEl;
   bubbleBox.addEventListener('click', function (e) {
@@ -711,26 +734,24 @@
       if (!previewSessionNext()) hideBubble();
       return;
     }
+    // 按压气泡模型：气泡正显示本模型的某一泡时，点气泡翻下一泡（末泡再点收起）
+    if (bubbleActive) {
+      if (!bubbleNext()) hideBubble();
+      else bubbleArm(bubbleModelDwellMs, hideBubble);
+      return;
+    }
     if (bubbleRandomActive || bubbleTimerActive) {
       // 「只显计时」关闭时计时只是先弹一下：点掉它要接着显示常规内容，而不是直接把气泡收起
       if (bubbleTimerActive && !timerTakesBubble()) { timerPeekDone(); return; }
-      // 依次播放：随机台词阶段再点一次切下一组，播完最后一组才收起
-      if (bubbleRandomActive && clickQueueOn && queueNext()) return;
-      hideBubble(); // 再次点击：关闭（计时气泡收起后计时继续）
+      hideBubble(); // 再次点击：关闭（计时气泡收起后计时继续）。动图降级文案也在此收起
     } else {
-      // 首次点击：切随机台词（依次播放时从第一组开始），并重置自动关闭计时（保证第二段有完整停留时间）
-      bubbleRemindActive = false; // 用户点击后让随机台词接管，避免被峰谷提醒覆盖
+      // 首次点击：显示常规气泡内容，并重置自动关闭计时。
+      // 动图加载失败时 onGifError 会把 bubbleRandomActive 置位、bubbleRandomLines 换成降级文案，
+      // 这里只管把气泡显出来
+      bubbleRemindActive = false; // 用户点击后让常规内容接管，避免被峰谷提醒覆盖
       bubbleRemindLines = null;
-      bubbleRandomActive = true;
-      queueIdx = 0;
-      if (clickQueueOn) {
-        bubbleRandomLines = RANDOM_GROUPS[0].lines();
-        playQuoteSound(RANDOM_GROUPS[0].sound);
-      } else {
-        bubbleRandomLines = pickRandomLines();
-      }
-      swapBubbleContent(function () { applyBubbleLines(bubbleRandomLines); });
-      bubbleArm(BUBBLE_MS, hideBubble);
+      showBubble(true);
+      bubbleArm(bubbleDwellMs, hideBubble);
     }
   });
 
@@ -744,7 +765,7 @@
   document.body.appendChild(menuBox);
 
   // —— 状态 ——
-  var state = { balance: null, currency: null, todayUsage: null, isPeak: false, peakNextAt: 0, budgetOver: false, lowOver: false, status: 'loading', message: '', adjustNote: null };
+  var state = { balance: null, currency: null, todayUsage: null, isPeak: false, peakNextAt: 0, change: 0, budgetOver: false, lowOver: false, status: 'loading', message: '', adjustNote: null };
   // 多厂商模型（宿主 whale:models 推送）：list 含内置 DeepSeek 那条，mainModelId 决定挂件主显示
   var models = [];
   var mainModelId = 'deepseek';
@@ -758,14 +779,29 @@
   // 独立于随机台词（点鲸鱼本体弹随机台词时不抢会话里的这条），点挂件气泡才顺序翻条
   var bubblePreviewActive = false;
   var previewSession = null;
-  var QUOTE_PREVIEW_STEPS_MAX = 30; // 会话步数上限（单组台词宿主限 30 行，这里对齐防恶意载荷）
+  // —— 按压气泡（v3 自定义泡泡模型）——
+  // 由设置页「按压气泡设置」卡下发整份 bubble 配置；bubble.on 开启时常规气泡走本模型。
+  //   bubbleItems  —— 点击序列（首次 + 再次…），每项是单选 {kind, modules} 或并列 {kind:'choice', options}
+  //   bubbleIdx    —— 常规点按推进到第几项（首次点击 0）
+  //   bubbleActive —— 当前气泡内容来自本模型（决定点击推进走 bubbleNext）
+  var bubbleOn = false;
+  var bubbleItems = [];
+  // 自定义泡泡模型是否启用（bubble.on === true）。与顶层 bubbleOn 分开记：
+  // bubbleOn 是「点挂件弹不弹气泡」的总闸（顶层思考气泡也用它），bubbleModelOn 才是
+  // 「用不用自定义泡泡内容」。未启用自定义时 bubbleOn 仍可被顶层 cfg.bubbleOn 单独打开，
+  // 此时走常规气泡，不该被自定义的出厂默认队列顶掉
+  var bubbleModelOn = false;
+  var bubbleTapAdvanceOn = false; // 本模型自带「点鲸鱼本体也推进」
+  var bubbleModelDwellMs = BUBBLE_MS; // 本模型自带停留时长（秒 → ms；与顶层 bubbleDwellMs 各管各）
+  var bubbleDragLines = [];       // 本模型自带拖拽台词
+  var bubbleIdx = 0;
+  var bubbleActive = false;
   // 气泡 TTL 补收：悬浮窗被隐藏 / 系统休眠时，Electron 会节流隐藏窗口的定时器，
   // 单靠 setTimeout 可能「该收不收」（收起时刻漂移几十秒）。这里记一份绝对截止时刻，
   // 窗口回到可见 / 拿到焦点时补收一次，另有每秒巡检兜底（绝大多数时候两次比较就返回）。
   // 0 = 无 TTL（常驻气泡 / remindSec=0 / 计时气泡 pin），巡检必须跳过，不能误收
   var bubbleTtlDeadline = 0;
   var bubbleRemindActive = false, bubbleRemindLines = null; // 峰谷提醒气泡（优先级高于随机台词）
-  var queueIdx = 0; // 「点按依次播放」当前播到第几组台词
   var bubbleTimerActive = false; // 计时气泡（正计时/倒计时/定时/时间到），优先级最高
   // BUBBLE_STYLE_CLASS（台词行类型 → 样式类）已移入共享渲染器，applyBubbleLines 经薄壳走渲染器
 
@@ -781,6 +817,10 @@
   // 宿主推送的自定义气泡图片（whale:bubbles，base64 data URL 数组）。与形象不同，这里没有
   // 「当前用哪张」：抽到「动图组」时从里面随机取一张，空数组则回退内置 rua.webp
   var customBubbles = [];
+  // 宿主推送的「已装官方可下载形象」本体（whale:shared-skins，base64 data URL 数组）：
+  // 台词 v2 randimg 段的共享角色图池。与 customBubbles 分开 —— randimg 抽的是共享角色的
+  // 形象图（上游 gif 模块能力），不是用户自定义气泡图；空数组时 randimg 段整段丢
+  var sharedSkins = [];
   var skinId = DEFAULT_SKIN;   // 当前形象：BUILTIN_SKINS 的键，或 'custom'（用户导入）
   var themeId = 'default';     // 当前气泡配色：'default' | 'dark' | 'sakura'
   var opacityPct = 100;        // 窗口透明度 20–100
@@ -937,93 +977,11 @@
     playAlertSound('pass');
     showRemindBubble(alertLines(on ? 'passOn' : 'passOff', {}, on ? '#e0433f' : '#2fa24c'));
   }
-  // 设置页「挂件气泡试播」（whale:quote-preview）：整组台词一次发来挂成会话，
-  // 点挂件气泡按顺序翻下一条（每条重挂自动收起，时长按该屏停留秒数走，缺省 BUBBLE_MS），
-  // 屏上配了停留秒数时到点自动翻（无人点击也能推进），末条再点收起。
-  // 收到的是逐屏的 rows 载荷（{rows}，旧发送方兼容三行模型数组），占位符在这里才替换——
-  // 抽签口径本来就是「真被抽到时才换」，这样 {balance} 等拿到的也是本机实时值。计时中不打断；
-  // 会话期间任何其它气泡内容接管（点鲸鱼本体 / 提醒 / 计时）都整段作废，不留悬空会话。
-  function showQuotePreviewBubble(payload) {
-    if (!bubbleOn || timerActive()) return;
-    var data = payload && typeof payload === 'object' ? payload : {};
-    var raw = Array.isArray(data.steps) ? data.steps : [];
-    var steps = [];
-    for (var i = 0; i < raw.length && steps.length < QUOTE_PREVIEW_STEPS_MAX; i++) {
-      var step = normPreviewStepRows(raw[i]);
-      if (step) steps.push(step);
-    }
-    if (!steps.length) return;
-    if (bubbleSwapTimer) { clearTimeout(bubbleSwapTimer); bubbleSwapTimer = null; }
-    if (bubbleTimer) { clearTimeout(bubbleTimer); bubbleTimer = null; }
-    renderer.cancelGifFade();
-    bubblePreviewActive = true;
-    previewSession = { steps: steps, idx: 0 };
-    bubbleRandomActive = false;
-    bubbleRandomLines = null;
-    bubbleRemindActive = false;
-    bubbleRemindLines = null;
-    bubbleTimerActive = false;
-    var first = steps[0];
-    if (bubbleShown) {
-      // 气泡已开着：原地淡入换词，不要闪一下（与拖拽台词同款）
-      swapBubbleContent(function () { applyBubbleLines(first); });
-    } else {
-      bubbleShown = true;
-      restoreBubbleLines();
-      applyBubbleLines(first);
-      bubbleBox.classList.add('dshwv-bubble-open');
-    }
-    previewArmDwell(first);
-    bubbleArmFor(first && first.dwell, hideBubble);
-  }
-  // 单步清洗：一屏 = { rows }（v2 行载荷）。双认输入：{rows} 直接用；旧三行模型数组
-  // [{t,s,c,w}|null] 就地转成单 text 段行（s→字号档，A 带行 w:1，P 档用 fz9），逐屏 br:1
-  // 保持竖排。text 段占位符在这里替换（实时值口径）；非 text 段原样留给渲染器。
-  // 整屏没有任何有效行时返回 null（调用方把这一屏整个丢掉）
-  function normPreviewStepRows(rawStep) {
-    var rows = null;
-    if (rawStep && typeof rawStep === 'object' && Array.isArray(rawStep.rows)) {
-      rows = rawStep.rows; // v2 载荷：清洗过的行对象/段列表，这里只补占位符
-    } else if (Array.isArray(rawStep)) {
-      // 旧三行模型 → 多个单段行（rowsBox 行天然竖排，不靠 br——br 是「行内截断」语义）：
-      // s 对应字号档（与钉住的 BUBBLE_FONT 对齐 A=fz7/B=fz11/P=fz10/C=fz7），
-      // B/P 补 b:1 保住粗体重量，行 w 同 A 折行口径
-      var SZ = { A: 7, B: 11, P: 10, C: 7 };
-      rows = [];
-      for (var i = 0; i < rawStep.length; i++) {
-        var it = rawStep[i];
-        if (!it || typeof it !== 'object' || !String(it.t || '').trim()) continue;
-        var s = (it.s === 'B' || it.s === 'P' || it.s === 'C') ? it.s : 'A';
-        var seg = { type: 'text', t: String(it.t), fz: SZ[s], c: String(it.c || '') || undefined };
-        if (s === 'B' || s === 'P') seg.b = 1;
-        rows.push({ segs: [seg], w: s === 'A' ? 1 : undefined });
-      }
-    }
-    if (!rows) return null;
-    for (var r = 0; r < rows.length; r++) {
-      var row = rows[r];
-      var segs = typeof row === 'string' ? [{ type: 'text', t: row }]
-        : Array.isArray(row) ? row
-        : (row && typeof row === 'object' && Array.isArray(row.segs)) ? row.segs : null;
-      if (!segs) { rows[r] = null; continue; }
-      for (var s2 = 0; s2 < segs.length; s2++) {
-        var seg2 = segs[s2];
-        if (seg2 && seg2.type === 'text' && typeof seg2.t === 'string') seg2.t = renderLinePlaceholders(seg2.t);
-      }
-    }
-    for (var r2 = 0; r2 < rows.length; r2++) { if (rows[r2]) {
-      // 停留秒数从首行对象带出（预览一屏 = 一行，与抽签口径一致）：无 d 的屏维持纯点击翻页
-      var firstRow = rows[r2];
-      var dwell = firstRow && !Array.isArray(firstRow) && typeof firstRow === 'object' ? Number(firstRow.d) : NaN;
-      return { rows: rows, dwell: isFinite(dwell) ? dwell : undefined };
-    } }
-    return null;
-  }
   var timerNotifyOn = true, timerPersistOn = true; // 计时到点系统通知 / 计时状态持久化
   // 计时到点的邮件通知开关，以及「邮件渠道总开关」的本地副本：页面不自己发信，
   // 只用来判断「到点该不该叫宿主发」—— 两个渠道都关时才真的不发。
   var timerMailOn = true, mailOn = false;
-  var usageMode = 'ledger', peakMode = 'default', bubbleOn = true;
+  var usageMode = 'ledger', peakMode = 'default';
   // 界面深浅色偏好（设置页可改）：'auto' 跟 uTools / 'light' / 'dark'。
   // 生效值 = 偏好为 auto 时取 uTools 实际深浅，否则用偏好本身；uTools 侧实时值由 onDark/isDark 维护
   var uiMode = 'auto';
@@ -1032,7 +990,7 @@
   var menuBtnEnabled = true; // 挂件右上角菜单按钮开关（设置页可关）
   var lowAlertOn = true, lowAlertAmount = 10; // 低余额预警（余额低于阈值时数字变红）
   var budgetOn = false, budgetAmount = 0; // 今日预算：用量超过预算额时提醒（0 = 未设置）
-  var clickQueueOn = false; // 点气泡依次播放台词（关掉则每次随机一组）
+  var tapAdvance = false; // 点挂件本体是否也推进依次播放（默认关；见 endDrag 的 wasClick 分支）
   var timeBubbleOn = true; // 报时：气泡首行显示当前时间
   var dragLock = false; // 锁定位置：禁止拖拽与滚轮缩放（点击刷新仍可用）
   var menuOpen = false;
@@ -1041,22 +999,21 @@
   var firstBalance = true, pendingManual = false;
   var lastIsPeak = null; // 上一次的峰谷状态，用于检测「进入峰时/谷时」的切换
 
-  // —— 随机台词 ——
-  // 台词库内置默认值：与宿主 store.js 的 QUOTES_DEFAULT 逐字一致（浮动页没有 require 读不到宿主常量，
-  // 靠 scripts/check-shared.mjs 在构建时比对，改一处忘另一处会构建失败）。
-  // hint / chat / dsh / short 是内置六组里那四个文本组的默认台词（设置页没配过组列表时用它拼出六组）；
-  // time 是白天报时模板（{t} 换当前时间）、gifFail 是动图加载失败的顶替文案 —— 这两项不走抽签，
-  // 固定就是这两份，设置页改过则由 applyConfig 覆盖。
+  // —— 固定文案池 ——
+  // 报时模板与动图降级文案：与宿主 store.js 的 QUOTE_TEXT_DEFAULT 逐字一致（浮动页没有 require
+  // 读不到宿主常量，靠 scripts/check-shared.mjs 在构建时比对，改一处忘另一处会构建失败）。
+  // time 是白天报时模板、timeEarly/timeMorning/timeEve 是深夜/清晨/深夜前报时模板（{t} 换当前时间）、
+  // gifFail 是动图加载失败的顶替文案。这几项不走抽签，设置页改过则由 applyConfig 从
+  // config.bubble.system 覆盖（已并入按压气泡卡，不再有独立台词库）
   var QUOTES = {
-    hint: ['好模型... ↓', '好女孩...↓'],
-    chat: ['不知道用户有什么用，先赶走吧~', '我...我...我也要挣钱吗？', '我去吃饭啦，测完叫我', '压力一只蓝色大肥鱼？！', 'DeepSleep...', '坏了...用户彻底怒了！', '终有一天，终有一天……'],
-    dsh: ['你目录里的dsh是什么...大烧货吗...?', '恭喜你实现token自由！token全跑了！', '真当我是便宜货啊...'],
-    short: ['哦鲸鲸...'],
     time: ['现在是 {t}', '已经 {t} 啦', '都 {t} 了哦', '小鲸鱼报时：{t}'],
+    timeEarly: ['都 {t} 了，还不睡吗…'],
+    timeMorning: ['早安~ 现在是 {t}'],
+    timeEve: ['都 {t} 了，早点休息…'],
     gifFail: ['gif 加载失败了...', '今天没有动图给你看~', '呜呜 动图不见了...'],
   };
-  // 上面这两项（不走抽签的那两份）的 key：applyConfig 里逐个覆盖
-  var QUOTE_TEXT_KEYS = ['time', 'gifFail'];
+  // 上面这些固定文案池的 key：applyConfig 里逐个覆盖。顺序即报时四池的判定顺序
+  var QUOTE_TEXT_KEYS = ['time', 'timeEarly', 'timeMorning', 'timeEve', 'gifFail'];
   // 随机取一条，且不与上次同组取到的重复（组内只有 1 条时无从避免，直接返回）。
   // 记在数组自身引用上，所以每一组各记各的，不会互相干扰
   var lastPicked = new WeakMap();
@@ -1084,10 +1041,107 @@
     if (i <= 0) return pickBubbleUrl() || null;
     return customBubbles[Math.min(i, customBubbles.length) - 1] || null;
   }
+  // randimg 段的取图回调（渲染器 randImgSrc）：每次显示从「已装共享角色图」池里随机抽一张
+  //（不连续重复，复用 pickOne 的 WeakMap 机制）。一张都没装时回 null，渲染器据此整段丢
+  function randImgSrc() {
+    if (!sharedSkins.length) return null;
+    return pickOne(sharedSkins) || null;
+  }
+  // —— 按压气泡模块取值（渲染器 modText / modImageSrc 回调）——
+  // 模板占位符与旧台词同一套（renderLinePlaceholders）；另加四个上游专属 token：
+  //   {balance_ds} 余额（同 {balance}）·{expense_ds} 今日已用（同 {today}）·{status} 峰谷状态字·{countdown} 倒计时
+  // 认不出的 token 原样留着（与 alertLines 同口径，便于用户发现写错）。模块自带 tpl 为空时用内置自动文本。
+  function bubbleModTokenMap() {
+    return {
+      balance_ds: linePlaceholderValue('balance'),
+      expense_ds: linePlaceholderValue('today'),
+      status: linePlaceholderValue('peak'),
+      countdown: linePlaceholderValue('countdown'),
+      balance: linePlaceholderValue('balance'),
+      today: linePlaceholderValue('today'),
+      peak: linePlaceholderValue('peak'),
+      next: linePlaceholderValue('next'),
+      change: linePlaceholderValue('change'),
+      model: linePlaceholderValue('model'),
+      currency: linePlaceholderValue('currency'),
+      date: linePlaceholderValue('date'),
+      time: linePlaceholderValue('time'),
+      weekday: linePlaceholderValue('weekday'),
+      session: bubbleSessionText(),
+    };
+  }
+  function bubbleApplyTpl(tpl, autoText) {
+    var s = String(tpl == null ? '' : tpl);
+    if (!s) return autoText;
+    var map = bubbleModTokenMap();
+    var keys = Object.keys(map).sort(function (a, b) { return b.length - a.length; });
+    for (var i = 0; i < keys.length; i++) {
+      var v = map[keys[i]];
+      if (v === null || v === undefined) continue;
+      s = s.split('{' + keys[i] + '}').join(String(v));
+    }
+    return s;
+  }
+  // session 模块：本项目暂无「对话名」数据源，一律占位「—」（锁定决策：全做但占位）
+  function bubbleSessionText() {
+    return '—';
+  }
+  // 峰谷状态字（peak 模块按自身 peakStyle 取，不再依赖全局 peakMode；本项目暂只支持 text/mini 两式的语义合并）
+  function bubblePeakStatusText(mod) {
+    var st = mod && mod.peakStyle;
+    var peak = !!state.isPeak;
+    if (st === 'mini') return peak ? '峰' : '谷';
+    return peakLabelText(peak);
+  }
+  function bubblePeakModuleText(mod) {
+    var st = mod && mod.peakStyle;
+    if (st === 'count') return peakCountdownLeftText() || '—';
+    return bubblePeakStatusText(mod);
+  }
+  // 数值模块（balance/bonus/recharge/today）：balance/today 有数据源；bonus/recharge 本项目暂无，回「—」
+  function bubbleAmountModuleText(type) {
+    if (type === 'balance') return mainAmountText();
+    if (type === 'today') return linePlaceholderValue('today');
+    return '—';
+  }
+  // 模块文本回调：按 type 现算自动文本，再套模板（tpl），无数据源回占位「—」
+  function bubbleModText(mod) {
+    if (!mod || typeof mod !== 'object') return '';
+    var type = mod.type;
+    if (type === 'text') return renderLinePlaceholders(String(mod.text || ''));
+    if (type === 'random') {
+      var lines = Array.isArray(mod.lines) ? mod.lines : [];
+      if (!lines.length) return '';
+      var pick = lines[Math.floor(Math.random() * lines.length)];
+      return renderLinePlaceholders(String((pick && pick.t) || ''));
+    }
+    if (type === 'link') return renderLinePlaceholders(String(mod.text || mod.url || ''));
+    // 报时模块（本插件自有扩展）：自动文本 = 按当前时段取「报时文案池」一句（同小鲸鱼报时口径），
+    // 套模板后可写成 {time} / {weekday} 等自定义报时
+    if (type === 'time') return bubbleApplyTpl(mod.tpl, timeLabel());
+    if (type === 'balance' || type === 'bonus' || type === 'recharge' || type === 'today') {
+      return bubbleApplyTpl(mod.tpl, bubbleAmountModuleText(type));
+    }
+    if (type === 'peak') return bubbleApplyTpl(mod.tpl, bubblePeakModuleText(mod));
+    if (type === 'session') return bubbleApplyTpl(mod.tpl, bubbleSessionText());
+    if (type === 'quota' || type === 'plan') return bubbleApplyTpl(mod.tpl, bubbleQuotaModuleText(mod));
+    return '';
+  }
+  // quota/plan 模块：本项目暂无订阅额度 / 订阅窗口数据源，一律占位「—」（全做但占位；tpl 为空时给「—」）
+  function bubbleQuotaModuleText() {
+    return '—';
+  }
+  // 模块取图回调：image 用自定义气泡图（随机抽一张）；randimg 用共享角色池随机抽（与 randimg 段同源）
+  function bubbleModImageSrc(mod) {
+    if (!mod || typeof mod !== 'object') return null;
+    if (mod.type === 'image') return pickBubbleUrl() || null;
+    if (mod.type === 'randimg') return randImgSrc();
+    return null;
+  }
   // —— 拖拽台词 ——
   // 真把挂件拖出一段距离（松手位移 ≥100px）才弹：drag.moved 3px 就置位，日常挪一下位置不该触发。
-  // 刻意不进 QUOTES / QUOTES_DEFAULT：它不进设置页台词库、不可编辑，塞进去会被 check-shared
-  // 逼着往宿主默认值里放一份没人消费的死副本（normQuotes 只认 hint/chat/dsh/short/time/gifFail）。
+  // 独立键 cfg.dragLines，不进 QUOTES：它不属固定文案池，但**可在设置页单独编辑**，
+  // 由 applyConfig 覆盖。字面量须与宿主 store.js 的 DRAG_LINES_DEFAULT 一致（check-shared 钉住）
   var DRAG_LINES = ['哇——轻点轻点！', '起飞咯——', '放我下来！……好吧，再玩一次。', '晕鱼了晕鱼了……'];
   var DRAG_QUOTE_SQ = 100 * 100;       // 触发阈值的平方（比较平方距离，省开方）
   var DRAG_QUOTE_COOLDOWN = 60 * 1000; // 冷却：连拖几次（如甩到屏幕另一侧）只弹第一句
@@ -1099,6 +1153,23 @@
     // 优先级与提醒类入口（showRemindBubble）同口径：计时中不打断，气泡总开关关闭时不弹
     if (!bubbleOn || timerActive() || bubbleRemindActive) return;
     lastDragQuoteAt = Date.now();
+    // 新按压气泡模型自带拖拽台词：开着 bubble.on 时优先用它，且同样按模块式渲染；
+    // 与顶层 DRAG_LINES 各管各 —— bubbleDragLines 为空则回退顶层台词。
+    if (bubbleActive && bubbleDragLines.length) {
+      var dlines = { mods: [{ type: 'text', text: pickOne(bubbleDragLines), row: 1 }] };
+      renderer.cancelGifFade();
+      if (bubbleSwapTimer) { clearTimeout(bubbleSwapTimer); bubbleSwapTimer = null; }
+      if (bubbleTimer) { clearTimeout(bubbleTimer); bubbleTimer = null; }
+      if (bubbleShown) swapBubbleContent(function () { applyBubbleLines(dlines); });
+      else {
+        bubbleShown = true;
+        restoreBubbleLines();
+        applyBubbleLines(dlines);
+        bubbleBox.classList.add('dshwv-bubble-open');
+      }
+      bubbleArm(DRAG_QUOTE_MS, hideBubble);
+      return;
+    }
     var lines = singleCenter('A', pickOne(DRAG_LINES), '', true);
     bubbleRandomActive = true; // 按随机台词口径：点气泡可再切组，再点关闭
     bubbleRandomLines = lines;
@@ -1150,16 +1221,21 @@
       rows[2] ? { t: rows[2], s: 'C', c: '', w: true } : null,
     ];
   }
-  // 报时文案（鲸鱼娘语气，按时段变化）；白天几种说法可在设置页改，{t} 换成当前时间
+  // 报时：按小时选池（四池全时段开放，用户可在设置页分别编辑）。
+  // 深夜(<6)/清晨(6-10)/白天(11-22)/深夜前(>=23)；每池抽一条，{t} 换成当前时间
   function timeLabel() {
     var d = new Date();
     var p2 = function (n) { return String(n).padStart(2, '0'); };
     var t = p2(d.getHours()) + ':' + p2(d.getMinutes());
     var h = d.getHours();
-    if (h < 6) return '都 ' + t + ' 了，还不睡吗…';
-    if (h >= 23) return '都 ' + t + ' 了，早点休息…';
-    if (h < 11) return '早安~ 现在是 ' + t;
-    return pickOne(QUOTES.time).split('{t}').join(t);
+    var pool;
+    if (h < 6) pool = QUOTES.timeEarly;
+    else if (h < 11) pool = QUOTES.timeMorning;
+    else if (h < 23) pool = QUOTES.time;
+    else pool = QUOTES.timeEve;
+    // 池为空（理论上不会，宿主与本地兜底都非空）时退回白天池，别让报时没字
+    if (!Array.isArray(pool) || !pool.length) pool = QUOTES.time;
+    return pickOne(pool).split('{t}').join(t);
   }
   function singleCenter(style, text, color, wrap) { return [null, { t: text, s: style, c: color || '', w: !!wrap }, null]; }
   function fmt(balance, currency) {
@@ -1167,6 +1243,12 @@
     var fixed = isFinite(num) ? num.toFixed(2) : '--';
     return currency === 'CNY' ? '¥ ' + fixed : fixed + ' ' + currency;
   }
+  // 币种符号：{currency} 占位符用（CNY→¥ / USD→$ / 其余原样返回代码，不硬造符号）
+  function currencySymbol(currency) {
+    return MODEL_MONEY_PREFIX[currency] != null ? String(MODEL_MONEY_PREFIX[currency]).trim() : String(currency || '');
+  }
+  // 周几标签：{weekday} 占位符用（索引与 Date.getDay() 对齐，0=周日）
+  var WEEKDAY_LABELS = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
   // token 数按万/亿缩写（与设置页口径一致）：大字行放不下长串数字
   function fmtTokens(n) {
     var v = Number(n) || 0;
@@ -1263,49 +1345,27 @@
       : '~' + usedTodayText(fmtModelMoney(m.todayUsage, m.currency));
     return { amount: fmtModelMoney(m.balance, m.currency), hint: used };
   }
-  // 第 3 行（说明行）一律允许换行：它是三行里最长的一行，也是三行中唯一会超出可用宽
-  // （FIT_W=660u）的那行。若保持 nowrap，fitBubbleText 会按它算出缩放系数、把三行一起缩小
-  // —— 第 2 行的大字金额会跟着从 140u 掉到约 105u，挂件越小越看不清。
-  function buildGroup1() {
-    // 峰谷时段是 DeepSeek 专属概念：主显示换成别的模型时，这组台词改报该模型的余额/额度
-    if (mainModelId !== 'deepseek') {
-      var d = modelDisplay();
-      return [
-        { t: defaultLabelText(), s: 'A', c: '' },
-        { t: d.amount, s: 'P', c: '' },
-        { t: d.hint, s: 'C', c: '', w: true },
-      ];
-    }
-    var peak = !!state.isPeak;
-    var tail = peakCountdownText();
-    return [
-      { t: '当前时间段为:', s: 'A', c: '' },
-      { t: peakLabelText(peak), s: 'P', c: peak ? '#e0433f' : '#2fa24c' },
-      { t: usedTodayText(fmt(state.todayUsage, state.currency)) + (tail ? ' · ' + tail : ''), s: 'C', c: '', w: true },
-    ];
-  }
-  // 内置默认组：与宿主 store.js 的 QUOTE_GROUPS_DEFAULT 一一对应（顺序、权重、样式都要一致）。
-  // 权重沿用整理前写死在挂件页里的那套（45 / 7 / 7 / 10 / 3 / 1）
-  function defaultRandomGroups() {
-    return [
-      { kind: 'card', w: 45 },
-      { kind: 'text', w: 7, style: 'B', lines: QUOTES.hint },
-      { kind: 'text', w: 7, style: 'A', lines: QUOTES.chat },
-      { kind: 'image', w: 10 },
-      { kind: 'text', w: 3, style: 'A', lines: QUOTES.dsh },
-      { kind: 'text', w: 1, style: 'B', lines: QUOTES.short },
-    ];
-  }
-  // 台词占位符：{balance} 当前主显示金额 / {today} 今日已用 / {peak} 当前时段 / {next} 距下次峰谷切换。
-  // 后三项都是 DeepSeek 口径：主显示换成别的模型时 state.isPeak / peakNextAt 不再更新
-  // （见 handleBalance 的提前返回），此时给空串而不是旧值，免得台词里报出一个早就过期的时段。
+  // 台词占位符。DeepSeek 专属口径（余额/今日已用/峰谷/倒计时/变化）在主显示换成别的模型时
+  // 不再更新（见 handleBalance 的提前返回），此时给空串而不是旧值，免得台词里报出一个早就过期的值。
   // 认不出的占位符原样保留（与提醒文案 alertLines 同一口径），便于用户发现写错。
+  //   {balance} 当前主显示金额   {today} 今日已用   {peak} 当前时段   {next} 距下次峰谷切换
+  //   {model} 主显示模型名       {currency} 币种符号（¥ / $ / 原币种代码）
+  //   {date} 月-日   {time} 时:分   {weekday} 周几（本地时间，页面现算）
+  //   {change} 本轮余额降幅（自动采样才有值，手动刷新/无变化给 0）
+  //   {countdown} 与 {next} 同源（距下次峰谷切换），单独留名便于用户按语义书写
   function linePlaceholderValue(k) {
     if (k === 'balance') return mainAmountText();
-    if (k !== 'today' && k !== 'peak' && k !== 'next') return null;
+    if (k === 'model') return (currentModel() && currentModel().name) || (mainModelId === 'deepseek' ? 'DeepSeek' : mainModelId);
+    if (k === 'currency') return currencySymbol(mainModelId === 'deepseek' ? state.currency : (currentModel() && currentModel().currency) || state.currency);
+    if (k === 'date') { var d1 = new Date(); return (d1.getMonth() + 1) + '-' + d1.getDate(); }
+    if (k === 'time') { var d2 = new Date(); return pad2(d2.getHours()) + ':' + pad2(d2.getMinutes()); }
+    if (k === 'weekday') return WEEKDAY_LABELS[new Date().getDay()];
+    // 以下几项都是 DeepSeek 口径：主显示不是内置 DeepSeek 时一律空串
+    if (k !== 'today' && k !== 'peak' && k !== 'next' && k !== 'change' && k !== 'countdown') return null;
     if (mainModelId !== 'deepseek') return '';
     if (k === 'today') return (state.todayUsage === null || state.todayUsage === undefined) ? '--' : fmt(state.todayUsage, state.currency);
     if (k === 'peak') return peakLabelText(!!state.isPeak);
+    if (k === 'change') { var ch = Number(state.change) || 0; return ch > 0 ? '-' + fmt(ch, state.currency) : fmt(0, state.currency); }
     return peakCountdownLeftText();
   }
   // 占位符在「这一组真被抽到」时才替换：抽签那一刻换会拿到上一轮刷新的旧余额
@@ -1315,136 +1375,44 @@
       return v === null ? m : v;
     });
   }
-  // v1 文本组 → v2 候选行列表（就地升级，不抽签）：style A = fz7 单段行 + 行 w:1、
-  // B = fz11 单段行不折行，与宿主 store.js rowsFromV1 同映射；占位符留给抽取时才替换
-  function rowsFromV1Lines(list, style) {
-    var fz = style === 'B' ? 11 : 7;
-    var out = [];
-    for (var i = 0; i < list.length; i++) {
-      out.push(style === 'B' ? [{ t: list[i], fz: fz }] : { segs: [{ t: list[i], fz: fz }], w: 1 });
+  // 通用「按权重抽下标」纯函数：累减权重抽一次；若命中上次的下标且池子 ≥2，就在「其余元素」
+  // 里按权重再抽一次——与 pickOne 的设计理由相同（不是简单 ±1 平移，避免总抽到相邻项）。
+  // lastOf 是「取上次下标的回调」（可为 null，此时不避重），返回抽中的下标；空池返回 -1。
+  // 供 randSegText 的段级随机句池抽取复用
+  function weightedPick(arr, wOf, lastOf) {
+    var n = arr.length;
+    if (!n) return -1;
+    if (n < 2) return 0;
+    var last = lastOf ? lastOf() : -1;
+    function draw(skip) {
+      var total = 0, i;
+      for (i = 0; i < n; i++) { if (i !== skip) total += wOf(arr[i]); }
+      if (!(total > 0)) return -1; // 其余项权重全为 0：无从抽，交给调用方定
+      var r = Math.random() * total;
+      for (i = 0; i < n; i++) {
+        if (i === skip) continue;
+        r -= wOf(arr[i]);
+        if (r < 0) return i;
+      }
+      return -1;
     }
-    return out;
+    var i = draw(-1);
+    if (i === last) { var j = draw(last); if (j >= 0) i = j; }
+    return i;
   }
-  // 行条件求值（与宿主 store.js quoteCondOk 同口径的内联副本：浮动页没有 require）。
-  // ctx 现取：isPeak / balance / mainModelId / day(getDay)。balance null = 未知 → 余额条件按不满足算
-  function rowCondOk(cond) {
-    if (!cond || typeof cond !== 'object') return true;
-    if (cond.type === 'peak') return !!state.isPeak;
-    if (cond.type === 'valley') return !state.isPeak;
-    if (cond.type === 'balanceBelow') return state.balance != null && state.balance < cond.value;
-    if (cond.type === 'model') return mainModelId === cond.value;
-    if (cond.type === 'weekday') { var d = new Date().getDay(); return cond.days && cond.days.indexOf(d) >= 0; }
-    return true;
-  }
-  // 行×段组的抽签项：候选行列表里随机取一行当一屏（v2 一行 = 一屏，与 v1 一条候选一屏同口径）。
-  // 纯单图段行走 gif 模式（保住内置图回退与降级文案），混合行才走 rows 内联渲染；
-  // text 段占位符在这里换（抽到才换的实时值口径）——必须拷贝新段再写，不能污染抽签配置
-  // （原地改 t 会把模板覆盖掉，下一轮再抽到就永远是第一次的旧值）；model 段留给渲染器现算
-  function rowsGroupLines(rows) {
-    return function () {
-      // 条件行先按当前状态过滤再抽：不满足的整行塌缩（不参与抽选）。全被滤掉 = 这屏不出（返回 null，
-      // 调用方 applyLines(null) 三行全藏、气泡自然收起）。求值口径与宿主 store.js quoteCondOk 同源（页面不能 require）
-      var pool = [];
-      for (var c = 0; c < rows.length; c++) {
-        var r = rows[c];
-        if (rowCondOk(r && r.cond)) pool.push(r);
-      }
-      if (!pool.length) return null;
-      var row = pickOne(pool);
-      var segs = Array.isArray(row) ? row : (row && typeof row === 'object' && Array.isArray(row.segs)) ? row.segs : null;
-      if (!segs || !segs.length) return null;
-      var onlyImg = true;
-      for (var i = 0; i < segs.length; i++) {
-        if (!segs[i] || segs[i].type !== 'image') { onlyImg = false; break; }
-      }
-      if (onlyImg) {
-        return { gif: true, src: bubbleImgSrc(segs[0].img) || '' };
-      }
-      var outSegs = [];
-      for (var j = 0; j < segs.length; j++) {
-        var seg = segs[j];
-        if (seg && seg.type === 'text' && typeof seg.t === 'string') {
-          outSegs.push(Object.assign({}, seg, { t: renderLinePlaceholders(seg.t) }));
-        } else {
-          outSegs.push(seg);
-        }
-      }
-      // 行级停留秒数随抽签结果带出（d 缺省 = BUBBLE_MS 5 秒口径，由 bubbleArmFor 统一折算）
-      return { rows: [{ segs: outSegs, w: Array.isArray(row) ? undefined : row.w }], dwell: row && !Array.isArray(row) ? row.d : undefined };
-    };
-  }
-  // 图片组 → 抽签项：抽一张自定义气泡图（没导入过时回空串，渲染层据此回退内置 rua.webp）
-  function imageGroupLines() { return { gif: true, src: pickBubbleUrl() }; }
-  // 组配置 → 抽签项列表。card 是内置的余额 / 时段卡（内容按当前数据现算，文本不可编辑）；
-  // 文本组没有有效台词就整组丢掉（清空 = 这组不出现，与宿主 normQuotes 口径一致）；
-  // 一组不剩时回退内置六组 —— 全空会让「随机台词」整个功能消失。
-  // 双形态输入：v2 组（rows）优先，v1 组（lines + style）就地升级，宿主侧 normQuoteGroup 同款
-  function buildRandomGroups(groups) {
-    var src = Array.isArray(groups) && groups.length ? groups : defaultRandomGroups();
-    var out = [];
-    for (var i = 0; i < src.length; i++) {
-      var g = src[i] || {};
-      var w = Number(g.w);
-      if (!(w > 0)) w = 1; // 宿主已把权重压在 1–999，这里只是兜底（0 / NaN 会让抽签把该组当兜底项）
-      // 组级音效：g.sound 是共享音效库的段名，播放体查 quoteSoundMap（收货自 whale:quote-sounds）；
-      // 名字查不到（没推过来 / 段已被删）就当没有，不报错
-      var snd = typeof g.sound === 'string' && g.sound && quoteSoundMap[g.sound] ? quoteSoundMap[g.sound] : '';
-      if (g.kind === 'card') { out.push({ w: w, sound: snd, lines: buildGroup1 }); continue; }
-      if (g.kind === 'image') { out.push({ w: w, sound: snd, lines: imageGroupLines }); continue; }
-      var rows = Array.isArray(g.rows) ? g.rows
-        : (Array.isArray(g.lines) && g.lines.length) ? rowsFromV1Lines(g.lines, g.style === 'B' ? 'B' : 'A')
-        : null;
-      if (!rows || !rows.length) continue;
-      out.push({ w: w, sound: snd, lines: rowsGroupLines(rows) });
-    }
-    return out.length ? out : buildRandomGroups(defaultRandomGroups());
-  }
-  var RANDOM_GROUPS = buildRandomGroups(null);
-  // 抽中一个组：返回 { lines, sound }（lines 可为 null —— 该组当前没有满足条件的行）。
-  // 三处抽中点（点击首抽 / 随机抽 / 依次播放）都从这里拿，组级音效才不会跟丢
-  function drawGroup() {
-    var total = 0, i;
-    for (i = 0; i < RANDOM_GROUPS.length; i++) total += RANDOM_GROUPS[i].w;
-    var r = Math.random() * total;
-    for (i = 0; i < RANDOM_GROUPS.length; i++) {
-      r -= RANDOM_GROUPS[i].w;
-      if (r < 0) return { lines: RANDOM_GROUPS[i].lines(), sound: RANDOM_GROUPS[i].sound || '' };
-    }
-    return null;
-  }
-  // 播一个组的音效（抽到带 sound 的组时随气泡响一下）。段名查不到 data URL 就静音 ——
-  // 组里存的只是段名，库里的段随时可能被删，这里不该报错打断抽词流程
-  function playQuoteSound(url) {
-    if (!soundOn || !url) return;
-    var a = audioFor(url, soundVol);
-    if (!a) return;
-    try {
-      a.currentTime = 0;
-      var p = a.play();
-      if (p && typeof p.catch === 'function') p.catch(function () {});
-    } catch (err) {}
-  }
-  function pickRandomLines() {
-    // 抽到「当前时间没有任何行满足条件」的组会返回 null：重抽几次，还不行就接受 null（气泡全空白比死循环好）
-    for (var t = 0; t < 3; t++) {
-      var drawn = drawGroup();
-      if (!drawn) continue; // 浮点边界没落到任何组：按原口径进入下一次重抽
-      if (drawn.lines) {
-        playQuoteSound(drawn.sound);
-        return drawn.lines;
-      }
-    }
-    return null;
-  }
-  // 「依次播放」：展示下一组台词；已是最后一组时返回 false，由调用方收起气泡
-  function queueNext() {
-    if (queueIdx + 1 >= RANDOM_GROUPS.length) { queueIdx = 0; return false; }
-    queueIdx += 1;
-    bubbleRandomLines = RANDOM_GROUPS[queueIdx].lines();
-    playQuoteSound(RANDOM_GROUPS[queueIdx].sound);
-    swapBubbleContent(function () { applyBubbleLines(bubbleRandomLines); });
-    bubbleArmFor(bubbleRandomLines && bubbleRandomLines.dwell, hideBubble);
-    return true;
+  // 段级随机句池取字（random 段）：按 { t, wt } 加权抽一条，并按段对象记住上次抽中的下标避重。
+  // 句池是静态的，同一段在多次渲染间复用同一对象，用 WeakMap 记「上次下标」最省事
+  var randSegLast = new WeakMap();
+  function randSegText(seg) {
+    var lines = seg && seg.lines;
+    if (!Array.isArray(lines) || !lines.length) return '';
+    if (lines.length === 1) return typeof lines[0] === 'string' ? lines[0] : (lines[0].t || '');
+    var last = randSegLast.get(seg);
+    var idx = weightedPick(lines, function (l) { return (l && !Array.isArray(l) && l.wt) || 1; }, function () { return last; });
+    if (idx < 0) idx = 0;
+    randSegLast.set(seg, idx);
+    var picked = lines[idx];
+    return typeof picked === 'string' ? picked : (picked && picked.t) || '';
   }
   // 试播会话推进：展示 steps[idx+1]，重挂自动收起；末条返回 false 由调用方收起气泡。
   // 该屏带停留秒数（step.dwell）时另布自动翻页定时器——到点没被点就走下一屏（参考外部
@@ -1476,6 +1444,86 @@
     if (previewDwellTimer) { clearTimeout(previewDwellTimer); previewDwellTimer = null; }
   }
 
+  // —— 按压气泡（v3 自定义泡泡模型）——
+  // 挂件常规气泡内容的产出路径：bubble.on 开启时由这里产出。
+  // 每一步（item）是一个「泡」：单选 {kind:'custom', modules} 或并列 {kind:'choice', options:[{w,item}]}；
+  // 并列泡每次呈现时按权重抽一个候选（上游 A/B 并列泡口径）。渲染复用 renderer.applyMods，
+  // 内容以 { mods } 形态交给它（applyLines 内部的 mods 分支）。
+  // 按权重抽候选下标（avoidIdx 用于不连续重复上一候选）：与上游 bubblePickLine 同口径
+  function bubblePickOptionIdx(options, avoidIdx) {
+    if (!options || !options.length) return -1;
+    if (options.length === 1) return 0;
+    var total = 0;
+    for (var i = 0; i < options.length; i++) total += Math.max(1, Number(options[i].w) || 1);
+    var pick = 0;
+    for (var guard = 0; guard < 6; guard++) {
+      var r = Math.random() * total, acc = 0;
+      pick = options.length - 1;
+      for (var j = 0; j < options.length; j++) {
+        acc += Math.max(1, Number(options[j].w) || 1);
+        if (r < acc) { pick = j; break; }
+      }
+      if (pick !== avoidIdx) break;
+    }
+    return pick;
+  }
+  var bubbleLastOptionIdx = -1; // 并列泡避重：上次呈现的候选下标
+  // 一步 → 要渲染的模块数组：单选直取；并列按权重抽一个候选（记录避重下标）
+  function bubbleStepModules(step) {
+    if (!step || typeof step !== 'object') return null;
+    if (step.kind === 'choice') {
+      var idx = bubblePickOptionIdx(step.options, bubbleLastOptionIdx);
+      bubbleLastOptionIdx = idx;
+      var opt = idx >= 0 ? step.options[idx] : null;
+      return opt && opt.item ? opt.item.modules : null;
+    }
+    return Array.isArray(step.modules) ? step.modules : null;
+  }
+  // 呈现一步：无模块内容时整泡不出（applyBubbleLines({mods:null}) 让渲染器三行全藏）
+  function bubbleRenderStep(step) {
+    var mods = bubbleStepModules(step);
+    applyBubbleLines({ mods: mods });
+  }
+  // 推进到下一步（点击语义）：末步返回 false 由调用方收起
+  function bubbleNext() {
+    if (bubbleIdx + 1 >= bubbleItems.length) return false;
+    bubbleIdx += 1;
+    var step = bubbleItems[bubbleIdx];
+    swapBubbleContent(function () { bubbleRenderStep(step); });
+    return true;
+  }
+  // 设置页「按压气泡试播」：把当前编辑的整份 items 发来挂成会话，点挂件气泡顺序翻条，
+  // 末条再点收起；停留时长走 bubble.dwell（无人点击也能自动推进）
+  function showBubblePreviewBubble(payload) {
+    if (!bubbleOn || timerActive()) return;
+    var data = payload && typeof payload === 'object' ? payload : {};
+    var items = Array.isArray(data.items) ? data.items : [];
+    if (!items.length) return;
+    if (bubbleTimer) { clearTimeout(bubbleTimer); bubbleTimer = null; }
+    renderer.cancelGifFade();
+    bubbleActive = true;
+    bubbleRandomActive = false;
+    bubbleRandomLines = null;
+    bubbleRemindActive = false;
+    bubbleRemindLines = null;
+    bubbleTimerActive = false;
+    bubblePreviewActive = false;
+    previewSession = null;
+    bubbleItems = items.slice();
+    bubbleIdx = 0;
+    bubbleLastOptionIdx = -1;
+    var first = bubbleItems[0];
+    if (bubbleShown) {
+      swapBubbleContent(function () { bubbleRenderStep(first); });
+    } else {
+      bubbleShown = true;
+      restoreBubbleLines();
+      bubbleRenderStep(first);
+      bubbleBox.classList.add('dshwv-bubble-open');
+    }
+    bubbleArm(bubbleModelDwellMs, hideBubble);
+  }
+
   // —— 峰谷时段提醒 ——
   // 时段表在页面内按内置规则拼出（浮动页没有 require，读不到宿主 constants）
   var PEAK_HOURS = [[9, 12], [14, 18]]; // 工作日峰时（北京时间）
@@ -1499,11 +1547,6 @@
     var m = Math.max(1, Math.round(left / 60));
     var h = Math.floor(m / 60);
     return h > 0 ? h + 'h' + pad2(m % 60) + 'm' : m + 'm';
-  }
-  // 气泡第三行的倒计时尾巴（不足 1 小时按分钟显示）
-  function peakCountdownText() {
-    var left = peakCountdownLeftText();
-    return left ? '距' + (state.isPeak ? '谷时' : '峰时') + ' ' + left : '';
   }
   // 峰谷两种状态的叫法（跟随设置页的「峰谷」模式）：余额卡与台词占位符 {peak} 共用，避免两处各写一套
   function peakLabelText(peak) {
@@ -1720,7 +1763,7 @@
   // 「只显计时」开 → 按「气泡常驻」；关 → 只先弹出来提示一下，随后回到余额/用量的常规气泡
   function timerBubbleAutoMs() {
     if (timerFinished) return timerRemindMs();
-    return (timerBubbleOnly && timerBubblePin) ? 0 : BUBBLE_MS;
+    return (timerBubbleOnly && timerBubblePin) ? 0 : bubbleDwellMs;
   }
   // 计时气泡是否占用思考气泡：到点提醒始终显示；计时中/暂停时由「只显计时」开关决定
   function timerTakesBubble() { return timerFinished || timerBubbleOnly; }
@@ -1992,6 +2035,9 @@
     // v2 行×段内容复位：render() 默认分支不走 applyLines，rowsBox 不会被自动藏掉，这里显式清
     rowsBox.style.display = 'none';
     rowsBox.innerHTML = '';
+    // v3 按压气泡模块区（modsBox）同上：不走 applyLines 时也要清掉，否则旧模块内容粘在屏上
+    modsBox.style.display = 'none';
+    modsBox.innerHTML = '';
     gifEl.style.display = 'none';
     gifEl.style.opacity = '';
     labelEl.style.display = '';
@@ -2034,7 +2080,18 @@
     previewSession = null;
     restoreBubbleLines();
     bubbleBox.classList.add('dshwv-bubble-open');
-    bubbleArm(BUBBLE_MS, hideBubble);
+    // 按压气泡模型开启：常规内容由 bubble 模型的第 1 泡产出，
+    // 停留时长走新模型自带值。此时不算「随机台词激活」，点击走 bubbleNext 推进（见 click / endDrag）
+    if (bubbleModelOn && bubbleItems.length) {
+      bubbleActive = true;
+      bubbleIdx = 0;
+      bubbleLastOptionIdx = -1;
+      bubbleRenderStep(bubbleItems[0]);
+      bubbleArm(bubbleModelDwellMs, hideBubble);
+      return;
+    }
+    bubbleActive = false;
+    bubbleArm(bubbleDwellMs, hideBubble);
   }
   // 「只显计时」关闭时，计时先显示一段后原地切回常规内容（气泡不收起，继续按常规时长停留）
   function timerPeekDone() {
@@ -2089,6 +2146,8 @@
     bubblePreviewActive = false;
     previewSession = null;
     previewDwellClear();
+    // 按压气泡模型与气泡同生共死：收起即退出该模型的显示态（下次点开重新从第 1 泡起）
+    bubbleActive = false;
     // 「时间到」提示收起后回到普通状态（计时已结束，模式保留便于重新开始）；
     // 动作条与气泡同生共死，否则气泡没了按钮还浮在那儿
     timerDoneActions.classList.remove('dshwv-actions-open');
@@ -2110,10 +2169,10 @@
     bubbleTtlAction = onExpire;
     bubbleTimer = setTimeout(function () { bubbleTimer = null; onExpire(); }, ttlMs);
   }
-  // 行级停留秒数（r.d 秒）→ TTL：与 BUBBLE_MS 同一布防入口，只是时长按行覆盖。
-  // dwell 非法（0/负数/超大/非数值）时回 BUBBLE_MS，d 上限 120s 由宿主 normRow 把关，这里只兜底
+  // 行级停留秒数（r.d 秒）→ TTL：与默认停留同一布防入口，只是时长按行覆盖。
+  // dwell 非法（0/负数/超大/非数值）时回全局默认停留（bubbleDwellMs），d 上限 120s 由宿主 normRow 把关，这里只兜底
   function bubbleArmFor(dwellSec, onExpire) {
-    var ms = BUBBLE_MS;
+    var ms = bubbleDwellMs;
     var d = Number(dwellSec);
     if (isFinite(d) && d >= 1 && d <= 120) ms = Math.round(d * 1000);
     bubbleArm(ms, onExpire);
@@ -2251,6 +2310,8 @@
       state.todayUsage = data.todayUsage !== undefined ? data.todayUsage : null;
       state.isPeak = !!data.isPeak;
       state.peakNextAt = Number(data.peakNextAt) || 0;
+      // 本轮余额降幅（占位符 {change} 用）：宿主只在自动采样时给非零，手动刷新/缓存副本恒 0
+      state.change = Number(data.change) || 0;
       // 本轮下降被判定为非消费（赠送额到期等）：第三行解释 12s；正常采样不带此字段
       state.adjustNote = (data.adjust && data.adjust.amount)
         ? { text: adjustNoteText(data.adjust), until: Date.now() + ADJUST_NOTE_MS }
@@ -2445,19 +2506,9 @@
     lockToggle.checked = dragLock;
     saveCfg();
   }
-  // 请求宿主唤出 uTools 主窗（设置页）
-  function openSettings() {
-    try { whaleApi.openSettings(null); } catch (err) { logErr('[whale][page] 打开设置失败', err && err.message); }
-  }
-  // 组级台词音效（whale:quote-sounds，name→dataURL，只含被台词组引用的段）。
-  // buildRandomGroups 装配时按组里的 sound 段名查这份表；applyConfig 重建抽签项时若
-  // 推送先到就用新表，后到则用补送钩子重建 —— 顺序无关
-  var quoteSoundMap = {};
-  var lastQuoteGroups = null;
-  function applyQuoteSounds(map) {
-    quoteSoundMap = map && typeof map === 'object' ? map : {};
-    // 音效数据与组配置谁先到都不确定：组已就位且新表能盖住引用时重建抽签项（换上刚到的音效）
-    if (lastQuoteGroups) RANDOM_GROUPS = buildRandomGroups(lastQuoteGroups);
+  // 请求宿主唤出 uTools 主窗（设置页）。target 可选（如 'quotes' 直达按压气泡卡）
+  function openSettings(target) {
+    try { whaleApi.openSettings(target || null); } catch (err) { logErr('[whale][page] 打开设置失败', err && err.message); }
   }
   function applyConfig(cfg) {
     if (!cfg || typeof cfg !== 'object') return;
@@ -2578,7 +2629,24 @@
       state.budgetOver = budgetOverAmount() !== null;
       if (!bubbleShown) render();
     }
-    if (typeof cfg.clickQueueOn === 'boolean') clickQueueOn = cfg.clickQueueOn;
+    if (typeof cfg.tapAdvance === 'boolean') tapAdvance = cfg.tapAdvance;
+    // 全局默认气泡停留时长（秒）：3–60 整数才覆盖，其余（缺省/脏值）回落出厂 5s。
+    // 宿主 normConfig 已把非法值摘键，这里只做运行期兜底
+    if (typeof cfg.bubbleDwell === 'number' && isFinite(cfg.bubbleDwell)
+      && cfg.bubbleDwell >= 3 && cfg.bubbleDwell <= 60) {
+      bubbleDwellMs = Math.round(cfg.bubbleDwell) * 1000;
+    }
+    // 拖拽台词：非空字符串数组才覆盖（空数组会让拖拽没词，保留内置默认）；
+    // 逐条清洗（trim + 截 60 字）与宿主 normLineList 同口径，防脏载荷
+    if (Array.isArray(cfg.dragLines)) {
+      var dl = [];
+      for (var di = 0; di < cfg.dragLines.length && dl.length < 10; di++) {
+        if (typeof cfg.dragLines[di] !== 'string') continue;
+        var ds = cfg.dragLines[di].trim().slice(0, 60);
+        if (ds) dl.push(ds);
+      }
+      if (dl.length) DRAG_LINES = dl;
+    }
     if (typeof cfg.timeBubbleOn === 'boolean') {
       timeBubbleOn = cfg.timeBubbleOn;
       timeToggle.checked = timeBubbleOn;
@@ -2655,15 +2723,45 @@
       var nextUiMode = (cfg.uiMode === 'light' || cfg.uiMode === 'dark') ? cfg.uiMode : 'auto';
       if (nextUiMode !== uiMode) { uiMode = nextUiMode; applyDark(); }
     }
-    // 台词库：time / gifFail 是非空字符串数组才覆盖（空数组会让报时/降级文案没字）；
-    // groups 是随机组的抽签配置，整份重建（宿主侧已清洗过，这里只做抽签项装配）
-    if (cfg.quotes && typeof cfg.quotes === 'object') {
-      for (var qi = 0; qi < QUOTE_TEXT_KEYS.length; qi++) {
-        var qk = QUOTE_TEXT_KEYS[qi];
-        if (Array.isArray(cfg.quotes[qk]) && cfg.quotes[qk].length) QUOTES[qk] = cfg.quotes[qk].slice();
+    // 固定文案池（报时四池 + 动图降级）：挂在按压气泡模型的 system 键上，非空字符串数组才覆盖
+    //（空数组会让报时/降级文案没字）
+    // 新按压气泡模型（bubble.on 开启时挂件改走它；与顶层交互项各管各）：
+    // 宿主 store.normBubble 已归一化，这里只做运行期兜底与落地
+    if (cfg.bubble && typeof cfg.bubble === 'object') {
+      var bub = cfg.bubble;
+      if (bub.system && typeof bub.system === 'object') {
+        for (var qi = 0; qi < QUOTE_TEXT_KEYS.length; qi++) {
+          var qk = QUOTE_TEXT_KEYS[qi];
+          if (Array.isArray(bub.system[qk]) && bub.system[qk].length) QUOTES[qk] = bub.system[qk].slice();
+        }
       }
-      RANDOM_GROUPS = buildRandomGroups(cfg.quotes.groups);
-      lastQuoteGroups = cfg.quotes.groups;
+      var wasOn = bubbleModelOn;
+      // 自定义泡泡只在**启用时**接管（bubble.on === true）；未启用（false）时不覆盖顶层
+      // 「思考气泡」，保住顶层 bubbleOn 开着时的常规气泡 —— 早先无条件覆盖，会让关掉自定义
+      // 连思考气泡一起没了。bubbleModelOn 才是「用不用自定义内容」，bubbleOn 只是总闸
+      bubbleModelOn = bub.on === true;
+      if (bubbleModelOn) bubbleOn = true;
+      bubbleItems = Array.isArray(bub.items) ? bub.items : [];
+      if (typeof bub.tapAdvance === 'boolean') bubbleTapAdvanceOn = bub.tapAdvance;
+      if (typeof bub.dwell === 'number' && isFinite(bub.dwell) && bub.dwell >= 3 && bub.dwell <= 60) {
+        bubbleModelDwellMs = Math.round(bub.dwell) * 1000;
+      }
+      if (Array.isArray(bub.dragLines)) {
+        var bdl = [];
+        for (var bi = 0; bi < bub.dragLines.length && bdl.length < 10; bi++) {
+          if (typeof bub.dragLines[bi] !== 'string') continue;
+          var bs = bub.dragLines[bi].trim().slice(0, 60);
+          if (bs) bdl.push(bs);
+        }
+        bubbleDragLines = bdl;
+      }
+      // 自定义模型开关变化时，气泡若正显示就按新模型重显一次（避免残留旧内容）。
+      // 未启用自定义（bubbleOn 仅由顶层思考气泡打开）时不接管，交给常规气泡路径
+      if (bubbleShown && (bubbleModelOn !== wasOn)) {
+        if (bubbleModelOn) { bubbleActive = true; bubbleIdx = 0; bubbleLastOptionIdx = -1; bubbleRenderStep(bubbleItems[0]); bubbleArm(bubbleModelDwellMs, hideBubble); }
+        else if (bubbleOn) showBubble(false); // 退回常规气泡：按顶层思考气泡重显一次
+        else hideBubble();
+      }
     }
     // 提醒文案模板：只接受非空字符串（空模板会让气泡没字），逐条覆盖
     if (cfg.alerts && typeof cfg.alerts === 'object') {
@@ -2699,7 +2797,7 @@
   // 池里只留当前引用的 URL：删掉/换掉一段音效后，旧的 data URL 不该继续占着内存（一段 wav 可能近 1MB）
   function prunePool() {
     var keep = {};
-    var lists = [pressList, releaseList, alertUrls.low, alertUrls.budget, alertUrls.peak, alertUrls.pass, quoteSoundUrls()];
+    var lists = [pressList, releaseList, alertUrls.low, alertUrls.budget, alertUrls.peak, alertUrls.pass];
     for (var i = 0; i < lists.length; i++) {
       for (var j = 0; j < lists[i].length; j++) keep[lists[i][j]] = true;
     }
@@ -2795,13 +2893,6 @@
   // 与上面的「音色」相互独立：press/release 缺失时回退内置音色，提醒音没有回落 ——
   // 不打扰是默认，没导入就不响。播放只受「音效开关 + 音量」影响，不受音色选择影响。
   var alertUrls = { low: [], budget: [], peak: [], pass: [] };
-  // 组级音效走 dataURL → Audio，同样进池：keep 名单里要带上，否则 prunePool 会把
-  // 刚建好的组音效当孤儿清掉，表现为「组音效第一次响、之后永远没声」
-  function quoteSoundUrls() {
-    var out = [];
-    for (var k in quoteSoundMap) if (quoteSoundMap[k]) out.push(quoteSoundMap[k]);
-    return out;
-  }
   function applyAlertSounds() {
     for (var role in alertUrls) {
       alertUrls[role] = toList(customSounds[role]);
@@ -3282,6 +3373,16 @@
     var ddx = e.screenX - drag.sSX, ddy = e.screenY - drag.sSY;
     drag = null;
     if (wasClick) {
+      // 点挂件本体推进（tapAdvance，默认关）：气泡已在显示随机台词/试播会话时，点本体等同点气泡翻下一条。
+      // 首点开泡、计时 peek、「只显计时」等语义完全不变 —— 只有「气泡已开着且有可推进内容」才拦走
+      // 新按压气泡模型（bubble.on）自带 tapAdvance，走自己的开关与推进函数，与顶层 tapAdvance 各管各。
+      if (bubbleActive && bubbleTapAdvanceOn) {
+        if (!bubbleNext()) hideBubble(); else bubbleArm(bubbleModelDwellMs, hideBubble);
+        try { whaleApi.dragEnd(); } catch (err) {} hoverAt(e); return;
+      }
+      if (tapAdvance && bubbleShown) {
+        if (bubblePreviewActive) { if (!previewSessionNext()) hideBubble(); try { whaleApi.dragEnd(); } catch (err) {} hoverAt(e); return; }
+      }
       showBubble(true); // 用户点击：计时气泡即使不常驻也要弹出来
       refresh(true);
       // 只是点击、没真正拖动，不会走下面的 dragEnd（那条路才会解冻宿主）。
@@ -3384,10 +3485,8 @@
     // 此时 customSkin 若还是空串，会先闪一下内置形象再换成自定义
     customSkin = data.skin || '';
     customBubbles = toList(data.bubbles);
-    // 组级音效表必须先于 applyConfig 落地：applyConfig 里 buildRandomGroups 装配抽签项时
-    // 要按组里的 sound 段名查 quoteSoundMap，init 不补这张表的话冷启动后组音效一直不响
-    // （whale:quote-sounds 只在配置变更时推送，启动路径上没有第二次机会）
-    if (data.quoteSounds) applyQuoteSounds(data.quoteSounds);
+    // 共享角色图池也要先于 applyConfig 落地：randimg 段首次渲染就要能从池里抽
+    sharedSkins = toList(data.sharedSkins);
     applyConfig(data.config);
     passNoticeReady = true; // 之后的配置变更（快捷键/设置页切换）才弹说明气泡
     if (data.sounds) {
@@ -3418,7 +3517,7 @@
   });
   whaleApi.onConfig(function (cfg) { applyConfig(cfg); });
   whaleApi.onModels(function (data) { handleModels(data); });
-  whaleApi.onQuotePreview(function (data) { showQuotePreviewBubble(data); });
+  whaleApi.onBubblePreview(function (data) { showBubblePreviewBubble(data); });
   whaleApi.onSounds(function (data) {
     // 设置页导入/删除自定义音效后宿主重推；当前正用自定义音色时立即换源，
     // 提醒音与音色无关，每次都要重建（导入即生效、删除即静音）
@@ -3431,10 +3530,6 @@
     if (soundSet === 'custom') applySoundSet();
     applyAlertSounds();
   });
-  whaleApi.onQuoteSounds(function (data) {
-    applyQuoteSounds(data);
-    prunePool();
-  });
   whaleApi.onSkin(function (data) {
     // 设置页导入/删除自定义形象后宿主重推；当前正用自定义形象时立即换图
     customSkin = data || '';
@@ -3443,6 +3538,10 @@
   whaleApi.onBubbles(function (data) {
     // 设置页导入/删除自定义气泡图后宿主重推；没有「当前用哪张」，下次抽到动图组自然生效
     customBubbles = toList(data);
+  });
+  if (whaleApi.onSharedSkins) whaleApi.onSharedSkins(function (data) {
+    // 设置页下载/删除共享角色后宿主重推；没有「当前用哪张」，下次抽到 randimg 段自然生效
+    sharedSkins = toList(data);
   });
   whaleApi.onSnapped(function (data) {
     flipped = !!(data && data.flipped);

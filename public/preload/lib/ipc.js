@@ -255,12 +255,18 @@ function registerIpc() {
   })
 
   // 挂件菜单请求唤出主窗（设置页）：「显示挂件」模式下唯一入口。
-  // redirect 分支（主窗不存在）时页面全新加载落默认 Tab
-  ipcRenderer.on('whale:open-settings', () => {
-    // 1) 主窗还在（如 both/settings 模式，或设置窗已分离）→ 直接唤回
+  // 可带 target（如 'appearance'）—— 菜单按钮用它直达对应卡片；无 target 时只唤窗落默认 Tab。
+  // redirect 分支（主窗不存在）时页面全新加载，target 无法投递，落默认 Tab（与无载荷时一致）。
+  ipcRenderer.on('whale:open-settings', (event, data) => {
+    const target = (data && typeof data.target === 'string') ? data.target : ''
+    // 1) 主窗还在（如 both/settings 模式，或设置窗已分离）→ 直接唤回并把导航指令投给设置页
     let shown = false
     try { shown = !!utools.showMainWindow() } catch (err) { logErr('[whale][ipc] 显示主窗失败', err && err.message) }
-    if (shown) return
+    if (shown) {
+      // 窗口已存在的同步路径：先等一帧让设置页排到队列末尾，避免「唤回」与「切 Tab」在同一拍被后来的重渲染覆盖
+      if (target) setTimeout(() => { try { require('./settings').emitNavigate(target) } catch (err) { logErr('[whale][ipc] 投递导航失败', err && err.message) } }, 0)
+      return
+    }
     // 2) 主窗不存在（如「显示挂件」模式下挂件夺焦，uTools 已把插件收到后台）：
     //    showMainWindow 唤不回主窗，必须 redirect 重新「进入插件」（'余额挂件' 是 whale 的指令别名），
     //    由 onPluginEnter 的 redirect 分支显式 showMainWindow（重定向已让插件重新激活）。

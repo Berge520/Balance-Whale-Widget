@@ -520,6 +520,23 @@ function importBuffer(name, ext, buf, thumbBuf, at, id, builtin) {
   return r
 }
 
+// 已装「官方可下载形象」（builtin===true，即内置包 + 共享角色）的本体 → base64 data URL 数组。
+// 用途：气泡台词 v2 的 randimg 段要从「共享角色图池」随机抽图（上游 gif 模块的能力），
+// 挂件侧读不到磁盘，只能由宿主一次性把已装的官方图推过去。
+// 为什么只推 builtin：用户自己导入的形象是「当前头像」语义，不该混进随机图池；
+// 只推已装官方图，池子天然就是「共享角色 + 内置形象」这一批。
+// 文件缺失的项跳过（不因一张坏图让整个池子推不出去）；一次搬几十 MB 的风险由调用方
+//（widget.pushInit）按需决定，这里只如实返回。
+function getBuiltinData() {
+  const out = []
+  for (const it of readRaw().items) {
+    if (it.builtin !== true) continue
+    const url = readFileUrl(it.id + '.' + it.ext, it.ext)
+    if (url) out.push(url)
+  }
+  return out
+}
+
 // 当前形象的本体 → base64 data URL（挂件 img.src 直接可用）。
 // 文件丢失（用户手动清理了 userData）时按缺失处理，挂件侧回退内置形象。
 function getSkinData() {
@@ -533,7 +550,7 @@ function getSkinData() {
 
 module.exports = {
   importSkin, importSkinFromPath, pickImageFile, importSkinFromData,
-  removeSkin, removeSkins, setCurrent, moveSkin, moveSkins, setRandomBatch, clearAll, getSkinData, listSkins, readMeta,
+  removeSkin, removeSkins, setCurrent, moveSkin, moveSkins, setRandomBatch, clearAll, getSkinData, getBuiltinData, listSkins, readMeta,
   // 内置可下载形象（lib/skin-packs.js）用
   builtinIds, installBuiltin,
   // 设置页把共享角色的打包缩略图补落盘用（老数据没有缩略图时懒补）

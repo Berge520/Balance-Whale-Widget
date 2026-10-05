@@ -85,8 +85,8 @@
   }
   .dshwv-amount.dshwv-low { color: #e0433f; }
   .dshwv-hint.dshwv-low { color: #e0433f; }
-  /* 台词库 v2 行×段：与三行结构互斥（渲染器 applyRows 开关 display）。
-     行本身无字号，段自带行内字号；链接段单独开 pointer-events（text 容器整体关掉了）
+  /* 泡泡模块行容器：与三行结构互斥（渲染器 applyRows 开关 display）。
+     行本身无字号，模块自带行内字号；链接模块单独开 pointer-events（text 容器整体关掉了）
      并可点，点击处理由宿主页面按 dataset.url 接 */
   .dshwv-rows { display: none; }
   .dshwv-row { white-space: nowrap; line-height: 1.2; }
@@ -94,3 +94,42 @@
   .dshwv-seg { white-space: inherit; }
   .dshwv-seg-img { display: inline-block; vertical-align: middle; max-width: calc(var(--dshw-u) * 660); }
   .dshwv-link { text-decoration: underline; cursor: pointer; pointer-events: auto; }
+  /* 按压气泡（bubble 模型）行×模块：与三行结构、台词 v2 行结构互斥显示。
+     每个模块自带字号（行内 calc(var(--dshw-u) * N)），行内模块依次紧排、超宽在模块内折行；
+     模块的底色/跑马灯在 .dshwv-trow 层，文字跑马灯在其内层 span（dshwv-trowtx）叠加 */
+  .dshwv-mods { white-space: normal; }
+  .dshwv-trowline { display: block; white-space: normal; line-height: 1.25; text-align: center; }
+  .dshwv-trow { display: inline; vertical-align: baseline; white-space: normal; overflow-wrap: anywhere; word-break: break-word; }
+  .dshwv-mimg { display: block; margin: 0 auto; max-width: calc(var(--dshw-u) * 540); }
+  /* 文字/底色跑马灯渐变：与上游 18 套配色同名（.dshwv-rgb-<scheme> /.dshwv-bgrgb-<scheme>），
+     颜色停止点的取色与上游一致（macaron 为基础方案，其余为同类渐变） */
+  .dshwv-rgb, .dshwv-bgrgb {
+    background-size: 200% auto;
+    animation-name: dshwv-rgb-move;
+    animation-timing-function: linear;
+    animation-iteration-count: infinite;
+  }
+  .dshwv-rgb {
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+    color: transparent;
+  }
+  @keyframes dshwv-rgb-move { from { background-position: 0% 50%; } to { background-position: 200% 50%; } }
+  .dshwv-rgb-macaron,   .dshwv-bgrgb-macaron   { background-image: linear-gradient(90deg,#ff9a9e,#fad0c4,#fbc2eb,#a18cd1,#fbc2eb,#fad0c4,#ff9a9e); }
+  .dshwv-rgb-candy,     .dshwv-bgrgb-candy     { background-image: linear-gradient(90deg,#f6d365,#fda085,#f6d365); }
+  .dshwv-rgb-rouge,     .dshwv-bgrgb-rouge     { background-image: linear-gradient(90deg,#e0433f,#f7a1a1,#e0433f); }
+  .dshwv-rgb-bamboo,    .dshwv-bgrgb-bamboo    { background-image: linear-gradient(90deg,#2fa24c,#a8e063,#2fa24c); }
+  .dshwv-rgb-aurora,    .dshwv-bgrgb-aurora    { background-image: linear-gradient(90deg,#00c9ff,#92fe9d,#00c9ff); }
+  .dshwv-rgb-deepsea,   .dshwv-bgrgb-deepsea   { background-image: linear-gradient(90deg,#2b5876,#4e4376,#2b5876); }
+  .dshwv-rgb-sunset,    .dshwv-bgrgb-sunset    { background-image: linear-gradient(90deg,#ff7e5f,#feb47b,#ff7e5f); }
+  .dshwv-rgb-forest,    .dshwv-bgrgb-forest    { background-image: linear-gradient(90deg,#11998e,#38ef7d,#11998e); }
+  .dshwv-rgb-champagne, .dshwv-bgrgb-champagne { background-image: linear-gradient(90deg,#f7e8b1,#e6c15a,#f7e8b1); }
+  .dshwv-rgb-lavender,  .dshwv-bgrgb-lavender  { background-image: linear-gradient(90deg,#a18cd1,#fbc2eb,#a18cd1); }
+  .dshwv-rgb-mint,      .dshwv-bgrgb-mint      { background-image: linear-gradient(90deg,#43e97b,#38f9d7,#43e97b); }
+  .dshwv-rgb-lava,      .dshwv-bgrgb-lava      { background-image: linear-gradient(90deg,#f83600,#f9d423,#f83600); }
+  .dshwv-rgb-galaxy,    .dshwv-bgrgb-galaxy    { background-image: linear-gradient(90deg,#4b2e83,#a06cd5,#4b2e83); }
+  .dshwv-rgb-ink,       .dshwv-bgrgb-ink       { background-image: linear-gradient(90deg,#232526,#414345,#232526); }
+  .dshwv-rgb-indigo,    .dshwv-bgrgb-indigo    { background-image: linear-gradient(90deg,#4e54c8,#8f94fb,#4e54c8); }
+  .dshwv-rgb-blaze,     .dshwv-bgrgb-blaze     { background-image: linear-gradient(90deg,#ff512f,#dd2476,#ff512f); }
+  .dshwv-rgb-amber,     .dshwv-bgrgb-amber     { background-image: linear-gradient(90deg,#f7971e,#ffd200,#f7971e); }

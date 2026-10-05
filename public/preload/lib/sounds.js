@@ -395,37 +395,9 @@ function getSoundData() {
   return out
 }
 
-// 组级台词音效的数据源：按「组里引用的段名清单」从 shared 素材池取 data URL。
-// 不进 getSoundData —— 那份只推实播槽位且有缓存，而「被组引用的段」随配置变动，
-// 定向推送（whale:quote-sounds）只搬真正被用到的几段，避免全池几十段 base64 白占消息
-function getQuoteSoundData(names) {
-  const list = Array.isArray(names) ? names : []
-  const uniq = []
-  const seen = {}
-  for (const n of list) {
-    if (typeof n !== 'string' || !n || seen[n]) continue
-    seen[n] = true
-    uniq.push(n)
-  }
-  if (!uniq.length) return {}
-  const meta = readMeta().shared
-  const out = {}
-  for (const m of meta) {
-    if (uniq.indexOf(m.name) < 0) continue
-    try {
-      const buf = fs.readFileSync(path.join(soundsDir(), m.file))
-      if (buf.length > MAX_BYTES * 2) continue
-      out[m.name] = 'data:' + (MIME[m.ext] || 'audio/mpeg') + ';base64,' + buf.toString('base64')
-    } catch (err) {
-      logErr('[whale][sounds] 读取组音效失败', m.file, err && err.message)
-    }
-  }
-  return out
-}
-
 module.exports = {
   importSound, pickSoundFile, importSoundFromData,
-  removeSound, clearAll, getSoundData, getQuoteSoundData, readMeta, ROLES, PLAY_ROLES, ROLE_LABEL,
+  removeSound, clearAll, getSoundData, readMeta, ROLES, PLAY_ROLES, ROLE_LABEL,
   // 共享音效库（lib/assets-packs.js / 设置页「选用」用）
   installBuiltin, useSharedSound, readSoundBuffer, mimeOf, removeDerivedFrom,
   // 素材包（assets.js）用

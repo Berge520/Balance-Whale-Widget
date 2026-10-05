@@ -4,15 +4,15 @@
  * normTokenPrice：设置页每次提交的整份自定义单价都会过这里，写错不抛错，
  * 只会让用户填的单价 / 汇率悄悄变成别的值 —— 甚至把美元数额当人民币记进账本。
  *
- * normQuotes：随机台词组（可增删 / 调权重）与两项固定文案都过这里，同样是不抛错的清洗 ——
- * 写错会让用户配好的台词组整组消失、或权重被悄悄改成别的值。
+ * normBubble：按压气泡（含固定文案池 system）过这里，同样是不抛错的清洗 ——
+ * 写错会让用户配好的气泡整条消失、或权重被悄悄改成别的值。
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import store from '../public/preload/lib/store.js'
 import constants from '../public/preload/lib/constants.js'
 
-const { normTokenPrice, normQuotes, normUiMode, QUOTE_GROUP_MAX, normSeg, normRow, normQuoteGroup, normQuoteSound, rowsFromV1, normRowCond, quoteCondOk, QUOTE_FONT_TIERS } = store
+const { normTokenPrice, normUiMode, QUOTE_TEXT_KEYS, DRAG_LINES_DEFAULT, normLineList } = store
 const { TOKEN_PRICE_DEFAULT, TOKEN_PRICE_MAX, TOKEN_RATE_MAX } = constants
 
 test('normTokenPrice 缺字段回落默认值，开关只认 true', () => {
@@ -49,277 +49,29 @@ test('normTokenPrice 汇率保留 4 位小数', () => {
   assert.equal(normTokenPrice({ rate: 7 }).rate, 7)
 })
 
-test('normQuotes 恢复默认：两项固定文案 + 内置六组迁移成 v2（顺序与权重沿用整理前写死的那套）', () => {
-  const q = normQuotes(null)
-  assert.ok(Array.isArray(q.time) && q.time.length)
-  assert.ok(Array.isArray(q.gifFail) && q.gifFail.length)
-  assert.equal(q.v, 2)
-  assert.deepEqual(q.groups.map((g) => [g.kind, g.w]), [
-    ['card', 45],
-    ['text', 7],
-    ['text', 7],
-    ['text', 10],
-    ['text', 3],
-    ['text', 1],
-  ])
-  // v2 出口：旧 image 组迁移成单图段行（img=0 = 抽到时随机取一张）；text 组全是行×段
-  assert.deepEqual(q.groups[3].rows, [{ segs: [{ type: 'image', img: 0, h: 96, br: undefined }] }])
-  const textGroups = q.groups.filter((g) => g.kind === 'text' && g.rows.some((r) => r.segs[0].type === 'text'))
-  assert.ok(textGroups.every((g) => g.rows.length > 0 && g.rows.every((r) => r.segs[0].t)))
-  // 旧 style 还留在行里：B 组大字 fz11、A 组普通字号 fz7 + 行可折行
-  assert.equal(q.groups[1].rows[0].segs[0].fz, 11)
-  assert.equal(q.groups[2].rows[0].segs[0].fz, 7)
-  assert.equal(q.groups[2].rows[0].w, 1)
-  assert.equal(q.groups[1].rows[0].w, undefined)
-  // 默认值不能共用同一个数组实例（否则设置页改一次就把默认值污染了）
-  assert.notEqual(normQuotes(null).groups, normQuotes(null).groups)
+test('normLineList（拖拽台词）：非数组回默认、逐条 trim 截断并去非串，全空也回默认', () => {
+  // 非数组 / 全是脏项 → 回默认（不能让拖拽没词）
+  assert.deepEqual(normLineList(null, DRAG_LINES_DEFAULT, 10), DRAG_LINES_DEFAULT)
+  assert.deepEqual(normLineList(['  ', 42, null], DRAG_LINES_DEFAULT, 10), DRAG_LINES_DEFAULT)
+  assert.deepEqual(normLineList('abc', DRAG_LINES_DEFAULT, 10), DRAG_LINES_DEFAULT)
+  // 合法项 trim 后保留；条数压到上限
+  assert.deepEqual(normLineList([' 甲 ', '乙'], DRAG_LINES_DEFAULT, 10), ['甲', '乙'])
+  assert.equal(normLineList(Array.from({ length: 30 }, (_, i) => 'x' + i), DRAG_LINES_DEFAULT, 4).length, 4)
+  // 默认值是一份拷贝：改返回值不能污染模块级默认（否则下次「恢复默认」就被带歪）
+  const got = normLineList(null, DRAG_LINES_DEFAULT, 10)
+  got.push('污染')
+  assert.equal(DRAG_LINES_DEFAULT.includes('污染'), false)
 })
 
-test('normQuotes 老结构就地升级：四个 key → 四组文本，card / image 补回原位', () => {
-  const q = normQuotes({ hint: ['a'], chat: ['b'], dsh: ['c'], short: ['d'], time: ['报时'], gifFail: ['挂了'] })
-  assert.equal(q.v, 2)
-  assert.deepEqual(q.time, ['报时'])
-  assert.deepEqual(q.gifFail, ['挂了'])
-  assert.deepEqual(q.groups.map((g) => g.kind), ['card', 'text', 'text', 'text', 'text', 'text'])
-  assert.deepEqual(q.groups.map((g) => g.w), [45, 7, 7, 10, 3, 1])
-  const firstText = (g) => g.rows[0].segs[0].t
-  assert.deepEqual(
-    [q.groups[1], q.groups[2], q.groups[4], q.groups[5]].map(firstText),
-    ['a', 'b', 'c', 'd'],
-  )
-  // 老结构里没配过的组用内置文案补齐，不会升级成空组
-  assert.ok(normQuotes({ chat: ['只有这一组'] }).groups[1].rows.length > 1)
-})
-
-test('normQuotes 组清洗：权重压到 1–999，kind 不认按文本，没有台词的文本组整组丢掉', () => {
-  const q = normQuotes({ groups: [
-    { kind: 'image', w: 0 },
-    { kind: 'card', w: 99999 },
-    { kind: 'nope', w: 3, lines: [' 留  '] },
-    { kind: 'text', w: 5, lines: ['   ', ''] },
-  ] })
-  assert.equal(q.v, 2)
-  // image 组被迁移成「单图段行」的 text 组，w 压到 1
-  assert.deepEqual(q.groups, [
-    { kind: 'text', w: 1, rows: [{ segs: [{ type: 'image', img: 0, h: 96, br: undefined }] }] },
-    { kind: 'card', w: 999 },
-    { kind: 'text', w: 3, rows: [{ segs: [{ type: 'text', t: '留', fz: 7, c: '', g: undefined, b: undefined, i: undefined, br: undefined }], w: 1 }] },
-  ])
-})
-
-test('normQuotes 组列表为空 / 一组不剩都回内置默认（全空会让随机台词整个功能消失）', () => {
-  assert.equal(normQuotes({ groups: [] }).groups.length, 6)
-  assert.equal(normQuotes({ groups: [{ kind: 'text', lines: [] }] }).groups.length, 6)
-  assert.equal(normQuotes({ groups: [{ kind: 'text', w: 1 }] }).groups.length, 6)
-})
-
-test('normQuotes 组数超上限截到上限（用实现导出的常量比较，写死数字会与实现脱钩）', () => {
-  const many = []
-  for (let i = 0; i < QUOTE_GROUP_MAX + 8; i++) many.push({ kind: 'image', w: 1 })
-  assert.equal(normQuotes({ groups: many }).groups.length, QUOTE_GROUP_MAX)
-  // 恰好等于上限时不截断（边界另一侧：off-by-one 会让用户配满的一组凭空消失）
-  const exact = many.slice(0, QUOTE_GROUP_MAX)
-  assert.equal(normQuotes({ groups: exact }).groups.length, QUOTE_GROUP_MAX)
-})
-
-test('normQuotes 只带部分键时其余沿用现值（不是回默认）', () => {
-  const cur = normQuotes(null)
-  cur.time = ['旧的']
-  const q = normQuotes({ gifFail: ['新降级'] }, cur)
-  assert.deepEqual(q.time, ['旧的'])
-  assert.deepEqual(q.gifFail, ['新降级'])
-  assert.deepEqual(q.groups, cur.groups)
-})
-
-test('normQuotes v2 现值回灌幂等：groups 读写往返一遍不再变形（patchConfig 部分更新靠它）', () => {
-  const first = normQuotes({ groups: [
-    { kind: 'text', w: 4, rows: [{ segs: [{ t: '富文本', fz: 9, c: '#f00' }, { type: 'model', model: 'balance' }] }] },
-    { kind: 'image', w: 2 },
-  ] })
-  const second = normQuotes(first)
-  assert.deepEqual(second, first)
-  // 再灌一遍仍一致（防「第一次是巧合」）
-  assert.deepEqual(normQuotes(second), first)
-})
-
-test('normQuotes 文本字段清空回内置默认（不是空数组：报时 / 降级文案不能没字）', () => {
-  assert.ok(normQuotes({ time: [], gifFail: ['   '] }).time.length > 1)
-  assert.ok(normQuotes({ time: [], gifFail: ['   '] }).gifFail.length > 1)
-})
-
-test('normQuotes 同时带 groups 与老 key 时以 groups 为准', () => {
-  const q = normQuotes({ groups: [{ kind: 'image', w: 2 }], hint: ['老'] })
-  assert.deepEqual(q.groups, [
-    { kind: 'text', w: 2, rows: [{ segs: [{ type: 'image', img: 0, h: 96, br: undefined }] }] },
-  ])
-})
-
-// —— v2 组/行/段清洗 ——
-
-test('normSeg text 段：清洗字段、截长度，非法渐变丢掉只留纯色', () => {
-  const s = normSeg({ t: '  你好  ', fz: 99, c: ' #abc ', g: 'not-a-gradient', b: 1, i: 1, br: 1 })
-  assert.deepEqual(s, {
-    type: 'text', t: '你好', fz: QUOTE_FONT_TIERS.length, c: '#abc',
-    g: undefined, b: 1, i: 1, br: 1,
-  })
-  // 空文本整段丢；type 缺省也按 text
-  assert.equal(normSeg({ t: '   ' }), null)
-  assert.equal(normSeg({ t: 'x' }).type, 'text')
-})
-
-test('normSeg image / link / model 段：字段边界与整段丢弃', () => {
-  // 图段：img 缺省按 0（渲染层随机取一张），h 压到 8–300
-  assert.deepEqual(normSeg({ type: 'image' }), { type: 'image', img: 0, h: 96, br: undefined })
-  assert.equal(normSeg({ type: 'image', img: 3, h: 999 }).h, 300)
-  assert.equal(normSeg({ type: 'image', img: -5 }).img, 0)
-  // 链接段：没 url 整段丢；t 空回落 url
-  assert.equal(normSeg({ type: 'link', url: '   ' }), null)
-  assert.deepEqual(
-    normSeg({ type: 'link', url: ' https://a.b ', t: '' }),
-    { type: 'link', url: 'https://a.b', t: 'https://a.b', br: undefined },
-  )
-  // model 段：键不认整段丢（留着会渲染出「undefined 余额」）
-  assert.equal(normSeg({ type: 'model', model: 'nope' }), null)
-  assert.equal(normSeg({ type: 'model', model: 'balance' }).fz, 7)
-})
-
-test('normRow 双认输入：数组 = 段列表、字符串 = 单 text 段，无有效段整行丢', () => {
-  assert.deepEqual(normRow('你好'), { segs: [{ type: 'text', t: '你好', fz: 7, c: '', g: undefined, b: undefined, i: undefined, br: undefined }] })
-  assert.deepEqual(normRow([{ t: 'a' }, { type: 'image' }]).segs.length, 2)
-  assert.equal(normRow({ segs: [{ t: '  ' }] }), null)
-  assert.equal(normRow(null), null)
-  // w 只认 1；行内段数超上限截断
-  assert.equal(normRow({ segs: [{ t: 'x' }], w: true }).w, undefined)
-  const many = []
-  for (let i = 0; i < 20; i++) many.push({ t: 'x' + i })
-  assert.equal(normRow(many).segs.length, 12)
-})
-
-test('rowsFromV1 迁移映射：A = fz7 + 行可折行，B = fz11 大字不折行（与旧三行模型字号对齐）', () => {
-  assert.deepEqual(rowsFromV1(['a', 'b'], 'A'), [
-    { segs: [{ t: 'a', fz: 7 }], w: 1 },
-    { segs: [{ t: 'b', fz: 7 }], w: 1 },
-  ])
-  assert.deepEqual(rowsFromV1(['a'], 'B'), [[{ t: 'a', fz: QUOTE_FONT_TIERS.length }]])
-})
-
-test('normQuoteGroup：双认输入（v2 rows 优先）、v1 image 组迁移、空文本组整组丢', () => {
-  // v1 输入（lines + style + kind image）就地升级：B 组行对象已带全套段字段
-  const v1 = normQuoteGroup({ kind: 'text', w: 3, style: 'B', lines: ['甲', '乙'] })
-  assert.equal(v1.kind, 'text')
-  assert.deepEqual(
-    v1.rows.map((r) => [r.segs[0].t, r.segs[0].fz, r.w]),
-    [['甲', 11, undefined], ['乙', 11, undefined]],
-  )
-  // v2 输入原样清洗；rows 与 lines 同时给时 rows 优先
-  const v2 = normQuoteGroup({ kind: 'text', w: 3, rows: ['富'], lines: ['旧'], style: 'A' })
-  assert.deepEqual(v2.rows, [{ segs: [{ type: 'text', t: '富', fz: 7, c: '', g: undefined, b: undefined, i: undefined, br: undefined }] }])
-  // 行数超上限截到 30（与 normRows 上限一致）
-  const big = normQuoteGroup({ kind: 'text', w: 3, rows: Array.from({ length: 40 }, (_, i) => '行' + i) })
-  assert.equal(big.rows.length, 30)
-  // 没有有效台词的文本组丢掉
-  assert.equal(normQuoteGroup({ kind: 'text', w: 3, lines: [] }), null)
-  assert.equal(normQuoteGroup({ kind: 'text', w: 3, rows: [] }), null)
-})
-
-test('normQuoteSound 清洗：非串回 undefined、trim + 限长 120、空串回 undefined', () => {
-  assert.equal(normQuoteSound('来财'), '来财')
-  assert.equal(normQuoteSound('  来财  '), '来财')
-  assert.equal(normQuoteSound(42), undefined)
-  assert.equal(normQuoteSound({}), undefined)
-  assert.equal(normQuoteSound(null), undefined)
-  assert.equal(normQuoteSound('   '), undefined)
-  assert.equal(normQuoteSound(''), undefined)
-  assert.equal(normQuoteSound('a'.repeat(130)), 'a'.repeat(120))
-})
-
-test('normQuoteGroup sound 字段：三 kind 出口都带清洗后的名字，脏值（非串）不残留', () => {
-  // 合法名字随组带出
-  const t = normQuoteGroup({ kind: 'text', w: 3, lines: ['甲'], sound: ' 来财 ' })
-  assert.equal(t.sound, '来财')
-  const c = normQuoteGroup({ kind: 'card', w: 3, sound: '金币' })
-  assert.equal(c.sound, '金币')
-  const img = normQuoteGroup({ kind: 'image', w: 3, sound: '泡泡' })
-  assert.equal(img.sound, '泡泡')
-  // 脏值清洗不出名字：出口不残留（关键在 passOwn 透传排除——sound 必须列进已知键）
-  const dirty = normQuoteGroup({ kind: 'card', w: 3, sound: 42 })
-  assert.equal('sound' in dirty, false)
-  // 没配 sound 的组出口也不带键（保持出口形态干净）
-  const plain = normQuoteGroup({ kind: 'card', w: 3 })
-  assert.equal('sound' in plain, false)
-})
-
-test('normRowCond 清洗：type 白名单、balanceBelow/model 必带参、weekday 去重且拒绝全选，非法一律摘键', () => {
-  assert.deepEqual(normRowCond({ type: 'peak' }), { type: 'peak' })
-  assert.deepEqual(normRowCond({ type: 'valley' }), { type: 'valley' })
-  assert.deepEqual(normRowCond({ type: 'balanceBelow', value: '22.4' }), { type: 'balanceBelow', value: 22 })
-  // 0 / 负数阈值没有意义（余额<0 恒假），回 undefined 让行退回无条件
-  assert.equal(normRowCond({ type: 'balanceBelow', value: 0 }), undefined)
-  assert.deepEqual(normRowCond({ type: 'model', value: ' gpt ' }), { type: 'model', value: 'gpt' })
-  assert.equal(normRowCond({ type: 'model', value: '  ' }), undefined)
-  // weekday：非法值滤掉、去重；全选（恒真）与全不选（恒假）都摘键
-  assert.deepEqual(normRowCond({ type: 'weekday', days: [1, '3', 1, 9] }), { type: 'weekday', days: [1, 3] })
-  assert.equal(normRowCond({ type: 'weekday', days: [0, 1, 2, 3, 4, 5, 6] }), undefined)
-  assert.equal(normRowCond({ type: 'weekday', days: [] }), undefined)
-  // 未知类型 / 非对象输入一律 undefined（行退回无条件，不丢行）
-  assert.equal(normRowCond({ type: 'weather' }), undefined)
-  assert.equal(normRowCond('peak'), undefined)
-  assert.equal(normRowCond(null), undefined)
-})
-
-test('quoteCondOk 求值：峰谷 / 余额阈值（null = 未知不满足）/ 主显模型 / 星期几，未知类型恒真', () => {
-  const day = (n) => new Date(2026, 9, 4 + n).getDay() // 相邻两天 weekday 必不同，测试自洽不依赖日历
-  assert.equal(quoteCondOk({ type: 'peak' }, { isPeak: true }), true)
-  assert.equal(quoteCondOk({ type: 'peak' }, { isPeak: false }), false)
-  assert.equal(quoteCondOk({ type: 'valley' }, { isPeak: false }), true)
-  assert.equal(quoteCondOk({ type: 'valley' }, { isPeak: true }), false)
-  // 余额未知（null / 没给）按不满足算：还没查到余额就别把「余额低」的台词抖出来吓人
-  assert.equal(quoteCondOk({ type: 'balanceBelow', value: 10 }, { balance: 9.9 }), true)
-  assert.equal(quoteCondOk({ type: 'balanceBelow', value: 10 }, { balance: 10 }), false)
-  assert.equal(quoteCondOk({ type: 'balanceBelow', value: 10 }, { balance: null }), false)
-  assert.equal(quoteCondOk({ type: 'balanceBelow', value: 10 }, {}), false)
-  assert.equal(quoteCondOk({ type: 'model', value: 'gpt' }, { mainModelId: 'gpt' }), true)
-  assert.equal(quoteCondOk({ type: 'model', value: 'gpt' }, { mainModelId: 'deepseek' }), false)
-  const mon = day(1) // 周一
-  assert.equal(quoteCondOk({ type: 'weekday', days: [mon] }, { day: mon }), true)
-  assert.equal(quoteCondOk({ type: 'weekday', days: [mon] }, { day: day(2) }), false)
-  assert.equal(quoteCondOk({ type: 'weekday', days: [mon] }, {}), false)
-  // 无条件 / 未知类型恒真（老配置没有 cond、未来加了新类型旧页面不能把行全塌了）
-  assert.equal(quoteCondOk(null, {}), true)
-  assert.equal(quoteCondOk({ type: 'weather' }, {}), true)
-})
-
-test('normRow 收编 cond：合法条件透传到行上，非法条件摘键（行保留）', () => {
-  const ok = normRow({ segs: [{ t: '峰时才见' }], cond: { type: 'peak' } })
-  assert.deepEqual(ok.cond, { type: 'peak' })
-  const bad = normRow({ segs: [{ t: '条件写错' }], cond: { type: 'weather' } })
-  assert.equal(bad.cond, undefined)
-  assert.equal(bad.segs.length, 1)
-  // v2「只升级不删」的透传口径继续成立：其它未知字段仍原样带出（未来加 ttl / sound 零迁移）
-  const keep = normRow({ segs: [{ t: 'x' }], ttl: 5 })
-  assert.equal(keep.ttl, 5)
-})
-
-test('normRow 收编 d（行级停留秒数）：1–120 取整落键，边界外/非数值一律摘键，缺省不落键', () => {
-  const mk = (d) => normRow({ segs: [{ t: 'x' }], d })
-  assert.equal(mk(30).d, 30)
-  assert.equal(mk('45').d, 45)
-  assert.equal(mk(7.6).d, 8)
-  assert.equal(mk(1).d, 1)
-  assert.equal(mk(120).d, 120)
-  // 边界外直接摘键（夹回是设置页编辑器的职责，出口清洗只认合法区间，不让脏值穿到悬浮页）
-  assert.equal(mk(0).d, undefined)
-  assert.equal(mk(-5).d, undefined)
-  assert.equal(mk(121).d, undefined)
-  assert.equal(mk(99999).d, undefined)
-  // 非数值 / 脏值摘键（缺省口径：悬浮页按 BUBBLE_MS 5 秒收起）
-  assert.equal(mk('abc').d, undefined)
-  assert.equal(mk(NaN).d, undefined)
-  assert.equal(mk(null).d, undefined)
-  assert.equal(mk(undefined).d, undefined)
-  // 幂等往返：清洗结果再洗一遍不变
-  const once = mk(42)
-  assert.equal(normRow(once).d, 42)
+test('QUOTE_TEXT_KEYS：报时四池（time / timeEarly / timeMorning / timeEve）+ gifFail 都在，且都能清洗回默认', () => {
+  // 四池缺一都会让对应时段报时退回默认文案 —— 顺序即悬浮页 timeLabel 的选池依据
+  assert.deepEqual(QUOTE_TEXT_KEYS, ['time', 'timeEarly', 'timeMorning', 'timeEve', 'gifFail'])
+  // 缺省气泡的 system 每个池都得有非空默认文案（清空回默认，不能变成空数组，否则那一时段没词）
+  const sys = normBubble({}, undefined).system
+  for (const k of QUOTE_TEXT_KEYS) assert.ok(Array.isArray(sys[k]) && sys[k].length, `${k} 未回默认池`)
+  for (const k of ['timeEarly', 'timeMorning', 'timeEve']) {
+    assert.ok(normBubble({ system: { [k]: [] } }, undefined).system[k].length > 0, `${k} 清空后没回默认`)
+  }
 })
 
 test('normUiMode 只认 light/dark，其余（含缺省与非法）一律回 auto', () => {
@@ -333,4 +85,194 @@ test('normUiMode 只认 light/dark，其余（含缺省与非法）一律回 aut
   assert.equal(normUiMode('Light'), 'auto')
   assert.equal(normUiMode('system'), 'auto')
   assert.equal(normUiMode(123), 'auto')
+})
+
+// ──────────────────────────────────────────────
+// 按压气泡（config.bubble，上游式独立模型）—— 归一化
+// ──────────────────────────────────────────────
+const { normBubble, normBubbleMod, normBubbleModules, normBubbleStep, normBubbleLib, bubbleDefaultItems,
+  BUBBLE_ROW_MAX, BUBBLE_MOD_MAX, BUBBLE_ITEM_MAX, BUBBLE_CHOICE_MAX,
+  BUBBLE_DWELL_DFT, BUBBLE_DWELL_MIN, BUBBLE_DWELL_MAX, BUBBLE_DRAG_LINES_DFT } = store
+
+test('normBubble：非对象（null/undefined/串）整份恢复默认形态，出口恒为稳定七键', () => {
+  for (const bad of [null, undefined, 'x', 123, []]) {
+    const out = normBubble(bad, undefined)
+    assert.equal(out.v, 1)
+    assert.equal(out.on, false) // 缺省总开关关：关 = 挂件不弹气泡
+    assert.equal(out.tapAdvance, false)
+    assert.equal(out.dwell, BUBBLE_DWELL_DFT)
+    assert.deepEqual(out.lib, [])
+    assert.deepEqual(out.dragLines, BUBBLE_DRAG_LINES_DFT)
+    // system 是报时四池 + 动图降级的固定文案池，缺省必须回默认
+    assert.ok(out.system && typeof out.system === 'object')
+    // items 回出厂默认：至少有个非空的点击序列，不能是空数组
+    assert.ok(Array.isArray(out.items) && out.items.length > 0)
+  }
+})
+
+test('normBubble：on / tapAdvance 只认 === true，缺键时沿用现值', () => {
+  assert.equal(normBubble({ on: true }, undefined).on, true)
+  assert.equal(normBubble({ on: 'true' }, undefined).on, false) // 字符串不算真
+  assert.equal(normBubble({ on: 1 }, undefined).on, false)
+  // 已开 → 补丁不带 on 时保持开
+  assert.equal(normBubble({ tapAdvance: true }, undefined).tapAdvance, true)
+  assert.equal(normBubble({}, { on: true, tapAdvance: true }).on, true)
+  assert.equal(normBubble({}, { on: true, tapAdvance: true }).tapAdvance, true)
+  assert.equal(normBubble({ on: false }, { on: true }).on, false) // 显式关覆盖现值
+})
+
+test('normBubble：dwell 越界/非数值回默认，3–60 取整保留', () => {
+  assert.equal(normBubble({ dwell: 9 }, undefined).dwell, 9)
+  assert.equal(normBubble({ dwell: 9.6 }, undefined).dwell, 10)
+  assert.equal(normBubble({ dwell: BUBBLE_DWELL_MIN - 1 }, undefined).dwell, BUBBLE_DWELL_DFT)
+  assert.equal(normBubble({ dwell: BUBBLE_DWELL_MAX + 1 }, undefined).dwell, BUBBLE_DWELL_DFT)
+  assert.equal(normBubble({ dwell: 'abc' }, undefined).dwell, BUBBLE_DWELL_DFT)
+})
+
+test('normBubble：items 非数组回默认序列；数组里无效步被丢；全空也回默认（挂件点下去不能没内容）', () => {
+  const fromBad = normBubble({ items: 'nope' }, undefined)
+  assert.ok(fromBad.items.length > 0)
+  // [null, 无模块泡, 一个有内容的] —— 前两个丢，只剩一个
+  const mixed = normBubble({ items: [null, { kind: 'custom', modules: [] }, { kind: 'custom', modules: [{ type: 'text', text: 'hi' }] }] }, undefined)
+  assert.equal(mixed.items.length, 1)
+  assert.equal(mixed.items[0].modules[0].text, 'hi')
+  // 全无效 → 回默认
+  assert.ok(normBubble({ items: [null, {}, 0] }, undefined).items.length > 0)
+})
+
+test('normBubbleItems 上限截断：超长序列截到 BUBBLE_ITEM_MAX（用实现导出的常量比较，写死数字会与实现脱钩）', () => {
+  const many = []
+  for (let i = 0; i < BUBBLE_ITEM_MAX + 8; i++) many.push({ kind: 'custom', modules: [{ type: 'text', text: 't' + i }] })
+  assert.equal(normBubble({ items: many }, undefined).items.length, BUBBLE_ITEM_MAX)
+})
+
+test('normBubbleMod：认不出的 type 丢；空 text / 空 random 丢（同 normSeg 口径）', () => {
+  assert.equal(normBubbleMod({ type: 'nope', text: 'x' }), null)
+  assert.equal(normBubbleMod({ type: 'text', text: '   ' }), null)
+  assert.equal(normBubbleMod({ type: 'random', lines: [] }), null)
+  assert.equal(normBubbleMod({ type: 'link', url: '  ' }), null)
+  assert.equal(normBubbleMod(null), null)
+  // 认得出的 text 落 text 键并 trim
+  const m = normBubbleMod({ type: 'text', text: '  嗨  ' })
+  assert.equal(m.text, '嗨')
+  assert.equal(m.type, 'text')
+})
+
+test('normBubbleMod：size 压到 1–50 取整，bold/italic/ul 只认 === true，rgb 只认 18 项白名单', () => {
+  const m = normBubbleMod({ type: 'text', text: 'x', size: 999, bold: 1, italic: 'yes', ul: true, rgb: 'indigo' })
+  assert.equal(m.size, 50) // 上界截断
+  assert.equal(m.bold, undefined) // 1 不算真
+  assert.equal(m.italic, undefined)
+  assert.equal(m.ul, true)
+  assert.equal(m.rgb, 'indigo')
+  const bad = normBubbleMod({ type: 'text', text: 'x', rgb: 'rainbow', size: -5 })
+  assert.equal(bad.rgb, undefined) // 不在白名单 → 摘键（不是空串）
+  assert.equal(bad.size, 1) // 下界
+})
+
+test('normBubbleMod：peak 样式白名单默认 text，peak/off 色与 rgb 都清洗', () => {
+  const m = normBubbleMod({ type: 'peak', peakStyle: 'nope', peakColor: '#fff', offRgb: 'bamboo', peakRgb: 'zzz' })
+  assert.equal(m.peakStyle, 'text') // 认不出回 text
+  assert.equal(m.peakColor, '#fff')
+  assert.equal(m.offRgb, 'bamboo')
+  assert.equal(m.peakRgb, '') // 非法方案归 ''（peak 的颜色字段是**无条件赋值**，与其余字段的「非法摘键」口径不同）
+  assert.equal(normBubbleMod({ type: 'peak', peakStyle: 'count' }).peakStyle, 'count')
+})
+
+test('normBubbleMod：session 模板兜底 {session}，len 压 0–40；plan 窗口白名单默认 all', () => {
+  const s = normBubbleMod({ type: 'session' })
+  assert.equal(s.tpl, '{session}')
+  assert.equal(normBubbleMod({ type: 'session', len: 8 }).len, 8)
+  assert.equal(normBubbleMod({ type: 'session', len: 999 }).len, undefined) // 越界摘键
+  const p = normBubbleMod({ type: 'plan', planWin: 'nope', modelId: ' m1 ' })
+  assert.equal(p.planWin, 'all')
+  assert.equal(p.modelId, 'm1')
+})
+
+test('normBubbleModules：row 键重建 —— 相邻同 row 归一行（写 row=行号+1），单模块行删键', () => {
+  const flat = normBubbleModules([
+    { type: 'text', text: 'a', row: 2 },
+    { type: 'text', text: 'b', row: 2 }, // 与上一条同 row → 同一行
+    { type: 'text', text: 'c' }, // 无 row → 自成单模块行
+  ])
+  assert.equal(flat.length, 3)
+  assert.equal(flat[0].row, 1) // 第一逻辑行 → row = 0 + 1
+  assert.equal(flat[1].row, 1)
+  assert.equal(flat[2].row, undefined) // 单模块行不写 row 键
+})
+
+test('normBubbleModules：图片类（image/randimg）独占一行并打断合并', () => {
+  const flat = normBubbleModules([
+    { type: 'text', text: 'a', row: 1 },
+    { type: 'image', imgId: 'x.png', row: 1 }, // 图片强制单行，且打断上面的合并
+    { type: 'text', text: 'b', row: 1 },
+  ])
+  assert.equal(flat[1].type, 'image')
+  assert.equal(flat[1].row, undefined) // 图片行不写 row
+  // 图片前后的 text 各自成单模块行（row 键都不保留）
+  assert.equal(flat[0].row, undefined)
+  assert.equal(flat[2].row, undefined)
+})
+
+test('normBubbleModules：行数 / 每行模块数双双截断（常量比较）', () => {
+  // 每行 6 个模块、造 BUBBLE_ROW_MAX + 3 行 → 行数截到上限
+  const mods = []
+  for (let r = 0; r < BUBBLE_ROW_MAX + 3; r++) {
+    for (let c = 0; c < BUBBLE_MOD_MAX + 2; c++) mods.push({ type: 'text', text: 'r' + r + 'c' + c, row: r + 1 })
+  }
+  const flat = normBubbleModules(mods)
+  assert.equal(flat.length, BUBBLE_ROW_MAX * BUBBLE_MOD_MAX)
+  // 同一逻辑行内最多 BUBBLE_MOD_MAX 个
+  const firstRow = flat.filter((m) => m.row === 1)
+  assert.equal(firstRow.length, BUBBLE_MOD_MAX)
+})
+
+test('normBubbleModules：非数组回空数组；脏 row 值（0 / 越界 / 非数）不当行键', () => {
+  assert.deepEqual(normBubbleModules('x'), [])
+  // row = 0 / 99 都超出 1–6，被摘成「无 row」，各成单模块行
+  const flat = normBubbleModules([
+    { type: 'text', text: 'a', row: 0 },
+    { type: 'text', text: 'b', row: 99 },
+  ])
+  assert.equal(flat.length, 2)
+  assert.equal(flat[0].row, undefined)
+  assert.equal(flat[1].row, undefined)
+})
+
+test('normBubbleStep：并列泡只剩 1 个候选降级为单选，0 个候选丢该步', () => {
+  const one = normBubbleStep({ kind: 'choice', options: [{ item: { kind: 'custom', modules: [{ type: 'text', text: 'a' }] } }] })
+  assert.equal(one.kind, 'custom') // 降级成单选（item 形态）
+  assert.ok(Array.isArray(one.modules))
+  assert.equal(normBubbleStep({ kind: 'choice', options: [] }), null)
+  assert.equal(normBubbleStep({ kind: 'choice', options: [null, {}] }), null)
+  // 两个有效候选 → 保持 choice，w 2–99 才落键（=1 摘键）
+  const two = normBubbleStep({ kind: 'choice', options: [
+    { w: 10, item: { kind: 'custom', modules: [{ type: 'text', text: 'a' }] } },
+    { w: 1, item: { kind: 'custom', modules: [{ type: 'text', text: 'b' }] } },
+  ] })
+  assert.equal(two.kind, 'choice')
+  assert.equal(two.options.length, BUBBLE_CHOICE_MAX)
+  assert.equal(two.options[0].w, 10)
+  assert.equal(two.options[1].w, undefined) // =1 摘键
+})
+
+test('normBubbleLib：无效 module 丢该条；name 空则「模块N」，超长截 20；id 缺失自动补', () => {
+  const lib = normBubbleLib([
+    { id: 'k1', name: '好康', module: { type: 'text', text: 'x' } },
+    { name: '', module: { type: 'text', text: 'y' } }, // 缺 id + 空 name
+    { id: 'k2', module: { type: 'nope' } }, // 无效 module → 丢
+    null,
+  ])
+  assert.equal(lib.length, 2)
+  assert.equal(lib[0].id, 'k1')
+  assert.equal(lib[0].name, '好康')
+  assert.ok(lib[1].id && lib[1].id.length > 0) // 自动补 id
+  assert.equal(lib[1].name, '模块2') // 「模块N」按输出序号
+  assert.deepEqual(normBubbleLib('x'), [])
+})
+
+test('normBubble 幂等：一次归一的出口再喂进去不变形（patchConfig 部分更新靠它）', () => {
+  const once = normBubble({ on: true, items: bubbleDefaultItems(), tapAdvance: true, dwell: 12, dragLines: ['一条'] }, undefined)
+  const twice = normBubble(JSON.parse(JSON.stringify(once)), once)
+  assert.deepEqual(twice, once)
 })

@@ -161,53 +161,111 @@ function writeSecrets(secrets) {
 // ──────────────────────────────────────────────
 // 配置
 // ──────────────────────────────────────────────
-// 台词库默认值（设置页可编辑）。挂件页面里另有一份同内容的兜底（浮动页没有 require，读不到这里），
-// 两处要一起改。hint/chat/dsh/short 是随机台词四组的文本，time 是报时模板（{t} 换成当前时间），
-// gifFail 是动图加载失败时的顶替文案。
-const QUOTES_DEFAULT = {
-  hint: ['好模型... ↓', '好女孩...↓'],
-  chat: ['不知道用户有什么用，先赶走吧~', '我...我...我也要挣钱吗？', '我去吃饭啦，测完叫我', '压力一只蓝色大肥鱼？！', 'DeepSleep...', '坏了...用户彻底怒了！', '终有一天，终有一天……'],
-  dsh: ['你目录里的dsh是什么...大烧货吗...?', '恭喜你实现token自由！token全跑了！', '真当我是便宜货啊...'],
-  short: ['哦鲸鲸...'],
+// 固定文案池默认值（设置页在「按压气泡」卡里可编辑，挂进 config.bubble.system）。
+// 挂件页面里另有一份同内容的兜底（浮动页没有 require，读不到这里），两处要一起改。
+// time 是白天报时模板（{t} 换成当前时间）、timeEarly/timeMorning/timeEve 是凌晨/清晨/深夜前报时模板，
+// gifFail 是动图加载失败时的顶替文案。这几池不走抽签，按固定时机取词（见悬浮页 timeLabel）
+const QUOTE_TEXT_DEFAULT = {
   time: ['现在是 {t}', '已经 {t} 啦', '都 {t} 了哦', '小鲸鱼报时：{t}'],
+  timeEarly: ['都 {t} 了，还不睡吗…'],
+  timeMorning: ['早安~ 现在是 {t}'],
+  timeEve: ['都 {t} 了，早点休息…'],
   gifFail: ['gif 加载失败了...', '今天没有动图给你看~', '呜呜 动图不见了...'],
 }
-// 「不是随机组」的两项：报时模板与动图降级文案。它们不走抽签，固定就是这两份文案
-const QUOTE_TEXT_KEYS = ['time', 'gifFail']
+// 固定文案池的键：报时（按时段分四池 timeEarly/timeMorning/time/timeEve）与动图降级文案。
+// 数组顺序即报时池的判定顺序（见悬浮页 timeLabel）
+const QUOTE_TEXT_KEYS = ['time', 'timeEarly', 'timeMorning', 'timeEve', 'gifFail']
+// 拖拽台词（独立键 cfg.dragLines，不进 QUOTES）：真拖动挂件时弹的小彩蛋。
+// 与挂件页 DRAG_LINES 字面量必须一致（check-shared 钉住）；条数上限 10（随手逗鱼，够用即可）
+const DRAG_LINES_DEFAULT = ['哇——轻点轻点！', '起飞咯——', '放我下来！……好吧，再玩一次。', '晕鱼了晕鱼了……']
+const DRAG_LINES_MAX = 10
 // 单条（段）最长 60 字、每组最多 30 条候选：气泡可用区域有限，更长更多都显示不出来
 const QUOTE_MAX_LEN = 60
 const QUOTE_MAX_COUNT = 30
-// 随机台词组：一组 = 一个抽签项，权重越大越常抽到。
-// v2 起 text 组的内容是「行×段」：rows = 候选行列表，一行 = 段的水平内联拼接（br:1 的段后硬换行），
-// 段类型 text / image / link / model。image 不再是独立组型（旧 image 组迁移成单图段行），
-// 但 kind 白名单仍认 image —— QUOTE_GROUPS_DEFAULT 字面量与老配置都还是 v1 形态，得认出来才能迁移
-const QUOTE_GROUP_KINDS = ['card', 'text', 'image']
-const QUOTE_GROUP_MAX = 12
-const QUOTE_GROUP_W_MAX = 999
-// 段字号档表（单位 u = 挂件基准 / 1026）：fz 是档位序号（1 起）。
-// fz7=72 / fz10=114 / fz11=140 与旧三行模型的 label / period / amount 字号精确对齐，v1 迁移映射靠它。
-// 与渲染器 src/bubble/bubble-render.js 的 FONT_TIERS 是同一份表的两处副本，check-shared 钉住
-const QUOTE_FONT_TIERS = [26, 32, 40, 48, 58, 66, 72, 90, 104, 114, 140]
-// 段类型白名单以 normSeg 逐型清洗为准（text / image / link / model）；
-// model 段取值键与悬浮页 linePlaceholderValue 认的那几个占位符一致
-const QUOTE_MODEL_KEYS = ['balance', 'today', 'peak', 'next']
-// 行条件类型白名单：peak/valley 工作日峰谷时段、balanceBelow 余额阈值、model 主显某模型、weekday 星期几
-const QUOTE_COND_TYPES = ['peak', 'valley', 'balanceBelow', 'model', 'weekday']
-const QUOTE_WEEKDAY_ALL = [1, 2, 3, 4, 5, 6, 0] // 周一..周日（getDay 口径，0 = 周日）
-const QUOTE_SEG_MAX = 12 // 单行段数上限：再多基本是在拿气泡当记事本了
-const QUOTE_URL_MAX = 300
-// 内置默认组：与挂件页面 defaultRandomGroups() 一一对应（顺序、权重、样式都要一致），
-// 权重沿用整理前写死在挂件页里的那套（45 / 7 / 7 / 10 / 3 / 1）
-const QUOTE_GROUPS_DEFAULT = [
-  { kind: 'card', w: 45 },
-  { kind: 'text', w: 7, style: 'B', lines: QUOTES_DEFAULT.hint },
-  { kind: 'text', w: 7, style: 'A', lines: QUOTES_DEFAULT.chat },
-  { kind: 'image', w: 10 },
-  { kind: 'text', w: 3, style: 'A', lines: QUOTES_DEFAULT.dsh },
-  { kind: 'text', w: 1, style: 'B', lines: QUOTES_DEFAULT.short },
-]
-// 老结构（hint / chat / dsh / short 四个 key）里出现的 key 就认作「需要升级」
-const LEGACY_GROUP_KEYS = ['hint', 'chat', 'dsh', 'short']
+
+// ──────────────────────────────────────────────
+// 按压气泡（upstream「自定义泡泡」）—— config.bubble
+// ──────────────────────────────────────────────
+// 这一套就是挂件气泡的唯一模型（点击序列 泡/行/模块 + 模块库 + 自带交互项），
+// 与设置页「按压气泡」卡一一对应。
+// 命名与字段严格对齐上游 whale-widget.js 的 bubbleCfg（老内容/老模块能原样认出来），
+// 只有归一化出口做稳定化处理。字段用的都是上游字面量，改动前先查上游同名实现。
+//
+// 步骤（item/step）两种形态：单选 { kind, modules }；并列 { kind:'choice', options:[{w, item}] }
+//   · 首次点击 = items[0]；再次点击 = 依次轮 items[1..]（见上游 bubbleSeqIdx / applyBubbleCfgSeq）
+//   · 并列泡 options ≤ 2（A/B），每轮到该步按 w 权重抽一个（见 bubbleChoiceWeight）
+const BUBBLE_KIND_DEFAULT = 'custom' // 无 kind 的步骤按「自定义内容」处理（上游 BUBBLE_KIND_LABEL.custom 口径）
+const BUBBLE_CHOICE_MAX = 2 // 并列泡 A/B 上限
+const BUBBLE_CHOICE_W_MAX = 99 // 并列泡候选权重上限（1–99，缺省 1）
+const BUBBLE_ROW_MAX = 6 // 泡泡行数上限（= 上游 BUBBLE_PV_ROW_MAX，编辑器与渲染层一致）
+const BUBBLE_MOD_MAX = 6 // 同一行模块数上限（= 上游 BUBBLE_PV_MOD_MAX）
+const BUBBLE_ITEM_MAX = 24 // 点击序列步数上限（首次 + 再次若干；上游无硬上限，这里防空配置无限膨胀）
+const BUBBLE_LIB_MAX = 60 // 模块库条数上限（另存模块复用，够用即可）
+const BUBBLE_LIB_NAME_MAX = 20 // 模块库名称长度上限（上游 bubbleLibAdd 同值）
+const BUBBLE_TEXT_MAX = 400 // 单模块文本 / 模板 / 超链接文字长度上限
+const BUBBLE_URL_MAX2 = 300 // 超链接 url 长度上限（与 BUBBLE_TEXT_MAX 同口径的量级）
+const BUBBLE_SIZE_MIN = 1 // 模块字号（上游 size 1–50，非档位序号，直接就是字号数值）
+const BUBBLE_SIZE_MAX = 50
+const BUBBLE_SIZE_DFT = 6
+const BUBBLE_IMG_SCALE_MIN = 0.1 // 图片缩放（0.1–1）
+const BUBBLE_IMG_SCALE_MAX = 1
+const BUBBLE_LINES_MAX = 60 // random 模块句池上限
+const BUBBLE_LINE_W_MAX = 99 // random 句权重上限
+const BUBBLE_SESSION_LEN_MAX = 40 // 对话名模块「保留字数」上限（上游 WAIT_SESSION_MAX=12 是默认值，非上限；这里给个展示上限）
+// 模块类型白名单（上游调色板 renderBubblePal + 各渲染分支共同认的 type）：
+//   text 文本 / time 报时 / balance 总余额 / bonus 赠金 / recharge 充值余额 / today 今日已用 /
+//   peak 峰谷时段 / session 对话名 / random 随机语句 / link 超链接 / image 图片动图 /
+//   randimg 随机图片 / quota 手动额度 / plan 订阅额度
+// ⚠️ quota / plan 在上游是「按 API 模型实例化」的模块（带 modelId），本插件暂无该数据源，
+//    归一化仍认这两个 type（老内容不丢），渲染侧无数据时显示占位「—」。
+//    time 为本插件自有扩展（上游无）：显示当前时间，把原顶层「小鲸鱼报时」开关做成可摆放模块。
+const BUBBLE_MOD_TYPES = ['text', 'time', 'balance', 'bonus', 'recharge', 'today', 'peak', 'session', 'random', 'link', 'image', 'randimg', 'quota', 'plan']
+// 峰谷模块显示样式：mini 简式 / text 文字 / count 倒计时（上游 peakStyle）
+const BUBBLE_PEAK_STYLES = ['mini', 'text', 'count']
+// 订阅额度的显示时间窗口（上游 planWin）
+const BUBBLE_PLAN_WINS = ['all', '5h', 'week', 'month']
+// 跑马灯配色方案（上游 bubbleRgbSelect 的 18 项，'' = 无）。存的是方案名，取色在渲染侧
+const BUBBLE_RGB_SCHEMES = ['', 'macaron', 'candy', 'rouge', 'bamboo', 'aurora', 'deepsea', 'sunset', 'forest', 'champagne', 'lavender', 'mint', 'lava', 'galaxy', 'ink', 'indigo', 'blaze', 'amber']
+// 系统字体清单（上游 FONT_OPTIONS，去掉了 label 只留字号 css 值；'' = 默认字体）
+const BUBBLE_FONT_FAMILIES = ['', '"Microsoft YaHei",sans-serif', '"PingFang SC","Microsoft YaHei",sans-serif', 'DengXian,"Microsoft YaHei",sans-serif', 'SimSun,serif', 'SimHei,sans-serif', 'KaiTi,serif', 'FangSong,serif', 'STKaiti,KaiTi,serif', '"Noto Sans SC",sans-serif', '"Source Han Sans SC",sans-serif', '"Segoe UI",sans-serif', 'Arial,Helvetica,sans-serif', 'Helvetica,Arial,sans-serif', 'Verdana,sans-serif', 'Tahoma,sans-serif', '"Trebuchet MS",sans-serif', '"Times New Roman",serif', 'Georgia,serif', '"Courier New",monospace', 'Consolas,monospace', 'Impact,fantasy', '"Comic Sans MS",cursive']
+// 新卡自带的交互项默认值（与顶层 cfg.tapAdvance / bubbleDwell / dragLines「各管各」，
+// 仅在新模型生效时使用；见 s4 悬浮页）
+const BUBBLE_TAP_ADVANCE_DFT = false // 点角色是否推进泡泡队列（上游默认关）
+const BUBBLE_DWELL_DFT = 5 // 泡泡停留秒数（3–60）
+const BUBBLE_DWELL_MIN = 3
+const BUBBLE_DWELL_MAX = 60
+const BUBBLE_DRAG_LINES_DFT = ['哇——轻点轻点！', '起飞咯——', '放我下来！……好吧，再玩一次。', '晕鱼了晕鱼了……']
+// 出厂默认点击序列：首泡 = 大号纯色余额一行；次泡 = 随机语句 ∪ 随机图片（并列 A/B，权重 10:2）。
+// 首泡刻意**只放 1 行、纯色高对比、字号拉大**，是为最小档（大小 1 = scale 0.6）也能看清 ——
+// 气泡字号随挂件基准等比缩且无下限（小屏最小档下 base 可低到 122，u≈0.12），三个因素叠加会糊：
+// ① 字号小；② 颜色淡（原 #9fb0d9 在白底仅 2.2:1 对比、indigo 渐变半程也才 2.6:1）；
+// ③ 圆圈内文本可用宽仅 660u（base=122 时约 78px），内容一长就触发 fitText 再缩一半。
+// 故：纯色 #3b4d8f（白底约 6.2:1，达 WCAG 正文标准）、去渐变跑马灯、只留一行。
+// 对齐上游 BUBBLE_DEFAULT_ITEMS 的**形态**（不逐字搬 400+ 条台词，只取结构 + 像样的示例文案），
+// 保证「恢复默认」有个像样的起点。
+// 注意：这里只写形态干净的初始值，真正的归一化走 normBubble，函数返回后即稳定
+const BUBBLE_DFT_RANDOM_LINES = ['今天也要加油鸭~', '摸鱼一下下～', '余额还够，安心冲浪', '鲸鱼在看着你哦', '别卷了，来摸摸鱼～', '余额见底就喊我！', '咕噜咕噜……在海底摸鱼', '深海信号良好，一切照旧']
+function bubbleDefaultItems() {
+  return [
+    {
+      kind: 'custom',
+      modules: [
+        // 唯一一行：大号纯色总余额。纯色深蓝而非渐变，「余额」前缀补语境（{balance_ds} 只给金额数字）
+        { type: 'balance', size: 30, rgb: '', color: '#3b4d8f', tpl: '余额 {balance_ds}', bold: true },
+      ],
+    },
+    {
+      kind: 'choice',
+      options: [
+        // 随机语句也用纯色深蓝：小尺寸下比 #9fb0d9 之类的淡色清楚得多
+        { w: 10, item: { kind: 'custom', modules: [{ type: 'random', size: 12, color: '#3b4d8f', lines: BUBBLE_DFT_RANDOM_LINES.map((t) => ({ t: t })) }] } },
+        // 随机图偶尔露脸：权重 1→2，让角色图不至于几乎抽不到
+        { w: 2, item: { kind: 'custom', modules: [{ type: 'randimg', size: 6, imgScale: 1 }] } },
+      ],
+    },
+  ]
+}
+
 // 未知字段透传（v2「只升级不删」的约定：以后加 ttl / cond / sound 等能力零迁移）。
 // 只拷 own 键；__proto__ 必须跳过 —— JSON.parse 会把它造成本 own 键，直接赋值会改掉原型
 function passOwn(v, known) {
@@ -217,12 +275,6 @@ function passOwn(v, known) {
     out[k] = v[k]
   }
   return out
-}
-// 颜色 / 渐变不校验具体值（认不认是浏览器的事），只截长度；渐变另有形态门槛 ——
-// 乱写的值照单全收的话，background-clip:text 会把整段文字变透明
-const QUOTE_GRADIENT_RE = /^\s*(linear|radial|conic)-gradient\(/i
-function normQuoteColor(v, max) {
-  return String(v == null ? '' : v).trim().slice(0, max)
 }
 // 一组台词：null/非数组（设置页「恢复默认」传 null）→ 内置默认；空数组或全是空行 → 也回内置默认
 // （抽到空数组会渲染出 undefined，报时/降级文案更不能没字，所以「清空」按恢复默认处理）
@@ -236,218 +288,281 @@ function normQuoteList(v, dft) {
   }
   return out.length ? out : dft.slice()
 }
-// —— v2 段/行清洗 ——
-// 一行 = 段的水平内联拼接；br:1 的段后硬换行，行内剩下的段都失效（渲染侧同口径）——
-// v1 的「三行」靠它无损表达，迁移映射才能只用 style 一个键
-function normSeg(v) {
-  if (!v || typeof v !== 'object') return null
-  const br = v.br === 1 ? 1 : undefined
-  if (v.type === 'image') {
-    // img = 自定义气泡图下标；没给（undefined/null）按 0 存，渲染层再决定随机取哪张
-    const img = typeof v.img === 'undefined' || v.img === null
-      ? 0
-      : Math.round(clampNum(v.img, 0, 99, 0))
-    return Object.assign(passOwn(v, ['type', 'img', 'h', 'br']), {
-      type: 'image', img: img, h: Math.round(clampNum(v.h, 8, 300, 96)), br: br,
-    })
-  }
-  if (v.type === 'link') {
-    const url = String(v.url == null ? '' : v.url).trim().slice(0, QUOTE_URL_MAX)
-    if (!url) return null
-    const t = String(v.t == null ? '' : v.t).trim().slice(0, QUOTE_MAX_LEN)
-    return Object.assign(passOwn(v, ['type', 'url', 't', 'br']), {
-      type: 'link', url: url, t: t || url, br: br,
-    })
-  }
-  if (v.type === 'model') {
-    // model 段显示时现算成文本，取值键与悬浮页 linePlaceholderValue 认的占位符一致；
-    // 键不认就整段丢（留着会渲染出「undefined 余额」这类怪话）
-    const model = QUOTE_MODEL_KEYS.indexOf(v.model) >= 0 ? v.model : null
-    if (!model) return null
-    return Object.assign(passOwn(v, ['type', 'model', 'fz', 'br']), {
-      type: 'model', model: model,
-      fz: Math.round(clampNum(v.fz, 1, QUOTE_FONT_TIERS.length, 7)), br: br,
-    })
-  }
-  // text 段：默认型。type 缺省也算 text —— v1 的 lines（纯字符串数组）迁移成段时直接给 { t }
-  const t = String(v.t == null ? '' : v.t).trim().slice(0, QUOTE_MAX_LEN)
-  if (!t) return null
-  return Object.assign(passOwn(v, ['type', 't', 'fz', 'c', 'g', 'b', 'i', 'br']), {
-    type: 'text', t: t,
-    fz: Math.round(clampNum(v.fz, 1, QUOTE_FONT_TIERS.length, 7)),
-    c: normQuoteColor(v.c, 60),
-    g: QUOTE_GRADIENT_RE.test(String(v.g || '')) ? normQuoteColor(v.g, 200) : undefined,
-    b: v.b === 1 ? 1 : undefined,
-    i: v.i === 1 ? 1 : undefined,
-    br: br,
-  })
-}
-// 行条件：不满足时整行在挂件里塌缩（不参与抽选）。与段同层透传至今的字段，现在正式收编：
-// { type, value?, days? } —— peak/valley 无参、balanceBelow.value 余额阈值、model.value 主显模型 id、
-// weekday.days 星期几集合（getDay 口径 0=周日）。非法输入摘掉 cond 键（行退回无条件），不丢行
-function normRowCond(v) {
-  if (!v || typeof v !== 'object' || Array.isArray(v)) return undefined
-  const type = String(v.type || '')
-  if (QUOTE_COND_TYPES.indexOf(type) < 0) return undefined
-  const out = { type: type }
-  if (type === 'balanceBelow') {
-    const n = Math.round(clampNum(v.value, 0, 1e9, 10))
-    if (!(n > 0)) return undefined
-    out.value = n
-  } else if (type === 'model') {
-    const id = String(v.value || '').trim().slice(0, 60)
-    if (!id) return undefined
-    out.value = id
-  } else if (type === 'weekday') {
-    const days = Array.isArray(v.days) ? v.days.map((d) => Math.round(Number(d))).filter((d) => QUOTE_WEEKDAY_ALL.indexOf(d) >= 0) : []
-    const uniq = days.filter((d, i) => days.indexOf(d) === i)
-    if (!uniq.length || uniq.length >= QUOTE_WEEKDAY_ALL.length) return undefined // 全选 = 恒真，没有意义
-    out.days = uniq
-  }
-  return out
-}
-// 条件求值（纯函数，仅导出给单测）。ctx 由悬浮页给：isPeak（工作日峰时）、balance（数值，null = 未知）、
-// mainModelId、day（getDay 值）。悬浮页是原生 JS 不能 require store，同 rowsFromV1Lines 先例：页面内联同口径副本
-function quoteCondOk(cond, ctx) {
-  if (!cond || typeof cond !== 'object') return true
-  const c = ctx || {}
-  if (cond.type === 'peak') return !!c.isPeak
-  if (cond.type === 'valley') return !c.isPeak
-  if (cond.type === 'balanceBelow') return c.balance != null && c.balance < cond.value
-  if (cond.type === 'model') return c.mainModelId === cond.value
-  if (cond.type === 'weekday') return QUOTE_WEEKDAY_ALL.indexOf(c.day) >= 0 && cond.days.indexOf(c.day) >= 0
-  return true
-}
-// 候选行：行对象 { segs, w?:1, d?:sec }，w = 行内允许软换行（对应 v1 style A 的折行语义），
-// d = 该行停留秒数（1–120，缺省 = 悬浮页按 BUBBLE_MS 5 秒收起；试播会话中到点自动翻下一屏）。
-// 数组输入按「纯段列表」、字符串输入按「单 text 段」处理（手写配置友好）；行里没有有效段 = 整行丢
-function normRow(v) {
-  let segsSrc = null
-  let rowOwn = {}
-  let wantWrap = false
-  if (typeof v === 'string' || Array.isArray(v)) segsSrc = v
-  else if (v && typeof v === 'object') {
-    segsSrc = v.segs
-    rowOwn = passOwn(v, ['segs', 'w', 'cond', 'd'])
-    wantWrap = v.w === 1
-    const cond = normRowCond(v.cond)
-    if (cond) rowOwn.cond = cond
-    // d 压到 1–120 的整数；非数值 / 超界外的脏值直接摘键（与 sound 同理，别让脏值穿到出口）
-    const d = Math.round(Number(v.d))
-    if (isFinite(d) && d >= 1 && d <= 120) rowOwn.d = d
-  }
-  const src = typeof segsSrc === 'string' ? [segsSrc] : segsSrc
-  if (!Array.isArray(src)) return null
-  const segs = []
-  for (let i = 0; i < src.length && segs.length < QUOTE_SEG_MAX; i++) {
-    // 字符串段按「单 text 段」吃下（手写配置友好）；normSeg 只认对象，这里先行包装
-    const s = normSeg(typeof src[i] === 'string' ? { t: src[i] } : src[i])
-    if (s) segs.push(s)
-  }
-  if (!segs.length) return null
-  const row = Object.assign(rowOwn, { segs: segs })
-  if (wantWrap) row.w = 1
-  return row
-}
-// 候选行列表：逐行清洗，空行丢（清空 = 这条候选不出现），全空 = 这组没有有效内容
-function normRows(v) {
-  if (!Array.isArray(v)) return []
+// 独立台词列表清洗（当前用于拖拽台词 cfg.dragLines）：与 normQuoteList 同口径，但条数上限更小
+// （拖拽台词是随手逗鱼的小彩蛋，10 条够用）。非数组 → 回默认；全空 → 也回默认（不能让拖拽没词）
+function normLineList(v, dft, max) {
+  const cap = typeof max === 'number' && max > 0 ? max : 10
+  if (!Array.isArray(v)) return dft.slice()
   const out = []
-  for (let i = 0; i < v.length && out.length < QUOTE_MAX_COUNT; i++) {
-    const r = normRow(v[i])
-    if (r) out.push(r)
+  for (let i = 0; i < v.length && out.length < cap; i++) {
+    if (typeof v[i] !== 'string') continue
+    const s = v[i].trim().slice(0, QUOTE_MAX_LEN)
+    if (s) out.push(s)
   }
-  return out
+  return out.length ? out : dft.slice()
 }
-// v1 文本组 → v2 行：style A = 普通字号可折行 → fz7（=旧 label 的 72）+ 行 w:1；
-// style B = 大字不换行 → fz11（=旧 amount 的 140）。v1 一条候选就是一句纯文本，
-// 迁移成「单段单行」没有任何信息损失；字号档表见 QUOTE_FONT_TIERS
-function rowsFromV1(lines, style) {
-  const fz = style === 'B' ? QUOTE_FONT_TIERS.length : 7
-  const out = []
-  for (const t of lines) {
-    out.push(style === 'B' ? [{ t: t, fz: fz }] : { segs: [{ t: t, fz: fz }], w: 1 })
-  }
-  return out
-}
-// 单个组：kind 不认就按 text（老结构升级过来的都是文本组）；文本组没有有效台词就整组丢掉
-// —— 清空 = 这组不出现，比「悄悄变回内置文案」更符合直觉。
-// 权重压到 1–999：抽签是「累减权重」的循环，权重 0 的组不会被跳过、反而会被兜底抽到，
-// 留着 0 只会让人以为「设成 0 就不出现」。
-// 双认输入：rows（v2）优先，lines + style（v1）就地升级 —— patchConfig 的部分更新会把
-// 已是 v2 的现值回灌进来，清洗函数必须两种形态都吃得下。未知字段（cond/ttl…）原样透传
-// 组级音效 sound = 共享音效库的段名：store 是基础层，读不到 sounds 库（资源叶），只做字符串
-// 规整；名字在库里不存在时播放侧静音处理，不做存在性校验。sound 不在透传白名单里 —— 否则
-// 数字/对象等脏值会原样落库，悬浮页 match 永远落空还白占内存
-function normQuoteSound(v) {
-  if (typeof v !== 'string') return undefined
-  const s = v.trim().slice(0, 120)
-  return s || undefined
-}
-function normQuoteGroup(v) {
-  if (!v || typeof v !== 'object') return null
-  const kind = QUOTE_GROUP_KINDS.indexOf(v.kind) >= 0 ? v.kind : 'text'
-  const w = Math.round(clampNum(v.w, 1, QUOTE_GROUP_W_MAX, 5))
-  const sound = normQuoteSound(v.sound)
-  const base = sound ? { sound: sound } : {}
-  // sound 必须列进已知键从透传里排除：清不出名字（非字符串/空白）时 base 为空，
-  // 不排除的话原始脏值会穿过 passOwn 残留在出口
-  if (kind === 'card') return Object.assign(passOwn(v, ['kind', 'w', 'sound']), base, { kind: 'card', w: w })
-  // v1 image 组 → v2 拆成单图段行；img 省略 = 渲染层抽到时随机取一张（与旧「随机取一张」一致）。
-  // 行必须过 normRows：图段 img 缺省会被 normSeg 存成 0，直接写 [[{type:'image'}]] 的话
-  // 每次读写往返都会是「0 → 缺省 → 0」的形态漂移，幂等性就没了
-  if (kind === 'image') {
-    return Object.assign(passOwn(v, ['kind', 'w', 'sound']), base, { kind: 'text', w: w, rows: normRows([[{ type: 'image' }]]) })
-  }
-  let rows = null
-  if (Array.isArray(v.rows)) rows = normRows(v.rows)
-  else if (Array.isArray(v.lines)) rows = normRows(rowsFromV1(normQuoteList(v.lines, []), v.style))
-  if (!rows || !rows.length) return null
-  return Object.assign(passOwn(v, ['kind', 'w', 'style', 'lines', 'rows', 'sound']), base, { kind: 'text', w: w, rows: rows })
-}
-// 组列表：非数组（含 null）= 用内置默认；逐组清洗；一组不剩也回内置默认
-// —— 全空的话气泡会没内容，「随机台词」整个功能就没了。
-// 默认字面量保持 v1 形态（check-shared 与悬浮页兜底都逐字比对它），出口处统一走清洗迁移成 v2
-function normQuoteGroups(v) {
-  if (!Array.isArray(v)) return normQuoteGroups(QUOTE_GROUPS_DEFAULT)
-  const out = []
-  for (const it of v) {
-    const g = normQuoteGroup(it)
-    if (g) out.push(g)
-    if (out.length >= QUOTE_GROUP_MAX) break
-  }
-  return out.length ? out : normQuoteGroups(QUOTE_GROUPS_DEFAULT)
-}
-// 老配置升级：hint / chat / dsh / short → 四个文本组，card 与 image 这两组在老结构里没有对应
-// key，按内置默认的权重补回原来的位置（顺序与权重都与升级前挂件里写死的那套完全一致）。
-// 先拼出 v1 形态再过一遍组清洗，迁移逻辑只写一处
-function groupsFromLegacy(src) {
-  return normQuoteGroups([
-    { kind: 'card', w: 45 },
-    { kind: 'text', w: 7, style: 'B', lines: normQuoteList(src.hint, QUOTES_DEFAULT.hint) },
-    { kind: 'text', w: 7, style: 'A', lines: normQuoteList(src.chat, QUOTES_DEFAULT.chat) },
-    { kind: 'image', w: 10 },
-    { kind: 'text', w: 3, style: 'A', lines: normQuoteList(src.dsh, QUOTES_DEFAULT.dsh) },
-    { kind: 'text', w: 1, style: 'B', lines: normQuoteList(src.short, QUOTES_DEFAULT.short) },
-  ])
-}
-// quotes 全量：v 不是对象（null/undefined）= 整份恢复默认；是对象则只处理它带的键，其余沿用 cur。
-// 出口恒为 v2（v:2 + groups 走行×段）：v1 形态（顶层老 key 或组内 lines/image 组）在读到的那一刻
-// 就地升级，不做单独的迁移步骤。组/行/段三层的未知字段原样透传，以后加能力零迁移
-function normQuotes(v, cur) {
+// 固定文案池清洗（config.bubble.system）：五池逐一走 normQuoteList，口径与已下线的旧台词库一致。
+// src 缺省（!src）时全靠默认；是对象时只覆盖它带的键，其余沿用 cur（按键合并，沿用 patchConfig 语义）
+function normBubbleSystem(v, cur) {
   const src = v && typeof v === 'object' ? v : null
   const base = src && cur && typeof cur === 'object' ? cur : {}
-  const out = { v: 2 }
+  const out = {}
   for (const k of QUOTE_TEXT_KEYS) {
-    if (!src) { out[k] = QUOTES_DEFAULT[k].slice(); continue }
+    if (!src) { out[k] = QUOTE_TEXT_DEFAULT[k].slice(); continue }
     out[k] = k in src
-      ? normQuoteList(src[k], QUOTES_DEFAULT[k])
-      : (Array.isArray(base[k]) ? base[k].slice() : QUOTES_DEFAULT[k].slice())
+      ? normQuoteList(src[k], QUOTE_TEXT_DEFAULT[k])
+      : (Array.isArray(base[k]) ? base[k].slice() : QUOTE_TEXT_DEFAULT[k].slice())
   }
-  if (!src) out.groups = normQuoteGroups(QUOTE_GROUPS_DEFAULT)
-  else if ('groups' in src) out.groups = normQuoteGroups(src.groups)
-  else if (LEGACY_GROUP_KEYS.some((k) => k in src)) out.groups = groupsFromLegacy(src)
-  else out.groups = normQuoteGroups(base.groups)
+  return out
+}
+// —— 按压气泡（config.bubble）清洗 ——
+// 跑马灯方案名：不在 18 项白名单里一律回 ''（渲染侧只认白名单，脏值留着也点不亮）
+function normBubbleRgb(v) {
+  const s = String(v == null ? '' : v).trim()
+  return BUBBLE_RGB_SCHEMES.indexOf(s) >= 0 ? s : ''
+}
+// 字体族：不在内置清单里也放行（用户可能从系统字体里选，上游 refreshSystemFonts 会注入动态项），
+// 但必须是纯字符串且不含引号/分号（避免注入 style）；超长截断
+function normBubbleFont(v) {
+  const s = String(v == null ? '' : v).trim().slice(0, 80)
+  return /[;"'<>]/.test(s) ? '' : s
+}
+// 颜色：与 normBubbleColor 同口径（不校验值，只截长度），空串 = 无色（走主题默认）
+function normBubbleColor(v) {
+  return String(v == null ? '' : v).trim().slice(0, 60)
+}
+// random 模块句池：**保留纯字符串形态**（上游 random 的 lines 项
+// 除了 { t, w, ...样式字段 } 也允许纯字符串），清洗成稳定的 { t, w?, bold?, size?, rgb?, color?, italic?, ul? }
+function normBubbleLines(v) {
+  if (!Array.isArray(v)) return []
+  const out = []
+  for (let i = 0; i < v.length && out.length < BUBBLE_LINES_MAX; i++) {
+    const it = v[i]
+    if (typeof it === 'string') {
+      const t = it.trim().slice(0, BUBBLE_TEXT_MAX)
+      if (t) out.push({ t: t })
+      continue
+    }
+    if (!it || typeof it !== 'object') continue
+    const t = String(it.t == null ? '' : it.t).trim().slice(0, BUBBLE_TEXT_MAX)
+    if (!t) continue
+    const o = Object.assign(passOwn(it, ['t', 'w', 'bold', 'size', 'rgb', 'color', 'italic', 'ul']), { t: t })
+    const w = Math.round(Number(it.w))
+    if (isFinite(w) && w >= 2 && w <= BUBBLE_LINE_W_MAX) o.w = w // 缺省/非法/=1 摘键
+    if (it.bold === true) o.bold = true
+    if (it.italic === true) o.italic = true
+    if (it.ul === true) o.ul = true
+    const size = Math.round(Number(it.size))
+    if (isFinite(size) && size >= BUBBLE_SIZE_MIN && size <= BUBBLE_SIZE_MAX) o.size = size
+    const rgb = normBubbleRgb(it.rgb)
+    if (rgb) o.rgb = rgb
+    const color = normBubbleColor(it.color)
+    if (color) o.color = color
+    out.push(o)
+  }
+  return out
+}
+// 单个模块：按 type 逐型清洗。所有类型共有 style 字段（size/color/rgb/bg/bgRgb/bold/italic/ul/fontFamily/row），
+// 各型另有专属字段（tpl/text/lines/url/imgId/imgs/imgScale/peakX/session len/modelId/planWin）。
+// 认不出的 type → 丢（留着渲染侧无从下手）；无内容的 text/random → 丢。
+// row 是「行键」（行号+1，仅多模块行写；单模块行/图片行不写 —— 见上游 bubbleRowsFlat）
+function normBubbleMod(v) {
+  if (!v || typeof v !== 'object') return null
+  const type = BUBBLE_MOD_TYPES.indexOf(v.type) >= 0 ? v.type : null
+  if (!type) return null
+  const KNOWN = ['type', 'size', 'color', 'rgb', 'bg', 'bgRgb', 'bold', 'italic', 'ul', 'fontFamily', 'row',
+    'tpl', 'text', 'lines', 'url', 'text2', 'imgId', 'imgs', 'imgScale',
+    'peakColor', 'offColor', 'peakRgb', 'offRgb', 'peakBg', 'offBgRgb', 'offBg', 'peakStyle',
+    'len', 'modelId', 'planWin']
+  const out = Object.assign(passOwn(v, KNOWN), { type: type })
+  out.size = Math.round(clampNum(v.size, BUBBLE_SIZE_MIN, BUBBLE_SIZE_MAX, BUBBLE_SIZE_DFT))
+  const color = normBubbleColor(v.color)
+  if (color) out.color = color
+  const rgb = normBubbleRgb(v.rgb)
+  if (rgb) out.rgb = rgb
+  const bgRgb = normBubbleRgb(v.bgRgb)
+  if (bgRgb) out.bgRgb = bgRgb
+  const bg = normBubbleColor(v.bg)
+  if (bg) out.bg = bg
+  if (v.bold === true) out.bold = true
+  if (v.italic === true) out.italic = true
+  if (v.ul === true) out.ul = true
+  const fontFamily = normBubbleFont(v.fontFamily)
+  if (fontFamily) out.fontFamily = fontFamily
+  const row = Math.round(Number(v.row))
+  if (isFinite(row) && row >= 1 && row <= BUBBLE_ROW_MAX) out.row = row
+  const tpl = String(v.tpl == null ? '' : v.tpl).slice(0, BUBBLE_TEXT_MAX)
+  if (type === 'text') {
+    const text = String(v.text == null ? '' : v.text).trim().slice(0, BUBBLE_TEXT_MAX)
+    if (!text) return null
+    out.text = text
+  } else if (type === 'random') {
+    const lines = normBubbleLines(v.lines)
+    if (!lines.length) return null
+    out.lines = lines
+  } else if (type === 'link') {
+    const url = String(v.url == null ? '' : v.url).trim().slice(0, BUBBLE_URL_MAX2)
+    if (!url) return null
+    out.url = url
+    out.text = String(v.text == null ? '' : v.text).trim().slice(0, BUBBLE_TEXT_MAX) || url
+  } else if (type === 'image') {
+    out.imgId = String(v.imgId == null ? '' : v.imgId).trim().slice(0, 120)
+    const imgScale = clampNum(v.imgScale, BUBBLE_IMG_SCALE_MIN, BUBBLE_IMG_SCALE_MAX, 1)
+    out.imgScale = Math.round(imgScale * 100) / 100
+  } else if (type === 'randimg') {
+    const imgs = Array.isArray(v.imgs) ? v.imgs.slice(0, 60).map((x) => String(x == null ? '' : x).trim().slice(0, 120)).filter(Boolean) : []
+    out.imgs = imgs
+    const imgScale = clampNum(v.imgScale, BUBBLE_IMG_SCALE_MIN, BUBBLE_IMG_SCALE_MAX, 1)
+    out.imgScale = Math.round(imgScale * 100) / 100
+  } else if (type === 'peak') {
+    out.peakColor = normBubbleColor(v.peakColor)
+    out.offColor = normBubbleColor(v.offColor)
+    out.peakRgb = normBubbleRgb(v.peakRgb)
+    out.offRgb = normBubbleRgb(v.offRgb)
+    out.peakStyle = BUBBLE_PEAK_STYLES.indexOf(v.peakStyle) >= 0 ? v.peakStyle : 'text'
+    if (tpl) out.tpl = tpl
+  } else if (type === 'session') {
+    out.tpl = tpl || '{session}'
+    const len = Math.round(Number(v.len))
+    if (isFinite(len) && len >= 0 && len <= BUBBLE_SESSION_LEN_MAX) out.len = len
+  } else if (type === 'quota' || type === 'plan') {
+    out.modelId = String(v.modelId == null ? '' : v.modelId).trim().slice(0, 60)
+    if (type === 'plan') out.planWin = BUBBLE_PLAN_WINS.indexOf(v.planWin) >= 0 ? v.planWin : 'all'
+    if (tpl) out.tpl = tpl
+  } else {
+    // balance / bonus / recharge / today：内置数值模块，内容锁定，只有模板可调
+    if (tpl) out.tpl = tpl
+  }
+  return out
+}
+// 行×模块规范化：上游用 row 键把 modules[] 平铺表达成「行」，这里在清洗时**重建 row 键**，
+// 保证读写幂等（脏 row 值不会让同一份内容每次往返变形）。规则同上游 bubbleRowsFlat：
+// 图片/随机图片类独占一行且打断行合并；同一逻辑行（相邻模块 row 键相同且非空）归一成同一个行号
+function normBubbleModules(v) {
+  if (!Array.isArray(v)) return []
+  const mods = []
+  for (let i = 0; i < v.length; i++) {
+    const m = normBubbleMod(v[i])
+    if (m) mods.push(m)
+  }
+  // 按 row 键（1–6）分组：非图片模块带相同 row 键视为同一行；图片类强制单行。
+  // 先把每个模块归到「逻辑行序号」，再统一改写 row 键（多模块行 = 行号+1，单模块行删键）
+  const rows = []
+  let cur = null
+  for (const m of mods) {
+    const isImg = m.type === 'image' || m.type === 'randimg'
+    if (isImg) { rows.push([m]); cur = null; continue }
+    if (cur && cur.key !== null && cur.key === m.row) { cur.row.push(m); continue }
+    cur = { key: m.row === undefined ? null : m.row, row: [m] }
+    rows.push(cur.row)
+  }
+  const flat = []
+  for (let r = 0; r < rows.length && r < BUBBLE_ROW_MAX; r++) {
+    const row = rows[r]
+    const multi = row.length > 1
+    for (let i = 0; i < row.length && i < BUBBLE_MOD_MAX; i++) {
+      const m = row[i]
+      if (multi) m.row = r + 1
+      else delete m.row
+      flat.push(m)
+    }
+  }
+  return flat
+}
+// 单个「泡」（步骤的 item 形态）：{ kind, modules }。kind 只认 custom（上游 default 出口），
+// 无有效模块 → null（整泡丢，避免渲染空白）
+function normBubbleBubble(v) {
+  if (!v || typeof v !== 'object') return null
+  const modules = normBubbleModules(v.modules)
+  if (!modules.length) return null
+  return Object.assign(passOwn(v, ['kind', 'modules']), { kind: BUBBLE_KIND_DEFAULT, modules: modules })
+}
+// 并列候选：{ w, item }，w 1–99（缺省 1，=1 摘键）；item 无效 → 该候选丢
+function normBubbleOption(v) {
+  if (!v || typeof v !== 'object') return null
+  const item = normBubbleBubble(v.item)
+  if (!item) return null
+  const out = { item: item }
+  const w = Math.round(Number(v.w))
+  if (isFinite(w) && w >= 2 && w <= BUBBLE_CHOICE_W_MAX) out.w = w
+  const own = passOwn(v, ['w', 'item'])
+  return Object.assign(own, out)
+}
+// 单个步骤：单选 { kind, modules } 或并列 { kind:'choice', options:[...] }。
+// 并列只剩 1 个候选时**降级成单选**（上游渲染侧同样按单选处理，出口恒定只有两种形态）；
+// 0 个候选 → 丢该步
+function normBubbleStep(v) {
+  if (!v || typeof v !== 'object') return null
+  if (v.kind === 'choice') {
+    const options = []
+    const src = Array.isArray(v.options) ? v.options : []
+    for (let i = 0; i < src.length && options.length < BUBBLE_CHOICE_MAX; i++) {
+      const o = normBubbleOption(src[i])
+      if (o) options.push(o)
+    }
+    if (!options.length) return null
+    if (options.length === 1) return options[0].item
+    return Object.assign(passOwn(v, ['kind', 'options']), { kind: 'choice', options: options })
+  }
+  return normBubbleBubble(v)
+}
+// 点击序列：非数组/全空 = 回出厂默认（不能让挂件点下去没内容）
+function normBubbleItems(v) {
+  if (!Array.isArray(v)) return bubbleDefaultItems().map((it) => normBubbleStep(it)).filter(Boolean)
+  const out = []
+  for (let i = 0; i < v.length && out.length < BUBBLE_ITEM_MAX; i++) {
+    const s = normBubbleStep(v[i])
+    if (s) out.push(s)
+  }
+  return out.length ? out : bubbleDefaultItems().map((it) => normBubbleStep(it)).filter(Boolean)
+}
+// 模块库：[{ id, name, module }]，另存模块复用。id 缺失/重复的补一个稳定 id（时间戳+随机），
+// name 截 20 字（空则「模块N」），module 过 normBubbleMod（无效则丢该条）
+function normBubbleLib(v) {
+  if (!Array.isArray(v)) return []
+  const out = []
+  const seen = {}
+  for (let i = 0; i < v.length && out.length < BUBBLE_LIB_MAX; i++) {
+    const it = v[i]
+    if (!it || typeof it !== 'object') continue
+    const module = normBubbleMod(it.module)
+    if (!module) continue
+    let id = String(it.id == null ? '' : it.id).trim().slice(0, 40)
+    if (!id || seen[id]) id = 'bmod_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6)
+    seen[id] = true
+    const name = String(it.name == null ? '' : it.name).trim().slice(0, BUBBLE_LIB_NAME_MAX) || ('模块' + (out.length + 1))
+    out.push(Object.assign(passOwn(it, ['id', 'name', 'module']), { id: id, name: name, module: module }))
+  }
+  return out
+}
+// bubble 全量：v 不是对象（null/undefined）= 整份恢复默认；是对象则只处理它带的键，其余沿用 cur。
+// 出口恒为稳定形态：{ v:1, on, items, lib, tapAdvance, dwell, dragLines }
+//   · on        —— 气泡总开关
+//   · items     —— 点击序列（首次 + 再次…）
+//   · lib       —— 模块库
+//   · tapAdvance/dwell/dragLines —— 新卡自带交互项（与顶层同名键「各管各」，仅本模型生效时用）
+function normBubble(v, cur, legacyQuotes) {
+  const src = v && typeof v === 'object' ? v : null
+  const base = src && cur && typeof cur === 'object' ? cur : {}
+  const out = { v: 1 }
+  out.on = !src ? false : (src.on !== undefined ? src.on === true : (base.on === true))
+  if (!src) out.items = normBubbleItems(null)
+  else if ('items' in src) out.items = normBubbleItems(src.items)
+  else out.items = normBubbleItems(base.items)
+  if (!src) out.lib = []
+  else if ('lib' in src) out.lib = normBubbleLib(src.lib)
+  else out.lib = normBubbleLib(base.lib)
+  out.tapAdvance = !src ? BUBBLE_TAP_ADVANCE_DFT
+    : (src.tapAdvance !== undefined ? src.tapAdvance === true : base.tapAdvance === true)
+  const dwell = Math.round(Number(!src ? BUBBLE_DWELL_DFT : (src.dwell !== undefined ? src.dwell : base.dwell)))
+  out.dwell = isFinite(dwell) && dwell >= BUBBLE_DWELL_MIN && dwell <= BUBBLE_DWELL_MAX ? dwell : BUBBLE_DWELL_DFT
+  const dragSrc = !src ? BUBBLE_DRAG_LINES_DFT : (src.dragLines !== undefined ? src.dragLines : base.dragLines)
+  out.dragLines = normLineList(dragSrc, BUBBLE_DRAG_LINES_DFT, DRAG_LINES_MAX)
+  // 固定文案池（报时四池 + 动图降级）：旧版存在 config.quotes 老键上，读配置时一次性搬进来。
+  // 只在 bubble.system 缺省且老键有值时走迁移；迁移后 quotes 老键不再被读写（彻底弃用台词库）
+  const sysSrc = src && 'system' in src ? src.system
+    : (base.system !== undefined ? base.system : (legacyQuotes !== undefined ? legacyQuotes : undefined))
+  out.system = normBubbleSystem(sysSrc, base.system)
   return out
 }
 // ──────────────────────────────────────────────
@@ -558,7 +673,7 @@ function normAlertVols(v, dft) {
   return out
 }
 function defaultConfig() {
-  return { scale: 1.3, vol: 0.9, soundOn: true, soundSet: 'duck', usageMode: 'ledger', peakMode: 'default', peakRemindOn: true, bubbleOn: true, menuBtn: true, onTop: true, lowAlertOn: true, lowAlertAmount: LOW_ALERT_BY_CURRENCY.CNY, budgetOn: false, budgetAmount: 0, dropAlertOn: false, dropAlertAmount: 5, clickQueueOn: false, remindSec: 8, quietOn: false, quietFrom: '23:00', quietTo: '07:00', timeBubbleOn: true, updateCheckOn: false, dragLock: false, enterMode: 'both', timerNotifyOn: true, timerMailOn: true, timerPersistOn: true, timerMode: 'off', timerSec: 1500, timerAt: '07:30', timerNote: '', timerBreakMin: 5, timerRemindSec: 8, timerBubblePin: true, timerBubbleOnly: true, guideDone: false, dshNodeDir: '', dshKeepAlive: false, dshPort: DSH_PORT_DEFAULT, dshRegistry: '', dshVersion: '', dshReinstall: false, dshNoOpen: true, dshMarketUrl: '', dshMarketMirror: true, dshMarketRegistry: '', dshMarketOfficial: false, dshExportCred: false, dshExportNoMod: true, avoidTaskbar: true, edgeTop: 0, edgeRight: 0, edgeBottom: 0, edgeLeft: 0, scrollGapOn: false, scrollGapPx: SCROLL_GAP_DEFAULT, snapMode: 'ratio', snapRatio: SNAP_RATIO_DEFAULT, opacity: 100, passThrough: false, skin: 'DSniang1', theme: 'default', uiMode: 'auto', quotes: normQuotes(null), alerts: normAlerts(null), alertVols: normAlertVols(null), quotaTotal: 0, quotaReset: 'monthly', tokenPrice: normTokenPrice(null), historyKeepDays: HISTORY_KEEP_DEFAULT, models: [], mainModelId: DEFAULT_MAIN_MODEL, dshBackupKeep: DSB_KEEP_DEFAULT, menuGroups: normMenuGroups(null), menuGroupsRev: 0, ghAccelOn: false, ghAccelIps: normIps(null), ghAccelRefreshedAt: 0, ghAccelSrc: normGhAccelSrc(null), skinPackSrc: '', randomIncludeBuiltin: true, notifySystemOn: true, notifyMailOn: false, mailFrom: '', mailTo: '', mailFromName: '小鲸鱼余额挂件', mailSubjectPrefix: '[小鲸鱼余额挂件]' }
+  return { scale: 1.3, vol: 0.9, soundOn: true, soundSet: 'duck', usageMode: 'ledger', peakMode: 'default', peakRemindOn: true, bubbleOn: true, menuBtn: true, onTop: true, lowAlertOn: true, lowAlertAmount: LOW_ALERT_BY_CURRENCY.CNY, budgetOn: false, budgetAmount: 0, dropAlertOn: false, dropAlertAmount: 5, remindSec: 8, quietOn: false, quietFrom: '23:00', quietTo: '07:00', timeBubbleOn: true, updateCheckOn: false, dragLock: false, bubbleDwell: 5, dragLines: null, tapAdvance: false, enterMode: 'both', timerNotifyOn: true, timerMailOn: true, timerPersistOn: true, timerMode: 'off', timerSec: 1500, timerAt: '07:30', timerNote: '', timerBreakMin: 5, timerRemindSec: 8, timerBubblePin: true, timerBubbleOnly: true, guideDone: false, dshNodeDir: '', dshKeepAlive: false, dshPort: DSH_PORT_DEFAULT, dshRegistry: '', dshVersion: '', dshReinstall: false, dshNoOpen: true, dshMarketUrl: '', dshMarketMirror: true, dshMarketRegistry: '', dshMarketOfficial: false, dshExportCred: false, dshExportNoMod: true, avoidTaskbar: true, edgeTop: 0, edgeRight: 0, edgeBottom: 0, edgeLeft: 0, scrollGapOn: false, scrollGapPx: SCROLL_GAP_DEFAULT, snapMode: 'ratio', snapRatio: SNAP_RATIO_DEFAULT, opacity: 100, passThrough: false, skin: 'DSniang1', theme: 'default', uiMode: 'auto', bubble: normBubble(null, null, null), alerts: normAlerts(null), alertVols: normAlertVols(null), quotaTotal: 0, quotaReset: 'monthly', tokenPrice: normTokenPrice(null), historyKeepDays: HISTORY_KEEP_DEFAULT, models: [], mainModelId: DEFAULT_MAIN_MODEL, dshBackupKeep: DSB_KEEP_DEFAULT, menuGroups: normMenuGroups(null), menuGroupsRev: 0, ghAccelOn: false, ghAccelIps: normIps(null), ghAccelRefreshedAt: 0, ghAccelSrc: normGhAccelSrc(null), skinPackSrc: '', randomIncludeBuiltin: true, notifySystemOn: true, notifyMailOn: false, mailFrom: '', mailTo: '', mailFromName: '小鲸鱼余额挂件', mailSubjectPrefix: '[小鲸鱼余额挂件]' }
 }
 // dsh Web UI 监听端口（默认 3080）。
 // ⚠️ 为什么必须能配：3080 属于 Windows/Hyper-V 的「动态端口保留段」，被系统预留时
@@ -820,7 +935,13 @@ function readConfig() {
     budgetAmount: clampNum(p.budgetAmount, 0, 1e9, dft.budgetAmount),
     dropAlertOn: p.dropAlertOn === true,
     dropAlertAmount: clampNum(p.dropAlertAmount, 0, 1e9, dft.dropAlertAmount),
-    clickQueueOn: p.clickQueueOn === true,
+    // 全局默认气泡停留时长（秒，3–60 整数；=5 摘键回默认）。非法值直接摘键，由悬浮页回落出厂 5s
+    ...(typeof p.bubbleDwell === 'number' && isFinite(p.bubbleDwell) && p.bubbleDwell >= 3 && p.bubbleDwell <= 60
+      ? { bubbleDwell: Math.round(p.bubbleDwell) } : {}),
+    // 独立拖拽台词（顶层键，不进 quotes）：走 normLineList 清洗，空回内置默认。见 defaultConfig 注释
+    dragLines: normLineList(p.dragLines, DRAG_LINES_DEFAULT, DRAG_LINES_MAX),
+    // 点挂件本体是否推进「依次播放」（默认关）：false 时点本体只开泡/切随机，不翻页
+    tapAdvance: p.tapAdvance === true,
     remindSec: p.remindSec === 0 || p.remindSec === 5 || p.remindSec === 8 || p.remindSec === 15 ? p.remindSec : dft.remindSec,
     quietOn: p.quietOn === true,
     quietFrom: normHm(p.quietFrom, dft.quietFrom),
@@ -881,7 +1002,9 @@ function readConfig() {
     skin: normSkin(p.skin),
     theme: normTheme(p.theme),
     uiMode: normUiMode(p.uiMode),
-    quotes: normQuotes(p.quotes),
+    // 按压气泡（独立模型，见 normBubble 注释）：固定文案池（报时/降级）就挂在它的 system 键上；
+    // 老配置的 config.quotes 在这里一次性迁进 bubble.system（第三参），此后 quotes 老键不再读写
+    bubble: normBubble(p.bubble, dft.bubble, p.quotes),
     alerts: normAlerts(p.alerts, dft.alerts),
     // 额度（资源包 / 订阅）：总量（元，0 = 未设置）与重置周期，已用由账本算，不落配置
     quotaTotal: clampNum(p.quotaTotal, 0, 1e9, dft.quotaTotal),
@@ -939,7 +1062,12 @@ function writeConfig(cfg) {
       budgetAmount: cfg.budgetAmount,
       dropAlertOn: cfg.dropAlertOn === true,
       dropAlertAmount: cfg.dropAlertAmount,
-      clickQueueOn: cfg.clickQueueOn === true,
+      // 全局默认气泡停留时长（秒，3–60 整数；=5 出厂默认则摘键，保持存储干净）
+      ...(typeof cfg.bubbleDwell === 'number' && isFinite(cfg.bubbleDwell) && cfg.bubbleDwell >= 3 && cfg.bubbleDwell <= 60
+        ? { bubbleDwell: Math.round(cfg.bubbleDwell) } : {}),
+      // 独立拖拽台词：与 quotes 同款清洗（空回内置默认），单列一个键
+      dragLines: normLineList(cfg.dragLines, DRAG_LINES_DEFAULT, DRAG_LINES_MAX),
+      tapAdvance: cfg.tapAdvance === true,
       remindSec: cfg.remindSec === 0 || cfg.remindSec === 5 || cfg.remindSec === 8 || cfg.remindSec === 15 ? cfg.remindSec : 8,
       quietOn: cfg.quietOn === true,
       quietFrom: normHm(cfg.quietFrom, '23:00'),
@@ -987,7 +1115,7 @@ function writeConfig(cfg) {
       skin: normSkin(cfg.skin),
       theme: normTheme(cfg.theme),
       uiMode: normUiMode(cfg.uiMode),
-      quotes: normQuotes(cfg.quotes),
+      bubble: normBubble(cfg.bubble),
       alerts: normAlerts(cfg.alerts),
       quotaTotal: clampNum(cfg.quotaTotal, 0, 1e9, 0),
       quotaReset: normQuotaReset(cfg.quotaReset),
@@ -1042,7 +1170,14 @@ function patchConfig(patch) {
   // 余额大幅波动通知（单次下降 ≥ 阈值即通知；0 = 未设置，不通知）
   if (p.dropAlertOn !== undefined) cfg.dropAlertOn = !!p.dropAlertOn
   if (p.dropAlertAmount !== undefined) cfg.dropAlertAmount = clampNum(p.dropAlertAmount, 0, 1e9, cfg.dropAlertAmount)
-  if (p.clickQueueOn !== undefined) cfg.clickQueueOn = !!p.clickQueueOn
+  // 全局默认气泡停留时长（秒，3–60 整数）：非法值忽略（保留原值），不落脏数据
+  if (p.bubbleDwell !== undefined) {
+    const n = Number(p.bubbleDwell)
+    if (isFinite(n) && n >= 3 && n <= 60) cfg.bubbleDwell = Math.round(n)
+  }
+  // 独立拖拽台词：走 normLineList 清洗（空数组按恢复默认处理）
+  if (p.dragLines !== undefined) cfg.dragLines = normLineList(p.dragLines, DRAG_LINES_DEFAULT, DRAG_LINES_MAX)
+  if (p.tapAdvance !== undefined) cfg.tapAdvance = !!p.tapAdvance
   // 提醒气泡停留秒数（0 = 常驻，手动点掉）与免打扰时段（时段内静默系统通知，气泡照常）
   if (p.remindSec !== undefined) {
     const n = Number(p.remindSec)
@@ -1110,9 +1245,10 @@ function patchConfig(patch) {
   if (p.theme !== undefined) cfg.theme = normTheme(p.theme)
   // 界面深浅色：auto 跟 uTools / light / dark（设置页与挂件面板共用这一个字段）
   if (p.uiMode !== undefined) cfg.uiMode = normUiMode(p.uiMode)
-  // 台词库：传对象 = 只改它带的组（组值 null/空 = 该组回内置默认）；传 null = 全部回内置默认
-  if (p.quotes !== undefined) cfg.quotes = normQuotes(p.quotes, cfg.quotes)
-  // 提醒文案模板：口径同台词库（传 null = 全部回内置默认）
+  // 按压气泡（独立模型）：传对象 = 只改它带的键，其余沿用现值；传 null = 整份回内置默认。
+  // 固定文案池（报时/降级）走它的 system 键；老配置若还有 quotes 老键，这里也当迁移源
+  if (p.bubble !== undefined) cfg.bubble = normBubble(p.bubble, cfg.bubble, p.quotes)
+  // 提醒文案模板：口径同固定文案池（传 null = 全部回内置默认）
   if (p.alerts !== undefined) cfg.alerts = normAlerts(p.alerts, cfg.alerts)
   // 额度（资源包 / 订阅）：总量 0 = 未设置（设置页不显示进度条）
   if (p.quotaTotal !== undefined) cfg.quotaTotal = clampNum(p.quotaTotal, 0, 1e9, cfg.quotaTotal)
@@ -1549,7 +1685,6 @@ module.exports = {
   readConfig,
   writeConfig,
   patchConfig,
-  normQuotes,
   renderAlert,
   alertOneLine,
   alertFor,
@@ -1583,16 +1718,30 @@ module.exports = {
   DSB_KEEP_DEFAULT,
   DSB_KEEP_MIN,
   DSB_KEEP_MAX,
-  // 随机台词组的数量上限（仅导出给单测：测试里写死 12 会与实现脱钩，改上限时测试照样"通过"）
-  QUOTE_GROUP_MAX,
-  // 台词库 v2（仅导出给单测）：组/行/段清洗、v1 迁移与字号档表
-  normSeg,
-  normRow,
-  normRows,
-  normRowCond,
-  quoteCondOk,
-  normQuoteGroup,
-  normQuoteSound,
-  rowsFromV1,
-  QUOTE_FONT_TIERS,
+  // 固定文案池清洗（config.bubble.system）：仅导出给单测
+  normBubbleSystem,
+  // 按压气泡（config.bubble，独立模型）：归一化 + 常量，导出给宿主 API / 渲染侧 / 单测
+  normBubble,
+  normBubbleMod,
+  normBubbleModules,
+  normBubbleStep,
+  normBubbleLib,
+  bubbleDefaultItems,
+  BUBBLE_MOD_TYPES,
+  BUBBLE_RGB_SCHEMES,
+  BUBBLE_FONT_FAMILIES,
+  BUBBLE_PEAK_STYLES,
+  BUBBLE_PLAN_WINS,
+  BUBBLE_ROW_MAX,
+  BUBBLE_MOD_MAX,
+  BUBBLE_CHOICE_MAX,
+  BUBBLE_ITEM_MAX,
+  BUBBLE_SIZE_MIN,
+  BUBBLE_SIZE_MAX,
+  BUBBLE_DWELL_DFT,
+  BUBBLE_DRAG_LINES_DFT,
+  // 报时四池的键名顺序（悬浮页 timeLabel 按它选池）与拖拽台词默认值（check-shared 钉两处字面量一致）
+  QUOTE_TEXT_KEYS,
+  DRAG_LINES_DEFAULT,
+  normLineList,
 }

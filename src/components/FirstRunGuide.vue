@@ -23,7 +23,7 @@ const props = defineProps<{
   // 已保存的凭据（用于回填）：跳过一次后再进设置页时仍显示上次填了一半的内容
   apiKey: string
   platformToken: string
-  // 进入方式，与「窗口」Tab 的 cfg.enterMode 同值
+  // 进入方式，与「外观」Tab 的 cfg.enterMode 同值
   enterMode: string
   // 保存 / 测试进行中：禁用按钮，防连点
   saving: boolean
@@ -146,7 +146,7 @@ function onTest() {
 
       <!-- 第二步：进入方式 -->
       <template v-else-if="step === 1">
-        <p class="lead">每次呼出插件时，先看到什么？选一个就行，之后可在「窗口」Tab 里随时改。</p>
+        <p class="lead">每次呼出插件时，先看到什么？选一个就行，之后可在「外观」Tab 的「挂件窗口」卡里随时改。</p>
         <div class="opts">
           <label v-for="o in [
             { v: 'both', t: '设置窗口 + 挂件', d: '两个都开，第一次装通常选这个' },

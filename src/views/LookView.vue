@@ -172,11 +172,6 @@ function onVolInput(e: Event) {
           <span class="label">挂件右上角菜单按钮</span>
           <input type="checkbox" :checked="cfg.menuBtn" @change="emit('patch', { menuBtn: ($event.target as HTMLInputElement).checked })" />
         </label>
-
-        <label class="field row check">
-          <span class="label">点按依次播放 <em>（点气泡按顺序播放台词，播完才收起；关闭则每次随机一组）</em></span>
-          <input type="checkbox" :checked="cfg.clickQueueOn" @change="emit('patch', { clickQueueOn: ($event.target as HTMLInputElement).checked })" />
-        </label>
       </div>
     </div>
 

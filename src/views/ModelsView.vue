@@ -6,14 +6,14 @@ import type { WhaleModel, WhaleModelRow, WhaleModelTemplate, WhaleServices } fro
 // 抽自 App.vue：卡片自身的行内表单 / 展开态 / 删除确认 / 测试 / 刷新 / 增删改全内聚在此。
 // 跨卡共享的运行时快照（models）、配置清单（modelConfigs）、主显示 id（modelsMainId）、
 // 模板与上限、以及 fmtTokens / codexWinText 两个文案函数仍留父级，按 props 下传 ——
-// 账号余额卡（quote 条件的 model 候选与 mainModelId）与 Codex 心跳都在用，不复制副本。
+// 账号余额卡（余额卡的 model 候选与 mainModelId）与 Codex 心跳都在用，不复制副本。
 const props = defineProps<{
   services: Partial<WhaleServices>
   // 宿主运行时快照行（含内置 DeepSeek 第一行），父级 reloadModels 取回后下传
   models: WhaleModelRow[]
   // 配置清单（不含余额），用于「是否已达上限」与编辑时查配置
   modelConfigs: WhaleModel[]
-  // 主显示模型 id（父级持有：quote 条件的 model 文案也读它）
+  // 主显示模型 id（父级持有：余额卡的 model 文案也读它）
   modelsMainId: string
   modelTpls: Record<string, WhaleModelTemplate>
   modelMax: number
