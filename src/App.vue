@@ -14,7 +14,9 @@ import { CARD_TEXT } from './search-index.gen'
 const AccelView = defineAsyncComponent(() => import('./views/AccelView.vue'))
 // 「资源」Tab 整组（7 张卡）。含 7 张可独立命中的卡，故把 cardOn 作为 prop 传入、
 // 由组件内各 section 自行判定显隐，不能在本层包一层 v-if（那样搜索态只能整组显隐）。
-import AssetsView from './views/AssetsView.vue'
+// 按需异步加载：全仓最大的视图（形象画廊 / 音效 / 素材包编辑都在这），抽成独立 chunk 给主包瘦身；
+// 组件恒挂载（无 v-if），chunk 在启动即取，但主包解析变小变快。expose 仅供外部预留，父级无 ref 调用点，异步安全。
+const AssetsView = defineAsyncComponent(() => import('./views/AssetsView.vue'))
 // 「挂件窗口」整卡。widgetFlash / 显隐 / 复位 / 复制指令 / 新增快捷键都会写与「使用帮助」
 // 卡共用的消息槽，故这些函数与状态留在父级，本组件用 emit 触发。
 import WindowView from './views/WindowView.vue'
@@ -35,7 +37,9 @@ import LookView from './views/LookView.vue'
 // 本卡只补编辑入口 —— 故不需要新 IPC 通道；队列只读概览 + 试播内聚在组件里，
 // 落盘统一 emit('patch', { bubble })；挂件菜单「气泡设置」的导航订阅留在父级
 // （与 onConfigChange 同处 onMounted），组件不重复管生命周期。
-import BubbleView from './views/BubbleView.vue'
+// 按需异步加载：BubbleQueueEditor / BubbleModPanel / BubblePreview 与共享渲染器只被本卡引用，
+// 整族抽成独立 chunk 后首屏包明显变小（本卡只在「外观」Tab 的泡泡卡展开时才渲染）。
+const BubbleView = defineAsyncComponent(() => import('./views/BubbleView.vue'))
 // 「用量与账本」整卡。账本快照与刷新入口（refreshHistory / refreshTodayModels）留在父级——
 // 窗口聚焦 / 挂载 / 恢复备份 / 清除数据后父级都要主动刷新，故这里用 props 收、emit 触发；
 // 卡片内需要父级同步结果的回填（账本截取所需数据）经 defineExpose 暴露方法，父级用模板 ref 调用。
@@ -49,7 +53,8 @@ import NotifyView from './views/NotifyView.vue'
 // 跨卡共享的运行时快照（models）、配置清单（modelConfigs）、主显示 id（modelsMainId）、
 // 模板与上限、以及 fmtTokens / codexWinText 仍留父级，故按 props 下传；保存 / 删除 / 刷新后
 // 需要父级 reloadModels 重新取快照，故 emit('reload')；主显示切换经 update:mainId 上抛。
-import ModelsView from './views/ModelsView.vue'
+// 按需异步加载：expose 的 closeModelForm 仅组件内部使用，父级无 ref 调用点，异步安全。
+const ModelsView = defineAsyncComponent(() => import('./views/ModelsView.vue'))
 // 「使用帮助」整卡：使用说明 / 快捷键绑定 / 挂件故障排查 / 挂件创建错误详情。
 // 卡片自身的折叠态与诊断日志入口内聚在组件内；挂件错误状态（errDetail / errFlash）与
 // checkWidgetError 由父级 onMounted、showWidget 驱动，故按 props 收、emit 触发；
@@ -59,7 +64,8 @@ import HelpView from './views/HelpView.vue'
 // fmtTokens / codexWinText / codexDayLabel 与图表档位是跨卡共享的单一来源（模型列表行、
 // dsh 用量卡也在用），按 props 下传；本卡是否有窗口数据经 emit('windows') 上抛，并入父级的
 // 倒计时心跳 codexTickNeed。与其上 7 张 dsh 卡之间的 hr.group-sep 依赖 searchActive / activeTab，留父级。
-import CodexView from './views/CodexView.vue'
+// 按需异步加载：只在「开发者」Tab 渲染，内含 UsageChart 图表组件，首次切到该 Tab 才取这段 JS。
+const CodexView = defineAsyncComponent(() => import('./views/CodexView.vue'))
 
 // 主窗 preload（services.js）注入的宿主 API
 const services: Partial<WhaleServices> = window.services || {}

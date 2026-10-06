@@ -1,5 +1,5 @@
 <script lang="ts" setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { cloneBubbleItems, isChoiceStep, setStepModules, stepLabel, stepModules } from '../composables/useBubble'
 import BubbleQueueEditor from '../components/BubbleQueueEditor.vue'
 import BubbleModPanel from '../components/BubbleModPanel.vue'
@@ -38,6 +38,80 @@ function msgCls(f: Flash) { return { ok: !f.err, err: f.err } }
 const items = computed<any[]>(() => (props.cfg?.bubble && Array.isArray(props.cfg.bubble.items) ? props.cfg.bubble.items : []))
 // 气泡总开关：本卡不搬气泡的外层开关，只做「按压气泡」自己的 on（与「思考气泡」并列，互不影响）
 const bubbleOn = computed(() => props.cfg?.bubble?.on === true)
+
+// —— 撤销 / 重做 ——
+// 只覆盖本卡的三个编辑入口（队列 / 泡内容 / 模块库），不 watch props.cfg：宿主推送的回填
+// （挂件菜单改动、备份恢复）不是用户在编辑器里的操作，记进去会「没动过也能撤销出别的状态」。
+// 快照用 cloneBubbleItems 深拷贝（试播载荷同款），与 props 引用脱钩 —— 回填会整份换掉 cfg.bubble，
+// 浅引用入栈等于存了个「未来的状态」。
+type UndoState = { items: any[]; lib: any[] }
+const undoStack = ref<UndoState[]>([])
+const redoStack = ref<UndoState[]>([])
+// 泡内容面板是逐键回抛（textPatch 走 @input），不合并的话打一句「你好」就压进七八个快照。
+// 用合并窗口聚成一步：窗口内连续改动只更新栈顶，超过 600ms 或换了编辑对象才算新一步
+const MERGE_MS = 600
+let lastPushAt = 0
+let lastEditKey = ''
+let mergeTimer: number | undefined
+
+function snapshot(): UndoState {
+  return {
+    items: cloneBubbleItems(props.cfg?.bubble?.items),
+    lib: cloneBubbleItems(props.cfg?.bubble?.lib),
+  }
+}
+// 记一步可撤销的编辑：把改动前的状态压栈、清空重做栈。各 emit 入口在改 payload 前调用
+function pushUndo(editKey: string) {
+  const now = Date.now()
+  // 同一编辑对象且在合并窗口内 → 只把栈顶更新为「改动前」的最新近邻（第一次已压过，不重复压）
+  if (editKey === lastEditKey && now - lastPushAt < MERGE_MS && undoStack.value.length) {
+    lastPushAt = now
+    if (mergeTimer !== undefined) window.clearTimeout(mergeTimer)
+    mergeTimer = window.setTimeout(() => { lastEditKey = '' }, MERGE_MS)
+    return
+  }
+  undoStack.value.push(snapshot())
+  if (undoStack.value.length > 50) undoStack.value.shift()
+  redoStack.value = []
+  lastPushAt = now
+  lastEditKey = editKey
+  if (mergeTimer !== undefined) window.clearTimeout(mergeTimer)
+  mergeTimer = window.setTimeout(() => { lastEditKey = '' }, MERGE_MS)
+}
+function undo() {
+  const prev = undoStack.value.pop()
+  if (!prev) return
+  redoStack.value.push(snapshot())
+  lastEditKey = ''
+  emit('patch', { bubble: { items: prev.items, lib: prev.lib } })
+  editing.value = null
+}
+function redo() {
+  const next = redoStack.value.pop()
+  if (!next) return
+  undoStack.value.push(snapshot())
+  lastEditKey = ''
+  emit('patch', { bubble: { items: next.items, lib: next.lib } })
+  editing.value = null
+}
+const canUndo = computed(() => undoStack.value.length > 0)
+const canRedo = computed(() => redoStack.value.length > 0)
+// 快捷键 Ctrl+Z / Ctrl+Y（含 Ctrl+Shift+Z 反向）：输入框聚焦时不拦，让正常打字退格不受干扰
+function onUndoKey(e: KeyboardEvent) {
+  if (!(e.ctrlKey || e.metaKey) || e.altKey) return
+  const k = e.key.toLowerCase()
+  if (k !== 'z' && k !== 'y') return
+  const t = e.target as HTMLElement | null
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return
+  e.preventDefault()
+  if (k === 'z' && !e.shiftKey) undo()
+  else redo()
+}
+onMounted(() => window.addEventListener('keydown', onUndoKey))
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onUndoKey)
+  if (mergeTimer !== undefined) window.clearTimeout(mergeTimer)
+})
 
 // —— 试播：把当前队列整份发给挂件真弹一次（宿主 bubblePreview → whale:bubble-preview）——
 // 载荷必须与配置脱钩（挂件那边会存引用），故走 cloneBubbleItems 深拷贝
@@ -86,6 +160,7 @@ function onToggleThinking(e: Event) {
 function onQueueChange(next: any[]) {
   flash.msg = ''
   flash.err = false
+  pushUndo('queue')
   emit('patch', { bubble: { items: next } })
 }
 // 打开某一步某侧的内容编辑（W2）：记录「正在编辑哪一步的哪一侧」。
@@ -141,17 +216,20 @@ const editingSides = computed(() => {
 // 模块库：宿主归一化后恒为数组，这里再兜一层
 const bubbleLib = computed<any[]>(() => (props.cfg?.bubble && Array.isArray(props.cfg.bubble.lib) ? props.cfg.bubble.lib : []))
 
-// 泡内容回抛：用 setStepModules 把新 modules 写回该步该侧，再整份 items 落盘
+// 泡内容回抛：用 setStepModules 把新 modules 写回该步该侧，再整份 items 落盘。
+// editKey 带上「哪一步哪一侧」：换泡 / 换侧重开合并窗口，不把两个泡的改动并成一步
 function onModChange(mods: any[]) {
   const e = editing.value
   if (!e) return
   const cur = items.value[e.idx]
   if (cur === undefined) return
+  pushUndo('mod:' + e.idx + ':' + e.side)
   const next = items.value.map((s: any, k: number) => (k === e.idx ? setStepModules(s, e.side, mods) : s))
   emit('patch', { bubble: { items: next } })
 }
 // 模块库回抛：lib 是 cfg.bubble 上独立的一份，与 items 并列，直接整份覆盖
 function onLibChange(lib: any[]) {
+  pushUndo('lib')
   emit('patch', { bubble: { lib } })
 }
 
@@ -208,6 +286,12 @@ onMounted(() => {
     </BubbleQueueEditor>
 
     <div class="btn-row">
+      <!-- 撤销 / 重做：覆盖队列 + 泡内容 + 模块库三类编辑；宿主推送的回填（挂件菜单 / 备份恢复）
+           不入栈，故「撤销」永远只回退用户在编辑器里做过的操作。快捷键 Ctrl+Z / Ctrl+Y 同款 -->
+      <button class="utils-btn utils-secondary" type="button" :disabled="!canUndo"
+              title="撤销上一次编辑（Ctrl+Z）" @click="undo">撤销</button>
+      <button class="utils-btn utils-secondary" type="button" :disabled="!canRedo"
+              title="重做被撤销的编辑（Ctrl+Y）" @click="redo">重做</button>
       <button class="utils-btn utils-secondary" type="button" :disabled="previewing || !widgetVisible"
               :title="widgetVisible ? '把当前队列发给挂件真弹一次' : '挂件未显示，先在「窗口」页显示挂件'"
               @click="doPreview">{{ previewing ? '已试播' : '试播到挂件' }}</button>
