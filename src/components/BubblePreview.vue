@@ -100,6 +100,12 @@ watch(() => props.theme, () => applyThemeVars())
    这里只用 :deep() 管 root 几何与舞台外观。 */
 .bubble-preview-stage {
   position: relative;
+  /* 宽度必须显式给：舞台里只有绝对定位的 root，max-content 为 0，不给宽就会塌缩到
+     左卡标题的宽度（实测 ~94px），而 0.7 档气泡外框有 118% × 330 ≈ 273px ——
+     overflow:hidden 会把气泡左右各裁掉 ~90px，只剩中间一条（首版踩过）。
+     取值口径：气泡左偏 7.97% + 宽 118%，要让气泡完整落框内且 root 居中，
+     舞台至少需 root 的 120.06%（330 × 1.2006 ≈ 396px），取整 400px */
+  width: calc(400px * var(--pv-scale, 1));
   /* 舞台高 / root 几何 / 挂件基准同步乘 --pv-scale（见 scale prop 注释），
      默认 1 时与旧值（365 / 330）逐字一致 */
   height: calc(365px * var(--pv-scale, 1));

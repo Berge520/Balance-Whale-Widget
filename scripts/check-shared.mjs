@@ -111,28 +111,47 @@ function skinIdsFromArray(marker) {
     return ids.sort().join(',')
   }
 }
-// 可下载形象清单：宿主是 `[{ id: 'x', file: ..., sha256: ... }, ...]` 的对象数组，
-// 只抽 id 字段（sha256/体积这些不该跨文件比对），排序后逗号连接。
-function skinIdsFromPack(marker) {
-  return (src, file) => {
-    const body = jsLiteral(marker)(src, file)
-    const ids = [...body.matchAll(/\bid\s*:\s*['"]([^'"]+)['"]/g)].map((m) => m[1])
-    if (!ids.length) throw new Error(`${file} 里「${marker}」没解析出任何 id`)
-    return ids.sort().join(',')
-  }
-}
-
-// 共享角色清单：宿主是 `[{ id: 'sXxx...', name: '中文名', sha256: ... }, ...]`，
-// 设置页副本是 `[{ id, name }, ...]`。抽成 `id:name` 逐项排序连接 —— 只比 id 与展示名
-// （sha256 / 体积 / 文件扩展名不该跨文件比对，那些由宿主单侧说了算）。
+// 共享角色清单 / 可下载形象清单：宿主是 `[{ id: 'x', name: '中文名', sha256: ... }, ...]`，
+// 设置页副本是 `[{ id, name }, ...]`（或只有 id）。抽成 `id:name` 逐项排序连接 —— 只比 id 与
+// 展示名（sha256 / 体积 / 文件扩展名不该跨文件比对，那些由宿主单侧说了算）。
+//
+// name 缺失时抽成空串而不是整项丢弃：当前「可下载形象」那 1 张就没有 name。这样「只有一边
+// 补了中文名」会拼成 `id:中文` vs `id:`，整体不等、闸门报警；若改成丢弃，两边都会被丢空、
+// 反而漏掉这次漂移（试过一版，闸门报「没解析出任何 id/name」，正是丢空的表现）。
 function sharedSkinIds(marker) {
   return (src, file) => {
     const body = jsLiteral(marker)(src, file)
-    // 逐项取 `id: '...'` 与同项紧随的 `name: '...'`
-    const items = [...body.matchAll(/id\s*:\s*['"]([^'"]+)['"][^}]*?name\s*:\s*['"]([^'"]*)['"]/g)]
-      .map((m) => m[1] + ':' + m[2])
-    if (!items.length) throw new Error(`${file} 里「${marker}」没解析出任何 id/name`)
+    // 按 `}` 切项，逐项分别抠 id 与 name —— 不能用 `[^}]*?name` 这种跨字段正则，
+    // 没有 name 的项会直接匹配不上、被整条丢掉
+    const items = body.split('}')
+      .map((part) => {
+        const id = part.match(/id\s*:\s*['"]([^'"]+)['"]/)
+        if (!id) return null
+        const name = part.match(/name\s*:\s*['"]([^'"]*)['"]/)
+        return id[1] + ':' + (name ? name[1] : '')
+      })
+      .filter(Boolean)
+    if (!items.length) throw new Error(`${file} 里「${marker}」没解析出任何 id`)
     return items.sort().join(',')
+  }
+}
+
+// 音效实播槽位清单：宿主 sounds.js 的 PLAY_ROLES（决定能往哪几个槽位写文件、哪些槽位参与播放）
+// 与设置页的 SOUND_ROLES（决定界面列出哪几个槽位可导入）必须同值。改一处忘另一处会出现
+// 「界面能导入、宿主不认这个 role」或「宿主能播、界面没入口」的静默割裂。两处都是纯字符串数组，
+// 抽 `'x'` 排序连接即可；只比实播六槽位，shared（素材库落地槽）不进比对 —— 它不该出现在设置页的实播清单里。
+function soundRoleList(marker) {
+  return (src, file) => {
+    const at = src.indexOf(marker)
+    if (at < 0) throw new Error(`${file} 里找不到「${marker}」`)
+    const rest = src.slice(at + marker.length)
+    const m = rest.match(/=\s*\[/)
+    if (!m) throw new Error(`${file} 里「${marker}」后面没有数组字面量`)
+    const from = at + marker.length + m.index + m[0].length - 1
+    const body = balanced(src, from, file, marker)
+    const roles = [...body.matchAll(/['"]([^'"]+)['"]/g)].map((x) => x[1])
+    if (!roles.length) throw new Error(`${file} 里「${marker}」没解析出任何 role`)
+    return roles.sort().join(',')
   }
 }
 
@@ -431,13 +450,17 @@ const CHECKS = [
     ],
   },
   // 可下载形象清单（v1.8.0 起精简为 1 张）：宿主 constants 的 SKIN_PACK_SKINS（对象数组，
-  // 含 sha256）与设置页的字面量副本（id 数组）同值。设置页那份决定资源页列出哪些可下载，
-  // 宿主那份决定下载后落到画廊的 id 校验，两边不一致会出现「设置页点了下载、宿主不认」。
+  // 含 sha256）与设置页的字面量副本（`{ id, size }` 数组）同值。设置页那份决定资源页列出哪些
+  // 可下载，宿主那份决定下载后落到画廊的 id 校验，两边不一致会出现「设置页点了下载、宿主不认」。
+  //
+  // 走 sharedSkinIds 抽 id:name —— name 可以两边都没有（当前 1 张就没有 name，回归 id 展示，
+  // 「不带 displayName 时回落到 id」有单测守着），但**不能只有一边有**：那边一加中文名，
+  // 另一边抽出来的是空 name，拼接串整体不等，闸门立刻报警。这正是要拦的静默漂移。
   {
     name: '可下载形象清单 SKIN_PACK_SKINS',
     parts: [
-      { file: CONSTANTS, pick: skinIdsFromPack('const SKIN_PACK_SKINS =') },
-      { file: APP_VUE, pick: skinIdsFromArray('const SKIN_PACK_SKINS =') },
+      { file: CONSTANTS, pick: sharedSkinIds('const SKIN_PACK_SKINS =') },
+      { file: APP_VUE, pick: sharedSkinIds('const SKIN_PACK_SKINS =') },
     ],
   },
   {
@@ -469,6 +492,16 @@ const CHECKS = [
     parts: [
       { file: FLOATING_PAGE, pick: whaleMp3Paths('var SOUND_FILES') },
       { file: ASSETS_VIEW, pick: whaleMp3Paths('const BUILTIN_SOUND_SETS') },
+    ],
+  },
+  // 音效实播槽位清单：宿主 sounds.js 的 PLAY_ROLES 决定「能往哪几个槽位写文件、哪些槽位参与播放」，
+  // 设置页 SOUND_ROLES 决定「界面列出哪几个槽位可导入」。改一处忘另一处会出现
+  // 「界面能导入、宿主不认这个 role」或「宿主能播、界面没入口」的静默割裂（见 soundRoleList 注释）。
+  {
+    name: '音效实播槽位清单 SOUND_ROLES',
+    parts: [
+      { file: 'public/preload/lib/sounds.js', pick: soundRoleList('const PLAY_ROLES') },
+      { file: APP_VUE, pick: soundRoleList('const SOUND_ROLES') },
     ],
   },
   // 一键隔离的单次写入上限：宿主 dsh-isolate.js 拿它做准入判断（超限直接拒绝），

@@ -1,6 +1,6 @@
 <script lang="ts" setup>
 import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
-import type { AlertRole, BubbleMeta, CodexWindow, CodexWindows, DshMarketPlugin, SharedSkinList, SharedSoundList, SkinGallery, SkinMeta, SkinPackList, SoundMeta, SoundRole, WhaleModel, WhaleModelRow, WhaleModelTemplate, WhalePriceModel, WhaleServices, WhaleTokenPrice } from './types/services'
+import type { AlertRole, BubbleMeta, CodexWindow, CodexWindows, DshMarketPlugin, SkinGallery, SkinMeta, SkinPackList, SoundMeta, SoundRole, WhaleModel, WhaleModelRow, WhaleModelTemplate, WhalePriceModel, WhaleServices, WhaleTokenPrice } from './types/services'
 import SkinCropper from './components/SkinCropper.vue'
 import SoundTrimmer from './components/SoundTrimmer.vue'
 import FirstRunGuide from './components/FirstRunGuide.vue'
@@ -1045,9 +1045,6 @@ function blankSoundMap<T>(fill: T): Record<SoundRole, T> {
   return out
 }
 const soundsMeta = ref(blankSoundMap<SoundMeta[]>([]))
-// 共享音效库段清单（按压气泡模型里「音效」模块的选项来源）。soundsMeta 只装 SOUND_ROLES 六个实播
-// 槽位，shared 不在其中，单独放一份——由 refreshSounds 统一填充，跟槽位元信息同批刷新
-const sharedSounds = ref<SoundMeta[]>([])
 // 音效本体（base64 data URL）只用于「试听」：元信息里只有文件名，播不了
 const soundData = ref(blankSoundMap<string[]>([]))
 const soundFlash: Flash = useFlash()
@@ -1074,7 +1071,6 @@ function refreshSounds() {
   const next = blankSoundMap<SoundMeta[]>([])
   if (m) for (const r of SOUND_ROLES) next[r] = m[r] || []
   soundsMeta.value = next
-  sharedSounds.value = (m && Array.isArray(m.shared)) ? m.shared : []
   const d = services.getSoundData?.()
   const nextData = blankSoundMap<string[]>([])
   if (d) for (const r of SOUND_ROLES) nextData[r] = d[r] || []
@@ -1119,7 +1115,7 @@ function playAudioUrl(url: string, flash: Flash, onDone?: () => void) {
     if (onDone) onDone()
   }
 }
-// 试听某一段（idx 是该槽位音效组里的第几段）
+// 试听某一段（idx 是该槽位里的第几段；一段一槽位后恒为 0，留 idx 是为迁就旧数据的多段形态）
 function doPreviewSound(role: SoundRole, idx: number) {
   soundFlash.msg = ''
   soundFlash.err = false
@@ -1652,9 +1648,6 @@ function doRemoveSkins(ids: string[]) {
     }
     skinFlash.msg = `已删除 ${r.removed ?? ids.length} 张形象`
     refreshSkin()
-    // 删掉的可能正是「共享角色」那些格（画廊与共享网格是同一批文件的两个视图），
-    // 不跟着刷一下，共享区仍显示「已装」、按钮还是「删」——用户会以为没删掉。
-    refreshSharedSkins()
     // 一张都不剩了还停在「自定义」就无图可显示，回退内置形象
     if (!skinGallery.value.items.length && cfg.skin === 'custom') {
       cfg.skin = DEFAULT_SKIN
@@ -1677,9 +1670,6 @@ function doRemoveSkin(id: string) {
     }
     skinFlash.msg = '已删除该形象'
     refreshSkin()
-    // 删掉的可能正是「共享角色」那一格（画廊与共享网格是同一批文件的两个视图），
-    // 不跟着刷一下，共享区仍显示「已装」、按钮还是「删」——用户会以为没删掉。
-    refreshSharedSkins()
     // 一张都不剩了还停在「自定义」就无图可显示，回退内置形象
     if (!skinGallery.value.items.length && cfg.skin === 'custom') {
       cfg.skin = DEFAULT_SKIN
@@ -1811,10 +1801,6 @@ function doClearAssets() {
     refreshSkin()
     refreshBubbles()
     refreshSounds()
-    // 清完还要刷这三项，否则界面上会留下「已经不存在的东西」：
-    // - 共享角色（36 张）与内置可下载形象都存在同一套形象存储里，被删光了卡片却仍标「已下载」
-    // - skinPicked 里留着已删 id（pickedSkinned 计算属性能安全回退，但卡头会闪一下「已选 N 张」）
-    refreshSharedSkins()
     refreshSkinPacks()
     skinPicked.value = []
     if (failed) {
@@ -1903,20 +1889,12 @@ async function sharedSkinThumbDataUrl(id: string): Promise<string> {
     return ''
   }
 }
-const sharedSkinList = ref<SharedSkinList | null>(null)
-function refreshSharedSkins() {
-  const r = services.listSharedSkins?.()
-  sharedSkinList.value = r && Array.isArray(r.items) ? r : null
-}
 
 // —— 共享音效库（45 个，与共享角色同一个包来源，但落 sounds 的 shared 槽位） ——
 // shared 是「素材池」，不直接参与实播 —— 用户在下面从池子里「选用」到某个实播槽位才生效，
 // 否则一装几十段、把原本选好的音效挤掉。
-const sharedSoundList = ref<SharedSoundList | null>(null)
-function refreshSharedSounds() {
-  const r = services.listSharedSounds?.()
-  sharedSoundList.value = r && Array.isArray(r.items) ? r : null
-}
+// 库清单由 AssetsView 自己 listSharedSounds 拉（点开卡片时才拉），父级不再持副本
+
 // 「未使用」= 磁盘上有、但按当前设置不会播放 / 显示的素材：
 // 形象：画廊里除正在使用的那张以外的每一张（形象选的是内置时，整柜都没在用）
 // 音效：音效开关关 → 全部未使用；按压/释放看「音色」是否自定义；四类提醒音看对应提醒开关
@@ -1959,8 +1937,6 @@ function doClearUnused() {
     }
     refreshSkin()
     refreshSounds()
-    // 与 doClearAssets 同理：共享角色 / 内置可下载形象都共用形象存储，删完角标要跟着灭
-    refreshSharedSkins()
     refreshSkinPacks()
     skinPicked.value = []
     if (failed) {
@@ -2449,8 +2425,6 @@ onMounted(() => {
       refreshSounds()
       refreshSkin()
       refreshBubbles()
-      refreshSharedSkins()
-      refreshSharedSounds()
     } catch (err) {}
     // 更新检查与首次引导也一并后置：它们都涉及网络/弹窗，不能挡住首屏
     try { if (cfg.updateCheckOn) doCheckUpdate(false) } catch (err) {}
@@ -2620,7 +2594,6 @@ onUnmounted(() => {
       :thumb-broken="thumbBroken"
       :skin-hint-open="skinHintOpen"
       :sounds-meta="soundsMeta"
-      :shared-sounds="sharedSounds"
       :sound-data="soundData"
       :sound-flash="soundFlash"
       :bubble-items="bubbleItems"
@@ -2668,8 +2641,6 @@ onUnmounted(() => {
       @refresh-skin="refreshSkin"
       @refresh-bubbles="refreshBubbles"
       @refresh-skin-packs="refreshSkinPacks"
-      @refresh-shared-skins="refreshSharedSkins"
-      @refresh-shared-sounds="refreshSharedSounds"
     />
 
 

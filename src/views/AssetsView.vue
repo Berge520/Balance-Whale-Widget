@@ -7,7 +7,7 @@
 // 本组件只做展示与交互，改动一律 emit('patch', {...}) 或语义化事件上抛，
 // 不直接改写 cfg / 不直接落盘（导入形象、导入音效的两个裁剪弹层归父级所有）。
 // ============================================================================
-import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref, watch, nextTick } from 'vue'
 import type {
   AssetsApplyResult, AssetsExportResult, AssetsPreviewResult, BubbleMeta, DownloadProgress,
   SharedSkinList, SharedSoundItem, SharedSoundList, SkinGallery, SkinMeta, SkinPackList,
@@ -38,7 +38,6 @@ const props = defineProps<{
   thumbBroken: Record<string, boolean>
   skinHintOpen: boolean
   soundsMeta: Record<SoundRole, SoundMeta[]>
-  sharedSounds: SoundMeta[]
   soundData: Record<SoundRole, string[]>
   soundFlash: Flash
   bubbleItems: BubbleMeta[]
@@ -55,6 +54,7 @@ const props = defineProps<{
   // —— 父级常量（值来自父级，避免容器双写） ——
   builtinSkins: string[]
   legacyBuiltinSkins: string[]
+  // 可下载形象的 id + 体积（清单里没有 name，展示名一律回落成 id，见 skinPackLabel）
   skinPackSkins: Array<{ id: string; size: number }>
   sharedSkinPackSkins: Array<{ id: string; name: string }>
 }>()
@@ -503,6 +503,12 @@ const skinPackInstalledAny = computed(() => skinPackInstalledCount.value > 0)
 const skinPackAllInstalled = computed(() => !!skinPackItems.value.length && skinPackInstalledCount.value >= skinPackItems.value.length)
 const skinPackRemainBytes = computed(() => skinPackItems.value.reduce((n, it) => n + (it.installed ? 0 : Number(it.size) || 0), 0))
 const skinPackBytes = computed(() => props.skinPackSkins.reduce((n, s) => n + (Number(s.size) || 0), 0))
+// 可下载形象的展示名。清单里没有 name 字段（DSniang02 是「DS 娘」的 id，中文名无意义），
+// 于是各处一律走它回落成 id —— 全卡统一，免得标题用 name、缩略图用 id，两处对不上
+// （曾踩：一面写「内置形象」一面标 id，用户以为点错了卡）。
+function skinPackLabel(id: string) {
+  return id
+}
 // 「正在使用的形象当前拿不到」：配置里选的是历史内置形象，但本地还没下载回来（静默降级）
 const skinInUseMissing = computed<boolean>(() => {
   const s = props.cfg.skin
@@ -863,6 +869,21 @@ onMounted(() => {
   document.addEventListener('keydown', onKeydownCloseRndMenu)
   window.addEventListener('scroll', onScrollCloseRndMenu, true)
 })
+// 三张画廊卡默认收起，展开才去拉私有数据（共享角色 / 共享音效清单、素材包已装状态）。
+// 为什么不放 onMounted 一次拉完：这三张卡是 v-if，本组件挂载时它们并不在 DOM 里，
+// onMounted 拉回来的数据会因为没有可见消费方而一直被忽略；等用户点开时又不会再拉，
+// 于是「共享形象 / 共享音效」永远显示 0 张（曾踩：展开后一片空，点「下载全部」也没反应）。
+// 卡片展开或搜索态强制展开时补拉一次，补齐「onMounted 只覆盖已展开卡」的缺口。
+watch(
+  () => [galleryOpen('skins'), galleryOpen('sharedSkins'), galleryOpen('sharedSounds'), props.searchActive],
+  () => {
+    nextTick(() => {
+      refreshSkinPacks()
+      refreshSharedSkins()
+      refreshSharedSounds()
+    })
+  },
+)
 onUnmounted(() => {
   dlTickStop()
   stopBuiltinAudio()
@@ -1222,17 +1243,17 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds, expand
                  :class="{ active: cfg.skin === s.id, 'is-remote': !skinPackInstalled[s.id] }">
               <div class="skin-box">
                 <button class="skin-cell-pick" type="button"
-                        :title="skinPackInstalled[s.id] ? `${s.id}（已下载，点选用）`
-                          : `${s.id}（未下载，点一下下载，下完自动切到这张）`"
+                        :title="skinPackInstalled[s.id] ? `${skinPackLabel(s.id)}（已下载，点选用）`
+                          : `${skinPackLabel(s.id)}（未下载，点一下下载，下完自动切到这张）`"
                         @click="doSkinPackCell(s.id)">
-                  <img class="skin-cell-img" :src="skinPackThumb(s.id)" :alt="s.id" />
+                  <img class="skin-cell-img" :src="skinPackThumb(s.id)" :alt="skinPackLabel(s.id)" />
                 </button>
                 <!-- 角标写「下载」：v1.8.0 起这批只剩 1 张，「下载全部」显得莫名其妙 -->
                 <span v-if="!skinPackInstalled[s.id]" class="skin-cell-badge">下载</span>
                 <!-- 名字与警示标签二选一：两个都贴 bottom:0，同时渲染会叠在一起看不清。
                      「正在使用 · 未下载」本身已含「是哪张」的信息（它只可能出现在 cfg.skin 那张上） -->
                 <span v-if="skinInUseMissing && s.id === cfg.skin" class="skin-cell-tag warn">正在使用 · 未下载</span>
-                <span v-else class="skin-cell-tag">{{ s.id }}</span>
+                <span v-else class="skin-cell-tag">{{ skinPackLabel(s.id) }}</span>
                 <span v-if="skinPackInstalled[s.id]" class="skin-cell-ops">
                   <button class="skin-op danger" type="button" title="从本地删除这张（可重新下载）"
                           @click.stop="doRemoveSkin(s.id)">删</button>

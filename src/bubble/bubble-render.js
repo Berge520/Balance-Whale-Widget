@@ -199,7 +199,8 @@ export function createBubbleRenderer(opts) {
     seg.style.fontSize = 'calc(var(--dshw-u) * ' + (base * k).toFixed(1) + ')';
   }
   // 应用 3 行模型 { t, s: 'A'|'B'|'P'|'C', c, w }，或 { gif: true, src } 只显示动图。
-  // 行序固定为 标签 / 金额 / 说明，s 决定套哪套字号样式
+  // 行序固定为 标签 / 金额 / 说明，s 决定套哪套字号样式。
+  // 返回值 = 这次是否真的渲染出可见内容（供挂件判「空气泡」并重抽候选，见 applyMods 尾部注释）
   function applyLines(lines) {
     if (lines && lines.gif) {
       // 有自定义气泡图就用它，否则回退内置图（lines.src 为空串 = 用内置）
@@ -215,7 +216,7 @@ export function createBubbleRenderer(opts) {
         hintEl.style.display = 'none';
         rowsBox.style.display = 'none';
         modsBox.style.display = 'none';
-        return;
+        return true;
       }
     }
     if (gifFadeTimer) { clearTimeout(gifFadeTimer); gifFadeTimer = null; }
@@ -223,12 +224,13 @@ export function createBubbleRenderer(opts) {
     gifEl.style.opacity = '';
     resetFont();
     // v2 行组 { rows }：与三行结构互斥，走段级渲染（含图片/链接/占位段）
-    if (lines && lines.rows) { rowsBox.style.display = 'none'; modsBox.style.display = 'none'; applyRows(lines.rows); return; }
+    if (lines && lines.rows) { rowsBox.style.display = 'none'; modsBox.style.display = 'none'; applyRows(lines.rows); return true; }
     // 按压气泡 { mods }：行×模块渲染（模块自带字号/配色/底色/跑马灯/图片）
-    if (lines && lines.mods) { applyMods(lines.mods); return; }
+    if (lines && lines.mods) { return applyMods(lines.mods); }
     rowsBox.style.display = 'none';
     modsBox.style.display = 'none';
     var els = [labelEl, amountEl, hintEl];
+    var vis = false;
     for (var i = 0; i < 3; i++) {
       var el = els[i];
       var ln = lines && lines[i];
@@ -237,6 +239,7 @@ export function createBubbleRenderer(opts) {
         el.className = (BUBBLE_STYLE_CLASS[ln.s] || 'dshwv-label') + (ln.w ? ' dshwv-wrap' : '');
         el.textContent = ln.t;
         el.style.color = ln.c || '';
+        if (ln.t) vis = true;
       } else {
         el.style.display = 'none';
         el.textContent = '';
@@ -244,6 +247,7 @@ export function createBubbleRenderer(opts) {
       }
     }
     fitText();
+    return vis;
   }
 
   // —— v2 行×段渲染 ——
@@ -317,8 +321,9 @@ export function createBubbleRenderer(opts) {
   }
   if (seg.type === 'randimg') {
     // randimg 段：从「已装共享角色图」池随机抽一张（池由宿主注入 randImgSrc 回调）。
-    // 与 image 段同构，只是取图源不同；没装任何共享角色时回调回 null，整段丢
-    var rsrc = opts.randImgSrc ? opts.randImgSrc() : null;
+    // 与 image 段同构，只是取图源不同；没装任何共享角色时回调回 null，整段丢。
+    // seg.imgs 是本段限定的共享角色下标集（空/缺省 = 整池随机），交给回调过滤
+    var rsrc = opts.randImgSrc ? opts.randImgSrc(seg.imgs) : null;
     if (!rsrc) return null;
     var rimg = document.createElement('img');
     rimg.className = 'dshwv-seg dshwv-seg-img';
@@ -496,6 +501,9 @@ export function createBubbleRenderer(opts) {
     var kids = modsBox.children;
     for (var k = 0; k < kids.length; k++) visMods.push(kids[k]);
     if (modsBox.style.display === 'block') fitText(visMods);
+    // 回传「这次真的渲染出内容了吗」：整泡模块全被丢（如并列泡抽中 randimg 而共享角色池为空）
+    // 时 count 为 0、内容区隐藏 —— 挂件据此重抽候选，免得用户点出来是个空气泡
+    return count > 0;
   }
   function cancelGifFade() {
     if (gifFadeTimer) { clearTimeout(gifFadeTimer); gifFadeTimer = null; }

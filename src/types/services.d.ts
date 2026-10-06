@@ -1147,7 +1147,7 @@ export interface CalibrateResult {
 
 // 音效槽位：press / release 是「音色」的按压与释放两段（有内置回落）；
 // low / budget / peak / pass 是四类提醒（低余额 / 今日预算 / 峰谷切换 / 鼠标穿透）各自的提醒音，留空即静音。
-// 每个槽位是一个「音效组」——可导入多段，挂件每次随机播一条
+// 每个槽位只放一段（v1.9.0 起收敛为「一段一槽位」，旧的多段数据只取第一段展示，见 App.vue 的 soundLabel）
 export type SoundRole = 'press' | 'release' | 'low' | 'budget' | 'peak' | 'pass'
 
 // 四类提醒音的槽位名（alertVols 的键）：SoundRole 的子集 —— 提醒音有独立音量，音色两段没有
@@ -1158,7 +1158,7 @@ export interface SoundMeta {
   name: string
   ext: string
   at: number
-  // 落盘文件名（userData/whale-sounds 下）：一槽位多段时靠它区分，删除也要按它定位
+  // 落盘文件名（userData/whale-sounds 下）：删除 / 试听按它定位
   file: string
   // 音频体积（字节，宿主读取时派生；文件缺失为 0），供「自定义素材」卡片展示
   size: number

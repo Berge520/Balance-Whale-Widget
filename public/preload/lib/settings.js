@@ -2717,7 +2717,12 @@ module.exports = {
   // 传入用户自填的加速前缀（空 = 只用内置候选链），宿主不在这里读配置 —— 设置页已持有 cfg
   async downloadSkinPacks(prefix) {
     const r = await skinPacks.downloadSkinPacks({ prefix: prefix })
-    if (r && r.ok) sendToWidget('whale:skin', skins.getSkinData())
+    if (r && r.ok) {
+      sendToWidget('whale:skin', skins.getSkinData())
+      // 内置包里的形象带 builtin 标记，会进 randimg 的「共享角色图池」；重推一次图池，
+      // 下载完立刻能抽到，不必等挂件下次启动（与 downloadSharedSkin 同口径）
+      sendToWidget('whale:shared-skins', skins.getBuiltinData())
+    }
     return r
   },
   // —— 共享素材（角色图 36 张 + 音效库 45 个，上游 QQ 群素材，v1.9.0 起改为按需单张下载）——
@@ -2765,8 +2770,11 @@ module.exports = {
   },
   // 从共享库里删一段：素材池那段 + 从它「选用」出去的实播槽位副本一起清（见 assets-packs 注释）。
   // 返回值带 clearedRoles（被清空的实播槽位），设置页据此在提示里说明影响面。
+  // 删成功就必须重推音效 —— 挂件内存里还留着被删掉的 data URL，不推会继续播一段用户
+  // 已删除的音频（曾踩：删了还在响，要等下次改配置才纠正），被清空的槽位也才能回落到内置音色
   removeSharedSound(file) {
     const r = assetsPacks.removeSharedSound(file)
+    if (r && r.ok) sendToWidget('whale:sounds', sounds.getSoundData())
     return r
   },
   // —— 数据目录：设置页「资源」页展示落盘位置并提供「打开」按钮 ——

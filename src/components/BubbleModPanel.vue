@@ -254,7 +254,8 @@ function onLinesInput(ri: number, mi: number, e: Event) {
 // —— image / randimg 的取图设置 ——
 // image 的 imgId 是**已导入气泡图的下标**（1 起算，'0'/空 = 每次随机抽一张）——与浮动页
 // bubbleImgSrc 同语义。故这里给下拉而非文本框：让用户手填下标基本等于让他猜，无从下手。
-// randimg 的 imgs 是共享角色池下标集，那个池子在本项目里恒为空（无数据源），保持纯文本占位输入
+// randimg 的 imgs 是共享角色池下标集：留空 = 整池随机（默认），填了下标就只在这几张里抽。
+// 池子来自「资源」页下载的共享角色（挂件侧 sharedSkins），一张没装时整段取不到图、不显示
 function imgIdOptions() {
   const n = Math.max(1, props.bubbles.length)
   const out: { v: string; label: string }[] = [{ v: imgIdRandom(), label: '每次随机一张' }]
@@ -318,7 +319,7 @@ function modSummary(m: any): string {
       const s = imgIdCurrent(m)
       return s === imgIdRandom() ? '随机一张' : `第 ${s} 张`
     }
-    case 'randimg': return `${Array.isArray(m.imgs) ? m.imgs.length : 0} 张随机图`
+    case 'randimg': return Array.isArray(m.imgs) && m.imgs.length ? `限定 ${m.imgs.length} 张随机图` : '整池随机图'
     case 'peak': return `峰谷 · ${m.peakStyle === 'count' ? '倒计时' : m.peakStyle === 'mini' ? '简式' : '文字'}`
     default: return modLabel(m?.type || '')
   }
@@ -431,7 +432,7 @@ const HELP: Record<string, string> = {
   tpl: '这个模块的正文由运行时的数据决定（余额、峰谷状态等），模板里的 {balance_ds} / {status} / {countdown} 这类占位符会被自动替换。留空则用默认正文。',
   bg: '底色跑马灯优先于纯色底色：两者都设时只跑马灯生效。',
   img: '还没有导入过气泡图：去「资源」页导入后，这里才能指定用哪一张；选「随机」每次点开会在已导入的图里换一张。',
-  randimg: '本项目还没有共享角色图池，这一项暂时取不到图（整行不显示）。',
+  randimg: '在「资源」页下载的共享角色里随机抽一张展示。默认留空 = 每次从整池随机；想限定范围就一行填一个下标（1 = 池里第 1 张）。池里一张都没有时这一项取不到图，不显示。',
 }
 </script>
 
@@ -537,7 +538,7 @@ const HELP: Record<string, string> = {
               <p v-if="help === 'img'" class="bmp-help">{{ HELP.img }}</p>
 
               <label v-else-if="m.type === 'randimg'" class="bmp-f bmp-f-col">
-                <span>随机图池（一行一个共享角色下标，共 {{ Array.isArray(m.imgs) ? m.imgs.length : 0 }} 张）
+                <span>随机图池（留空 = 整池随机；一行一个下标，1 = 池里第 1 张{{ Array.isArray(m.imgs) && m.imgs.length ? `，已限定 ${m.imgs.length} 张` : '' }}）
                   <span class="bmp-ask" :class="{ 'bmp-ask-on': help === 'randimg' }"
                         title="说明" @click.stop.prevent="toggleHelp('randimg')">?</span>
                 </span>

@@ -1042,11 +1042,25 @@
     if (i <= 0) return pickBubbleUrl() || null;
     return customBubbles[Math.min(i, customBubbles.length) - 1] || null;
   }
-  // randimg 段的取图回调（渲染器 randImgSrc）：每次显示从「已装共享角色图」池里随机抽一张
-  //（不连续重复，复用 pickOne 的 WeakMap 机制）。一张都没装时回 null，渲染器据此整段丢
-  function randImgSrc() {
+  // randimg 段的取图回调（渲染器 randImgSrc / bubbleModImageSrc）：每次显示从「已装共享角色图」池里
+  // 随机抽一张（不连续重复，复用 pickOne 的 WeakMap 机制）。一张都没装时回 null，渲染器据此整段丢。
+  // imgs 是「本段可抽的共享角色下标集」（1 起算，模块编辑器填的就是它）：非空时只在该子集里抽，
+  // 空数组 = 不设限、整池随机。没有这个过滤，「随机图池」就成了空设置（曾踩：填了只抽这几张也不生效）
+  function randImgSrc(imgs) {
     if (!sharedSkins.length) return null;
-    return pickOne(sharedSkins) || null;
+    var list = filterSharedSkins(imgs);
+    return pickOne(list) || null;
+  }
+  // 把 imgs 下标集翻译成 sharedSkins 的子集：下标 1 起算（0 / 空 = 随机，落到整池），越界项忽略；
+  // 过滤后一张不剩（全是脏值 / 越界）时回退整池，宁可多抽几张也不让整段凭空消失
+  function filterSharedSkins(imgs) {
+    if (!Array.isArray(imgs) || !imgs.length) return sharedSkins;
+    var out = [];
+    for (var i = 0; i < imgs.length; i++) {
+      var idx = Math.round(Number(imgs[i]) || 0);
+      if (idx >= 1 && idx <= sharedSkins.length) out.push(sharedSkins[idx - 1]);
+    }
+    return out.length ? out : sharedSkins;
   }
   // —— 按压气泡模块取值（渲染器 modText / modImageSrc 回调）——
   // 模板占位符与旧台词同一套（renderLinePlaceholders）；另加四个上游专属 token：
@@ -1137,7 +1151,7 @@
   function bubbleModImageSrc(mod) {
     if (!mod || typeof mod !== 'object') return null;
     if (mod.type === 'image') return bubbleImgSrc(mod.imgId);
-    if (mod.type === 'randimg') return randImgSrc();
+    if (mod.type === 'randimg') return randImgSrc(mod.imgs);
     return null;
   }
   // 模块动态样式回调（渲染器 modStyle）：只有峰谷模块需要 —— 它自带两套配色，取哪套取决于
@@ -1489,21 +1503,40 @@
     return pick;
   }
   var bubbleLastOptionIdx = -1; // 并列泡避重：上次呈现的候选下标
-  // 一步 → 要渲染的模块数组：单选直取；并列按权重抽一个候选（记录避重下标）
-  function bubbleStepModules(step) {
+  // 一步 → 要渲染的模块数组：单选直取；并列按权重抽一个候选（记录避重下标）。
+  // exclude 是本次重试里已试过且渲染为空的下标（避免反复抽中同一个空气泡）
+  function bubbleStepModules(step, exclude) {
     if (!step || typeof step !== 'object') return null;
     if (step.kind === 'choice') {
-      var idx = bubblePickOptionIdx(step.options, bubbleLastOptionIdx);
+      var opts = Array.isArray(step.options) ? step.options : [];
+      var real = [];
+      for (var i = 0; i < opts.length; i++) { if (!exclude || exclude.indexOf(i) < 0) real.push(i); }
+      if (!real.length) return null;
+      // 在「未试过」的候选里按权重抽：把候选下标映射成临时数组交给 bubblePickOptionIdx
+      var pick = bubblePickOptionIdx(real.map(function (k) { return { w: opts[k].w, item: opts[k].item }; }), -1);
+      var idx = pick >= 0 ? real[pick] : real[0];
       bubbleLastOptionIdx = idx;
-      var opt = idx >= 0 ? step.options[idx] : null;
+      var opt = opts[idx];
       return opt && opt.item ? opt.item.modules : null;
     }
     return Array.isArray(step.modules) ? step.modules : null;
   }
-  // 呈现一步：无模块内容时整泡不出（applyBubbleLines({mods:null}) 让渲染器三行全藏）
+  // 呈现一步：无模块内容时整泡不出（applyBubbleLines({mods:null}) 让渲染器三行全藏）。
+  // 并列泡抽中的候选可能渲染成空气泡（典型：候选是 randimg，而用户一张共享角色都没装 ——
+  // 取图回 null 整段丢，模块区 count 归 0）。这时在「还没试过」的候选里继续抽，直到渲染出内容；
+  // 全候选都空（如整泡只有 randimg）才认命，与单选泡行为一致。
   function bubbleRenderStep(step) {
-    var mods = bubbleStepModules(step);
-    applyBubbleLines({ mods: mods });
+    if (step && step.kind === 'choice' && Array.isArray(step.options) && step.options.length > 1) {
+      var tried = [];
+      for (var guard = 0; guard < step.options.length; guard++) {
+        var mods = bubbleStepModules(step, tried);
+        if (applyBubbleLines({ mods: mods })) return;
+        if (bubbleLastOptionIdx >= 0) tried.push(bubbleLastOptionIdx);
+      }
+      // 全部候选都渲染不出内容：最后一次尝试的结果留在屏上（空泡），由调用方按原语义处理
+      return;
+    }
+    applyBubbleLines({ mods: bubbleStepModules(step, null) });
   }
   // 推进到下一步（点击语义）：末步返回 false 由调用方收起
   function bubbleNext() {
@@ -2019,7 +2052,7 @@
   // 保住页面全部调用点（render / show* / hide / updateTimerClock…），行为与抽取前一致
   function resetBubbleFont() { renderer.resetFont(); }
   function fitBubbleText() { renderer.fitText(); }
-  function applyBubbleLines(lines) { renderer.applyLines(lines); }
+  function applyBubbleLines(lines) { return renderer.applyLines(lines); }
   function setHint(text) {
     if (text === lastHintText) return;
     var first = lastHintText === null;
@@ -2478,6 +2511,9 @@
     soundSet = (v === 'fx1' || v === 'custom') ? v : 'duck';
     soundSelect.value = soundSet;
     applySoundSet();
+    // 切音色会重建 Audio 池（applySoundSet 里 new Audio），新建的 Audio 默认 volume=1；
+    // 这里不重落一次音量，切完的第一声会以满音量播，直到下次配置全量推送才纠正（曾踩）
+    applySoundVolume();
     saveCfg();
   }
   // 挂件菜单透明度档位（设置页有连续滑块，同一配置字段）

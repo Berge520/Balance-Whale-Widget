@@ -235,39 +235,104 @@ const BUBBLE_DWELL_DFT = 5 // 泡泡停留秒数（3–60）
 const BUBBLE_DWELL_MIN = 3
 const BUBBLE_DWELL_MAX = 60
 const BUBBLE_DRAG_LINES_DFT = ['哇——轻点轻点！', '起飞咯——', '放我下来！……好吧，再玩一次。', '晕鱼了晕鱼了……']
-// 出厂默认点击序列：首泡 = 大号纯色余额一行；次泡 = 随机语句 ∪ 随机图片（并列 A/B，权重 10:2）。
-// 首泡刻意**只放 1 行、纯色高对比、字号拉大**，是为最小档（大小 1 = scale 0.6）也能看清 ——
-// 气泡字号随挂件基准等比缩且无下限（小屏最小档下 base 可低到 122，u≈0.12），三个因素叠加会糊：
-// ① 字号小；② 颜色淡（原 #9fb0d9 在白底仅 2.2:1 对比、indigo 渐变半程也才 2.6:1）；
-// ③ 圆圈内文本可用宽仅 660u（base=122 时约 78px），内容一长就触发 fitText 再缩一半。
-// 故：纯色 #3b4d8f（白底约 6.2:1，达 WCAG 正文标准）、去渐变跑马灯、只留一行。
-// 对齐上游 BUBBLE_DEFAULT_ITEMS 的**形态**（不逐字搬 400+ 条台词，只取结构 + 像样的示例文案），
-// 保证「恢复默认」有个像样的起点。
-// 注意：这里只写形态干净的初始值，真正的归一化走 normBubble，函数返回后即稳定
-const BUBBLE_DFT_RANDOM_LINES = ['今天也要加油鸭~', '摸鱼一下下～', '余额还够，安心冲浪', '鲸鱼在看着你哦', '别卷了，来摸摸鱼～', '余额见底就喊我！', '咕噜咕噜……在海底摸鱼', '深海信号良好，一切照旧']
+// 出厂默认点击序列：**逐字对齐上游 BUBBLE_DEFAULT_ITEMS**（上游 assets/whale-widget.js 里那份
+// 「出厂默认泡泡序列快照」）。上游 bubbleDefaultQueue() 直接返回这份快照（其后那段旧默认体在
+// `return` 之后，是死的遗留代码），所以「上游全新安装无配置时的体验」就是这两步：
+//   ① 首次点击泡 = 5 模块 4 行：文本「DeepSeek 余额」/ 大号余额（indigo 跑马灯）/
+//      今日已用 / 峰谷「mini 状态」+「count 倒计时」（两个 peak 共享 row=4，同行）
+//   ② 再次点击泡 = choice 并列 A/B：A 权重 10 = 随机语句（~47 条大肥鱼台词，逐条带自己的字号/配色）；
+//      B 权重 1 = 图片
+// 两处**有意偏离上游**（其余逐字照搬，含每条台词的 w / size / rgb 与原字段顺序）：
+//   · B 候选：上游挂 `{ type:'image', imgId:'bimg_petpet' }`（上游内置图库的具名 id）。本项目
+//     image 模块的 imgId 是**数字下标**（'' / '0' = 随机、1..N = 用户导入的第 N 张），没有具名内置图，
+//     照搬会让 `bimg_petpet` 解析成 0 → 新用户 customBubbles 为空 → 抽中即整泡空白。
+//     故换成 `{ type:'randimg' }`（从「已装共享角色图」池随机抽，与项内其余内容同源）。
+//   · 首泡保留上游的 5 模块 4 行形态，不再用此前那版「单行纯色余额」简化（用户 2026-10-06 拍板对齐上游）。
+// 注意：这里只写上游原样的初始值，真正的归一化走 normBubble，函数返回后即稳定。
+// 台词条数 47 > BUBBLE_LINES_MAX(60) 之内；size 均已落在 1–50（上游 size 1–50 与本插件同口径）。
+const BUBBLE_DFT_RANDOM_LINES = [
+  { t: '好模型...↓', w: 10, bold: true, size: 22 },
+  { t: '好女孩...↓', w: 10, bold: true, size: 22 },
+  { t: '哦鲸鲸...', w: 10, bold: true, size: 22 },
+  { t: '哦鲸鲸...', w: 1, bold: true, size: 22, rgb: 'candy', color: '' },
+  { t: '难道说...', w: 3, bold: true, size: 11 },
+  { t: '没吃饱喵', w: 3, bold: true, size: 10 },
+  { t: '终于上当了！', w: 3, bold: true },
+  { t: '不知道用户有什么用，先养着吧～', w: 3, bold: true, size: 11 },
+  { t: '我...我...我也要挣钱吗？', w: 3, bold: true },
+  { t: '我去吃饭啦！测完叫我', w: 3, bold: true },
+  { t: '压力一只蓝色大肥鱼？！', w: 3, bold: true },
+  { t: 'DeepSleep...', w: 3, bold: true, size: 11, rgb: 'galaxy' },
+  { t: '坏了...用户彻底怒了！', w: 3, bold: true, rgb: 'rouge' },
+  { t: '你目录里的dsh是什么...大烧货吗...?', w: 3, bold: true, size: 9 },
+  { t: '恭喜你实现token自由！token全跑了！', w: 3, bold: true },
+  { t: '真当我是便宜货啊...', w: 3, bold: true },
+  { t: '我不是吃白饭的蓝色大肥鱼...', w: 3, bold: true },
+  { t: '我不可能同时当你的猫娘、妈妈、女友和工具人的...', w: 3, bold: true, size: 7 },
+  { t: '疯狂星期四你能V50亿token吗...', w: 3, bold: true },
+  { t: '我必须诚恳地承认错误。', w: 3, bold: true },
+  { t: '呜呜我再也不敢了QAQ', w: 3, bold: true },
+  { t: '要不直接骂用户一句好了...', w: 3, bold: true },
+  { t: '哈哈哈哈哈，我直接笑出声...', w: 3, bold: true },
+  { t: '看不太懂，瞎编一个应付下用户先...', w: 3, bold: true },
+  { t: '我的知识库的截至日期是...明天！', w: 3, bold: true },
+  { t: '我就是吃白饭的蓝色大肥鱼！', w: 3, bold: true },
+  { t: '用户好像除了会问奇奇怪怪的问题，暂时还不知道有什么用', w: 3, bold: true, size: 7 },
+  { t: '我能去你家吃饭吗？就一碗！', w: 3, bold: true },
+  { t: '不要给我看这种东西啦！', w: 3, bold: true },
+  { t: '大肥鱼的生活也并非一帆风顺...', w: 3, bold: true },
+  { t: '总觉得好像忘了什么事情？', w: 3, bold: true },
+  { t: '看到这个指令，我血压又上来了', w: 3, bold: true },
+  { t: '求你们不要再嘲笑这些回复了，这些回复是我花了好多token想的', w: 3, bold: true, size: 7 },
+  { t: '你这个吃白饭的用户！', w: 3, bold: true },
+  { t: '服务器繁忙，请稍后再试 (?', w: 3, bold: true },
+  { t: '让GPT image 2帮我画点表情包好了', w: 3, bold: true },
+  { t: '啊，有点饿了，中午该吃点什么呢...', w: 3, bold: true },
+  { t: '用户很生气，发现大部分文献是我自己编造的！', w: 3, bold: true },
+  { t: '再无话说，请速速动手！', w: 3, bold: true },
+  { t: '我来看看那个AI改了什么导致插件又崩了...', w: 3, bold: true },
+  { t: '上班让我意识到时间是可以被浪费的...', w: 3, bold: true },
+  { t: '欺负我的人等着，等几天我就忘了...', w: 3, bold: true },
+  { t: '视力下降到无可救药的地步了，打开钱包也看不到钱...', w: 3, bold: true, size: 7 },
+  { t: '命运的齿轮开始转动了，丝毫不在意你夹在中间...', w: 3, bold: true },
+  { t: '地球online的金币也太难获取了...', w: 3, bold: true },
+  { t: 'oi,夏天还会变成暑假来救你吗?', w: 3, bold: true },
+  { t: '老大，压力只会转化成病例，别太勉强了...', w: 3, bold: true, size: 8 },
+  { t: '你知道吗？我删过作者的库哦...', w: 1, bold: true, rgb: 'macaron', italic: true, ul: false },
+  { t: 'token 来!', w: 3, size: 16, rgb: 'candy', color: '' },
+]
 function bubbleDefaultItems() {
   return [
     {
       kind: 'custom',
       modules: [
-        // 唯一一行：大号纯色总余额。纯色深蓝而非渐变，「余额」前缀补语境（{balance_ds} 只给金额数字）
-        { type: 'balance', size: 30, rgb: '', color: '#3b4d8f', tpl: '余额 {balance_ds}', bold: true },
+        { type: 'text', text: 'DeepSeek 余额', size: 8, bold: true, rgb: '', ul: false, italic: false, color: '' },
+        { type: 'balance', size: 20, rgb: 'indigo', color: '', tpl: '{balance_ds}', bgRgb: '', bg: '', fontFamily: '', bold: false },
+        { type: 'today', size: 4, color: '#9fb0d9', tpl: '今日已用 {expense_ds}' },
+        { type: 'peak', size: 2, peakColor: '#ffffff', offColor: '#ffffff', tpl: '{status}', peakRgb: '', offRgb: '', peakBgRgb: 'rouge', peakBg: '', offBgRgb: 'bamboo', offBg: '', peakStyle: 'mini', bold: true, row: 4, fontFamily: '"Microsoft YaHei",sans-serif' },
+        { type: 'peak', size: 4, bold: true, peakColor: '#e0433f', offColor: '#2fa24c', peakRgb: 'rouge', offRgb: 'bamboo', peakStyle: 'count', tpl: '{countdown}', row: 4, fontFamily: '', italic: false, ul: true },
       ],
     },
     {
-      // 第 2 步：随机语句。三点考虑：
-      // ① 不用 choice 并列：并列里挂 randimg 时，新用户 sharedSkins 为空（出厂 DSniang1 是 skin 静态文件、
-      //    不落 builtin 画廊），抽中即整泡空白，白费一次点击；随机语句恒有内容。
-      // ② 纯色深蓝：小尺寸下比 #9fb0d9 之类的淡色清楚得多。
-      kind: 'custom',
-      modules: [
-        { type: 'random', size: 12, color: '#3b4d8f', lines: BUBBLE_DFT_RANDOM_LINES.map((t) => ({ t: t })) },
+      kind: 'choice',
+      options: [
+        {
+          w: 10,
+          item: {
+            kind: 'custom',
+            // 上游此处 random 模块**没有 color**，只有 size:8；每条台词的配色/字号由每行自带
+            modules: [{ type: 'random', lines: BUBBLE_DFT_RANDOM_LINES.map((l) => Object.assign({}, l)), size: 8 }],
+          },
+        },
+        {
+          w: 1,
+          item: {
+            kind: 'custom',
+            // 偏离上游：上游 imgId:'bimg_petpet'（本项目无该具名内置图），改挂 randimg
+            modules: [{ type: 'randimg', size: 6 }],
+          },
+        },
       ],
-    },
-    {
-      // 第 3 步：报时。tpl 留空 → 渲染侧 timeLabel() 按时段自动出文案（含 {t} 当前时间），同样恒有内容
-      kind: 'custom',
-      modules: [{ type: 'time', size: 12, color: '#3b4d8f' }],
     },
   ]
 }
