@@ -706,6 +706,7 @@
     // 按压气泡模块取值回调（v3 bubble 模型）：文本与图片都由页面按实时数据现算，渲染器只负责排版
     modText: bubbleModText,
     modImageSrc: bubbleModImageSrc,
+    modStyle: bubbleModStyle,
   });
   var textBox = renderer.els.textBox;
   var labelEl = renderer.els.labelEl;
@@ -1131,12 +1132,32 @@
   function bubbleQuotaModuleText() {
     return '—';
   }
-  // 模块取图回调：image 用自定义气泡图（随机抽一张）；randimg 用共享角色池随机抽（与 randimg 段同源）
+  // 模块取图回调：image 用自定义气泡图（imgId 语义同 v1 台词的 img：空/0 = 随机抽一张，
+  // 1..N = 指定第 N 张，见 bubbleImgSrc）；randimg 用共享角色池随机抽（与 randimg 段同源）
   function bubbleModImageSrc(mod) {
     if (!mod || typeof mod !== 'object') return null;
-    if (mod.type === 'image') return pickBubbleUrl() || null;
+    if (mod.type === 'image') return bubbleImgSrc(mod.imgId);
     if (mod.type === 'randimg') return randImgSrc();
     return null;
+  }
+  // 模块动态样式回调（渲染器 modStyle）：只有峰谷模块需要 —— 它自带两套配色，取哪套取决于
+  // 当前是峰还是谷，而这个是运行时状态，渲染器无从得知。回 null 表示「不覆盖，用模块自带值」
+  function bubbleModStyle(mod) {
+    if (!mod || typeof mod !== 'object' || mod.type !== 'peak') return null;
+    var peak = !!state.isPeak;
+    // 对象里只放有值的键：空串键会被渲染器当成「没回」而忽略，与不回等价，但白占内存
+    var o = {};
+    if (peak) {
+      if (mod.peakColor) o.color = mod.peakColor;
+      if (mod.peakRgb) o.rgb = mod.peakRgb;
+      if (mod.peakBg) o.bg = mod.peakBg;
+    } else {
+      if (mod.offColor) o.color = mod.offColor;
+      if (mod.offRgb) o.rgb = mod.offRgb;
+      if (mod.offBg) o.bg = mod.offBg;
+      if (mod.offBgRgb) o.bgRgb = mod.offBgRgb;
+    }
+    return o;
   }
   // —— 拖拽台词 ——
   // 真把挂件拖出一段距离（松手位移 ≥100px）才弹：drag.moved 3px 就置位，日常挪一下位置不该触发。

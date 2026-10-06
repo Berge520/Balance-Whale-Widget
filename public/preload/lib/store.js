@@ -255,13 +255,19 @@ function bubbleDefaultItems() {
       ],
     },
     {
-      kind: 'choice',
-      options: [
-        // 随机语句也用纯色深蓝：小尺寸下比 #9fb0d9 之类的淡色清楚得多
-        { w: 10, item: { kind: 'custom', modules: [{ type: 'random', size: 12, color: '#3b4d8f', lines: BUBBLE_DFT_RANDOM_LINES.map((t) => ({ t: t })) }] } },
-        // 随机图偶尔露脸：权重 1→2，让角色图不至于几乎抽不到
-        { w: 2, item: { kind: 'custom', modules: [{ type: 'randimg', size: 6, imgScale: 1 }] } },
+      // 第 2 步：随机语句。三点考虑：
+      // ① 不用 choice 并列：并列里挂 randimg 时，新用户 sharedSkins 为空（出厂 DSniang1 是 skin 静态文件、
+      //    不落 builtin 画廊），抽中即整泡空白，白费一次点击；随机语句恒有内容。
+      // ② 纯色深蓝：小尺寸下比 #9fb0d9 之类的淡色清楚得多。
+      kind: 'custom',
+      modules: [
+        { type: 'random', size: 12, color: '#3b4d8f', lines: BUBBLE_DFT_RANDOM_LINES.map((t) => ({ t: t })) },
       ],
+    },
+    {
+      // 第 3 步：报时。tpl 留空 → 渲染侧 timeLabel() 按时段自动出文案（含 {t} 当前时间），同样恒有内容
+      kind: 'custom',
+      modules: [{ type: 'time', size: 12, color: '#3b4d8f' }],
     },
   ]
 }
@@ -419,6 +425,10 @@ function normBubbleMod(v) {
     out.offColor = normBubbleColor(v.offColor)
     out.peakRgb = normBubbleRgb(v.peakRgb)
     out.offRgb = normBubbleRgb(v.offRgb)
+    // 峰 / 谷各自的底色与「谷底色跑马灯」：与顶部 bg / bgRgb 同一套清洗口径
+    out.peakBg = normBubbleColor(v.peakBg)
+    out.offBg = normBubbleColor(v.offBg)
+    out.offBgRgb = normBubbleRgb(v.offBgRgb)
     out.peakStyle = BUBBLE_PEAK_STYLES.indexOf(v.peakStyle) >= 0 ? v.peakStyle : 'text'
     if (tpl) out.tpl = tpl
   } else if (type === 'session') {

@@ -328,29 +328,56 @@ function packLine(n: number | undefined, unit: string, detail: string) {
 
 // —— 随机 / 选中 / 整理面板 ——
 const rndMenu = ref('')
-const rndSubOpen = ref(false)
-const rndSubHover = ref(false)
-const rndSubUsed = ref(false)
-const rndSubSeen = ref(false)
-let rndSubTimer = 0
-const rndPanelPos = reactive({ right: 0, top: 0, minWidth: 0 })
+const rndPanelPos = reactive({ left: 0, top: 0, minWidth: 0 })
+function closeRndMenu() {
+  rndMenu.value = ''
+}
 function toggleRndMenu(e: MouseEvent) {
-  if (rndMenu.value) { rndMenu.value = ''; return }
+  if (rndMenu.value) { closeRndMenu(); return }
   const btn = e.currentTarget as HTMLElement
   const r = btn.getBoundingClientRect()
-  rndPanelPos.right = Math.max(8, window.innerWidth - r.right)
+  // 按视口坐标钳制而不是靠 right 对齐：按钮文案会在「整理」与「已选 N 张」之间变长，
+  // right 对齐会把面板左边缘一路往左推，位置随选中数漂。这里先按按钮左边缘定位，
+  // 再减到不出右边界（留 8px），宽度因此只跟内容走，跟按钮文案无关
+  const w = Math.max(r.width, 180)
+  rndPanelPos.left = Math.max(8, Math.min(r.left, window.innerWidth - w - 8))
   rndPanelPos.top = r.bottom + 6
-  rndPanelPos.minWidth = Math.max(r.width, 180)
+  rndPanelPos.minWidth = w
   rndMenu.value = 'organize'
-  // 首次打开时自动展一瞬二级菜单，让新用户知道那里能悬停
-  if (!rndSubSeen.value) {
-    rndSubSeen.value = true
-    rndSubOpen.value = true
-    rndSubUsed.value = true
-    window.setTimeout(() => { if (!rndSubHover.value) rndSubOpen.value = false }, 900)
-  }
 }
 const randomSkinPool = computed(() => props.skinGallery.items.filter((it) => it.random).map((it) => it.id))
+// 选中 id 是父级持有的；「整理」面板的按钮文案 / 禁用态却按**当前可见清单**算数量。
+// 普通来源下二者恒等，但「共享形象」来源是个独立画廊：切过去时父级仍留着导入形象的选中 id，
+// pickedSkinned.length 会显示一个当前页面上根本点不出来的数，直接从 props 里滤掉这一批
+const pickedVisible = computed(() => {
+  const ids = new Set(props.skinGallery.items.map((it) => it.id))
+  return props.pickedSkinned.filter((it) => ids.has(it.id))
+})
+// 「随机时抽哪些」本质是一组互斥模式，而不是三个各自独立的批量动作 —— 三个按钮平铺时，
+// 用户得自己比对各池大小才知道当前处于哪种状态，而且很容易把「抽」与「不抽」按反。
+// 这里把现状算成 mode，模板据此标出命中项（✓）并把「点了也不改变现状」的那项置灰。
+// 注意 n 为 0 时一律视为 none：空画廊没有当前张，「只留当前」也无从谈起。
+// 返回 '' 表示「三种都不命中」（部分参与随机的混杂状态），此时三项全可点，没有勾
+const randomMode = computed<'all' | 'none' | 'keepCurrent' | ''>(() => {
+  const n = props.skinGallery.items.length
+  if (!n) return 'none'
+  const pool = randomSkinPool.value.length
+  if (pool === 0) return 'none'
+  if (pool >= n) return 'all'
+  if (pool === 1 && randomSkinPool.value[0] === props.skinGallery.current) return 'keepCurrent'
+  return ''
+})
+// 这一组里哪些项点了会改变现状（= 可点）。三项共用一套判定，避免像原来那样各写各的
+// 禁用条件、各错各的（原「全部不参与随机」写的是 pool === 0 才禁用，语义正好反了）
+const randomChoices = computed(() => {
+  const n = props.skinGallery.items.length
+  const hasCurrent = !!props.skinGallery.current && props.skinGallery.items.some((it) => it.id === props.skinGallery.current)
+  return [
+    { mode: 'all' as const, label: '随机时会抽到它们', on: randomMode.value === 'all' },
+    { mode: 'none' as const, label: '随机时都不抽', on: randomMode.value === 'none' },
+    { mode: 'keepCurrent' as const, label: '只抽「使用中」那张', on: randomMode.value === 'keepCurrent' },
+  ].map((c) => ({ ...c, usable: n > 0 && (c.mode !== 'keepCurrent' || hasCurrent) && randomMode.value !== c.mode }))
+})
 function doRandomSkin() {
   emit('random-skin')
 }
@@ -360,8 +387,15 @@ function doBatchRandom(mode: 'all' | 'none' | 'keepCurrent') {
 function doUseSkin(id: string) {
   emit('use-skin', id)
 }
-function pickSkin(id: string) {
+// 单击缩略图的反馈：选中是「整理」面板的前置状态，若不给一句文案，
+// 用户点完只看到描边变化，未必意识到卡头那个按钮已经换成「已选 N 张」。
+// 只在选中（而非取消选中）时说一句，取消是用户主动反悔，不必再确认一遍
+function onSkinPicked(id: string, picked: boolean) {
   emit('pick-skin', id)
+  if (picked) {
+    skinFlash.err = false
+    skinFlash.msg = '已选中 1 张：可连点多张，再到卡头「整理」里统一使用 / 排序 / 删除'
+  }
 }
 function doUseSkinPick(id: string) {
   emit('use-skin-pick', id)
@@ -802,28 +836,22 @@ const dlAmountText = computed<string>(() => {
   return s.totalKnown && s.total > 0 ? `${got} / ${fmtBytes(s.total)}` : got
 })
 
-// —— 文档级监听：整理面板点外部关闭 / 二级悬停 ——
+// —— 文档级监听：整理面板点外部关闭 ——
+// 面板用 Teleport 挂到了 body（见模板注释），不再是 .rnd-menu 的后代，
+// 所以「点击是否在面板内」必须额外认 .rnd-menu-panel 这个类
 function onDocClickForRndMenu(e: MouseEvent) {
   if (!rndMenu.value) return
   const t = e.target as HTMLElement
-  if (t && t.closest && t.closest('.rnd-menu')) return
-  rndMenu.value = ''
+  if (t && t.closest && (t.closest('.rnd-menu') || t.closest('.rnd-menu-panel'))) return
+  closeRndMenu()
 }
-function onDocMoveForRndMenu(e: MouseEvent) {
-  if (!rndMenu.value) return
-  const t = e.target as HTMLElement
-  const inSub = !!(t && t.closest && t.closest('.rnd-menu-sub'))
-  if (inSub) {
-    rndSubHover.value = true
-    if (rndSubTimer) { window.clearTimeout(rndSubTimer); rndSubTimer = 0 }
-    rndSubOpen.value = true
-    return
-  }
-  if (rndSubHover.value) {
-    rndSubHover.value = false
-    if (rndSubTimer) window.clearTimeout(rndSubTimer)
-    rndSubTimer = window.setTimeout(() => { rndSubOpen.value = false; rndSubTimer = 0 }, 220)
-  }
+// 面板按打开时的视口坐标固定，页面一滚就与按钮脱节（fixed 不会跟着走），索性关掉 —— 下拉的常规行为
+function onScrollCloseRndMenu() {
+  if (rndMenu.value) closeRndMenu()
+}
+// 下拉的常规键盘行为：Esc 收起。不做焦点回移，避免在 Teleport 面板里凭空抢焦点
+function onKeydownCloseRndMenu(e: KeyboardEvent) {
+  if (e.key === 'Escape' && rndMenu.value) closeRndMenu()
 }
 
 onMounted(() => {
@@ -832,15 +860,16 @@ onMounted(() => {
   refreshSharedSounds()
   dlTick()
   document.addEventListener('click', onDocClickForRndMenu)
-  document.addEventListener('mousemove', onDocMoveForRndMenu)
+  document.addEventListener('keydown', onKeydownCloseRndMenu)
+  window.addEventListener('scroll', onScrollCloseRndMenu, true)
 })
 onUnmounted(() => {
   dlTickStop()
   stopBuiltinAudio()
-  if (rndSubTimer) { window.clearTimeout(rndSubTimer); rndSubTimer = 0 }
   if (removeConfirmTimer) { clearTimeout(removeConfirmTimer); removeConfirmTimer = null }
   document.removeEventListener('click', onDocClickForRndMenu)
-  document.removeEventListener('mousemove', onDocMoveForRndMenu)
+  document.removeEventListener('keydown', onKeydownCloseRndMenu)
+  window.removeEventListener('scroll', onScrollCloseRndMenu, true)
 })
 
 defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds, expandBuiltin: () => { emit('toggle-builtin-fold', true) } })
@@ -971,62 +1000,62 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds, expand
                  悬停展开 + 220ms 延迟收 + 首次开面板自动展一瞬（新用户不必先发现那里能悬停）。 -->
             <div class="rnd-menu">
               <button class="export-btn utils-btn utils-outline" type="button"
-                      :class="{ 'has-sel': !!pickedSkinned.length }"
-                      :title="pickedSkinned.length
-                        ? `已选中 ${pickedSkinned.length} 张，可整理它们`
+                      :class="{ 'has-sel': !!pickedVisible.length }"
+                      :title="pickedVisible.length
+                        ? `已选中 ${pickedVisible.length} 张，可整理它们`
                         : '整理形象：使用 / 排序 / 删除 / 是否参与随机'"
                       @click="toggleRndMenu">
-                {{ pickedSkinned.length ? `已选 ${pickedSkinned.length} 张` : '整理' }}
+                {{ pickedVisible.length ? `已选 ${pickedVisible.length} 张` : '整理' }}
                 <span class="rnd-menu-caret">{{ rndMenu ? '▴' : '▾' }}</span>
               </button>
               <!-- 坐标在 toggleRndMenu 里按按钮实测（见 rndPanelPos）；面板是 fixed 定位，
-                   所以 .rnd-menu 只作为「哪些点击算面板内部」的判定锚点（onDocClickForRndMenu） -->
-              <div v-if="rndMenu" class="rnd-menu-panel"
-                   :style="{ right: rndPanelPos.right + 'px', top: rndPanelPos.top + 'px', minWidth: rndPanelPos.minWidth + 'px' }">
-                <!-- 第一段：作用于选中的那批。**未选中时整段不渲染**，只留一行可点的引导。
+                   Teleport 到 body 才对得上视口坐标：uTools 内嵌浏览器的祖先容器带 transform，
+                   会把 fixed 的定位基准降级成最近的定位祖先（这里是 position:relative 的 .rnd-menu），
+                   于是视口坐标被当成相对卡头的偏移，面板飘到卡片下方。
+                   回到 body 后 fixed 才真正相对视口，也与 .rnd-menu 只作「点击判定锚点」的原意一致 -->
+              <Teleport to="body">
+                <div v-if="rndMenu" class="rnd-menu-panel"
+                     :style="{ left: rndPanelPos.left + 'px', top: rndPanelPos.top + 'px', minWidth: rndPanelPos.minWidth + 'px' }">
+                <!-- 第一段：作用于选中的那批。**未选中时整段不渲染**，只留一行灰字说明。
                      原来是把 6 个按钮原样摆着置灰 —— 面板一下多出 6 行灰条，比能用的项还长，
-                     还会让人先去点一下试试是不是坏了。 -->
-                <template v-if="pickedSkinned.length">
-                  <p class="rnd-menu-title">选中的 {{ pickedSkinned.length }} 张</p>
-                  <button type="button" @click="doUsePicked(); rndMenu = ''">使用这张</button>
+                     还会让人先去点一下试试是不是坏了。
+                     说明行也**不做成可点按钮**：它点了只能弹一句提示，看着像菜单项却什么都办不了，
+                     是最容易骗到点击的那类占位；写成不可点的灰字，跟「选中的 N 张」小标题同款，
+                     读起来就是「这一段的处境」，而不是「一个暂时点不动的操作」 -->
+                <template v-if="pickedVisible.length">
+                  <p class="rnd-menu-title">选中的 {{ pickedVisible.length }} 张</p>
+                  <button type="button" @click="doUsePicked(); closeRndMenu()">使用这张</button>
                   <button type="button"
-                          :disabled="pickedSkinned.length === skinGallery.items.length"
-                          @click="doPinPicked(); rndMenu = ''">移到最前</button>
+                          :disabled="pickedVisible.length === skinGallery.items.length"
+                          @click="doPinPicked(); closeRndMenu()">移到最前</button>
                   <button type="button"
-                          :disabled="pickedSkinned.length === skinGallery.items.length"
-                          @click="doBottomPicked(); rndMenu = ''">移到最后</button>
-                  <button type="button" @click="applyPickedRandom(true); rndMenu = ''">参与随机</button>
-                  <button type="button" @click="applyPickedRandom(false); rndMenu = ''">不参与随机</button>
+                          :disabled="pickedVisible.length === skinGallery.items.length"
+                          @click="doBottomPicked(); closeRndMenu()">移到最后</button>
+                  <button type="button" @click="applyPickedRandom(true); closeRndMenu()">参与随机</button>
+                  <button type="button" @click="applyPickedRandom(false); closeRndMenu()">不参与随机</button>
                   <!-- 删除是这一列里唯一不可逆的动作，用一条分隔线与上面五项拉开：
                        连点「不参与随机」时手滑一下就删掉几张，只靠红字挡不住 -->
                   <div class="rnd-menu-sep"></div>
                   <button type="button" class="danger"
-                          @click="doRemovePicked(); rndMenu = ''">删除选中的</button>
+                          @click="doRemovePicked(); closeRndMenu()">删除选中的</button>
                 </template>
-                <button v-else class="rnd-menu-guide" type="button"
-                        title="去缩略图上点一下"
-                        @click="skinFlash.err = false; skinFlash.msg = '在缩略图上点一下即可选中，可连点多张'; rndMenu = ''">
-                  选中缩略图后可整理它们
-                </button>
+                <p v-else class="rnd-menu-title">未选中（单击缩略图可多选）</p>
                 <div class="rnd-menu-sep"></div>
-                <!-- 第二段：整张清单，无需先选中任何东西。低频，悬停展开（见 onDocMoveForRndMenu） -->
-                <div class="rnd-menu-sub">
-                  <p class="rnd-menu-title rnd-sub-trigger">
-                    全部 {{ skinGallery.items.length }} 张
-                    <span class="rnd-sub-caret">{{ rndSubOpen ? '▾' : '▸' }}</span>
-                  </p>
-                  <div v-show="rndSubOpen" class="rnd-sub-panel">
-                    <button type="button"
-                            :disabled="skinGallery.items.length > 0 && randomSkinPool.length >= skinGallery.items.length"
-                            @click="doBatchRandom('all')">全部参与随机</button>
-                    <button type="button" :disabled="randomSkinPool.length === 0"
-                            @click="doBatchRandom('none')">全部不参与随机</button>
-                    <button type="button"
-                            :disabled="randomSkinPool.length === 1 && skinGallery.items.some(it => it.id === skinGallery.current)"
-                            @click="doBatchRandom('keepCurrent')">只保留使用中那张</button>
-                  </div>
+                <!-- 第二段：整张清单的「随机时抽哪些」。原来是悬停展开的二级菜单，得先猜那里能悬停、
+                     再跨一层才碰到仅有的三个动作；而且那三项各写着各的禁用条件，池子空时「都不抽」
+                     这个唯一有用的动作反而被灰掉（条件写反了）。
+                     现在摊平，并改成一组成员状态的选项：命中项打勾（.on）、点了不改变现状的项置灰
+                     （!usable），勾选态的判定与可点性都来自 randomChoices / randomMode，不再逐项手写 -->
+                <p class="rnd-menu-title">随机时抽哪些</p>
+                <button v-for="c in randomChoices" :key="c.mode" type="button"
+                        :class="{ on: c.on }"
+                        :disabled="!c.usable"
+                        :title="c.on ? '当前已是这个状态' : ''"
+                        @click="doBatchRandom(c.mode); closeRndMenu()">
+                  <span class="rnd-menu-tick">{{ c.on ? '✓' : '' }}</span>{{ c.label }}
+                </button>
                 </div>
-              </div>
+              </Teleport>
             </div>
         </div>
       </div>
@@ -1051,7 +1080,7 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds, expand
                  功能靠「选中」这一个中间态承接。 -->
             <button class="skin-cell-pick" type="button"
                     :title="`${it.name}（${assetSize(it)} · ${assetAt(it)}）· 单击选中（可多选），双击切换使用`"
-                    @click="pickSkin(it.id)"
+                    @click="onSkinPicked(it.id, !(props.skinPicked.indexOf(it.id) >= 0))"
                     @dblclick="doUseSkinPick(it.id)">
               <img v-if="it.thumb && !thumbBroken[it.id]" class="skin-cell-img" :src="it.thumb" :alt="it.name"
                    @error="onThumbError(it.id)" />
@@ -1075,7 +1104,7 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds, expand
         双击缩略图也能直接切换使用，最多保留 20 张；
         直接拖动缩略图可排到任意位置；
         参与随机的共 {{ randomSkinPool.length }} 张（随包内置那张始终参与），「随机一张」会从它们里挑；
-        「整理 → 全部」那一段不用先选中，可整批切换参与随机。
+        「整理 → 随机时抽哪些」那一段不用先选中，可整批指定随机时的取图范围。
       </p>
       <p v-else-if="!skinMeta" class="hint">
         还没有导入形象。点「导入图片…」加一张，支持 png / jpg / webp / gif / apng（动图不裁剪，保留动画）。
@@ -1172,7 +1201,7 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds, expand
          纯查阅用，默认收起，避免与「导入的…」三张卡一起铺满一屏 -->
     <section v-if="cardOn('assets', 'assetsBuiltin')" class="card" data-search="assetsBuiltin">
       <div class="fold">
-        <button class="link-btn utils-btn utils-secondary" @click="emit('toggle-builtin-fold', !builtinFold)">{{ builtinFold ? '收起内置资源' : '内置资源（随插件附带，只作对照）' }}</button>
+        <button class="link-btn utils-btn utils-secondary" @click="emit('toggle-builtin-fold', !builtinFold)">{{ builtinFold ? '收起内置资源与下载源' : '内置资源与下载源' }}</button>
         <div v-if="builtinFold">
           <p class="hint">随插件附带、不可删除，列在这里只作对照；换形象 / 音色请到「挂件外观」。</p>
           <p v-if="skinInUseMissing" class="msg err">
@@ -1273,7 +1302,7 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds, expand
       <div class="card-head">
         <button class="fold-title" type="button" @click="galleryFolds.sharedSkins = !galleryFolds.sharedSkins">
           <span class="fold-caret">{{ galleryOpen('sharedSkins') ? '▾' : '▸' }}</span>
-          共享角色
+          共享形象
         </button>
         <div class="head-actions">
           <button class="export-btn utils-btn utils-primary" type="button"
@@ -1345,7 +1374,7 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds, expand
       <div class="card-head">
         <button class="fold-title" type="button" @click="galleryFolds.sharedSounds = !galleryFolds.sharedSounds">
           <span class="fold-caret">{{ galleryOpen('sharedSounds') ? '▾' : '▸' }}</span>
-          共享音效库
+          共享音效
         </button>
         <div class="head-actions">
           <button class="export-btn utils-btn utils-primary" type="button"
@@ -1456,4 +1485,788 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds, expand
   </div>
 </template>
 
-<style scoped />
+<style scoped>
+/* 设计令牌来自 main.css 的 :root。通用控件样式（.card / .field / .label / .msg / .hint /
+   .export-btn / .head-actions / .fold 等）原本由 App.vue 的 scoped 样式提供，
+   组件拆分后 scoped 隔离掉了，这里按本组件用到的部分补齐一份。utils 档位配色与
+   .link-btn 基类已在 main.css（单一来源），此处不再留副本。
+   ★ 本组件此前漏了这一步（样式标签是空的 `<style scoped />`），而 App.vue 内联的规则
+     带的是 App 的哈希、匹配不上本组件渲染的元素 —— 症状是整卡样式失效：画廊网格无尺寸、
+     棋盘格底 / 悬停操作条 / 角标全丢，素材包与共享音效的进度条塌成空白。这里一次性补齐。 */
+.card {
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: 12px;
+  padding: 16px;
+  margin-bottom: 16px;
+  /* 点搜索命中标签滚到卡片时，吸顶的 .tab-bar 会盖住卡头；预留它的高度让卡顶落在下方 */
+  scroll-margin-top: var(--tab-bar-h, 96px);
+}
+.card h2 {
+  margin: 0 0 12px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fg-dim);
+}
+/* 可折叠卡片的标题本身是按钮：抹掉 button 默认外观，视觉上对齐 .card-head h2，
+   让用户仍然一眼认出这是标题（有 hover 反馈暗示可点） */
+.fold-title {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fg-dim);
+  cursor: pointer;
+}
+.fold-title:hover {
+  color: var(--fg);
+}
+/* 箭头单独占位，展开 / 收起时标题不会左右横跳 */
+.fold-caret {
+  width: 1em;
+  font-size: 12px;
+}
+.head-actions {
+  display: flex;
+  gap: 8px;
+}
+/* 卡头的「整理」下拉：按钮沿用 utils-outline 基类，这里只负责面板定位。
+   .rnd-menu 自己 position:relative 当锚点（不能挂在 .head-actions 上 —— 后面还有别的按钮） */
+.rnd-menu {
+  position: relative;
+}
+.rnd-menu-caret {
+  font-size: 9px;
+  opacity: 0.75;
+}
+/* 有选中项时按钮变实心强调色：选中态是「操作哪几张」的入口，不显眼用户不会去点，
+   而整清单的动作（面板下半段）又不需要选中 —— 明确区分这两种处境 */
+.rnd-menu > button.has-sel {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-weak);
+}
+.rnd-menu-panel {
+  position: fixed;
+  z-index: 20;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  /* 用 fixed + 运行时算出的视口坐标（见 rndPanelPos 与 toggleRndMenu）：不用 absolute 挂在卡头下沿，
+     是因为 .tab-bar 是 position:sticky + z-index:5 且带不透明底色，粘住后是一条独立的层叠上下文，
+     卡头里的下拉无论写多高的 z-index 都会被它盖住。
+     ⚠️ 光写 fixed 还不够：必须配合模板里的 <Teleport to="body">。uTools 内嵌浏览器的祖先容器
+     带 transform，会创建 containing block 把 fixed 降级成「相对最近定位祖先」（=.rnd-menu），
+     于是视口坐标被当成偏移量，面板飘到卡片下方。挂到 body 下才真正相对视口。
+     宽度由内容撑开（fixed 元素默认 shrink-to-fit，无需再写 max-content）；
+     水平位置用 left（不用 right —— 按钮文案「整理」↔「已选 N 张」会变长，right 对齐会让位置跟着漂） */
+  background: var(--input-bg);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+}
+/* 面板内的分组标题（「选中的 N 张」/「全部 N 张」）：这面板里并存两类作用范围不同的动作，
+   不给小标题就会让人以为它们是一回事。样式上跟菜单项走同一套内边距、同一档字号 */
+.rnd-menu-title {
+  margin: 0;
+  padding: 6px 10px 3px;
+  font-size: 12px;
+  color: var(--fg-dim);
+  opacity: 0.9;
+  white-space: nowrap;
+}
+.rnd-menu-sep {
+  height: 1px;
+  margin: 4px 0;
+  /* 与项同宽：左右不留缝，这条线才能当作「一组到此为止」的边界 */
+  background: var(--line);
+}
+/* 「随机时抽哪些」这一组：三选一的成员状态，命中项左侧打勾并提亮。
+   原来是悬停展开的二级菜单（.rnd-menu-sub / .rnd-sub-trigger / .rnd-sub-panel），
+   得先猜到标题能悬停、再跨一层才碰到仅有的三个动作；摊平后一屏看全，不再需要那套悬停状态机 */
+.rnd-menu-panel button.on {
+  color: var(--accent);
+  font-weight: 600;
+}
+/* 勾号占位固定宽度：不打勾时也留出这一格，三项文字才能左侧对齐成一条线 */
+.rnd-menu-tick {
+  display: inline-block;
+  width: 12px;
+  font-size: 11px;
+}
+/* 未选中时的说明行：不做成可点按钮，直接沿用 .rnd-menu-title（见模板注释）。
+   原来那套 .rnd-menu-guide 按钮样式随「点了只弹提示」的假菜单项一起去掉了 */
+.rnd-menu-panel button {
+  padding: 6px 10px;
+  font-size: 12px;
+  text-align: left;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg);
+  cursor: pointer;
+  white-space: nowrap;
+}
+.rnd-menu-panel button:hover:not(:disabled) {
+  background: var(--accent-weak);
+}
+/* 面板里的危险动作（「删除选中的」）：悬停给红底，跟同类字色区分开，免得在一列同款菜单项里误点 */
+.rnd-menu-panel button.danger {
+  color: var(--err);
+}
+.rnd-menu-panel button.danger:hover:not(:disabled) {
+  background: rgba(210, 70, 70, 0.14);
+}
+/* 置灰的只有「点了也不改变现状」的那一项（当前命中项），可点性由 randomChoices 统一算出来。
+   原来三项各写各的禁用条件，还把「随机时都不抽」写成了池子空才禁用——语义正好反了，
+   于是池子空时唯一有用的那个动作反而点不动，面板看着像坏了 */
+.rnd-menu-panel button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+/* 尺寸与描边档配色来自 main.css 的 utils 基类；这里只补它没有的 hover 提亮。
+   注意 markup 里那些 `class="export-btn danger"`：在 scoped 块的 `[data-v]` 加持下
+   特异性高于全局的 .utils-danger，所以 danger 变体现在真的会显红 */
+.export-btn {
+  cursor: pointer;
+}
+.export-btn:hover:not(:disabled) {
+  color: var(--fg);
+  border-color: var(--accent);
+}
+.field {
+  display: block;
+  margin: 10px 0;
+}
+.field.row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.field.check {
+  justify-content: flex-start;
+  /* 标签换行成多行时，复选框跟首行对齐 —— 居中对齐会飘到两行之间，看起来像对错了行 */
+  align-items: flex-start;
+}
+.label {
+  font-size: 13px;
+  /* 短标签保持 72px 起始宽度、纵向对齐；flex-shrink 允许长标签在窄卡片里收缩换行 */
+  flex: 0 1 auto;
+  min-width: 72px;
+  /* 长标签的换行点：中文没有空格，靠 break-word 才能在盒子内折行 */
+  overflow-wrap: anywhere;
+}
+.field.check .label {
+  flex: 1 1 auto;
+  min-width: 0;
+  line-height: 1.5;
+}
+.field:not(.row) .label {
+  display: block;
+  margin-bottom: 5px;
+}
+.label em {
+  font-style: normal;
+  color: var(--fg-faint);
+  font-size: 11px;
+}
+input[type='text'] {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 7px 9px;
+  font-size: 13px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--input-bg);
+  color: var(--fg);
+}
+input[type='text']:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(83, 107, 169, 0.18);
+}
+input[type='checkbox'] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+}
+.msg {
+  margin: 10px 0 0;
+  font-size: 12px;
+}
+.msg.ok {
+  color: var(--ok);
+}
+.msg.err {
+  color: var(--err);
+}
+/* 有失败项时可点，直接去插件市场更新 */
+.msg.clickable {
+  cursor: pointer;
+  text-decoration: underline;
+}
+/* ── 素材包下载进度（内置形象 / 共享角色 / 共享音效三张卡共用一套样式） ──
+   条子固定 8px 高：40.6MB 的角色包在慢网下要下好几分钟，进度条要够显眼又不能顶开版式 */
+.dl-box {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--track);
+}
+.dl-track {
+  position: relative;
+  height: 8px;
+  border-radius: 999px;
+  background: var(--track);
+  overflow: hidden;
+}
+.dl-bar {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  /* 宽度每 250ms 跳一档，加过渡把台阶磨平，否则看起来像在抖 */
+  transition: width 0.25s linear;
+}
+.dl-bar.done { background: var(--ok); }
+.dl-bar.err { background: var(--err); }
+/* 总量未知（加速代理回 Transfer-Encoding: chunked，拿不到 Content-Length）：
+   不谎报百分比，改成来回扫的滑块表示「在动，但说不准还有多久」 */
+.dl-bar.indet {
+  width: 35%;
+  transition: none;
+  animation: dl-slide 1.1s ease-in-out infinite;
+}
+@keyframes dl-slide {
+  0% { margin-left: -35%; }
+  100% { margin-left: 100%; }
+}
+.dl-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-top: 6px;
+  font-size: 12px;
+}
+.dl-label { flex: 0 0 auto; }
+/* 字节数用等宽：数字每 250ms 变一次，比例字体下宽度会跳，整行跟着抖 */
+.dl-amt {
+  flex: 0 1 auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  opacity: 0.85;
+}
+.dl-pct {
+  flex: 0 0 auto;
+  margin-left: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  opacity: 0.85;
+}
+/* 下载源一行：URL 很长（github.com/.../releases/download/...），必须能断行 + 可复制 */
+.dl-src {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin-top: 4px;
+  font-size: 11px;
+}
+.dl-src-tag {
+  flex: 0 0 auto;
+  opacity: 0.7;
+}
+.dl-src-url {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: inherit;
+  opacity: 0.75;
+  word-break: break-all;
+  text-decoration: underline;
+}
+/* 折叠面板（「数据目录」「素材包导入导出」）与凭据获取教程同款观感 */
+.field + .link-btn {
+  margin-top: -4px;
+}
+.guide {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--input-bg);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.guide-use {
+  margin: 0;
+  color: var(--fg);
+}
+.guide-use + .guide-use {
+  margin-top: 6px;
+}
+/* 折叠面板里的首个标题紧贴顶部，不额外留白 */
+.guide > .link-btn:first-child {
+  margin-top: 0;
+}
+/* 「数据目录」里展示的落盘路径：等宽、可截断，长路径不把按钮挤出去 */
+.dir-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 2px 6px;
+  border-radius: 4px;
+  /* 只读的等宽值标签，用输入框底色 --input-bg 做底衬 */
+  background: var(--input-bg);
+  color: var(--fg-dim);
+  font-size: 11px;
+  font-family: ui-monospace, Consolas, monospace;
+}
+/* 分组折叠：组间留白并用分隔线隔开 */
+.fold {
+  margin-top: 12px;
+}
+.fold > .link-btn {
+  margin-top: 0;
+}
+.fold + .fold {
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+/* 覆盖 .link-btn 的 margin-top / 下划线，避免在 flex 行里把行高撑开 */
+.link-btn.inline {
+  margin-top: 0;
+  font-size: 12px;
+}
+.guide code {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: rgba(127, 127, 127, 0.18);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  word-break: break-all;
+}
+.guide a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+/* 卡片内的分组小标题（如素材包卡的「导出 / 导入」）：用上边框把小节和上一组字段隔开，
+   避免看起来还是一串平铺的字段 */
+.group-title {
+  margin: 18px 0 6px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+  font-size: 13px;
+  color: var(--fg-dim);
+}
+.group-title em {
+  font-style: normal;
+  font-size: 11px;
+  color: var(--fg-faint);
+}
+.hint {
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: var(--fg-faint);
+  line-height: 1.6;
+}
+.hint a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+/* ===== 「导入的音效」：六个槽位各成一个块 =====
+   块 = 槽位头（角色名 + 概况 + 导入/替换按钮）+ 该槽位那一段（最多一段）的明细。
+   没有底色 / 描边 / 块间距时，六个槽位连同各自的明细会在视觉上连成一片，看不出归属。 */
+.sound-file {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--fg-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sound-group {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--card-border);
+  border-radius: 10px;
+  background: var(--card-bg);
+}
+.sound-group:first-of-type {
+  /* 紧跟在卡片标题下，不需要再多一层上边距 */
+  margin-top: 4px;
+}
+.sound-group-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+/* 槽位头里的概况文案占住中间剩余宽度，把「导入 / 替换」按钮推到行尾 ——
+   六个块的按钮因此左边界一致 */
+.sound-group-head .asset-meta {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sound-seg {
+  display: flex;
+  align-items: center;
+  /* 允许换行，配合下面 .seg-time 的 flex-basis:100% 把它挤到第二行 */
+  flex-wrap: wrap;
+  gap: 8px;
+  /* 与槽位头拉开一点距离即可：这段就属于上面那个槽位，不需要分隔线再切一刀 */
+  margin-top: 6px;
+}
+.seg-ops {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 6px;
+}
+/* 导入时间：单独占满一行（flex-basis:100% 逼它换行），比挤在行尾更短更易扫。
+   同一个槽位里多个同名段（都叫「来财」）就是靠这里的时分来区分先后 */
+.seg-time {
+  flex: 1 1 100%;
+  font-size: 11px;
+  color: var(--fg-faint);
+  white-space: nowrap;
+}
+/* ===== 共享音效库的分组列表 =====
+   「已下载」与「未下载」分开渲染（见模板注释：两类行控件数差 3 个，混排必然列对不齐）。
+   每行是上下两段：.shs-main 主线（文件名 + 体积，文件名独占剩余宽度）、
+   .shs-ops 副线（动作控件，与文件名左对齐，窄卡片里可换行）。 */
+.shs-list {
+  margin-top: 4px;
+}
+.shs-row {
+  padding: 6px 0;
+  border-top: 1px solid var(--track);
+}
+/* 行内竖向留白 + 上下两段之间的间距；用 padding 而非 margin，
+   保证 border-top 是紧贴上一行、间距全部落在下面 */
+.shs-row:first-of-type {
+  border-top: none;
+  padding-top: 0;
+}
+.shs-main {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.shs-ops {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+/* 槽位下拉：给个基准宽度而不是 flex:1 铺满 —— 铺满后「选用 / 试听 / 删」会被推到行尾，
+   离开文件名的视线范围；固定宽度更紧凑，也让 45 行的按钮列左右对齐。
+   用 --input-bg 而非透明：它是个可选下拉，透明底会和「试听 / 删」两个描边按钮糊在一起 */
+.shs-ops .sound-role-pick {
+  flex: 0 1 150px;
+  min-width: 0;
+  padding: 3px 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--input-bg);
+  color: var(--fg-dim);
+  font-size: 12px;
+}
+/* 正在试听的那一段：按钮切成「停止」并给强调色描边，让用户在 45 行里一眼找到在放哪条 */
+.shs-ops .preview-on {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+/* 素材的体积与导入时间：次要信息，跟在文件名后面，不参与换行挤压 */
+.asset-meta {
+  flex: 0 0 auto;
+  font-size: 12px;
+  color: var(--fg-dim);
+  white-space: nowrap;
+}
+/* 形象画廊：缩略图网格。棋盘格底让透明 PNG 的透明区域能看出来 */
+.skin-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+/* 一格 = 一个 64×64 的预览图框。操作（置顶 / 随机 / 删）已改为悬停时浮在图上
+   （见 .skin-cell-ops），格内常态只有图 +「使用中 / 下载」角标，网格紧凑干净。
+   .skin-box 是「图 + 角标 + 操作条」的定位锚。 */
+.skin-cell {
+  position: relative;
+  display: block;
+  width: 64px;
+}
+/* 预览图框：虚线棋盘底（透明图能看出透明区）+ 圆角描边，挂在 .skin-box 上，
+   这样内置形象（没有 pick 包裹层）与其它格长得一样 */
+.skin-box {
+  position: relative;
+  width: 64px;
+  height: 64px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background-color: #fff;
+  background-image: linear-gradient(45deg, rgba(0, 0, 0, 0.07) 25%, transparent 25%, transparent 75%, rgba(0, 0, 0, 0.07) 75%),
+    linear-gradient(45deg, rgba(0, 0, 0, 0.07) 25%, transparent 25%, transparent 75%, rgba(0, 0, 0, 0.07) 75%);
+  background-size: 10px 10px;
+  background-position: 0 0, 5px 5px;
+}
+/* 图片与角标各自裁圆角 —— 不能给 .skin-box 加 overflow:hidden，
+   否则「使用中」的外发光（box-shadow 画在边框外）会被裁掉看不见 */
+.skin-cell-img,
+.skin-cell-broken,
+.skin-cell-none {
+  border-radius: 8px;
+  overflow: hidden;
+}
+.skin-cell-pick {
+  display: block;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+}
+.skin-cell.active .skin-box {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgba(83, 107, 169, 0.28);
+}
+.skin-cell-img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.skin-cell-none {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+/* 缩略图读到一半失败（文件被外部删了、动图解码失败、data URL 超长被截断等）也要给个反馈，
+   不能留一块空白格让人以为「没导入进来」。JS 侧把该格标记成 thumbBroken，这里只负责显示 */
+.skin-cell-broken {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  font-size: 11px;
+  color: var(--fg-dim);
+  text-align: center;
+  line-height: 1.4;
+}
+/* 「置顶 / 删除」已从导入的形象每格图内移到卡头（见 .head-actions），图上不再挂操作条 ——
+   原先每格悬停浮出一行小按钮，37 格下来整屏全是按钮、图本身读不清。
+   现在靠「单击选中」这一个中间态承接：选中格加主题色描边（.skin-cell.picked），
+   卡头的「置顶 / 删除」作用于它。
+   下面 .skin-cell-ops / .skin-op 仍供气泡图 / 皮肤包 / 共享角色三处网格使用（它们的操作简单、
+   格数也少，贴格悬停浮现比搬到卡头更直接），故不能删。 */
+.skin-cell-ops {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  padding: 1px;
+  border-radius: 8px 8px 0 0;
+  /* 不铺满整条的深色遮罩 —— 只给按钮各自底色的淡淡渐变托底，尽量减少对图的遮挡 */
+  background: linear-gradient(rgba(0, 0, 0, 0.5), rgba(0, 0, 0, 0));
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+.skin-cell:hover .skin-cell-ops,
+.skin-cell:focus-within .skin-cell-ops,
+.skin-cell.active .skin-cell-ops {
+  opacity: 1;
+  pointer-events: auto;
+}
+.skin-op {
+  flex: 0 0 auto;
+  padding: 0 2px;
+  font-size: 10px;
+  line-height: 1.5;
+  border: none;
+  border-radius: 4px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  cursor: pointer;
+}
+.skin-op.danger {
+  background: rgba(210, 70, 70, 0.9);
+}
+.skin-op:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+/* 普通选中（.skin-cell.picked）：单击缩略图切换选中，供「整理」面板里
+   「选中的 N 张」那一段作用。可多选，所以是「集合里的每个都描边」而不是单选高亮。
+   与「使用中」（右下角 .skin-cell-tag）区分开 —— 选中只是「接下来要操作它」，不等于启用。 */
+.skin-cell.picked {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.skin-cell.picked .skin-box {
+  background: var(--accent-weak);
+}
+.skin-cell-tag {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  padding: 0 3px;
+  font-size: 9px;
+  line-height: 1.4;
+  border-radius: 6px 0 6px 0;
+  background: rgba(83, 107, 169, 0.9);
+  color: #fff;
+  pointer-events: none;
+}
+/* 序号（左下角）：让「置 / ↑↓」的效果可验证，也方便描述「第几张」。
+   放左下而不是左上 —— 顶部整条被悬停操作条（.skin-cell-ops）占据，序号在左上会被按钮盖住；
+   右下角是「使用中」角标，左下角空着，正好错开。
+   悬停时淡出：操作条要盖住上半张图的视觉重心，序号此刻已不必要，隐去更清爽 */
+.skin-cell-idx {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  min-width: 13px;
+  padding: 0 3px;
+  font-size: 9px;
+  line-height: 13px;
+  text-align: center;
+  color: #fff;
+  border-radius: 0 6px 0 6px;
+  background: rgba(0, 0, 0, 0.32);
+  pointer-events: none;
+  z-index: 1;
+  transition: opacity 0.12s ease;
+}
+.skin-cell:hover .skin-cell-idx,
+.skin-cell:focus-within .skin-cell-idx,
+.skin-cell.dragging .skin-cell-idx {
+  opacity: 0;
+}
+/* 拖拽排序：源格半透明表示「正在被搬走」；落点格用左侧/右侧一条竖线提示插入位置。
+   指示线用 ::before/::after 画，避免再加 DOM 节点影响 flex 布局。 */
+.skin-cell.dragging {
+  opacity: 0.4;
+}
+.skin-cell.drop-before::before,
+.skin-cell.drop-after::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--accent);
+  pointer-events: none;
+}
+.skin-cell.drop-before::before {
+  left: -2px;
+}
+.skin-cell.drop-after::after {
+  right: -2px;
+}
+/* 可拖拽时给个抓手指针；批量模式下不可拖（此时点格是勾选） */
+.skin-cell[draggable='true'] .skin-cell-pick {
+  cursor: grab;
+}
+.skin-cell.dragging .skin-cell-pick {
+  cursor: grabbing;
+}
+/* 「下载」角标：贴在图片左上角（.skin-cell-tag 占右下角）。
+   只服务「未下载 · 可下载」一种语义（已下载的不再贴角标） */
+.skin-cell-badge {
+  position: absolute;
+  left: 0;
+  top: 0;
+  padding: 0 3px;
+  font-size: 9px;
+  line-height: 1.4;
+  border-radius: 0 0 6px 0;
+  background: rgba(83, 107, 169, 0.9);
+  color: #fff;
+  pointer-events: none;
+  white-space: nowrap;
+}
+/* 缩略图缺失 / 加载失败（文件被外部删了、动图解码失败、data URL 超长被截断等）都要给整格套警示色，
+   一眼能从一片正常格里认出「这张坏了要重导」。两档：
+   - .broken：thumb 有值但解码失败（@error 置位），文案「预览失败」—— 大概率文件损坏
+   - .noprev：thumb 为空（没缩略图且回落读原图也失败），文案「无预览」—— 大概率文件已被删 */
+.skin-cell.broken .skin-box,
+.skin-cell.noprev .skin-box {
+  border-color: rgba(200, 90, 60, 0.75);
+  background-color: rgba(200, 90, 60, 0.08);
+}
+/* 未下载的远程形象：整格压暗 + 缩略图降饱和，一眼看出「还没下来」，
+   但缩略图仍可见 —— 让用户在下手前看得见长什么样 */
+.skin-cell.is-remote .skin-cell-img {
+  opacity: 0.45;
+  filter: grayscale(0.7);
+}
+.skin-cell.is-remote .skin-cell-tag {
+  background: rgba(0, 0, 0, 0.45);
+}
+/* 「正在使用的那张已移出插件包、还没下载回来」：标签改成警示色，并且不再被
+   .is-remote 的压暗覆盖 —— 这张是用户最该看见和点的一张 */
+.skin-cell-tag.warn {
+  background: rgba(200, 120, 30, 0.92);
+}
+.skin-cell.is-remote .skin-cell-tag.warn {
+  background: rgba(200, 120, 30, 0.92);
+}
+/* 「导入」格：内容为「＋ / 导入」，位置与其它 64×64 图框对齐。
+   边框用实线、底色与 .skin-box 同款棋盘 —— 夹在一排棋盘格里时它是一枚正常的「加图」按钮 */
+.skin-cell-add {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: 64px;
+  height: 64px;
+  gap: 1px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  background-color: #fff;
+  background-image: linear-gradient(45deg, rgba(0, 0, 0, 0.07) 25%, transparent 25%, transparent 75%, rgba(0, 0, 0, 0.07) 75%),
+    linear-gradient(45deg, rgba(0, 0, 0, 0.07) 25%, transparent 25%, transparent 75%, rgba(0, 0, 0, 0.07) 75%);
+  background-size: 10px 10px;
+  background-position: 0 0, 5px 5px;
+  color: var(--fg-dim);
+  cursor: pointer;
+}
+.skin-cell-add:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.skin-cell-add-plus {
+  font-size: 18px;
+  line-height: 1;
+}
+.skin-cell-add-txt {
+  font-size: 11px;
+}
+</style>

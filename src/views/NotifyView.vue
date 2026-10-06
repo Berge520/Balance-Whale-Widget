@@ -348,6 +348,10 @@ watch(() => props.cfg.timerSec, syncTimerHms)
       <input type="checkbox" :checked="cfg.peakRemindOn" @change="emit('patch', { peakRemindOn: ($event.target as HTMLInputElement).checked })" />
     </label>
 
+    <!-- 计时相关项原先散在本卡中段、与「余额提醒」「通知渠道」混排，用户找不到「倒计时时长」在哪儿。
+         加一个分区标题把它们圈起来（与下方「通知方式」同一套 .sub 视觉），不改控件归属 -->
+    <h3 class="sub">计时</h3>
+
     <label class="field row check">
       <span class="label">计时到点通知 <em>（挂件菜单「计时」到点时弹系统通知）</em></span>
       <input type="checkbox" :checked="cfg.timerNotifyOn" @change="emit('patch', { timerNotifyOn: ($event.target as HTMLInputElement).checked })" />

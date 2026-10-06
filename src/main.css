@@ -116,6 +116,14 @@ button:not(:disabled):active {
   line-height: 1.6;
 }
 
+/* 紧凑档：给气泡编辑器这类「一行里塞多个小按钮」的密集面板用（按泡沫模块面板 / 队列编辑器的
+   行操作按钮都是这一档）。只缩盒模型与字号，配色仍由上面的档位决定 */
+.utils-xs {
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+}
+
 /* 主操作：实心强调色 */
 .utils-primary {
   background: #536ba9;

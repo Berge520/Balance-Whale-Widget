@@ -76,7 +76,7 @@ function clearSelectedData() {
   <!-- [数据] 数据与隐私：按项清除本地数据。根元素即 .card：父级 v-if 控显隐，
        data-search 供搜索滚动锚点定位（构建期据此抽卡片全文索引）。 -->
   <section class="card" data-search="privacy">
-    <h2>数据与隐私</h2>
+    <h2>清除数据</h2>
     <p class="hint">API Key 与平台 Token 通过 uTools 加密存储，账本、窗口位置与导入的素材（形象 / 气泡图 / 音效）也只保存在本机，不会上传到任何第三方服务器。</p>
     <p class="hint">卸载 uTools 插件不会自动删除这些数据，需要彻底清除时请勾选下方要清除的内容（<strong>清除前建议先导出一份备份</strong>，见下方「备份与恢复」）：</p>
     <label class="field row check">

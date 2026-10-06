@@ -466,7 +466,21 @@ defineExpose({ closeModelForm })
 
 <style scoped>
 /* 多厂商模型：每行 = 主显示单选 / 名称 / 余额 / 说明 / 操作，展开后是本行的编辑表单
-   （原 app.css 的 .mm-* 副本随卡搬来：scoped 样式必须与渲染它的组件同处一个块） */
+   （原 app.css 的 .mm-* 副本随卡搬来：scoped 样式必须与渲染它的组件同处一个块）。
+   卡头的 .head-actions / .export-btn 同理 —— 它们原本只在 App.vue 的内联 scoped 里，
+   拆分后带的是 App 的哈希、匹配不上本组件渲染的元素，卡头那三个按钮一直没样式。 */
+.head-actions {
+  display: flex;
+  gap: 8px;
+}
+.export-btn {
+  /* 尺寸与描边档配色来自 main.css 的 utils 基类；这里只补它没有的 hover 提亮 */
+  cursor: pointer;
+}
+.export-btn:hover:not(:disabled) {
+  color: var(--fg);
+  border-color: var(--accent);
+}
 .mm-list {
   margin-top: 10px;
   padding-top: 4px;

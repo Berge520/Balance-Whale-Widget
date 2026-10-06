@@ -2068,6 +2068,9 @@ export interface WhaleServices {
   copyText(text: string): boolean
   redirectHotKeySetting(cmdLabel?: string): boolean
   isWidgetVisible(): boolean
+  // 试播按压气泡：把队列整份发给挂件真弹一次（只发不落盘，挂件那边会存引用，
+  // 故调用方需先深拷贝）。items 经宿主 normBubble 归一化与截断；挂件未显示 / 队列为空时 ok:false
+  bubblePreview(payload: { items: unknown[] }): { ok: boolean; error?: string }
   // 诊断日志（落盘于 %TEMP%\whale-debug.log，进程被 uTools 结束也不丢）
   getDebugLog(): DebugLogResult
   openLogFile(): { ok: boolean; path: string }

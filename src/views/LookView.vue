@@ -138,7 +138,7 @@ function onVolInput(e: Event) {
     </p>
 
     <div class="fold">
-      <button class="link-btn utils-btn utils-secondary" @click="lookFolds.bubble = !lookFolds.bubble">{{ lookFolds.bubble ? '收起气泡与文案' : '气泡与文案（主题 · 峰谷 · 报时 · 点按播放）' }}</button>
+      <button class="link-btn utils-btn utils-secondary" @click="lookFolds.bubble = !lookFolds.bubble">{{ lookFolds.bubble ? '收起气泡与文案' : '气泡与文案（主题 · 峰谷 · 思考气泡 · 报时 · 菜单按钮）' }}</button>
       <div v-if="lookFolds.bubble">
         <label class="field row">
           <span class="label">气泡主题</span>

@@ -3,14 +3,14 @@
 // 同一套 DOM / 主题变量 / 字号自适应算法，按压气泡编辑时所见即所得。
 // 悬浮窗走 esbuild 打的 IIFE（window.BubbleRender），这里直接 ESM import 同一源文件——
 // 两边共享的正是这份源码，而不是各自维护的副本。
-import { onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { createBubbleRenderer, THEMES } from '../bubble/bubble-render.js'
 
 interface PreviewLine { t: string; s: 'A' | 'B' | 'P' | 'C'; c?: string; w?: boolean }
 // rows 形态 = 模块行（泡泡多模块真预览）：段结构由渲染器 normalizeRowInput 双认，
 // 这里只透传，不在前端再清洗
 const props = defineProps<{
-  lines: Array<PreviewLine | null> | { gif: true; src?: string } | { rows: unknown[] }
+  lines: Array<PreviewLine | null> | { gif: true; src?: string } | { rows: unknown[] } | { mods: unknown[] }
   theme?: string
   // v2 段级回调：image 段取气泡图（按 listBubbles 的下标，0/缺省 = 随机）、model 段算占位符值。
   // 不传时渲染器整段丢弃这两类段（与旧版一致），传了才能真预览富文本组
@@ -18,7 +18,18 @@ const props = defineProps<{
   modelText?: (model: string) => string
   // v2 randimg 段取图：从「已装共享角色图」池随机抽一张。不传时渲染器整段丢弃
   randImgSrc?: () => string | null
+  // 按压气泡 { mods } 形态的模块回调（渲染器 modText / modImageSrc / modStyle）：
+  // 不传时模块文本为空、图片整行丢弃 —— 按压气泡编辑页要传全才能真预览
+  modText?: (mod: any) => string
+  modImageSrc?: (mod: any) => string | null
+  modStyle?: (mod: any) => Record<string, string> | null
+  // 缩放（默认 1 = 真机 1:1）。弹层里要同时塞下模块编辑列表，0.7 约合 255px 高。
+  // 舞台高与 root 几何同步乘，--dshw-base 也随之缩放 —— 模块字号 / 图片尺寸都按
+  // calc(var(--dshw-u) * …) 派生，故整体等比缩小，形与真机一致（不是裁切）
+  scale?: number
 }>()
+
+const scaleVar = computed(() => String(props.scale ?? 1))
 
 const stage = ref<HTMLElement | null>(null)
 let renderer: ReturnType<typeof createBubbleRenderer> | null = null
@@ -51,6 +62,10 @@ onMounted(() => {
     bubbleSrc: (img: number) => (props.bubbleSrc ? props.bubbleSrc(img) : null),
     modelText: (model: string) => (props.modelText ? props.modelText(model) : ''),
     randImgSrc: () => (props.randImgSrc ? props.randImgSrc() : null),
+    // 按压气泡模块回调：与宿主 floating-page.js 的同名回调同签名，只是取的是示例值
+    modText: (mod: any) => (props.modText ? props.modText(mod) : ''),
+    modImageSrc: (mod: any) => (props.modImageSrc ? props.modImageSrc(mod) : null),
+    modStyle: (mod: any) => (props.modStyle ? props.modStyle(mod) : null),
   })
   // 预览里的气泡常开（不做收起状态机）：文本/动图的显隐全由 applyLines 按行模型控制
   renderer.els.bubbleBox.classList.add('dshwv-bubble-open')
@@ -74,7 +89,7 @@ watch(() => props.theme, () => applyThemeVars())
 </script>
 
 <template>
-  <div ref="stage" class="bubble-preview-stage" @click="emit('next')"></div>
+  <div ref="stage" class="bubble-preview-stage" :style="{ '--pv-scale': scaleVar }" @click="emit('next')"></div>
 </template>
 
 <style scoped>
@@ -85,7 +100,9 @@ watch(() => props.theme, () => applyThemeVars())
    这里只用 :deep() 管 root 几何与舞台外观。 */
 .bubble-preview-stage {
   position: relative;
-  height: 365px;
+  /* 舞台高 / root 几何 / 挂件基准同步乘 --pv-scale（见 scale prop 注释），
+     默认 1 时与旧值（365 / 330）逐字一致 */
+  height: calc(365px * var(--pv-scale, 1));
   border: 1px dashed var(--line);
   border-radius: 10px;
   background: var(--input-bg);
@@ -95,10 +112,10 @@ watch(() => props.theme, () => applyThemeVars())
   position: absolute;
   left: 50%;
   top: 50%;
-  width: 330px;
-  height: 330px;
+  width: calc(330px * var(--pv-scale, 1));
+  height: calc(330px * var(--pv-scale, 1));
   transform: translate(-50%, -50%);
   /* 挂件基准：floating.css 的 .dshwv-root 用 calc(100vw - pad*2)，预览舞台自备固定值 */
-  --dshw-base: 330px;
+  --dshw-base: calc(330px * var(--pv-scale, 1));
 }
 </style>

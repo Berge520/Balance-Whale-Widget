@@ -395,7 +395,15 @@ export function createBubbleRenderer(opts) {
   function buildModBlock(m) {
     var txt = opts.modText ? String(opts.modText(m) == null ? '' : opts.modText(m)) : '';
     if (!txt && m.type !== 'image' && m.type !== 'randimg') txt = String(m.text || '');
-    var needBg = !!(m.bg || m.bgRgb);
+    // 峰谷这类「同一个模块随运行时状态换色」的模块：渲染器不知道当前是峰是谷，交给宿主回调
+    // modStyle(m) 回一份 {color, rgb, bg, bgRgb} 覆盖（未回的键沿用模块自带值）
+    var dyn = opts.modStyle ? (opts.modStyle(m) || null) : null;
+    var dColor = dyn && dyn.color ? String(dyn.color) : '';
+    var dRgb = dyn && dyn.rgb ? String(dyn.rgb) : '';
+    var dBg = dyn && dyn.bg ? String(dyn.bg) : '';
+    var dBgRgb = dyn && dyn.bgRgb ? String(dyn.bgRgb) : '';
+    var useBg = dBg || dBgRgb || m.bg || m.bgRgb;
+    var needBg = !!useBg;
     var row = document.createElement('span');
     row.className = 'dshwv-trow';
     if (m.type === 'link') { row.className += ' dshwv-link'; row.dataset.url = String(m.url || ''); }
@@ -414,22 +422,24 @@ export function createBubbleRenderer(opts) {
     if (m.italic) row.style.fontStyle = 'italic';
     if (m.ul) row.style.textDecoration = 'underline';
     if (m.fontFamily) row.style.fontFamily = String(m.fontFamily);
-    var marquee = m.rgb;
+    var marquee = dRgb || m.rgb;
     if (marquee) {
       tx.classList.add('dshwv-rgb');
       var scheme = marquee === true ? 'macaron' : String(marquee || 'macaron');
       if (scheme) tx.classList.add('dshwv-rgb-' + scheme);
       tx.style.animationDuration = bubbleMarqueeDur();
-    } else if (m.color) {
-      row.style.color = String(m.color);
+    } else if (dColor || m.color) {
+      row.style.color = dColor || String(m.color);
     }
     if (needBg) {
-      if (m.bgRgb) {
+      var bgRgb = dBgRgb || m.bgRgb;
+      var bg = dBg || m.bg;
+      if (bgRgb) {
         row.classList.add('dshwv-bgrgb');
-        row.classList.add('dshwv-bgrgb-' + String(m.bgRgb));
+        row.classList.add('dshwv-bgrgb-' + String(bgRgb));
         row.style.animationDuration = bubbleMarqueeDur();
-      } else if (m.bg) {
-        row.style.background = String(m.bg);
+      } else if (bg) {
+        row.style.background = String(bg);
       }
     }
     return row;

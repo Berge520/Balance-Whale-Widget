@@ -13,8 +13,10 @@ import type { LedgerDetailDay, LedgerDetailEntry, ModelUsageRow, WhaleServices }
 //   - HISTORY_KEEP / PRICE_MODEL_MAX / TOKEN_PRICE_DEFAULT：第三份副本由 scripts/check-shared.mjs
 //     比对（指向 App.vue），不搬进来，模板所需数值以 prop 传入。
 //   - onUsageModeChange / onTokenPriceChange / onHistoryKeepChange / addPriceModel / removePriceModel：
-//     前四个要 patchCfg 落盘，addPriceModel / removePriceModel 更是直接 mutate cfg.tokenPrice.models
-//     （Proxy 数组，宿主会丢弃空名行，不落存储）；一律留父级，本卡 emit 触发。
+//     前四个要写回 cfg 并 patchCfg 落盘，addPriceModel / removePriceModel 更是直接 mutate cfg.tokenPrice.models
+//     （Proxy 数组，宿主会丢弃空名行，不落存储）；一律留父级，本卡只 emit 触发并把新值带出去
+//     —— 本卡不能改写 cfg（vue/no-mutating-props），而 :value 单向绑定不会写回，
+//     所以这些 handler 必须从事件参数取值，不能回头读 cfg（那样只会读到旧值）。
 // 随卡搬入的：图表 / 明细 / 模型占比 / 额度 / 校准相关的状态与计算，父级不再引用。
 const props = defineProps<{
   // 挂件配置整体传入：本卡只读写用量 / 额度相关字段，落盘统一走 emit('patch')
@@ -37,9 +39,12 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{
   (e: 'patch', p: Record<string, any>): void
-  (e: 'usage-mode-change'): void
-  (e: 'token-price-change'): void
-  (e: 'history-keep-change'): void
+  // 值随事件传给父级（父级负责写回 cfg + 落盘）：cfg 是 props，本卡不能改写；
+  // 而 :value 是单向绑定、不会写回，父级若只从 cfg 读就会永远拿到旧值 —— 表现就是「选了没反应」
+  (e: 'usage-mode-change', v: string): void
+  // 全局单价字段：key 是 cfg.tokenPrice 下的字段名（on / cur / rate / hit / miss / out）
+  (e: 'token-price-change', p: { key: string; value: any; index?: number }): void
+  (e: 'history-keep-change', v: number): void
   // 要求父级重取账本（refreshHistory）：导入 CSV / 校准后趋势与额度都要重新拉一次。
   // 不复用 history-keep-change —— 那个的语义是「校验并落盘保留天数」，借用会串味
   (e: 'refresh'): void
@@ -374,7 +379,10 @@ defineExpose({ applyHistory, refreshTodayModels, refreshDetail })
 
     <label class="field row">
       <span class="label">用量</span>
-      <select :value="cfg.usageMode" @change="emit('usage-mode-change')">
+      <!-- 值必须随事件传给父级：cfg 是 props，本卡不能改写（vue/no-mutating-props 是 error 级），
+           而 :value 单向绑定不会写回，父级若从 cfg 读就永远拿到旧值 -->
+      <select :value="cfg.usageMode"
+              @change="emit('usage-mode-change', ($event.target as HTMLSelectElement).value)">
         <option value="ledger">小鲸鱼记账（推荐）</option>
         <option value="token">实时·令牌（需平台 Token）</option>
       </select>
@@ -384,7 +392,8 @@ defineExpose({ applyHistory, refreshTodayModels, refreshDetail })
     <label class="field row">
       <span class="label">历史保留</span>
       <input class="num" type="number" :min="historyKeep.MIN" :max="historyKeep.MAX" step="1"
-             :value="cfg.historyKeepDays" @change="emit('history-keep-change')" />
+             :value="cfg.historyKeepDays"
+             @change="emit('history-keep-change', Number(($event.target as HTMLInputElement).value))" />
       <span class="num-text">天</span>
       <span class="hint">{{ historyKeep.MIN }}–{{ historyKeep.MAX }} 天，默认 {{ historyKeep.DEFAULT }}；保留越久账本越大</span>
     </label>
@@ -395,36 +404,38 @@ defineExpose({ applyHistory, refreshTodayModels, refreshDetail })
     <div v-if="cfg.usageMode === 'token'" class="price-box">
       <label class="field row check">
         <span class="label">自定义单价</span>
-        <input type="checkbox" :checked="cfg.tokenPrice.on" @change="emit('token-price-change')" />
+        <input type="checkbox" :checked="cfg.tokenPrice.on"
+               @change="emit('token-price-change', { key: 'on', value: ($event.target as HTMLInputElement).checked })" />
         <span class="hint">整表覆盖（关闭 = 全部用内置价目表）</span>
       </label>
       <div v-if="cfg.tokenPrice.on" class="price-row">
         <label class="price-cell">
           <span class="price-name">缓存命中</span>
           <input class="num" type="number" min="0" step="0.01" :value="cfg.tokenPrice.hit"
-                 @change="emit('token-price-change')" />
+                 @change="emit('token-price-change', { key: 'hit', value: Number(($event.target as HTMLInputElement).value) })" />
         </label>
         <label class="price-cell">
           <span class="price-name">缓存未命中</span>
           <input class="num" type="number" min="0" step="0.01" :value="cfg.tokenPrice.miss"
-                 @change="emit('token-price-change')" />
+                 @change="emit('token-price-change', { key: 'miss', value: Number(($event.target as HTMLInputElement).value) })" />
         </label>
         <label class="price-cell">
           <span class="price-name">输出</span>
           <input class="num" type="number" min="0" step="0.01" :value="cfg.tokenPrice.out"
-                 @change="emit('token-price-change')" />
+                 @change="emit('token-price-change', { key: 'out', value: Number(($event.target as HTMLInputElement).value) })" />
         </label>
       </div>
       <label class="field row">
         <span class="label">币种</span>
-        <select :value="cfg.tokenPrice.cur" @change="emit('token-price-change')">
+        <select :value="cfg.tokenPrice.cur"
+                @change="emit('token-price-change', { key: 'cur', value: ($event.target as HTMLSelectElement).value })">
           <option value="CNY">人民币 CNY</option>
           <option value="USD">美元 USD</option>
         </select>
         <template v-if="cfg.tokenPrice.cur === 'USD'">
           <span class="label">汇率</span>
           <input class="num" type="number" min="0" step="0.01" :value="cfg.tokenPrice.rate"
-                 @change="emit('token-price-change')" />
+                 @change="emit('token-price-change', { key: 'rate', value: Number(($event.target as HTMLInputElement).value) })" />
           <span class="num-text">元/USD</span>
         </template>
       </label>
@@ -441,22 +452,23 @@ defineExpose({ applyHistory, refreshTodayModels, refreshDetail })
         <label class="price-cell price-cell-model">
           <span class="price-name">模型名</span>
           <input class="num" type="text" spellcheck="false" placeholder="deepseek-v4-pro"
-                 :value="it.name" @change="emit('token-price-change')" />
+                 :value="it.name"
+                 @change="emit('token-price-change', { index: i, key: 'name', value: ($event.target as HTMLInputElement).value })" />
         </label>
         <label class="price-cell">
           <span class="price-name">缓存命中</span>
           <input class="num" type="number" min="0" step="0.01" :value="it.hit"
-                 @change="emit('token-price-change')" />
+                 @change="emit('token-price-change', { index: i, key: 'hit', value: Number(($event.target as HTMLInputElement).value) })" />
         </label>
         <label class="price-cell">
           <span class="price-name">缓存未命中</span>
           <input class="num" type="number" min="0" step="0.01" :value="it.miss"
-                 @change="emit('token-price-change')" />
+                 @change="emit('token-price-change', { index: i, key: 'miss', value: Number(($event.target as HTMLInputElement).value) })" />
         </label>
         <label class="price-cell">
           <span class="price-name">输出</span>
           <input class="num" type="number" min="0" step="0.01" :value="it.out"
-                 @change="emit('token-price-change')" />
+                 @change="emit('token-price-change', { index: i, key: 'out', value: Number(($event.target as HTMLInputElement).value) })" />
         </label>
         <button class="export-btn price-del utils-btn utils-outline" type="button" title="删除这一条"
                 @click="emit('remove-price-model', i)">删</button>
@@ -532,9 +544,9 @@ defineExpose({ applyHistory, refreshTodayModels, refreshDetail })
       <label class="field row">
         <span class="label">额度总量</span>
         <input class="num" type="number" min="0" step="1" :value="cfg.quotaTotal"
-               @change="emit('patch', { quotaTotal: cfg.quotaTotal })" />
+               @change="emit('patch', { quotaTotal: Number(($event.target as HTMLInputElement).value) })" />
         <span class="num-text">{{ usageCurrency === 'CNY' ? '元' : '美元' }}</span>
-        <select class="quota-reset" :value="cfg.quotaReset" @change="emit('patch', { quotaReset: cfg.quotaReset })">
+        <select class="quota-reset" :value="cfg.quotaReset" @change="emit('patch', { quotaReset: ($event.target as HTMLSelectElement).value })">
           <option value="monthly">每月重置</option>
           <option value="daily">每日重置</option>
           <option value="never">不重置</option>
