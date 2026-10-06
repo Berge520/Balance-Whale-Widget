@@ -211,6 +211,31 @@ function onWeight(i: number, side: number, e: Event) {
 function onEdit(i: number, side: number) {
   emit('edit', { idx: i, side })
 }
+
+// —— 权重滑杆：拖动只改本地草稿显示，松手才落库 ——
+// @input 逐 tick 触发（拖一次几十个事件），逐 tick emit 会打爆 undo 合并窗口并造成存储写入风暴；
+// 故拖动中把值暂存在 liveW（同一时刻只有一根滑杆在拖，单值即可），数值 / 概率 / 比例条实时跟手，
+// 松手（@change）才经 onWeight 走 emit('change') 落库并记一步 undo
+const liveW = ref<{ key: number; side: number; w: number } | null>(null)
+// 展示用权重：拖动中取草稿，否则取落库值（rows 由 props 派生，落库后才更新）
+function weightOf(r: { key: number; weights: number[] }, si: number): number {
+  const l = liveW.value
+  return l && l.key === r.key && l.side === si ? l.w : r.weights[si]
+}
+// 抽中概率（%）：与 floating-page.js 的 bubblePickOptionIdx 同口径 —— 权重 / 权重和；
+// 两侧先按 A 取整，B 用 100 - A 收尾，保证恒为整百
+function probs(r: { key: number; weights: number[] }): [number, number] {
+  const pa = Math.round((weightOf(r, 0) * 100) / (weightOf(r, 0) + weightOf(r, 1)))
+  return [pa, 100 - pa]
+}
+function onWLive(r: { key: number }, si: number, e: Event) {
+  const w = Number((e.target as HTMLInputElement).value)
+  if (Number.isFinite(w)) liveW.value = { key: r.key, side: si, w }
+}
+function onWCommit(r: { key: number }, si: number, e: Event) {
+  liveW.value = null
+  onWeight(r.key, si, e)
+}
 // 某一步里 A / B 侧现有模块数（给「编辑内容」按钮加个规模提示）
 function sideModCount(step: any, side: number): number {
   return stepModules(step, side).length
@@ -278,7 +303,8 @@ function sideModCount(step: any, side: number): number {
                   @click="onSwapConfirm(false)">取消</button>
         </div>
 
-        <!-- 并列：A / B 权重 + 各自的内容编辑入口。权重越高越容易被抽到；
+        <!-- 并列：A / B 权重滑杆 + 抽中概率 + 各自的内容编辑入口。权重越高越容易被抽到；
+             滑杆拖动只改草稿显示（数值 / 概率 / 比例条实时跟手），松手才落库记 undo；
              A / B 标签可拖：拖到别的位置 = 拆出成独立单泡，拖回本步上 / 下半 = 调换 A / B 次序 -->
         <div v-if="r.choice" class="bqe-choice">
           <div v-for="(w, si) in r.weights" :key="si" class="bqe-side">
@@ -287,12 +313,18 @@ function sideModCount(step: any, side: number): number {
                   @dragstart="onSideDragStart(r.key, si, $event)" @dragend="dragReset()">{{ si === 0 ? 'A' : 'B' }}</span>
             <label class="bqe-w">
               权重
-              <input class="bqe-w-input" type="number" min="1" :max="BUBBLE_CHOICE_W_MAX"
-                     :value="w" @change="onWeight(r.key, si, $event)" />
+              <input class="bqe-w-range" type="range" min="1" :max="BUBBLE_CHOICE_W_MAX"
+                     :value="weightOf(r, si)" @input="onWLive(r, si, $event)" @change="onWCommit(r, si, $event)" />
+              <span class="bqe-w-num">{{ weightOf(r, si) }}</span>
             </label>
-            <span class="bqe-side-mods">{{ sideModCount(items[r.key], si) }} 个模块</span>
+            <span class="bqe-side-mods">{{ probs(r)[si] }}% · {{ sideModCount(items[r.key], si) }} 个模块</span>
             <button class="utils-btn utils-secondary utils-xs" type="button"
                     @click="onEdit(r.key, si)">编辑内容</button>
+          </div>
+          <!-- A / B 比例条：概率可视化（拖动中实时跟手），title 给精确百分数 -->
+          <div v-if="r.weights.length === 2" class="bqe-bar" :title="'A ' + probs(r)[0] + '% / B ' + probs(r)[1] + '%'">
+            <span class="bqe-bar-a" :style="{ width: probs(r)[0] + '%' }">A {{ probs(r)[0] }}%</span>
+            <span class="bqe-bar-b" :style="{ width: probs(r)[1] + '%' }">B {{ probs(r)[1] }}%</span>
           </div>
         </div>
         <!-- 单泡：直接编辑入口 -->
@@ -446,14 +478,42 @@ function sideModCount(step: any, side: number): number {
   font-size: 11px;
   color: var(--fg-faint);
 }
-.bqe-w-input {
-  width: 56px;
-  padding: 2px 6px;
+/* 权重滑杆（1–99）：固定宽度防止拖动时跟着概率文字伸缩；数值紧跟其后 */
+.bqe-w-range {
+  width: 110px;
+  accent-color: var(--accent);
+}
+.bqe-w-num {
+  min-width: 20px;
   font-size: 12px;
   color: var(--fg);
-  background: var(--card-bg);
-  border: 1px solid var(--line);
+  font-variant-numeric: tabular-nums;
+}
+/* A / B 比例条：概率可视化，文字过窄时溢出隐藏（权重悬殊时窄侧放不下百分数） */
+.bqe-bar {
+  margin: 2px 0 0 28px;
+  display: flex;
+  height: 18px;
   border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+}
+.bqe-bar-a,
+.bqe-bar-b {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  font-size: 10px;
+  color: #fff;
+}
+.bqe-bar-a {
+  background: var(--accent);
+}
+.bqe-bar-b {
+  background: var(--fg-faint);
 }
 .bqe-side-mods {
   font-size: 11px;
