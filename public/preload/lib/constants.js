@@ -18,6 +18,11 @@ const UPDATE_TTL_MS = 12 * 3600 * 1000
 
 const MIN_SCALE = 0.6
 const MAX_SCALE = 2.5
+// 大小档位数：1–SCALE_STEPS 线性映射到 MIN_SCALE–MAX_SCALE（档位 k 的倍率 = numToScale(k)）。
+// 全链路唯一刻度：宿主 store 的落库归一、设置页的滑块/数字框、浮动页菜单滑块都用它。
+// 三处各有一份同值副本（preload 不参与打包，互相读不到），由 scripts/check-shared.mjs 校验一致性。
+// 原为 1–20 档，档位 20（=2.5 倍）太大，收到 15（最大约 2.1 倍）。
+const SCALE_STEPS = 15
 
 // ──────────────────────────────────────────────
 // 可选下载的内置形象（v1.7.x 起随包只留默认那一张）
@@ -218,6 +223,11 @@ const BASE_MAX = 625   // 挂件基准尺寸硬上限 px
 // 必须与 floating.css 里的 --whale-pad 保持一致。
 const WIN_PAD = 200
 
+// 挂件窗口的兜底显示延时 ms：窗口以 show:false 创建（防首帧露出内置形象，见 lib/widget.js），
+// 正常由页面就绪后调 show()；页面异常久久不就绪时，靠这个超时兜底显示，避免挂件永远不可见。
+// 取值要「比页面正常就绪慢、比用户能接受的等待快」——给到数秒量级，正常开机远早于此。
+const WIDGET_AUTOSHOW_MS = 3000
+
 // DeepSeek CNY 价格（每百万 token）：[空闲时段价, 高峰时段价]
 // 高峰：工作日 9:00–12:00、14:00–18:00（北京时间）；2026-08-23 起周末全天谷价
 // 官方调价只改这里；「实时·令牌」模式的今日已用按本表换算（见 lib/pricing.js 的 priceFor）。
@@ -314,7 +324,7 @@ const GH520_HOSTS_URL = 'https://raw.hellogithub.com/hosts'
 
 
 const K = {
-  secrets: 'whale:secrets', // dbCryptoStorage：{ apiKey, platformToken, models }
+  secrets: 'whale:secrets', // dbCryptoStorage：{ apiKey, platformToken, models(+key), notifyMail }
   config: 'whale:config',   // dbStorage：挂件配置
   ledger: 'whale:ledger',   // dbStorage：本地账本
   win: 'whale:window',      // dbStorage：窗口锚点
@@ -496,6 +506,7 @@ module.exports = {
   UPDATE_TTL_MS,
   MIN_SCALE,
   MAX_SCALE,
+  SCALE_STEPS,
   SKIN_PACK_URL,
   SKIN_PACK_ORIGIN,
   SKIN_PACK_DEFAULT_PREFIX,
@@ -518,6 +529,7 @@ module.exports = {
   BASE_CAP,
   BASE_MAX,
   WIN_PAD,
+  WIDGET_AUTOSHOW_MS,
   PEAK_HOURS,
   PRICING,
   WEEKEND_VALLEY_FROM_SEC,

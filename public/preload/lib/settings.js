@@ -2503,6 +2503,10 @@ module.exports = {
     const token = readSecrets().platformToken
     if (!token) return Promise.resolve({ ok: false, error: '未配置平台 Token' })
     return fetchPlatformUsage(token, readConfig().tokenPrice).then((r) => {
+      // fetchPlatformUsage 的 'no usage' 不是错误，而是「接口连通、当天没消耗」的空态标记
+      // （与 testPlatformToken 同口径）。若当错误透传，页面会显示「读取失败：no usage」，
+      // 用户以为插件坏了 —— 所以这里必须转成 ok:true 的空列表。
+      if (r && r.error === 'no usage') return { ok: true, models: [], amount: 0, tokens: 0 }
       if (r && r.error) return { ok: false, error: r.error }
       return {
         ok: true,
@@ -2745,8 +2749,8 @@ module.exports = {
     }
     return r
   },
-  // 下载并安装单个共享音效到 shared 槽位。shared 不参与实播，无需推给挂件
-  // （用户「选用」到实播槽位时走 useSharedSound 才推）
+  // 下载并安装单个共享音效到 shared 槽位。下载只是入库，默认不参加任何槽位的播放，
+  // 无需推给挂件（用户勾选了它参加哪些槽位时才走 setSharedRoles 推）
   async downloadSharedSound(id, prefix) {
     return assetsPacks.downloadSharedSound(id, { prefix: prefix })
   },
@@ -2758,9 +2762,10 @@ module.exports = {
   downloadProgress() {
     return dlp.snapshot()
   },
-  // 把共享库的一段「选用」到某个实播槽位，推新音频给挂件
-  useSharedSound(file, role) {
-    const r = sounds.useSharedSound(file, role)
+  // 设置共享库某段「参加哪些槽位的播放」（取代旧的「选用到某槽位」）。
+  // 改完必须重推音效：挂件那份播放列表是按 roles 现拼的，不推就还是老列表
+  setSharedRoles(file, roles) {
+    const r = sounds.setSharedRoles(file, roles)
     if (r && r.ok) sendToWidget('whale:sounds', sounds.getSoundData())
     return r
   },
@@ -2768,10 +2773,9 @@ module.exports = {
   readSharedSoundData(file) {
     return assetsPacks.readSharedSoundData(file)
   },
-  // 从共享库里删一段：素材池那段 + 从它「选用」出去的实播槽位副本一起清（见 assets-packs 注释）。
-  // 返回值带 clearedRoles（被清空的实播槽位），设置页据此在提示里说明影响面。
-  // 删成功就必须重推音效 —— 挂件内存里还留着被删掉的 data URL，不推会继续播一段用户
-  // 已删除的音频（曾踩：删了还在响，要等下次改配置才纠正），被清空的槽位也才能回落到内置音色
+  // 从共享库里删一段（池里那段本身就是播放载体，删掉即各槽位自动少一段，无副本要清）。
+  // 删成功必须重推音效 —— 挂件内存里还留着被删掉的 data URL，不推会继续播一段用户
+  // 已删除的音频（曾踩：删了还在响，要等下次改配置才纠正）
   removeSharedSound(file) {
     const r = assetsPacks.removeSharedSound(file)
     if (r && r.ok) sendToWidget('whale:sounds', sounds.getSoundData())

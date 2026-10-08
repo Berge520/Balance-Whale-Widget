@@ -271,39 +271,79 @@ test('removeSharedSound：空 file 直接拒绝，不误删整槽位', () => {
   assert.equal(sounds.readMeta().shared.some((x) => x.file === fileC), true, '空 file 不应误删任何一段')
 })
 
-// ── 删除时的「选用副本」连带清理 ────────────────────────────────────────
-// 选用是另存一份拷贝到实播槽位，两份之间没有文件级关联，只能靠 saveOne 写入的 from 标记反查。
-// 不清理的话，用户删了池里那段、槽位那份照旧在响 —— 表现成「删了没删干净」。
+// ── 参加播放：roles 记在池段自己身上（取代旧的「选用 = 另存一份副本」） ──────
+// 现在一段共享音效可以同时挂到多个槽位，删池里那段 = 各槽位自动少一段，不需要副本连带清理。
 
-test('removeSharedSound：连带清掉从该段选用出去的实播槽位副本，并回传槽位名', () => {
+test('setSharedRoles：一段可同时挂在多个槽位，getSoundData 据此拼进各槽位', () => {
   const d = SHARED_SOUND_LIB[7]
   assert.ok(sounds.installBuiltin(d.name, d.ext, Buffer.alloc(Number(d.size) || 8, 7)).ok)
   const fileD = fileOf(d.name)
-  // 选用到 press 与 low 两个槽位
-  assert.ok(sounds.useSharedSound(fileD, 'press').ok, '选用到 press 失败')
-  assert.ok(sounds.useSharedSound(fileD, 'low').ok, '选用到 low 失败')
 
-  const r = removeSharedSound(fileD)
+  const r = sounds.setSharedRoles(fileD, ['press', 'low'])
   assert.equal(r.ok, true, r.error)
-  assert.deepEqual(r.clearedRoles.sort(), ['low', 'press'], '应回传被清空的实播槽位')
+  assert.deepEqual(r.roles.sort(), ['low', 'press'])
 
+  // roles 落在池里那段身上，实播槽位没有多出任何条目（不再另存副本）
   const meta = sounds.readMeta()
-  assert.equal(meta.press.length, 0, 'press 上的选用副本应被清掉')
-  assert.equal(meta.low.length, 0, 'low 上的选用副本应被清掉')
+  assert.deepEqual((meta.shared.find((x) => x.file === fileD) || {}).roles.sort(), ['low', 'press'])
+  assert.equal(meta.press.length, 0, '实播槽位不应出现副本条目')
+
+  // getSoundData 现拼：press / low 各多出这一段
+  const data = sounds.getSoundData()
+  assert.equal(data.press.length, 1)
+  assert.equal(data.low.length, 1)
+  assert.equal(data.peak.length, 0, '没挂的槽位不应带上它')
 })
 
-test('removeSharedSound：不误伤用户自己导入的实播音效（无 from 标记）', () => {
-  // 用户手动导入到 release：不带 from，删共享库任何一段都不该动它
+test('setSharedRoles：传空数组 = 从所有槽位摘掉', () => {
+  const c = SHARED_SOUND_LIB[8]
+  assert.ok(sounds.installBuiltin(c.name, c.ext, Buffer.alloc(Number(c.size) || 8, 8)).ok)
+  const fileC = fileOf(c.name)
+
+  assert.ok(sounds.setSharedRoles(fileC, ['peak']).ok)
+  assert.ok(sounds.setSharedRoles(fileC, []).ok)
+  const item = sounds.readMeta().shared.find((x) => x.file === fileC) || {}
+  assert.equal('roles' in item, false, '摘干净后不应残留空 roles 字段')
+  assert.equal(sounds.getSoundData().peak.length, 0)
+})
+
+test('setSharedRoles：非法槽位名一律忽略，file 不在池里则拒绝', () => {
+  const e = SHARED_SOUND_LIB[9]
+  assert.ok(sounds.installBuiltin(e.name, e.ext, Buffer.alloc(Number(e.size) || 8, 9)).ok)
+  const fileE = fileOf(e.name)
+
+  const r = sounds.setSharedRoles(fileE, ['press', 'nope', 'press', 'shared'])
+  assert.equal(r.ok, true, r.error)
+  assert.deepEqual(r.roles, ['press'], '只保留合法实播槽位并去重（shared 本身不是实播槽位）')
+
+  const bad = sounds.setSharedRoles('没有这个文件.mp3', ['press'])
+  assert.equal(bad.ok, false)
+  assert.match(bad.error, /没有这段音效/)
+})
+
+test('removeSharedSound：删掉池里那段，各槽位的播放列表随之少一段', () => {
+  const f = SHARED_SOUND_LIB[10]
+  assert.ok(sounds.installBuiltin(f.name, f.ext, Buffer.alloc(Number(f.size) || 8, 10)).ok)
+  const fileF = fileOf(f.name)
+  assert.ok(sounds.setSharedRoles(fileF, ['release']).ok)
+  assert.equal(sounds.getSoundData().release.length, 1)
+
+  const r = removeSharedSound(fileF)
+  assert.equal(r.ok, true, r.error)
+  assert.equal(sounds.readMeta().shared.some((x) => x.file === fileF), false)
+  assert.equal(sounds.getSoundData().release.length, 0, '池段删了，挂它的槽位自动少一段')
+})
+
+test('removeSharedSound：不误伤用户自己导入的实播音效', () => {
+  // 用户手动导入到 release：roles 机制只作用于 shared 槽，删共享库任何一段都不该动它
   assert.ok(sounds.importBuffer('release', 'myself', 'mp3', Buffer.alloc(9, 9)).ok)
   const mineFile = sounds.readMeta().release[0].file
 
-  const e = SHARED_SOUND_LIB[8]
-  assert.ok(sounds.installBuiltin(e.name, e.ext, Buffer.alloc(Number(e.size) || 8, 8)).ok)
-  const fileE = fileOf(e.name)
+  const e = SHARED_SOUND_LIB[11]
+  assert.ok(sounds.installBuiltin(e.name, e.ext, Buffer.alloc(Number(e.size) || 8, 11)).ok)
 
-  const r = removeSharedSound(fileE)
+  const r = removeSharedSound(fileOf(e.name))
   assert.equal(r.ok, true, r.error)
-  assert.deepEqual(r.clearedRoles, [], '没选用过，不应清任何槽位')
   const kept = sounds.readMeta().release
   assert.equal(kept.length, 1, '用户自己导入的音效必须原样保留')
   assert.equal(kept[0].file, mineFile)

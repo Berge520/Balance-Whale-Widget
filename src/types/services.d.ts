@@ -1147,7 +1147,8 @@ export interface CalibrateResult {
 
 // 音效槽位：press / release 是「音色」的按压与释放两段（有内置回落）；
 // low / budget / peak / pass 是四类提醒（低余额 / 今日预算 / 峰谷切换 / 鼠标穿透）各自的提醒音，留空即静音。
-// 每个槽位只放一段（v1.9.0 起收敛为「一段一槽位」，旧的多段数据只取第一段展示，见 App.vue 的 soundLabel）
+// 自己导入的段是「一段一槽位」（旧的多段数据只取第一段展示，见 App.vue 的 soundLabel）；
+// 共享音效库的段则按段自带 roles 挂到若干槽位，一个槽位因此可同时播「导入的 1 段 + 池里的 N 段」
 export type SoundRole = 'press' | 'release' | 'low' | 'budget' | 'peak' | 'pass'
 
 // 四类提醒音的槽位名（alertVols 的键）：SoundRole 的子集 —— 提醒音有独立音量，音色两段没有
@@ -1162,6 +1163,8 @@ export interface SoundMeta {
   file: string
   // 音频体积（字节，宿主读取时派生；文件缺失为 0），供「自定义素材」卡片展示
   size: number
+  // 仅 shared 槽位的段有：这段要参加哪些槽位的播放（空 / 缺省 = 不参加）
+  roles?: SoundRole[]
 }
 
 export interface SoundImportResult {
@@ -1256,6 +1259,8 @@ export interface SharedSoundItem {
   installed: boolean
   // shared 槽位里的落盘文件名（已装时非空）。删除要按它定位 —— name 不唯一
   file: string
+  // 这段参加的播放槽位（见 setSharedRoles）；未装时为空数组
+  roles: SoundRole[]
 }
 
 export interface SharedPackList<T> {
@@ -1913,17 +1918,17 @@ export interface WhaleServices {
   // thumb 是缩略图的 data URL（webp/png），由设置页从打包资源 resources/thumbs 读好传来 ——
   // 宿主定位不到插件目录，不给的话画廊只能回落读原图（MB 级），很快耗尽回落预算变「无预览」
   downloadSharedSkin(id: string, prefix?: string, thumb?: string): Promise<SharedPackDownloadResult>
-  // 下载并安装单个共享音效到 shared 槽位（素材池，不参与实播，故不推给挂件）
+  // 下载并安装单个共享音效到 shared 槽位（下载只是入库，默认不参加任何槽位的播放，故不推给挂件）
   downloadSharedSound(id: string, prefix?: string): Promise<SharedPackDownloadResult>
   // 从共享音效库删一段（按落盘文件名定位，见 SharedSoundItem.file）。
-  // 一并清掉从这段「选用」出去的实播槽位副本（选用是另存拷贝，靠 meta.from 反查），
-  // clearedRoles 是因此被清空的实播槽位，供提示里说明影响面
-  removeSharedSound(file: string): { ok: boolean; error?: string; clearedRoles?: SoundRole[] }
+  // 池里那段本身就是播放载体（roles 记在它自己身上），删掉即各槽位自动少一段，无副本要清
+  removeSharedSound(file: string): { ok: boolean; error?: string }
   // 素材包下载进度快照：只读内存、零副作用，供设置页下载期间 1Hz 轮询。
   // 返回 null 表示从未下载过；下载结束后快照仍保留终态一小段时间（含命中源与体积）
   downloadProgress(): DownloadProgress | null
-  // 把共享库的一段「选用」到某个实播槽位（file 是共享库里那段的文件名）
-  useSharedSound(file: string, role: string): { ok: boolean; role?: string; name?: string; error?: string }
+  // 设置共享库某段「参加哪些槽位的播放」（file 是共享库里那段的文件名；传空数组 = 从所有槽位摘掉）。
+  // 取代旧的「选用到某槽位」：不再搬副本，改在池里那段上记槽位，故同一段可同时属于多个槽位
+  setSharedRoles(file: string, roles: SoundRole[]): { ok: boolean; file?: string; roles?: SoundRole[]; error?: string }
   // 试听共享库里的一段：按落盘文件名取一段 data URL（shared 槽位不在 getSoundData 里）。
   // 传 file 而非 name —— 素材池允许同名，按 name 会误取第一条（见 SharedSoundItem.file）
   readSharedSoundData(file: string): { ok: boolean; url?: string; error?: string }

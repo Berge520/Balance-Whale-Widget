@@ -80,13 +80,22 @@ function listSharedSkins() {
 
 // 可下载的音效库清单 + 已装状态。
 // installed 按 name 判定（上游同名即同一段）；file 只在已装时非空，供设置页「删这段」精确删。
+// 已装段还要带出 roles（它参加了哪些槽位的播放），设置页的勾选框靠它回填。
+// ⚠️ roles 按 file 逐段匹配，不能按 name —— 池里可能有重名（见 readSharedSoundData 注释）。
 function listSharedSounds() {
   const have = installedSoundNames()
   const files = sharedSoundFiles()
-  const items = SHARED_SOUND_LIB.map((s) => ({
-    id: s.id, name: s.name, ext: s.ext, size: s.size, installed: have[s.name] === true,
-    file: files[s.name] || '',
-  }))
+  const byFile = {}
+  for (const m of sounds.readMeta().shared || []) byFile[m.file] = m
+  const items = SHARED_SOUND_LIB.map((s) => {
+    const file = files[s.name] || ''
+    const meta = file ? byFile[file] : null
+    return {
+      id: s.id, name: s.name, ext: s.ext, size: s.size, installed: have[s.name] === true,
+      file: file,
+      roles: meta && Array.isArray(meta.roles) ? meta.roles.slice() : [],
+    }
+  })
   return {
     ok: true,
     items: items,
@@ -288,17 +297,14 @@ function readSharedSoundData(file) {
 }
 
 // 删掉共享库里的一段（按落盘文件名定位，shared 槽位的同名覆盖用 name 会误伤）。
-// 只删素材池这一段，不动已「选用」到实播槽位的那份（useSharedSound 是另存一份，两者互不干扰）。
+// 池里那段本身就是「参加播放」的载体（roles 记在它自己身上），删掉即各槽位自动少一段，
+// 不需要再清副本 —— 选用语义已改为「在池子里那段上记槽位」，没有另存拷贝了。
 function removeSharedSound(file) {
   const f = String(file || '')
   if (!f) return { ok: false, error: '缺少要删除的文件名' }
   const r = sounds.removeSound('shared', f)
   if (!r || !r.ok) return { ok: false, error: (r && r.error) || '删除失败' }
-  // 把这门声「选用」到实播槽位的副本一并清掉：用户删了池里这段，槽位那份照旧在响，
-  // 看着就是「删了没删干净」（选用是另存拷贝，两份无文件级关联，只能靠 from 标记反查）。
-  // 返回清掉的槽位名，供设置页在提示里说明影响面
-  const clearedRoles = sounds.removeDerivedFrom(f)
-  return { ok: true, clearedRoles: clearedRoles }
+  return { ok: true }
 }
 
 module.exports = {

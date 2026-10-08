@@ -22,9 +22,9 @@ const MIME = { mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', m4a: 'audi
 // 音效槽位。press / release 是「音色」的两段（有内置回落，见挂件页 SOUND_FILES）；
 // low / budget / peak / pass 是四类提醒各自的提醒音 —— **没有内置回落，留空即静音**，
 // 不打扰是默认，想要声音才去导一段。
-// shared 是「共享音效库」的落地槽位：从 Release 下载的全集音效都进这里，**不直接作为上述
-// 任一实播槽位**（否则一装就是几十段，随机播到哪段全看运气）。用户在设置页从这里「选用」到
-// press/release/… 某个槽位，才真正参与播放（见 useSharedSound）。
+// shared 是「共享音效库」的落地槽位：从 Release 下载的全集音效都进这里。它本身不是实播槽位，
+// 但每段带一组 roles（这段要参加哪些槽位的播放），getSoundData 据此把它拼进对应实播槽位。
+// 用户在设置页勾选某段要参加哪些槽位即可（见 setSharedRoles），无需把音频另存一份搬过去。
 const ROLES = ['press', 'release', 'low', 'budget', 'peak', 'pass', 'shared']
 // 实播槽位：与「音色 / 提醒」直接挂钩的那六个（shared 只是素材库，不算）
 const PLAY_ROLES = ['press', 'release', 'low', 'budget', 'peak', 'pass']
@@ -82,10 +82,20 @@ function oneItem(v, role) {
     file: file,
     size: fileSize(file),
   }
-  // 必须原样带出 from（「这段是从共享库哪一段选用来的」）：readMeta 是**归一化**写入，
-  // 不带出的字段会在下一次 writeMeta 时被静默抹掉 —— 删除共享库那段的连带清理就失效了，
-  // 表现成「删了池里那段、槽位上的副本照旧在响」。
-  if (typeof v.from === 'string' && v.from) out.from = v.from
+  // 共享库那段「参加哪些槽位的播放」（shared 槽位专用，实播槽位不认这个字段）。
+  // readMeta 是**归一化**写入，不带出的字段会在下一次 writeMeta 时被静默抹掉 ——
+  // 用户勾的槽位会在下次增删任何一段音效时无声消失，表现成「勾了过一会儿又自己没了」。
+  // 只保留 PLAY_ROLES 里的合法值并去重：这段会被 getSoundData 直接当槽位名索引。
+  if (Array.isArray(v.roles)) {
+    const seen = {}
+    const roles = []
+    for (const r of v.roles) {
+      if (typeof r !== 'string' || PLAY_ROLES.indexOf(r) < 0 || seen[r]) continue
+      seen[r] = true
+      roles.push(r)
+    }
+    if (roles.length) out.roles = roles
+  }
   return out
 }
 
@@ -149,12 +159,12 @@ function saveOne(role, name, ext, buf, opts) {
   }
   const meta = readMeta()
   const list = meta[role]
-  // 这段是从共享库哪一段「选用」过来的（源段落盘文件名）。只有走 useSharedSound 才有；
-  // 直接导入 / 素材包导入都不带，删除池里那段时也就不会误伤用户自己的音效。
-  if (o.from) item.from = String(o.from)
   // 同名命中（仅在 append 模式下有意义）：覆盖它就复用其文件名，避免素材库里越攒越多
   const dup = o.append ? list.findIndex((x) => x.name === item.name) : -1
   const reused = dup >= 0 ? list[dup] : null
+  // shared 重装同名段（素材包 / 重下载）时继承原有的 roles：勾选记在段自己身上，
+  // 不该因为重装一次素材包就全丢掉 —— 那会让用户以为「勾了又自己没了」
+  if (reused && Array.isArray(reused.roles) && reused.roles.length) item.roles = reused.roles.slice()
   item.file = reused && reused.ext === ext ? reused.file : nextFile(role, ext, reused && reused.file)
   try {
     fs.mkdirSync(dir, { recursive: true })
@@ -277,33 +287,33 @@ function removeSound(role, file) {
   return { ok: true, role: role }
 }
 
-// 从共享库删掉一段时，一并清掉从它「选用」过去的实播槽位副本。
-// 背景：选用是另存一份拷贝，两份之间没有文件级关联。用户删了池里那段，实播槽位那份照旧在响，
-// 看着就是「删了没删干净」—— 因此这里按 from 标记反查并清掉。
-// 只删 from === file 的项：用户自己导入的音效没有 from（或指向别的段），不会被误伤。
-// 返回清掉的槽位名数组，供设置页在提示里说明「顺带清掉了哪个槽位」。
-function removeDerivedFrom(file) {
-  if (!file) return []
-  const meta = readMeta()
-  const dir = soundsDir()
-  const hitRoles = []
-  for (const role of PLAY_ROLES) {
-    const list = meta[role]
-    const keep = list.filter((x) => x.from !== file)
-    if (keep.length === list.length) continue
-    for (const it of list) {
-      if (it.from === file && it.file) {
-        try { fs.unlinkSync(path.join(dir, it.file)) } catch (err) {}
-      }
+// 设置共享库里某段「参加哪些槽位的播放」（按落盘文件名定位，池里可能重名）。
+// 这是选用语义的替代：不再把音频「另存一份拷贝」搬进实播槽位，而是在池子里那段上记一组槽位名，
+// getSoundData 据此把它拼进对应槽位的播放列表。好处是同一段能同时属于多个槽位（一个槽位也能挂多段），
+// 且删除池里那段 = 各槽位自动少一段，不需要副本清理。
+// roles 传空数组 = 从所有槽位摘掉（不参与播放）；未知槽位名一律忽略。
+function setSharedRoles(file, roles) {
+  const f = String(file || '')
+  if (!f) return { ok: false, error: '缺少音效文件名' }
+  const want = []
+  const seen = {}
+  if (Array.isArray(roles)) {
+    for (const r of roles) {
+      if (typeof r !== 'string' || PLAY_ROLES.indexOf(r) < 0 || seen[r]) continue
+      seen[r] = true
+      want.push(r)
     }
-    meta[role] = keep
-    hitRoles.push(role)
   }
-  if (hitRoles.length) {
-    writeMeta(meta)
-    dataCache = null
-  }
-  return hitRoles
+  const meta = readMeta()
+  const idx = meta.shared.findIndex((x) => x.file === f)
+  if (idx < 0) return { ok: false, error: '共享库中没有这段音效' }
+  const item = meta.shared[idx]
+  if (want.length) item.roles = want
+  else delete item.roles
+  meta.shared[idx] = item
+  writeMeta(meta)
+  dataCache = null
+  return { ok: true, file: f, roles: want }
 }
 
 // 清除全部自定义音效：音频文件 + 元信息 + 读取缓存（供设置页「清除选中数据」调用）。
@@ -353,43 +363,46 @@ function installBuiltin(name, ext, buf) {
   return saveOne('shared', name, e, buf, { append: true })
 }
 
-// 把共享库里的一段「选用」到某个实播槽位（press/release/low/budget/peak/pass）：
-// 读共享库那段音频字节，按实播槽位再存一份（追加、不改动共享库本身）。
-// 这样共享库是「素材池」、实播槽位是「已选」，两者互不干扰 —— 删除实播槽位那段不影响素材池。
-// 写入时带 from: 源段文件名。实播槽位是**另存一份拷贝**，与素材池那段没有文件级关联；
-// 用户删掉池里那段时，要靠这个标记才认得出「实播槽位这份是从它抄来的」（见 removeSharedSound）。
-function useSharedSound(file, role) {
-  if (PLAY_ROLES.indexOf(role) < 0) return { ok: false, error: '未知音效段' }
-  const meta = readMeta()
-  const src = meta.shared.filter((x) => x.file === file)[0]
-  if (!src) return { ok: false, error: '共享库中没有这段音效' }
-  let buf = null
-  try { buf = fs.readFileSync(path.join(soundsDir(), src.file)) } catch (err) {
-    logErr('[whale][sounds] 读取共享音效失败', src.file, err && err.message)
-    return { ok: false, error: '读取音效失败：' + ((err && err.message) || err) }
-  }
-  return saveOne(role, src.name, src.ext, buf, { from: file })
-}
-
 // 音频本体 → base64 data URL 数组（挂件随机取一条 new Audio(dataURL) 播放）。
 // 文件丢失（用户手动清理了 userData）时按缺失处理，挂件侧回退内置音色 / 提醒音静音。
+//
+// 每个实播槽位的列表 = 用户自己导入的那段（实播槽位是「一段一槽位」）+ 共享库里 roles 含该槽位的段。
+// 只拼「被挂上的」池段，不推整个池子：全集 45 段约 2.7MB base64，全推等于每次配置变更都搬一遍。
 function getSoundData() {
   if (dataCache) return dataCache
   const meta = readMeta()
   const out = {}
-  // 只推「实播槽位」：shared 是素材池（几十段），全推给挂件等于每次都搬几 MB 无用 base64
+  for (const role of PLAY_ROLES) out[role] = []
+  // 一次性读池，避免每个槽位各扫一遍 shared
+  for (const m of meta.shared) {
+    const roles = Array.isArray(m.roles) ? m.roles : []
+    if (!roles.length) continue
+    let url = null
+    try {
+      const buf = fs.readFileSync(path.join(soundsDir(), m.file))
+      if (buf.length <= MAX_BYTES * 2) {
+        url = 'data:' + (MIME[m.ext] || 'audio/mpeg') + ';base64,' + buf.toString('base64')
+      }
+    } catch (err) {
+      logErr('[whale][sounds] 读取共享音效失败', m.file, err && err.message)
+    }
+    if (!url) continue
+    for (const r of roles) out[r].push(url)
+  }
+  // 自己导入的段放前面：挂件拿到的是「导入在前、池段在后」的拼接结果，
+  // 用户亲手导的那段仍有相当概率被随机到，不会被池子挤没
   for (const role of PLAY_ROLES) {
-    const list = []
+    const own = []
     for (const m of meta[role]) {
       try {
         const buf = fs.readFileSync(path.join(soundsDir(), m.file))
         if (buf.length > MAX_BYTES * 2) continue
-        list.push('data:' + (MIME[m.ext] || 'audio/mpeg') + ';base64,' + buf.toString('base64'))
+        own.push('data:' + (MIME[m.ext] || 'audio/mpeg') + ';base64,' + buf.toString('base64'))
       } catch (err) {
         logErr('[whale][sounds] 读取音效失败', m.file, err && err.message)
       }
     }
-    out[role] = list
+    out[role] = own.concat(out[role])
   }
   dataCache = out
   return out
@@ -398,8 +411,8 @@ function getSoundData() {
 module.exports = {
   importSound, pickSoundFile, importSoundFromData,
   removeSound, clearAll, getSoundData, readMeta, ROLES, PLAY_ROLES, ROLE_LABEL,
-  // 共享音效库（lib/assets-packs.js / 设置页「选用」用）
-  installBuiltin, useSharedSound, readSoundBuffer, mimeOf, removeDerivedFrom,
+  // 共享音效库（lib/assets-packs.js / 设置页「参加播放」用）
+  installBuiltin, setSharedRoles, readSoundBuffer, mimeOf,
   // 素材包（assets.js）用
   exportItems, importBuffer,
   // 设置页「打开数据目录」用
