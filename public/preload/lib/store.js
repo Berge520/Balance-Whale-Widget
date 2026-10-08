@@ -2,7 +2,7 @@
  * 本地持久化（CommonJS）：密钥 / 配置 / 账本 / 窗口锚点。
  */
 const {
-  K, MIN_SCALE, MAX_SCALE, MODEL_MAX, MODEL_TEMPLATES, DEFAULT_MAIN_MODEL, LOW_ALERT_BY_CURRENCY,
+  K, MIN_SCALE, MAX_SCALE, SCALE_STEPS, MODEL_MAX, MODEL_TEMPLATES, DEFAULT_MAIN_MODEL, LOW_ALERT_BY_CURRENCY,
   TOKEN_PRICE_DEFAULT, TOKEN_PRICE_MAX, TOKEN_RATE_MAX, TOKEN_PRICE_MODELS_MAX, TIMER_NOTE_MAX,
   NEWEST_VERSION, DSH_PORT_DEFAULT, SKIN_PACK_PREFIX_MAX,
 } = require('./constants')
@@ -714,8 +714,9 @@ const SCROLL_GAP_DEFAULT = 17
 // menuGroupsRev 是「默认展开态」的版本号：改了上面任一组的默认值 / 删掉某组就 +1。
 // 页面侧（floating-page.js）在配置里读到旧版本号时，会把受影响的组强制回到新默认，
 // 否则老配置里存过的旧默认值会一直盖着新默认值，看起来像改动没生效。
-// （v3 起 timer 组内不再有 timerAdv 子折叠，该键已从表里删掉）
-const MENU_GROUPS_DEFAULT = { look: false, models: true, usage: false, timer: false, dsh: false }
+// （v3 起 timer 组内不再有 timerAdv 子折叠，该键已从表里删掉；
+//   v4 起全部组默认收起，菜单一屏可见，避免默认展开的组把别的组挤出视野）
+const MENU_GROUPS_DEFAULT = { look: false, models: false, usage: false, timer: false, dsh: false }
 function normMenuGroups(v) {
   const p = v && typeof v === 'object' ? v : {}
   const out = {}
@@ -798,6 +799,16 @@ function clampNum(v, lo, hi, dft) {
   const n = Number(v)
   if (!isFinite(n)) return dft
   return Math.min(hi, Math.max(lo, n))
+}
+// 大小倍率归一：夹到 [MIN_SCALE, MAX_SCALE] 后吸附到最近的整数档倍率。
+// 档位 k（1–SCALE_STEPS）的倍率 = MIN_SCALE + (k-1) * step，与设置页 / 浮动页同一刻度
+// （SCALE_STEPS 同值由 check-shared.mjs 校验）。落库只存档位倍率，
+// 旧存储里的 1.3/1.6 这类非整档值在下次读/写时自动归到最近档，滑块与数字框才对得上。
+function normScale(v, dft) {
+  const n = clampNum(v, MIN_SCALE, MAX_SCALE, dft)
+  const step = (MAX_SCALE - MIN_SCALE) / (SCALE_STEPS - 1)
+  const k = Math.max(1, Math.min(SCALE_STEPS, Math.round((n - MIN_SCALE) / step) + 1))
+  return MIN_SCALE + (k - 1) * step
 }
 // 计时到点留言：单行纯文本（换行会让系统通知的标题/正文错位），超长截断。
 // 上限与 floating-page.js 的 TIMER_NOTE_MAX、菜单输入框 maxLength 同值，三处要一起改
@@ -993,7 +1004,7 @@ function readConfig() {
   if (!p || typeof p !== 'object') return dft
   const models = normModels(p.models)
   return {
-    scale: clampNum(p.scale, MIN_SCALE, MAX_SCALE, dft.scale),
+    scale: normScale(p.scale, dft.scale),
     vol: clampNum(p.vol, 0, 1, dft.vol),
     alertVols: normAlertVols(p.alertVols, dft.alertVols),
     soundOn: p.soundOn !== false,
@@ -1226,7 +1237,7 @@ function writeConfig(cfg) {
 function patchConfig(patch) {
   const cfg = readConfig()
   const p = patch && typeof patch === 'object' ? patch : {}
-  if (p.scale !== undefined) cfg.scale = Math.round(clampNum(p.scale, MIN_SCALE, MAX_SCALE, cfg.scale) * 10) / 10
+  if (p.scale !== undefined) cfg.scale = normScale(p.scale, cfg.scale)
   if (p.vol !== undefined) cfg.vol = clampNum(p.vol, 0, 1, cfg.vol)
   if (p.alertVols !== undefined) cfg.alertVols = normAlertVols(p.alertVols, cfg.alertVols)
   if (p.soundOn !== undefined) cfg.soundOn = !!p.soundOn
@@ -1757,6 +1768,7 @@ module.exports = {
   writeSecrets,
   defaultConfig,
   clampNum,
+  normScale,
   readConfig,
   writeConfig,
   patchConfig,

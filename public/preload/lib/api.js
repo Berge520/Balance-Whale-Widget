@@ -166,25 +166,66 @@ function computeTodayUsage(data, custom) {
 
 async function fetchPlatformUsage(platformToken, custom) {
   const token = String(platformToken || '').replace(/^Bearer\s+/i, '')
-  if (!token) return { error: 'no platform token' }
+  if (!token) return { ok: false, code: 'NO_TOKEN', transient: false, error: '未配置平台 Token' }
   const now = new Date()
   const tz = -now.getTimezoneOffset() * 60
   const start = Math.floor(new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime() / 1000)
   const end = start + 86400
   const url = USAGE_URL + '?start=' + start + '&end=' + end + '&tz=' + tz
-  try {
-    const res = await fetch(url, {
-      headers: { Authorization: 'Bearer ' + token },
-      signal: AbortSignal.timeout(15000),
-    })
-    if (!res.ok) return { error: 'http ' + res.status }
-    const data = await res.json()
+  // 错误一律中文化、不透出英文码/原始异常（对齐 fetchBalanceWith）：调用方（getTodayModels /
+  // testPlatformToken）把这些 error 直接展示给用户，'http 401' / 'fetch failed' 用户看不懂。
+  // 5xx 与网络失败重试一次（与余额接口同口径）；空态仍返回硬契约 'no usage'，由调用方判为空列表。
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let res
+    try {
+      res = await fetch(url, {
+        headers: { Authorization: 'Bearer ' + token },
+        signal: AbortSignal.timeout(15000),
+      })
+    } catch (err) {
+      if (attempt === 0) { await new Promise((r) => setTimeout(r, 500)); continue }
+      return { ok: false, code: 'NET', transient: true, error: '网络请求失败（超时或无法连接用量接口），请检查网络/代理后重试' }
+    }
+    if (!res.ok) {
+      // 读取平台返回的具体错误：{"error":{"message":"..."}}
+      let serverMsg = ''
+      try {
+        const j = await res.json()
+        serverMsg = (j && j.error && j.error.message) ? String(j.error.message) : ''
+      } catch (err) {
+        try { serverMsg = (await res.text()).slice(0, 160) } catch (e2) {}
+      }
+      if (res.status === 401) {
+        return {
+          ok: false, code: 'AUTH', transient: false,
+          error: '平台 Token 无效或已过期（401）。请确认填的是 platform.deepseek.com「API keys」里 sk- 开头的密钥；若刚复制请重新完整复制后再保存。' +
+                 (serverMsg ? '（服务器：' + serverMsg.slice(0, 120) + '）' : ''),
+        }
+      }
+      if (res.status < 500) {
+        return {
+          ok: false, code: 'HTTP', transient: false,
+          error: '用量接口返回 HTTP ' + res.status + (serverMsg ? '：' + serverMsg : ''),
+        }
+      }
+      if (attempt === 0) { await new Promise((r) => setTimeout(r, 500)); continue }
+      return {
+        ok: false, code: 'HTTP', transient: true,
+        error: '用量接口暂时不可用（HTTP ' + res.status + (serverMsg ? '：' + serverMsg : '') + '），请稍后重试',
+      }
+    }
+    let data
+    try { data = await res.json() } catch (err) {
+      return { ok: false, code: 'PARSE', transient: false, error: '用量接口返回不是合法 JSON' }
+    }
     const u = computeTodayUsage(data, custom)
-    if (u && isFinite(u.amount)) return { amount: u.amount, tokens: u.tokens, byModel: u.byModel }
+    if (u && isFinite(u.amount)) {
+      return { ok: true, amount: u.amount, tokens: u.tokens, byModel: u.byModel }
+    }
+    // 空态：接口连通、当天没消耗。这个字面量是硬契约，调用方（getTodayModels / testPlatformToken）按它判空
     return { error: 'no usage' }
-  } catch (err) {
-    return { error: String((err && err.message) || err) }
   }
+  return { ok: false, code: 'HTTP', transient: true, error: '用量接口请求失败，请稍后重试' }
 }
 
 // ──────────────────────────────────────────────

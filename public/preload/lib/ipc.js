@@ -21,8 +21,8 @@ const dsh = new Proxy({}, {
 const {
   pushInit, sendToWidget, applyScaleToWindow, applyOnTop, pushConfig,
   winAlive, getWindow, queueLiveScale, widgetOrigin,
-  widgetSide, spaceAround, usableArea, snapRect, flippedOf,
-  syncTaskbarWatch, destroyWidget, ensureSkipTaskbar,
+  widgetSide, spaceAround, usableArea, snapRect, flippedOf, setWidgetPos,
+  syncTaskbarWatch, destroyWidget, ensureSkipTaskbar, show,
   beginDragSession, endDragSession, dragMoveTo,
 } = require('./widget')
 // 挂件菜单改配置后，通知已打开的设置窗口同步刷新开关（详见 settings.js 的 onConfigChange）。
@@ -54,6 +54,12 @@ function syncScaleFromConfig(scale) {
   emitConfigChange()
 }
 
+// 「页面已请求显示过」去重标志。声明在模块级而非 registerIpc 闭包内：窗口销毁重建后
+// 页面会重新 do-init 并再发一次 whale:show，闭包里的标志无人复位，重复请求会被 if 挡掉，
+// 挂件只能等满 WIDGET_AUTOSHOW_MS(3s) 兜底才显示。destroyWidget() 复位它（见 widget.js）。
+let widgetShown = false
+function resetWidgetShown() { widgetShown = false }
+
 function registerIpc() {
   // dsh 异步状态变更（3080 就绪 / 进程退出 / 安装或版本查询完成 …）主动推给挂件：
   // 挂件菜单不像设置页那样每 4s 轮询，只在点击操作时收一次回复，没有这路广播就会
@@ -71,6 +77,14 @@ function registerIpc() {
     getBalance().then((payload) => {
       sendToWidget('whale:balance', payload)
     })
+  })
+
+  // 页面把配置落地后请求显示窗口（窗口以 show:false 创建，防首帧露出随包内置形象）。
+  // 页面 do-init 只会调一次；这里再挡一道重复，避免多开时反复置顶抢焦点
+  ipcRenderer.on('whale:show', () => {
+    if (widgetShown) return
+    widgetShown = true
+    try { show() } catch (err) { logErr('[whale][ipc] 显示挂件失败', err && err.message) }
   })
 
   ipcRenderer.on('whale:refresh', (event, data) => {
@@ -172,7 +186,7 @@ function registerIpc() {
       const wgt = widgetOrigin(x, y)
       const wa = usableArea(wgt.x + s / 2, wgt.y + s / 2)
       const r = snapRect(wa, x, y, width)
-      w.setPosition(Math.round(r.x), Math.round(r.y))
+      setWidgetPos(r)
       writeAnchor(r.anchor)
       sendToWidget('whale:snapped', {
         hAnchor: r.anchor.hAnchor,
@@ -344,4 +358,4 @@ function registerIpc() {
   })
 }
 
-module.exports = { registerIpc }
+module.exports = { registerIpc, resetWidgetShown }

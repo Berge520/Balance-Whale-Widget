@@ -1,7 +1,7 @@
 /*
  * 悬浮窗窗口管理（CommonJS）：创建/销毁/几何/缩放/向子窗推送数据。
  */
-const { MIN_SCALE, MAX_SCALE, BASE_MIN, BASE_CAP, BASE_MAX, WIN_PAD, K } = require('./constants')
+const { MIN_SCALE, MAX_SCALE, BASE_MIN, BASE_CAP, BASE_MAX, WIN_PAD, WIDGET_AUTOSHOW_MS, K } = require('./constants')
 const { execFileSync } = require('child_process')
 const { log, logErr } = require('./log')
 const { clampNum, readConfig, readAnchor, writeAnchor, defaultAnchor, readTimer } = require('./store')
@@ -9,6 +9,17 @@ const { getCachedBalance, getModelsPayload } = require('./api')
 const { getSoundData } = require('./sounds')
 const { getSkinData, getBuiltinData } = require('./skins')
 const { getBubbleData } = require('./bubbles')
+
+// ipc.js 依赖 widget.js（取 show / destroyWidget 等），故这里不能顶层 require 它，否则成环。
+// 惰性取一次并缓存：销毁窗口时要复位 ipc 侧的 whale:show 去重标志，否则重建后
+// 页面重发的显示请求被挡掉，挂件只能等满 WIDGET_AUTOSHOW_MS 兜底才显示。
+let ipcResetWidgetShown = null
+function callResetWidgetShown() {
+  try {
+    if (!ipcResetWidgetShown) ipcResetWidgetShown = require('./ipc').resetWidgetShown
+    ipcResetWidgetShown()
+  } catch (err) { logErr('[whale][widget] 复位显示去重标志失败', err && err.message) }
+}
 
 let win = null
 let winCreatedAt = 0 // 窗口创建时刻（ms），用于区分「刚创建尚未显示」与「被隐藏」
@@ -128,21 +139,34 @@ function cursorOnTaskbar(info, edge, thickness) {
   return { inStrip: inY && x >= b.x + b.width - thickness, atEdge: inY && x >= b.x + b.width - slack }
 }
 
-// 「自动隐藏的任务栏此刻正弹出吗」—— 只能看光标：Windows 只在光标压到屏幕那条边时才把它
-// 拉出来，拉出后光标就落在它的矩形里，光标一离开它又缩回去。不能直接拿 workArea 判断：
+// 「自动隐藏的任务栏此刻正弹出吗」—— 没有可靠的系统查询，只能靠「光标何时压到屏幕那条边」这个
+// 直接证据：Windows 只在光标压到那条边时才把它拉出来。不能拿 workArea 判断：
 // Windows 上 Electron/uTools 的 workArea 不随任务栏显隐刷新，只反映进程启动时的状态
 // （electron#6312：display-metrics-changed 也不响应任务栏变化）。
-let tbPopped = false
-let tbLastIn = 0
-const TB_HOLD = 400 // 光标离开后仍按住一小会儿，避开任务栏收回动画
+//
+// 判据是「光标此刻是否压在条带上」+「距上次压上多久」，而不是单纯的「光标现在在哪」——
+// 后者修不掉这个 bug（v1.9.1）：任务栏弹出后，光标一旦离开，任务栏就带着收回动画缩回去；
+// 而光标从任务栏移到别处**必然**经过条带之外的区域，于是「已弹出」立刻被判成「已收起」，
+// 挂件当场落回、和收回动画打架，表现就是「任务栏都消失了，挂件还留在上面」。
+//
+// 让位/落回采用两个不同阈值：
+//  让位 —— 光标压在任务栏那条边上（atEdge）或条带内（inStrip）时**立即**算弹出，挂件马上让位；
+//  落回 —— 光标离开条带后，再等 TB_HIDE_DELAY 让它落回。这个短窗要 > 任务栏收回动画时长，
+//        否则挂件会在任务栏还在收的时候就抢着落回，和动画打架（= v1.9.1「任务栏没了挂件还在」的反向形态）。
+// 早期实现是单一 TB_MIN_SHOW=3000ms，让位和落回共用一个窗口：结果是光标早离开了，挂件还愣在原地
+// 最多 3 秒才落回（实测复现：250ms 离开、6740ms 才落回），用户感知即「避让后不归位」。
+// 「压在条带上点任务栏图标」也算 atEdge/inStrip，本身就是在按用户自己的任务栏，挂件替它让位同样成立。
+let tbLastEdge = -Infinity // 最近一次光标压在任务栏条带内的时刻（-Infinity → 首次必判未弹出，不会因初值 0 溢出）
+const TB_HIDE_DELAY = 500 // 光标离开条带后维持让位的时长（> 收回动画 ~300ms，又不至于让人等）
 function liveTaskbarPopped(info, edge, thickness) {
   if (!thickness) return false
   const s = cursorOnTaskbar(info, edge, thickness)
   const now = Date.now()
-  if (s.atEdge) tbPopped = true
-  else if (!s.inStrip && tbPopped && now - tbLastIn > TB_HOLD) tbPopped = false
-  if (s.inStrip) tbLastIn = now
-  return tbPopped
+  // 光标此刻在任务栏上（贴边拉出 or 压在条带里点按钮）→ 立即让位，并刷新「离开时刻」基准
+  const onTaskbar = s.atEdge || s.inStrip
+  if (onTaskbar) tbLastEdge = now
+  // 在任务栏上 → 弹出；刚离开但收回动画还没走完（<=TB_HIDE_DELAY）→ 仍算弹出；否则已收起
+  return onTaskbar || now - tbLastEdge <= TB_HIDE_DELAY
 }
 
 function sameDisplay(a, b) {
@@ -183,6 +207,8 @@ function taskbarBase() {
 }
 
 // 任务栏「当前」状态（供设置页展示）：visible = 正在占位（常显 / 自动隐藏已弹出）/ hidden = 已自动收起
+// 自动隐藏的情形下「已收起」只在最后一次贴边满 TB_MIN_SHOW 之后才成立 —— 光标离开并不能证明它收了，
+// 只能等；看不到它从何判断，见 liveTaskbarPopped 的注释。设置页每 2s 取一次，会看到这个状态稍晚翻转
 function taskbarState() {
   const tb = taskbarBase()
   if (!tb.edge) return { state: 'none', edge: '', thickness: 0 }
@@ -232,7 +258,7 @@ function repositionFromAnchor() {
     const winS = isFinite(sz[0]) ? sz[0] : WIN_PAD * 2 + BASE_MIN
     const wa = usableArea(pos[0] + winS / 2, pos[1] + winS / 2)
     const p = anchorToRect(wa, winS, readAnchor())
-    win.setPosition(Math.round(p.x), Math.round(p.y))
+    setWidgetPos(p)
     // 主动挪完窗口必须同步页面：否则菜单仍按旧位置摆，贴错边或朝屏幕外展开
     pushSnapped()
     return true
@@ -249,7 +275,16 @@ function repositionFromAnchor() {
 const WATCH_MS = 250
 let watchTimer = null
 let watchSig = ''
-let watchPos = ''
+// 上一次「由宿主按锚点摆出来的」位置。判 `moved` 不能拿上一 tick 的位置当基准：
+// 用户拖拽期间位置一直在变，等拖完（此刻位置与上一 tick 不同）任务栏状态再变，
+// moved 就会把这次重摆当成「用户还在拖」而吞掉；把基准改成「上次吸附落点」，
+// 则拖拽中移动（≠ 上次落点）依旧被拦，真需要重摆时（窗口仍在落点上）不会再被误拦。
+let snappedPos = ''
+// 把窗口按锚点摆到 p，并记下这次落点当基准
+function setWidgetPos(p) {
+  win.setPosition(Math.round(p.x), Math.round(p.y))
+  snappedPos = Math.round(p.x) + ',' + Math.round(p.y)
+}
 function watchTick() {
   if (!winAlive()) return
   try {
@@ -262,13 +297,12 @@ function watchTick() {
     const tb = taskbarBase()
     const sig = [info.id, info.bounds.x, info.bounds.y, info.bounds.width, info.bounds.height,
       info.wa.x, info.wa.y, info.wa.width, info.wa.height, tb.edge, tb.popped ? 1 : 0].join(',')
-    const pkey = x + ',' + y
-    const moved = !!watchPos && pkey !== watchPos
-    watchPos = pkey
+    // 窗口位置 ≠ 上次吸附落点 → 要么用户正在拖拽，要么拖完还没吸附（drag-end 会摆一次并刷新基准）
+    const moved = !!snappedPos && (x + ',' + y) !== snappedPos
     if (sig === watchSig) return
     const first = !watchSig
     watchSig = sig
-    // 首次只记基线；窗口位置刚变过（用户正在拖拽/缩放）时不抢位置，避免和操作打架
+    // 首次只记基线；拖拽中不抢位置，避免和操作打架
     if (first || moved) return
     log('[whale][taskbar] 可用区变化，按锚点重摆挂件', sig)
     clearLiveScaleCtx()
@@ -283,7 +317,7 @@ function syncTaskbarWatch() {
   const need = winAlive() && readConfig().avoidTaskbar !== false
   if (need && !watchTimer) {
     watchSig = ''
-    watchPos = ''
+    snappedPos = ''
     watchTimer = setInterval(watchTick, WATCH_MS)
     watchTick() // 立刻建立基线
   } else if (!need && watchTimer) {
@@ -557,6 +591,11 @@ function createWidget(focusable) {
       resizable: false,
       fullscreenable: false,
       enableLargerThanScreen: true, // 透明留白允许越出屏幕
+      // 先不显示：等页面把配置（含自定义形象本体）落地后再由页面调 show()。
+      // 不这么做的话窗口一创建就把 floating.html 的「首帧」亮出来 —— 此时 whale:init 还没到，
+      // 页面画的是随包内置形象（DSniang1），随后 applyConfig/applySkin 才换成用户设置的形象，
+      // 表现为「打开插件先闪一下内置形象」。窗口无法设置创建时透明度，只能靠延后显示规避
+      show: false,
       // 显式给最小/最大尺寸：否则 Windows 下无边框窗可能被钳制在“创建时尺寸”，
       // 表现为放大有效、缩小无效。窗口 = 挂件本体(base) + 四周留白(WIN_PAD)。
       minWidth: WIN_PAD * 2 + BASE_MIN - 40,
@@ -573,7 +612,6 @@ function createWidget(focusable) {
       focusable: wantFocus,
       alwaysOnTop: onTop,
       alwayOnTop: onTop, // uTools 类型里的拼写，两个都给
-      show: true,
       title: '小鲸鱼余额挂件',
       autoHideMenuBar: true,
       webPreferences: {
@@ -598,6 +636,14 @@ function createWidget(focusable) {
     try { win.show() } catch (err) {}
     try { applyOnTop(onTop) } catch (err) {}
     ensureSkipTaskbar() // 创建参数里的 skipTaskbar 未必被 uTools 透传，这里显式再声明一次
+    // 兜底显示：正常路径由页面在落地配置后调 show()（避免首帧露出内置形象，见上面的 show:false）。
+    // 但页面若因资产缺失、JS 报错、preload 未加载等原因始终没就绪，窗口会永远不可见 ——
+    // 那比「闪一下」糟得多。给一个充裕的兜底（页面真的异常时早该到了），
+    // 由 winAlive() 保证那时窗口没被销毁重建过
+    setTimeout(function () {
+      if (!winAlive()) return
+      try { if (typeof win.isVisible !== 'function' || !win.isVisible()) win.show() } catch (err) {}
+    }, WIDGET_AUTOSHOW_MS)
     setWidgetError('')
     syncTaskbarWatch() // 挂件就位后开始跟随任务栏显隐（「自动避让任务栏」关掉则不轮询）
     // 注意：uTools 返回的定制窗口「不包含 BrowserWindow / webContents 实例事件」，
@@ -624,6 +670,9 @@ function destroyWidget() {
   // 表现为「挂件再也调不了大小」。这种重建在拖拽中途就可能发生（ensureWidgetInner 改焦点、
   // 设置页重置后重建），不是理论情况。这里直接复用 endDragSession 的重置，别再抄一份字段清单。
   endDragSession()
+  // 复位 ipc 侧「已请求显示」标志：窗口没了，页面重建后会重新 do-init 再发一次 whale:show，
+  // 不复位的话该请求被去重吞掉，挂件要等满 WIDGET_AUTOSHOW_MS 兜底才出现（体感像「卡了一下」）。
+  callResetWidgetShown()
   syncTaskbarWatch() // 窗口没了 → 停掉任务栏轮询
 }
 
@@ -636,6 +685,14 @@ function toggleWidget() {
   }
   ensureWidget()
   return true
+}
+
+// 显示当前挂件窗口（由页面在首帧就绪后调 show 触发，见 createWidget 的 show:false）。
+// 窗口不存在（已被销毁 / 尚未创建）时什么都不做：那说明这次显示已无意义，
+// 重新创建会走 ensureWidget，其页面同样会在就绪后自己调 show
+function show() {
+  if (!winAlive()) return
+  try { win.show() } catch (err) {}
 }
 
 function sendToWidget(channel) {
@@ -700,6 +757,13 @@ let dragWinSize = 0 // 拖拽期窗口宽度缓存：见 beginDragSession
 function beginDragSession() {
   dragFrozen = true
   dragPendingScale = null
+  // 拖拽会挪窗口并阻断缩小；上次实时缩放的「已落定档位」作废，
+  // 否则松手后同样的 scale 会被去重逻辑挡掉、窗口停在拖拽前的尺寸（曾踩）
+  lastLiveScale = null
+  // 已排队但还没执行的那一帧实时缩放一并丢弃：它带着拖拽前的不动点，
+  // 拖拽开始后再落地会把窗口拉回拖前位置（与 dragMoveTo 抢 setPosition）
+  cancelLiveScaleSlot()
+  pendingLiveScale = null
   // 拖拽期尺寸被 dragFrozen 锁死（applyScaleToWindow 一律拒绝改尺寸），不可能中途变化，
   // 所以在会话开始读一次就够。原先 dragMoveTo 每帧都 win.getSize() —— 那是同步 IPC 往返，
   // 拖拽时每秒要付 ~60 次，且每次都拿到同一个值，纯属白烧。
@@ -770,14 +834,54 @@ function dragMoveTo(winX, winY) {
   } catch (err) {}
 }
 
-// 拖动滑块时的实时缩放：页面侧已用 rAF 合并 IPC（每帧最多一次），
-// 宿主侧直接同步执行 applyScaleToWindow，避免主窗不可见时 rAF 被节流导致延迟。
-// 优化后 applyScaleToWindow 实时路径只做一次 setBounds，无同步读 IPC，可扛 60fps。
+// 拖动滑块时的实时缩放：宿主侧再做一层帧合并。
+// 页面已用 rAF 合帧，但「快滑」时几乎每帧都跨档，setBounds 次数仍等于帧率，
+// 加上窗口重绘本身的开销，Windows 上表现为屏幕闪烁/闪动。这里把请求收进
+// pendingLiveScale，用 rAF 保证「每帧最多一次 setBounds」，且只取最新值
+// —— 合并掉中间帧不影响手感（人眼也分辨不出），但重绘次数被硬压在刷新率内。
+// ⚠️ 不能同步执行：原注释说的「避免主窗不可见时 rAF 被节流」在实时缩放下不成立 ——
+//    缩放时窗口必定可见且正在被操作。节流只会发生在窗口隐藏时，而那时本就无需缩放。
+// 上一档已落定的实时 scale，用于跳过同档重复请求
+let lastLiveScale = null
+// rAF 走 window 取用（ESLint 的 preload 环境只声明了 node + window，没铺 browser 全局）：
+// preload 跑在渲染进程里，window.requestAnimationFrame 一定存在；万一被裁剪则退化为 setTimeout
+const rafFn = (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function')
+  ? window.requestAnimationFrame.bind(window)
+  : function (fn) { return setTimeout(fn, 16) }
+const cafFn = (typeof window !== 'undefined' && typeof window.cancelAnimationFrame === 'function')
+  ? window.cancelAnimationFrame.bind(window)
+  : clearTimeout
+let pendingLiveScale = null
+let liveScaleRaf = 0
+let liveScaleTimer = 0
+// rAF 在窗口被遮挡时会被 Chromium 暂停（挂件常被别的窗口盖住），
+// 只靠 rAF 会「排队的那一帧永远不执行」→ 拖动中不实时、松手才落库（正是待修的症状）。
+// 用 setTimeout 与 rAF 竞速：谁先到谁执行，另一个被取消，保证最坏 ~16ms 内一定落地。
+function cancelLiveScaleSlot() {
+  if (liveScaleRaf) { cafFn(liveScaleRaf); liveScaleRaf = 0 }
+  if (liveScaleTimer) { clearTimeout(liveScaleTimer); liveScaleTimer = 0 }
+}
+function flushLiveScale() {
+  cancelLiveScaleSlot()
+  const n = pendingLiveScale
+  pendingLiveScale = null
+  if (n === null || !isFinite(n)) return
+  if (dragFrozen) { dragPendingScale = n; return } // 排队期间进了拖拽，转交 drag-end 补做
+  applyScaleToWindow(n, false)
+}
+function scheduleLiveScale() {
+  if (liveScaleRaf || liveScaleTimer) return
+  liveScaleRaf = rafFn(flushLiveScale)
+  liveScaleTimer = setTimeout(flushLiveScale, 16)
+}
 function queueLiveScale(s) {
   const n = Number(s)
   if (!isFinite(n)) return
   if (dragFrozen) { dragPendingScale = n; return } // 拖拽中冻结，drag-end 后补做
-  applyScaleToWindow(n, false)
+  if (n === lastLiveScale) return // 同一档重复请求：setBounds 是纯粹的重绘浪费
+  lastLiveScale = n
+  pendingLiveScale = n
+  scheduleLiveScale()
 }
 
 // 缩放：以鲸鱼角为不动点重算窗口尺寸/位置（判定均基于挂件本体矩形）
@@ -837,6 +941,8 @@ function applyScaleToWindow(scale, persist) {
     const nwt = anchor.vAnchor === 'top' ? pivotY : pivotY - newS
     const c = clampWidget(wa, nwl, nwt, newS)
     const wp = winOrigin(c.x, c.y)
+    // 缩放同样要刷新吸附落点基准：否则下一次任务栏/显示器变化会被 moved 误判成「用户还在拖」而跳过
+    snappedPos = Math.round(wp.x) + ',' + Math.round(wp.y)
     // uTools createBrowserWindow 的窗口在 resizable:false 时，运行时 setSize/setBounds
     // 可能被底层忽略（表现为拖动滑块无反应、只能重启生效）。临时放开 resizable，
     // 改完再锁回，避免用户手动拖拽边缘 resize。
@@ -874,6 +980,13 @@ function applyScaleToWindow(scale, persist) {
     } else {
       // 持久化模式：清除实时缓存，写 anchor
       liveScaleCtx = null
+      // 落库路径会从真实几何重算尺寸，实时去重的基准必须一起作废，
+      // 否则下一次同档实时请求会被误判为「无变化」而跳过
+      lastLiveScale = null
+      // 已排队的实时帧同样作废：它按旧的实时不动点算位置，落库后再执行会把
+      // 刚写好的 anchor 顶掉（松手瞬间的缩放会被旧位置拉回去）
+      cancelLiveScaleSlot()
+      pendingLiveScale = null
       const nextAnchor = {
         hAnchor: anchor.hAnchor,
         hDist: anchor.hAnchor === 'left' ? Math.round(c.x - wa.x) : Math.round(wa.x + wa.width - (c.x + newS)),
@@ -906,6 +1019,7 @@ module.exports = {
   anchorToRect,
   snapRect,
   flippedOf,
+  setWidgetPos,
   winAlive,
   getWindow,
   applyOnTop,
@@ -915,6 +1029,7 @@ module.exports = {
   ensureWidget,
   destroyWidget,
   toggleWidget,
+  show,
   sendToWidget,
   pushInit,
   pushConfig,

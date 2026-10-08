@@ -312,10 +312,4 @@ onUnmounted(endDrag)
   font-size: 12px;
   color: var(--err);
 }
-.hint {
-  margin: 10px 0 0;
-  font-size: 12px;
-  line-height: 1.6;
-  color: var(--fg-faint);
-}
 </style>

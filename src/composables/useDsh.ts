@@ -945,7 +945,7 @@ function dshQueryVersions() {
 const dshUsage = ref<DshUsageResult | null>(null)
 const dshUsageBusy = ref(false)
 const dshUsageFlash: Flash = useFlash()
-const dshUsageFolds = reactive({ help: false })
+const dshUsageFolds = reactive({ help: true })
 // 图表档位：宿主一次给 31 天（days31，索引 0 是今天），切档只改前端切片、不重扫
 const DSH_USAGE_RANGES = [7, 14, 30] as const
 const dshUsageRange = ref(7)
@@ -1047,7 +1047,7 @@ function dshUsageClearCache() {
 const diagnose = ref<DshDiagnoseResult | null>(null)
 const diagnoseBusy = ref(false)
 const diagnoseFlash: Flash = useFlash()
-const diagnoseFolds = reactive({ help: false })
+const diagnoseFolds = reactive({ help: true })
 function diagnoseRefresh(force = false) {
   if (diagnoseBusy.value) return
   diagnoseBusy.value = true
@@ -1821,7 +1821,7 @@ const DSH_ISOLATE_MAX_BATCH = 100
 const dshIsolateFlash: Flash = useFlash()
 const dshIsolate = ref<DshIsolateCandidatesResult | null>(null)
 const dshIsolateBusy = ref(false)
-const dshIsolateFolds = reactive({ help: false, list: false })
+const dshIsolateFolds = reactive({ help: true, list: false })
 // 勾选名单（用 Set 因为要频繁增删；渲染时再转数组）
 const dshIsolatePicked = ref<Set<string>>(new Set())
 // dryRun 探出来的改动计划：非空即处于「待确认」态（两步确认的第一步）
@@ -2098,7 +2098,7 @@ const dshMarketLoaded = ref(false)
 // 里面的来源单选、测速、已装状态就会跟着跑（改来源会触发 dshMarketLoad）。
 // 用一个显式开关把「打开卡片」与「进入市场」分开，保证**展开卡片本身零网络请求**。
 const dshMarketRevealed = ref(false)
-const dshMarketFolds = reactive({ help: false, filters: false, source: false, install: false })
+const dshMarketFolds = reactive({ help: true, filters: false, source: false, install: false })
 // 分类 chip 行是否展开全部。默认收起：24 类平铺会占三行，把「范围 / 排序」挤到首屏之外，
 // 而这 24 类里绝大多数人只看前几个；点 ⌄ 才铺开其余
 const dshMarketCatExpand = ref(false)

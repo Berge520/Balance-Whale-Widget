@@ -144,10 +144,11 @@ test('patchConfig 逐键生效：每个夹具都能真的改动对应配置键',
 
 test('patchConfig 只改传入的键，未传的键保持现值', () => {
   clearCfg()
+  // 1.6 不是整档倍率（15 档步长 (2.5-0.6)/14 ≈ 0.13571，档位 8 才是 1.55），会被吸附到最近档
   patchConfig({ scale: 1.6, quietOn: true, mailTo: 'x@y.z' })
   const cfg = readConfig()
   // 打过的键是新值
-  assert.equal(cfg.scale, 1.6)
+  assert.equal(cfg.scale, S.normScale(1.6, 1.3))
   assert.equal(cfg.quietOn, true)
   assert.equal(cfg.mailTo, 'x@y.z')
   // 没打过的键 = 默认值（尤其别被 patchConfig 顺手清零）
@@ -182,6 +183,30 @@ test('patchConfig 非法值不写入（保持现值），不抛错', () => {
   assert.equal(after.timerMode, before.timerMode, 'timerMode 非法值应保持现值')
   assert.equal(after.snapMode, before.snapMode, 'snapMode 非法值应保持现值')
   assert.equal(after.scale, 2.5, 'scale 越界应夹到 MAX_SCALE(2.5)')
+})
+
+test('scale 归一到整数档：越界夹取 + 非整档吸附到最近档（1.3 这类旧值不再落盘）', () => {
+  clearCfg()
+  const { MIN_SCALE, MAX_SCALE, SCALE_STEPS } = require('../public/preload/lib/constants.js')
+  const step = (MAX_SCALE - MIN_SCALE) / (SCALE_STEPS - 1)
+  // 档位 k 的倍率 = MIN_SCALE + (k-1)*step，第 6 档才是「1.3」这位数的家
+  assert.equal(S.normScale(3, 1), MAX_SCALE, '越上界夹到 MAX_SCALE')
+  assert.equal(S.normScale(0.1, 1), MIN_SCALE, '越下界夹到 MIN_SCALE')
+  // 恰好落在档位上的值原样保留（含浮点累积误差影响不到整数档）
+  assert.equal(S.normScale(MIN_SCALE + 5 * step, 1), MIN_SCALE + 5 * step)
+  // 非整档（1.3 是档位 6.15…）吸附到最近档，且结果必是某个整数档倍率
+  for (const v of [1.3, 1.6, 0.75, 2.11]) {
+    const snapped = S.normScale(v, 1)
+    const k = Math.round((snapped - MIN_SCALE) / step) + 1
+    assert.ok(Math.abs((snapped - MIN_SCALE) / step + 1 - k) < 1e-9, `normScale(${v}) 未落在整数档上`)
+    assert.ok(Math.abs(snapped - v) <= step / 2 + 1e-9, `normScale(${v}) 偏离超过半档`)
+  }
+  // 旧存储里躺着非整档倍率时，readConfig 读出来也必须是整档
+  clearCfg()
+  store.set(K.config, { ...defaultConfig(), scale: 1.3 })
+  const cfg = readConfig()
+  const k = Math.round((cfg.scale - MIN_SCALE) / step) + 1
+  assert.equal(cfg.scale, MIN_SCALE + (k - 1) * step, 'readConfig 未把旧的非整档 scale 吸附到整档')
 })
 
 test('timerAt 必须是合法的 24 小时时刻（99:99 曾能一路写进配置）', () => {
