@@ -231,24 +231,9 @@ function codexClearCache() {
 
 <style scoped>
 /* 设计令牌（--fg / --accent / --line / --ok / --err 等）来自 main.css 的 :root。
-   通用控件样式原本由 App.vue 的 scoped 样式提供，组件拆分后 scoped 隔离掉了，
-   这里按本组件用到的部分补齐一份。.btn-row 骨架、.link-btn 与 utils 档位配色已在
-   main.css（单一来源），此处不再留副本。 */
-.card {
-  background: var(--card-bg);
-  border: 1px solid var(--card-border);
-  border-radius: 12px;
-  padding: 16px;
-  margin-bottom: 16px;
-  /* 点搜索命中标签滚到卡片时，吸顶的 .tab-bar 会盖住卡头；预留它的高度让卡顶落在下方 */
-  scroll-margin-top: var(--tab-bar-h, 96px);
-}
-.card h2 {
-  margin: 0 0 12px;
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--fg-dim);
-}
+   通用控件样式已由 main.css 统一提供（全局唯一来源），本组件只留自身特有的控件样式。
+   .btn-row 骨架、.link-btn 与 utils 档位配色也已在 main.css，此处不再留副本。 */
+
 .card-head {
   display: flex;
   align-items: center;
@@ -287,21 +272,7 @@ function codexClearCache() {
 .dsh-card .btn-row button {
   flex: 1 1 auto;
 }
-.field {
-  display: block;
-  margin: 10px 0;
-}
-.field.row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-.label {
-  font-size: 13px;
-  flex: 0 1 auto;
-  min-width: 72px;
-  overflow-wrap: anywhere;
-}
+
 /* 值可能是长路径（会话目录）：作为 flex 项默认 min-width:auto 不肯收缩，会撑破卡片 */
 .ver {
   font-size: 13px;
@@ -316,22 +287,7 @@ function codexClearCache() {
   color: var(--fg-dim);
   word-break: break-all;
 }
-.hint {
-  margin: 10px 0 0;
-  font-size: 12px;
-  color: var(--fg-faint);
-  line-height: 1.6;
-}
-.msg {
-  margin: 10px 0 0;
-  font-size: 12px;
-}
-.msg.ok {
-  color: var(--ok);
-}
-.msg.err {
-  color: var(--err);
-}
+
 /* 口径指标格：等分列，数字统一大一号、单位降到标签行，各格基线对齐。
    列数用 auto-fit：格数变化时不空列、不挤成两行里只放一个 */
 .stat-grid {
@@ -425,10 +381,5 @@ function codexClearCache() {
   font-size: 11px;
   word-break: break-all;
 }
-.fold {
-  margin-top: 12px;
-}
-.fold > .link-btn {
-  margin-top: 0;
-}
+
 </style>

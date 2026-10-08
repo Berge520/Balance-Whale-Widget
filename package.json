@@ -7,7 +7,7 @@
     "typecheck": "vue-tsc --noEmit",
     "lint": "eslint .",
     "test": "node --test \"test/**/*.test.mjs\"",
-    "prebuild": "node scripts/sync-version.mjs && node scripts/check-shared.mjs && node scripts/check-dead-settings.mjs && node scripts/gen-search-index.mjs --check",
+    "prebuild": "node scripts/sync-version.mjs && node scripts/check-shared.mjs && node scripts/check-dead-settings.mjs && node scripts/gen-search-index.mjs --check && node scripts/check-orphan-css.mjs --fail",
     "build": "vite build",
     "release": "node scripts/release.mjs"
   },

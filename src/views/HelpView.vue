@@ -129,40 +129,9 @@ function openLogFile() {
 
 <style scoped>
 /* 设计令牌（--fg / --accent / --line / --ok / --err 等）全部来自 main.css 的 :root。
-   通用控件样式原本由 App.vue 的 scoped 样式提供，组件拆分后 scoped 隔离掉了，
-   这里按本组件用到的部分补齐一份。.btn-row 骨架、.link-btn 与 utils 档位配色已在 main.css
-   （单一来源），此处不再留副本。 */
-.card {
-  background: var(--card-bg);
-  border: 1px solid var(--card-border);
-  border-radius: 12px;
-  padding: 16px;
-  margin-bottom: 16px;
-  /* 点搜索命中标签滚到卡片时，吸顶的 .tab-bar 会盖住卡头；预留它的高度让卡顶落在下方 */
-  scroll-margin-top: var(--tab-bar-h, 96px);
-}
-.card h2 {
-  margin: 0 0 12px;
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--fg-dim);
-}
-.hint {
-  margin: 10px 0 0;
-  font-size: 12px;
-  color: var(--fg-faint);
-  line-height: 1.6;
-}
-.fold {
-  margin-top: 12px;
-}
-.fold > .link-btn {
-  margin-top: 0;
-}
-.fold + .fold {
-  padding-top: 12px;
-  border-top: 1px solid var(--line);
-}
+   通用控件样式已由 main.css 统一提供（全局唯一来源），本组件只留自身特有的控件样式。
+   .btn-row 骨架、.link-btn 与 utils 档位配色也已在 main.css，此处不再留副本。 */
+
 .guide {
   margin-top: 10px;
   padding: 10px 12px;
@@ -207,14 +176,5 @@ function openLogFile() {
   overflow: auto;
   user-select: text;
 }
-.msg {
-  margin: 10px 0 0;
-  font-size: 12px;
-}
-.msg.ok {
-  color: var(--ok);
-}
-.msg.err {
-  color: var(--err);
-}
+
 </style>

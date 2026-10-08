@@ -39,6 +39,11 @@ function msgCls(f: Flash) { return { ok: !f.err, err: f.err } }
 const SNAP_RATIO_MIN = 1
 const SNAP_RATIO_MAX = 45
 
+// 「位置与吸附」折叠态：贴边间距 / 吸附 / 避让滚动条 / 复位都是「装完就不动」的低频项，
+// 却占着本卡后半段整整一屏。默认收起，让常改的显隐 / 置顶 / 透明度 / 穿透留在首屏。
+// 纯展示态、不给父级，故留组件内部（同 UsageChart 的 modelsOpen）
+const posFold = ref(false)
+
 // 表单控件统一回写父级：cfg 是 prop，子组件直接改写属于规范外的副作用，
 // 一律 emit('patch') 交给父级落盘（与 AccelView 同一范式）。改完由宿主 saveConfig
 // 的 emitConfigChange 回推、父级 applyConfig 回填，形成闭环。
@@ -127,6 +132,12 @@ function onOpacityCommit() {
       <em v-if="!cfg.avoidTaskbar">（避让已关闭，挂件位置不再跟随任务栏变化）</em>
     </p>
 
+    <!-- 位置与吸附：低频项收进一个默认收起的折叠（贴边间距 / 吸附 / 滚动条 / 复位） -->
+    <div class="fold">
+      <button class="link-btn utils-btn utils-secondary" type="button" @click="posFold = !posFold">
+        {{ posFold ? '收起位置与吸附' : '位置与吸附（贴边间距 / 吸附与翻转 / 避让滚动条 / 复位）' }}
+      </button>
+      <div v-if="posFold" class="guide">
     <label class="field row">
       <span class="label">贴边间距</span>
       <span class="edge-row">
@@ -173,60 +184,17 @@ function onOpacityCommit() {
       <button class="secondary utils-btn utils-secondary" @click="emit('reset-pos')">复位窗口位置</button>
     </div>
     <p class="hint">把挂件挪回默认位置（右下角、紧贴边缘）——换显示器、改分辨率或拖出屏幕后用。</p>
+      </div>
+    </div>
     <p v-if="widgetFlash.msg" class="msg" :class="msgCls(widgetFlash)">{{ widgetFlash.msg }}</p>
   </section>
 </template>
 
 <style scoped>
 /* 设计令牌（--fg / --accent / --line / --ok / --err 等）全部来自 main.css 的 :root。
-   通用控件样式原本由 App.vue 的 scoped 样式提供，组件拆分后 scoped 隔离掉了，
-   这里按本组件用到的部分补齐一份。.btn-row 骨架与 utils 档位配色已在 main.css（单一来源），
-   此处不再留副本。 */
-.card {
-  background: var(--card-bg);
-  border: 1px solid var(--card-border);
-  border-radius: 12px;
-  padding: 16px;
-  margin-bottom: 16px;
-  /* 点搜索命中标签滚到卡片时，吸顶的 .tab-bar 会盖住卡头；预留它的高度让卡顶落在下方 */
-  scroll-margin-top: var(--tab-bar-h, 96px);
-}
-.card h2 {
-  margin: 0 0 12px;
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--fg-dim);
-}
-.field {
-  display: block;
-  margin: 10px 0;
-}
-.field.row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-.field.check {
-  justify-content: flex-start;
-  /* 标签换行成多行时，复选框跟首行对齐 —— 居中对齐会飘到两行之间，看起来像对错了行 */
-  align-items: flex-start;
-}
-.label {
-  font-size: 13px;
-  flex: 0 1 auto;
-  min-width: 72px;
-  overflow-wrap: anywhere;
-}
-.field.check .label {
-  flex: 1 1 auto;
-  min-width: 0;
-  line-height: 1.5;
-}
-.label em {
-  font-style: normal;
-  color: var(--fg-faint);
-  font-size: 11px;
-}
+   通用控件样式已由 main.css 统一提供（全局唯一来源），本组件只留自身特有的控件样式。
+   .btn-row 骨架与 utils 档位配色也已在 main.css，此处不再留副本。 */
+
 select {
   width: 100%;
   box-sizing: border-box;
@@ -249,9 +217,7 @@ select:focus,
   border-color: var(--accent);
   box-shadow: 0 0 0 3px rgba(83, 107, 169, 0.18);
 }
-.field.row select {
-  flex: 1;
-}
+
 .range {
   flex: 1;
   accent-color: var(--accent);
@@ -298,21 +264,5 @@ input[type='checkbox'] {
   width: 16px;
   height: 16px;
   accent-color: var(--accent);
-}
-.msg {
-  margin: 10px 0 0;
-  font-size: 12px;
-}
-.msg.ok {
-  color: var(--ok);
-}
-.msg.err {
-  color: var(--err);
-}
-.hint {
-  margin: 10px 0 0;
-  font-size: 12px;
-  color: var(--fg-faint);
-  line-height: 1.6;
 }
 </style>

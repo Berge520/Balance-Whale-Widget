@@ -179,54 +179,10 @@ function backupCancelPick() {
 
 <style scoped>
 /* 设计令牌（--fg / --accent / --line / --ok / --err 等）全部来自 main.css 的 :root。
-   通用控件样式（.card / .field / .label / .msg / .hint / .guide-use 等）原本由 App.vue 的
-   scoped 样式提供，组件拆分后 scoped 隔离掉了，这里按本组件用到的部分补齐一份。
-   .btn-row 骨架与 utils 档位配色已在 main.css（单一来源），此处不再留副本。 */
-.card {
-  background: var(--card-bg);
-  border: 1px solid var(--card-border);
-  border-radius: 12px;
-  padding: 16px;
-  margin-bottom: 16px;
-  /* 点搜索命中标签滚到卡片时，吸顶的 .tab-bar 会盖住卡头；预留它的高度让卡顶落在下方 */
-  scroll-margin-top: var(--tab-bar-h, 96px);
-}
-.card h2 {
-  margin: 0 0 12px;
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--fg-dim);
-}
-.field {
-  display: block;
-  margin: 10px 0;
-}
-.field.row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-.field.check {
-  justify-content: flex-start;
-  /* 标签换行成多行时，复选框跟首行对齐 —— 居中对齐会飘到两行之间，看起来像对错了行 */
-  align-items: flex-start;
-}
-.label {
-  font-size: 13px;
-  flex: 0 1 auto;
-  min-width: 72px;
-  overflow-wrap: anywhere;
-}
-.field.check .label {
-  flex: 1 1 auto;
-  min-width: 0;
-  line-height: 1.5;
-}
-.label em {
-  font-style: normal;
-  color: var(--fg-faint);
-  font-size: 11px;
-}
+   通用控件样式（.card / .field / .label / .msg / .hint / .guide-use 等）已由 main.css
+   统一提供（全局唯一来源），本组件只留自身特有的控件样式。
+   .btn-row 骨架与 utils 档位配色也已在 main.css，此处不再留副本。 */
+
 input[type='password'] {
   width: 100%;
   box-sizing: border-box;
@@ -247,22 +203,7 @@ input[type='checkbox'] {
   height: 16px;
   accent-color: var(--accent);
 }
-.msg {
-  margin: 10px 0 0;
-  font-size: 12px;
-}
-.msg.ok {
-  color: var(--ok);
-}
-.msg.err {
-  color: var(--err);
-}
-.hint {
-  margin: 10px 0 0;
-  font-size: 12px;
-  color: var(--fg-faint);
-  line-height: 1.6;
-}
+
 .guide-use {
   margin: 0;
   color: var(--fg);

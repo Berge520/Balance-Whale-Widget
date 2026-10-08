@@ -1,6 +1,6 @@
 <script lang="ts" setup>
-import { reactive, ref, watch } from 'vue'
-import type { SkinMeta, SoundMeta, SoundRole } from '../types/services'
+import { computed, reactive, ref, watch } from 'vue'
+import type { SkinGallery, SkinMeta, SoundMeta, SoundRole } from '../types/services'
 
 // 「挂件外观」整卡：大小 / 形象 / 深浅色 / 气泡与文案 / 音效，从设置页 App.vue 抽出。
 // 仍有多处留在父级，按 props 下传或 emit 触发，不能跟着搬：
@@ -11,10 +11,10 @@ import type { SkinMeta, SoundMeta, SoundRole } from '../types/services'
 //   - doRandomSkin / onToggleIncludeBuiltin：都要写 skinFlash 并刷新画廊，留父级，本卡 emit 触发。
 //   - 深浅色应用（applyUtoolsDark）：读全局 utools 与 document，父级 1s 轮询也在跑，留父级，
 //     本卡 emit('ui-mode-change') 由父级落盘并应用。
-//   - 量表换算：父级 applyConfig 回填时也要用（scaleToNum），
-//     故换算函数留父级，本卡只把输入的数值 emit 上去。
-// 吸附区 / 量表上下限等常量：MIN_SCALE / MAX_SCALE 的第三份副本由 scripts/check-shared.mjs
-// 比对（指向 App.vue），不搬进来，模板所需档位数以 prop 传入。
+//   - 量表换算：父级 applyConfig 回填时也要用（scaleToNum / numToScale / snapScale），
+//     故换算函数留父级，本卡只把输入的档位 emit 上去。
+// 吸附区 / 量表上下限与档位数等常量：MIN_SCALE / MAX_SCALE / SCALE_STEPS 的第三份副本由
+// scripts/check-shared.mjs 比对（指向 App.vue），不搬进来，模板所需档位数以 prop 传入。
 const props = defineProps<{
   // 挂件配置整体传入：本卡只读写外观相关字段，落盘统一走 emit('patch')
   cfg: any
@@ -24,6 +24,10 @@ const props = defineProps<{
   legacyBuiltinSkins: string[]
   // 当前使用的自定义形象元信息（无则 null）
   skinMeta: SkinMeta | null
+  // 画廊（父级 refreshSkin 填充）：只为在本卡显示「随机池有多大」。
+  // 「随机」的抽签池在父级 allSkinChoices 里算（含内置），这里只取画廊这一半用于展示口径，
+  // 避免把宿主抽签逻辑在视图层再实现一遍
+  skinGallery: SkinGallery | null
   // 已导入形象但当前未使用
   skinUnused: boolean
   // 与「资源」页画廊共用的操作反馈槽（父级写入，本卡只显示）
@@ -41,21 +45,30 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{
   (e: 'patch', p: Record<string, any>): void
-  (e: 'scale-live', v: number): void
   (e: 'scale-num-live', v: number): void
-  // 无参：range 与 number 两个入口的 change 都走它，父级统一以当前 cfg.scale 为准落盘
+  // 无参：range 与 number 两个入口的 change 都走它，父级统一以当前 cfg.scaleNum 为准落盘
   (e: 'scale-commit'): void
   (e: 'random-skin'): void
   (e: 'toggle-include-builtin', on: boolean): void
   (e: 'ui-mode-change', mode: string): void
 }>()
+// 「随机」抽签池规模：内置那张（开关打开时）+ 画廊里未取消参与随机的项。
+// 口径与父级 allSkinChoices 一致 —— 这里只用来显示，真正的抽签仍在父级 doRandomSkin。
+const randomPoolCount = computed(() => {
+  const builtin = props.cfg.randomIncludeBuiltin !== false ? 1 : 0
+  return builtin + (props.skinGallery?.items || []).filter((it) => it.random !== false).length
+})
+// 括号里的口径说明：只有一种情况需要解释（内置关掉了），其余情形保持简短
+const randomPoolNote = computed(() => (props.cfg.randomIncludeBuiltin === false
+  ? '只算你标了「参与随机」的'
+  : '含随包内置那张'))
 
 // 统一的消息态：与父级 App.vue 里的同名工具保持同一定义（内联一份，免父子透传 4 行工具）
 type Flash = { msg: string; err: boolean }
 function msgCls(f: Flash) { return { ok: !f.err, err: f.err } }
 
 // 两个折叠组（气泡与文案 / 音效）：仅本卡消费，随卡搬入
-const lookFolds = reactive({ bubble: false, sound: false })
+const lookFolds = reactive({ bubble: true, sound: true })
 
 // —— 音效音量：本地草稿。父级 cfg.vol 还供挂件预览，故本卡只 emit 落盘，
 // 显示值走草稿避免依赖父级回推的时序 ——
@@ -85,9 +98,21 @@ function onVolInput(e: Event) {
 
     <label class="field row">
       <span class="label">大小</span>
-      <input class="range" type="range" min="0.6" max="2.5" step="0.1" :value="cfg.scale"
-             @input="emit('scale-live', Number(($event.target as HTMLInputElement).value))"
-             @change="emit('scale-commit')" />
+      <!-- 滑块与右侧数字框是同一刻度的两种形态（1–scaleSteps 整数档），都绑 cfg.scaleNum。
+           原先滑块走 0.6–2.5/step 0.1（20 档）而数字框走 1–15（15 档），两个分母不同的刻度
+           映射同一个 scale，互相把对方挤到非整数位（1.3 这种值根本不是 15 档里的任何一档）。
+           input 只更新读数（scale-num-live 不再推实时缩放），change 才落盘并让挂件改窗口 ——
+           拖动期间不动窗口，规避「窗口边动边缩 → thumb 追手抖 + 快滑闪」。
+           下方刻度点给整数档提供视觉锚点，弥补拖动时看不到挂件真实大小的落差。 -->
+      <span class="range-wrap">
+        <input class="range" type="range" min="1" :max="scaleSteps" step="1" :value="cfg.scaleNum"
+               :style="{ '--steps': scaleSteps }"
+               @input="emit('scale-num-live', Number(($event.target as HTMLInputElement).value))"
+               @change="emit('scale-commit')" />
+        <span class="range-ticks" aria-hidden="true">
+          <i v-for="n in scaleSteps" :key="n" :class="{ on: n <= cfg.scaleNum }"></i>
+        </span>
+      </span>
       <input class="num" type="number" min="1" :max="scaleSteps" step="1" :value="cfg.scaleNum"
              @input="emit('scale-num-live', Number(($event.target as HTMLInputElement).value))"
              @change="emit('scale-commit')" />
@@ -112,6 +137,14 @@ function onVolInput(e: Event) {
       <input type="checkbox" :checked="cfg.randomIncludeBuiltin !== false"
              @change="emit('toggle-include-builtin', ($event.target as HTMLInputElement).checked)" />
     </label>
+    <!-- 「随机抽的是哪一池」此前只在「资源」页的操作说明里提一句，用户在外观页点「随机」时
+         既不知道池子里有几张、也不知道是哪几张。这里把规模常驻出来（随 inbox 实时变化），
+         「是哪几张」交给资源页缩略图上的标记（那里才有格子可标）。 -->
+    <p v-if="skinGallery" class="hint">
+      「随机」从 {{ randomPoolCount }} 张里挑（{{ randomPoolNote }}）。
+      具体是哪几张，见「资源 → 导入的形象」里带
+      <span class="skin-pool-legend-dot"></span> 标记的格子。
+    </p>
     <p v-if="cfg.skin === 'custom' && !skinMeta" class="hint">
       还没有导入形象，去「资源」页加一张后这里才有「自定义」可用（当前会回退为「默认形象」）。
     </p>
@@ -141,7 +174,7 @@ function onVolInput(e: Event) {
       <button class="link-btn utils-btn utils-secondary" @click="lookFolds.bubble = !lookFolds.bubble">{{ lookFolds.bubble ? '收起气泡与文案' : '气泡与文案（主题 · 峰谷 · 思考气泡 · 报时 · 菜单按钮）' }}</button>
       <div v-if="lookFolds.bubble">
         <label class="field row">
-          <span class="label">气泡主题</span>
+          <span class="label">气泡配色</span>
           <select :value="cfg.theme" @change="emit('patch', { theme: ($event.target as HTMLSelectElement).value })">
             <option value="default">默认（蓝白）</option>
             <option value="dark">深色</option>
@@ -219,54 +252,21 @@ function onVolInput(e: Event) {
 
 <style scoped>
 /* 设计令牌（--fg / --accent / --line / --ok / --err 等）全部来自 main.css 的 :root。
-   通用控件样式原本由 App.vue 的 scoped 样式提供，组件拆分后 scoped 隔离掉了，
-   这里按本组件用到的部分补齐一份。.btn-row 骨架、utils 档位配色与 .link-btn 基类
-   已在 main.css（单一来源），此处不再留副本。 */
-.card {
-  background: var(--card-bg);
-  border: 1px solid var(--card-border);
-  border-radius: 12px;
-  padding: 16px;
-  margin-bottom: 16px;
-  /* 点搜索命中标签滚到卡片时，吸顶的 .tab-bar 会盖住卡头；预留它的高度让卡顶落在下方 */
-  scroll-margin-top: var(--tab-bar-h, 96px);
+   通用控件样式已由 main.css 统一提供（全局唯一来源），本组件只留自身特有的控件样式。
+   .btn-row 骨架、utils 档位配色与 .link-btn 基类也已在 main.css，此处不再留副本。 */
+
+/* 正文里嵌的「参与随机」图例小圆点：与「资源 → 导入的形象」格子上那枚角标
+   （.skin-cell-pool）保持同一形态与配色，用户在这边读到时能对上那边的视觉 */
+.skin-pool-legend-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  margin: 0 2px;
+  border-radius: 50%;
+  background: var(--ok);
+  vertical-align: middle;
 }
-.card h2 {
-  margin: 0 0 12px;
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--fg-dim);
-}
-.field {
-  display: block;
-  margin: 10px 0;
-}
-.field.row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-.field.check {
-  justify-content: flex-start;
-  /* 标签换行成多行时，复选框跟首行对齐 —— 居中对齐会飘到两行之间，看起来像对错了行 */
-  align-items: flex-start;
-}
-.label {
-  font-size: 13px;
-  flex: 0 1 auto;
-  min-width: 72px;
-  overflow-wrap: anywhere;
-}
-.field.check .label {
-  flex: 1 1 auto;
-  min-width: 0;
-  line-height: 1.5;
-}
-.label em {
-  font-style: normal;
-  color: var(--fg-faint);
-  font-size: 11px;
-}
+
 select {
   width: 100%;
   box-sizing: border-box;
@@ -289,12 +289,39 @@ select:focus,
   border-color: var(--accent);
   box-shadow: 0 0 0 3px rgba(83, 107, 169, 0.18);
 }
-.field.row select {
-  flex: 1;
-}
+
 .range {
   flex: 1;
   accent-color: var(--accent);
+}
+/* 刻度点容器：与滑块同宽、同占位（滑块吃满剩余宽度，刻度点贴在它正下方）。
+   纵向排列滑块 + 刻度，行高只多几像素，不影响 .field.row 的居中对齐。 */
+.range-wrap {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+/* 刻度点：15 档均分。已到达的档位（n <= scaleNum）点亮为主题色，
+   给整数档提供视觉锚点 —— 拖动时窗口不实时变，靠它确认当前停在第几档。
+   用 space-between 而不是 grid，两端刻度正好落在滑块可停的两个极值上。 */
+.range-ticks {
+  display: flex;
+  justify-content: space-between;
+  padding: 0 8px;
+  /* 缩放到滑块 thumb 的有效行程：滑块的 thumb 半径约 8px，两端各留一点，
+     否则首尾刻度点会跑到 thumb 够不到的位置 */
+  box-sizing: border-box;
+}
+.range-ticks i {
+  width: 2px;
+  height: 4px;
+  border-radius: 1px;
+  background: var(--line);
+}
+.range-ticks i.on {
+  background: var(--accent);
 }
 .num {
   width: 56px;
@@ -323,32 +350,5 @@ input[type='checkbox'] {
 .export-btn:hover:not(:disabled) {
   color: var(--fg);
   border-color: var(--accent);
-}
-/* 折叠组：组间留白并用分隔线隔开 */
-.fold {
-  margin-top: 12px;
-}
-.fold > .link-btn {
-  margin-top: 0;
-}
-.fold + .fold {
-  padding-top: 12px;
-  border-top: 1px solid var(--line);
-}
-.msg {
-  margin: 10px 0 0;
-  font-size: 12px;
-}
-.msg.ok {
-  color: var(--ok);
-}
-.msg.err {
-  color: var(--err);
-}
-.hint {
-  margin: 10px 0 0;
-  font-size: 12px;
-  color: var(--fg-faint);
-  line-height: 1.6;
 }
 </style>

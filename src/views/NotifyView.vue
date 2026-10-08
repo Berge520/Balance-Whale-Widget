@@ -1,5 +1,5 @@
 <script lang="ts" setup>
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import type { AlertRole, SoundRole, WhaleMailSecrets, WhaleServices } from '../types/services'
 
 // 「提醒与通知」整卡：四类自动提醒（峰谷切换 / 低余额 / 今日预算 / 余额大幅波动）+
@@ -162,6 +162,25 @@ function resetAlerts() {
 
 // 提醒文案折叠：与上面的开关同属「提醒」主题，收在「提醒与通知」卡里，不再单独占「外观」页一张卡
 const alertFolds = reactive({ open: false })
+// 提醒音音量折叠：4 条滑块默认全「跟随全局」，多数人一次都不会拖，却常驻铺满卡片尾部。
+// 默认收起成一行摘要（「全部跟随全局（x%）」/「低余额 60% · 其余跟随全局」），点标题才铺开滑块 ——
+// 摘要在任何状态下都在播报当前音量口径，不会「藏了就等于没有」。纯展示态、不给父级
+const volFold = reactive({ open: false })
+// 摘要文案：全跟随 → 一行「全部跟随全局（x%）」；有独立项 → 「低余额 60% · 其余跟随全局（x%）」
+const volSummary = computed(() => {
+  const follow = '跟随全局（' + Math.round(alertVolShown(props.cfg.alertSoundRoles[0]) * 100) + '%）'
+  const parts: string[] = []
+  for (const r of props.cfg.alertSoundRoles as AlertRole[]) {
+    const av = props.cfg.alertVols[r]
+    if (av.volSet) parts.push(props.soundRoleLabel[r] + ' ' + Math.round(av.vol * 100) + '%')
+  }
+  if (!parts.length) return '全部' + follow
+  return parts.join(' · ') + ' · 其余' + follow
+})
+// 计时分区折叠：开关 4 个 + 时长 + 文案 + 休息快捷键共 9 个控件，多数人只在初次设一次，
+// 却把这卡的中段占满。默认展开（用户随时要开始/结束计时会来看它），仅方便随时收起。
+// 纯展示态、不给父级，故留组件内部
+const timerFold = reactive({ open: true })
 // 与上次回填的内容比对，用于「未保存」提示。基线由父级 applyConfig 后经 syncAlertsBaseline 写入
 const alertsBaseline = ref<string | null>(null)
 const alertsDirty = computed(() => alertsBaseline.value !== null && JSON.stringify(props.cfg.alerts) !== alertsBaseline.value)
@@ -180,8 +199,8 @@ const mail = reactive({
 const mailPassSaved = ref(false)
 const mailFlash: Flash = useFlash()
 const mailTesting = ref(false)
-// SMTP 配置区的展开态。三个来源共同决定，见下面 mailOpen 的注释
-const mailFold = reactive({ open: false, touched: false })
+// SMTP 配置区的展开态。默认收起，点了按钮才展开（见 mailOpen）
+const mailFold = reactive({ open: false })
 // 配置是否已齐全：服务器 / 发件人 / 收件人。只看「有没有填过」这个持久事实，
 // 不看本次测试成没成 —— 折叠态要能跨会话稳定重现，不依赖一次性的运行时结果。
 // **刻意不要求账号与授权码**：账号留空是合法用法（多数服务器直接拿发件人地址当账号，
@@ -191,11 +210,15 @@ const mailFold = reactive({ open: false, touched: false })
 const mailConfigured = computed(() => !!(
   mail.mailHost.trim() && props.cfg.mailFrom.trim() && props.cfg.mailTo.trim()
 ))
-// 展开条件：手动展开过、或配置还没齐（空表格就是要催用户去填）、或刚点了「重新配置」。
-// 配置齐全且用户没动过 → 收起，只留一行「已配置」摘要，把卡片位置让给上面的提醒开关。
-// `touched` 是关键：否则用户点「修改」展开后，一改动输入框就会因「已配置」立刻收起，
-// 出现「点开就自动关上」的失焦感
-const mailOpen = computed(() => mailFold.touched || !mailConfigured.value || mailFold.open)
+const mailOpen = computed(() => mailFold.open)
+// 端口缺省值的**唯一**推导口径，与宿主 notify.js 的 resolvePort() 保持一致：
+// 勾了 SSL/TLS 直连默认 465，否则 587。早先这里两处都写死 `|| 465`，
+// 用户选了「587 + 取消勾选」却留空端口时会落成 465，与 mailSecure=false 直接矛盾，
+// 连上后报 TLS 层原始错误（wrong version number），用户完全看不懂
+function mailPortOf(): number {
+  const n = Number(mail.mailPort)
+  return isFinite(n) && n > 0 ? n : (mail.mailSecure ? 465 : 587)
+}
 // 通知渠道自测（「通知方式」小节的「测试通知」按钮）：与邮件测试分开两个消息态，
 // 因为它同时覆盖系统通知渠道，消息文案也不同
 const notifyFlash: Flash = useFlash()
@@ -224,33 +247,27 @@ function mailFlashShow(msg: string, err = false) {
 function applyMailSecrets(m: WhaleMailSecrets | undefined) {
   if (!m || typeof m !== 'object') return
   mail.mailHost = String(m.mailHost || '')
-  mail.mailPort = Number(m.mailPort) > 0 ? Number(m.mailPort) : 465
   mail.mailSecure = m.mailSecure !== false
+  // 端口缺省也随 mailSecure 走：host 与 secure 都读回后再定端口默认值，
+  // 不能写死 465 —— 未配过端口的 587 用户回填会被强行改成 465
+  mail.mailPort = Number(m.mailPort) > 0 ? Number(m.mailPort) : (mail.mailSecure ? 465 : 587)
   mail.mailUser = String(m.mailUser || '')
   mailPassSaved.value = !!m.mailPass
   mail.mailPass = ''
 }
-// 「重新配置 / 收起」：touched 一旦置位就不再自动收起，把展开态完全交还给用户，
-// 避免填到一半被 computed 判成「已配置」而自己合上
+// 「SMTP 配置（必填） / 重新配置 / 收起」按钮：纯手动开关，展开态不再被「配置齐没齐」左右
 function toggleMailFold() {
-  mailFold.touched = true
   mailFold.open = !mailFold.open
 }
 function saveMailSettings() {
   mailFlash.msg = ''
   try {
-    // 非敏感字段（开关 / 收件人 / 主题前缀）进配置；服务器与授权码进加密存储，两条路分开写
-    emit('patch', {
-      notifySystemOn: props.cfg.notifySystemOn,
-      notifyMailOn: props.cfg.notifyMailOn,
-      mailFrom: props.cfg.mailFrom.trim(),
-      mailTo: props.cfg.mailTo.trim(),
-      mailFromName: props.cfg.mailFromName.trim(),
-      mailSubjectPrefix: props.cfg.mailSubjectPrefix.trim(),
-    })
+    // 非敏感字段（发件人 / 收件人 / 显示名 / 主题前缀）已改为输入即 emit('patch') 实时落盘，
+    // 这里不再重复 emit —— 早先靠 @change（失焦）才落盘，用户敲完直接点「保存」时
+    // change 可能尚未派发，看着「保存了却没生效」。只有服务器与凭据这一路需要显式写
     const saved = props.services.saveMailSecrets?.({
       mailHost: mail.mailHost.trim(),
-      mailPort: Number(mail.mailPort) || 465,
+      mailPort: mailPortOf(),
       mailSecure: mail.mailSecure,
       mailUser: mail.mailUser.trim(),
       mailPass: mail.mailPass,
@@ -292,7 +309,7 @@ async function testMail() {
   try {
     const r = await props.services.sendTestMail?.({
       mailHost: mail.mailHost.trim(),
-      mailPort: Number(mail.mailPort) || 465,
+      mailPort: mailPortOf(),
       mailSecure: mail.mailSecure,
       mailUser: mail.mailUser.trim(),
       mailPass: mail.mailPass,
@@ -305,7 +322,7 @@ async function testMail() {
     if (r && r.ok) {
       mailFlashShow('测试邮件已发出，请查收（含垃圾箱）')
       // 发信成功 = 这组参数确实能送达，此时自动收起配置区，卡片回到「一行摘要」的清爽态。
-      // 只清 open、留 touched=true：展开权已交给用户，之后不会再自己弹开
+      // 之后仍可点「重新配置」再展开
       mailFold.open = false
     } else {
       // 失败时反而要展开，否则错误提示会跟着配置区一起藏在折叠里，用户只看到一片空白
@@ -332,6 +349,11 @@ function loadMailSecrets() {
   // 预期分支：读存储失败/宿主未就绪时保持空表单，用户重填即可
   try { applyMailSecrets(props.services.getSecrets?.()?.notifyMail) } catch (err) {}
 }
+// 本卡自己挂载时就读一次 SMTP 凭据，**不再依赖父级 onMounted 里调 loadMailSecrets()**：
+// 本卡被 v-if="cardOn('usage','notify')" 控制、默认 Tab 是「外观」，父级 onMounted 跑时
+// notifyViewRef 还是 null，那次调用是空转 —— 于是服务器/端口/账号全部回填不出来，
+// 用户看到的就是「已保存配置没正确显示」。改成本卡自持后，无论从哪个 Tab 进入都能读回
+onMounted(loadMailSecrets)
 defineExpose({ syncAlertsBaseline, loadMailSecrets, syncTimerHms })
 
 // timerSec 变化（备份恢复 / 挂件菜单推送）时刷新三段展示；本地 commitTimerHms 已自行 sync，
@@ -349,8 +371,13 @@ watch(() => props.cfg.timerSec, syncTimerHms)
     </label>
 
     <!-- 计时相关项原先散在本卡中段、与「余额提醒」「通知渠道」混排，用户找不到「倒计时时长」在哪儿。
-         加一个分区标题把它们圈起来（与下方「通知方式」同一套 .sub 视觉），不改控件归属 -->
+         加一个分区标题把它们圈起来（与下方「通知方式」同一套 .sub 视觉），不改控件归属。
+         分区整块可折叠：9 个控件是「设一次就不动」的低频项，折起来让下方的提醒开关上浮 -->
     <h3 class="sub">计时</h3>
+    <button class="link-btn utils-btn utils-secondary" type="button" @click="timerFold.open = !timerFold.open">
+      {{ timerFold.open ? '收起计时设置' : '展开计时设置（通知 / 常驻 / 时长 / 到点提醒 / 休息）' }}
+    </button>
+    <template v-if="timerFold.open">
 
     <label class="field row check">
       <span class="label">计时到点通知 <em>（挂件菜单「计时」到点时弹系统通知）</em></span>
@@ -399,6 +426,7 @@ watch(() => props.cfg.timerSec, syncTimerHms)
       <input class="num" type="number" min="1" max="120" step="1" v-model.number="timerBreakMinEdit" @change="commitTimerBreak" />
       <span class="num-text">分钟</span>
     </label>
+    </template>
 
     <label class="field row check">
       <span class="label">低余额预警 <em>（余额低于阈值时数字变红，并弹一次提醒气泡 + 每天一次系统通知）</em></span>
@@ -460,8 +488,8 @@ watch(() => props.cfg.timerSec, syncTimerHms)
     </div>
     <p v-if="notifyFlash.msg" class="msg" :class="msgCls(notifyFlash)">{{ notifyFlash.msg }}</p>
 
-    <!-- SMTP 配置：只在「邮件通知」开着时出现。配置齐全后自动收起成一行摘要，
-         把卡片位置让回给上面的提醒开关；点「重新配置」可再展开（见 mailOpen） -->
+    <!-- SMTP 配置：只在「邮件通知」开着时出现。**默认收起**（未配置时也只留一行「SMTP 配置（必填）」按钮），
+         点开才铺开表格；配置齐全收起时显示一行「已配置」摘要 -->
     <div v-if="cfg.notifyMailOn" class="fold">
       <p v-if="mailConfigured && !mailOpen" class="mail-summary">
         <span class="ok-tag">已配置</span>
@@ -502,22 +530,22 @@ watch(() => props.cfg.timerSec, syncTimerHms)
         <label class="field row">
           <span class="label">发件人</span>
           <input :value="cfg.mailFrom" type="text" placeholder="与上方账号一致" autocomplete="off"
-                 @change="emit('patch', { mailFrom: ($event.target as HTMLInputElement).value })" />
+                 @input="emit('patch', { mailFrom: ($event.target as HTMLInputElement).value })" />
         </label>
         <label class="field row">
           <span class="label">收件人</span>
           <input :value="cfg.mailTo" type="text" placeholder="收提醒的邮箱（可与发件人相同）" autocomplete="off"
-                 @change="emit('patch', { mailTo: ($event.target as HTMLInputElement).value })" />
+                 @input="emit('patch', { mailTo: ($event.target as HTMLInputElement).value })" />
         </label>
         <label class="field row">
           <span class="label">发件人显示名</span>
           <input :value="cfg.mailFromName" type="text" placeholder="小鲸鱼余额挂件" autocomplete="off"
-                 @change="emit('patch', { mailFromName: ($event.target as HTMLInputElement).value })" />
+                 @input="emit('patch', { mailFromName: ($event.target as HTMLInputElement).value })" />
         </label>
         <label class="field row">
           <span class="label">主题前缀</span>
           <input :value="cfg.mailSubjectPrefix" type="text" placeholder="[小鲸鱼余额挂件]" autocomplete="off"
-                 @change="emit('patch', { mailSubjectPrefix: ($event.target as HTMLInputElement).value })" />
+                 @input="emit('patch', { mailSubjectPrefix: ($event.target as HTMLInputElement).value })" />
         </label>
 
         <label class="field row check">
@@ -534,27 +562,11 @@ watch(() => props.cfg.timerSec, syncTimerHms)
         <p v-if="mailFlash.msg" class="msg" :class="msgCls(mailFlash)">{{ mailFlash.msg }}</p>
         <p class="hint">
           测试邮件用的是上方「当前填的内容」（未保存也会用），方便先验证再保存；<b>发送成功会自动收起本区</b>。
-          改完记得点「保存邮件设置」——上方「测试通知」读的是已保存的配置，两者分工不同。
+          上方「测试通知」读的是已保存的配置，两者分工不同；SMTP 服务器与授权码需点「保存邮件设置」落盘。
           免打扰时段内邮件与系统通知一并静默（计时到点不受免打扰影响）。
         </p>
       </div>
     </div>
-
-    <!-- 提醒音独立音量：语义上属于「提醒」，放这页比折叠在「外观」的音效条里更好找；
-         音效开关/音色/全局音量仍在「外观」的音效折叠条里 -->
-    <div v-for="r in alertSoundRoles" :key="'av-' + r" class="field row">
-      <span class="label">{{ soundRoleLabel[r] }}</span>
-      <input class="range" type="range" min="0" max="1" step="0.05"
-             :value="alertVolShown(r)" :disabled="!cfg.soundOn"
-             @input="onAlertVolInput(r, $event)" />
-      <span class="num-text">{{ alertVolSummary(r) }}</span>
-      <button v-if="cfg.alertVols[r].volSet" class="link-btn utils-btn utils-secondary"
-              type="button" :disabled="!cfg.soundOn" @click="resetAlertVol(r)">恢复跟随</button>
-    </div>
-    <p class="hint">
-      提醒音量默认跟随「外观」页的全局音量；单独拖动某一类后即独立生效（不再跟随），
-      点「恢复跟随」回到随全局音量变化。提醒音的导入与静音（留空）在「资源」页。
-    </p>
 
     <!-- 低频的「提醒表现 + 时段 + 文案」收在一处折叠，卡片默认只留「哪几类提醒要开」 -->
     <div class="fold">
@@ -618,27 +630,39 @@ watch(() => props.cfg.timerSec, syncTimerHms)
         <p v-if="alertFlash.msg" class="msg" :class="msgCls(alertFlash)">{{ alertFlash.msg }}</p>
       </div>
     </div>
+
+    <!-- 提醒音独立音量：语义上属于「提醒」，放这页比折叠在「外观」的音效条里更好找（音效开关/音色/全局音量
+         仍在「外观」的音效折叠条里）。默认收起成一行摘要；点标题行展开成滑块，
+         摘要行始终播报当前音量口径，不会藏了等于没有 -->
+    <div class="fold">
+      <button class="link-btn utils-btn utils-secondary" @click="volFold.open = !volFold.open">
+        {{ volFold.open ? '收起提醒音音量' : '提醒音音量' }}
+      </button>
+      <p class="hint vol-sum">{{ volSummary }}</p>
+      <div v-if="volFold.open" class="guide">
+        <div v-for="r in alertSoundRoles" :key="'av-' + r" class="field row">
+          <span class="label">{{ soundRoleLabel[r] }}</span>
+          <input class="range" type="range" min="0" max="1" step="0.05"
+                 :value="alertVolShown(r)" :disabled="!cfg.soundOn"
+                 @input="onAlertVolInput(r, $event)" />
+          <span class="num-text">{{ alertVolSummary(r) }}</span>
+          <button v-if="cfg.alertVols[r].volSet" class="link-btn utils-btn utils-secondary"
+                  type="button" :disabled="!cfg.soundOn" @click="resetAlertVol(r)">恢复跟随</button>
+        </div>
+        <p class="hint">
+          默认跟随「外观」页的全局音量；单独拖动某一类后即独立生效（不再跟随），
+          点「恢复跟随」回到随全局音量变化。提醒音的导入与静音（留空）在「资源」页。
+        </p>
+      </div>
+    </div>
   </section>
 </template>
 
 <style scoped>
-/* 设计令牌来自 main.css 的 :root。通用控件样式原本由 App.vue 的 scoped 样式提供，
-   组件拆分后 scoped 隔离掉了，这里按本组件用到的部分补齐一份。utils 档位配色、.link-btn、
-   .btn-row 基类已在 main.css（单一来源），此处不再留副本。 */
-.card {
-  background: var(--card-bg);
-  border: 1px solid var(--card-border);
-  border-radius: 12px;
-  padding: 16px;
-  margin-bottom: 16px;
-  scroll-margin-top: var(--tab-bar-h, 96px);
-}
-.card h2 {
-  margin: 0 0 12px;
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--fg-dim);
-}
+/* 设计令牌来自 main.css 的 :root。通用控件样式已由 main.css 统一提供（全局唯一来源），
+   本组件只留自身特有的控件样式。utils 档位配色、.link-btn、.btn-row 基类也已在 main.css，
+   此处不再留副本。 */
+
 /* 「通知方式」小标题：与卡片流里的分组标题同源（app.css 的 .sub） */
 .sub {
   margin: 0 0 18px;
@@ -652,39 +676,7 @@ watch(() => props.cfg.timerSec, syncTimerHms)
   color: var(--fg);
   border-color: var(--accent);
 }
-.field {
-  display: block;
-  margin: 10px 0;
-}
-.field.row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-.field.check {
-  justify-content: flex-start;
-  align-items: flex-start;
-}
-.label {
-  font-size: 13px;
-  flex: 0 1 auto;
-  min-width: 72px;
-  overflow-wrap: anywhere;
-}
-.field.check .label {
-  flex: 1 1 auto;
-  min-width: 0;
-  line-height: 1.5;
-}
-.field:not(.row) .label {
-  display: block;
-  margin-bottom: 5px;
-}
-.label em {
-  font-style: normal;
-  color: var(--fg-faint);
-  font-size: 11px;
-}
+
 input[type='password'],
 input:not([type]),
 input[type='text'],
@@ -712,9 +704,7 @@ select:focus,
   border-color: var(--accent);
   box-shadow: 0 0 0 3px rgba(83, 107, 169, 0.18);
 }
-.field.row select {
-  flex: 1;
-}
+
 .num {
   width: 56px;
   padding: 5px 6px;
@@ -749,16 +739,7 @@ select:focus,
   flex: 1;
   accent-color: var(--accent);
 }
-.msg {
-  margin: 10px 0 0;
-  font-size: 12px;
-}
-.msg.ok {
-  color: var(--ok);
-}
-.msg.err {
-  color: var(--err);
-}
+
 /* 「未保存」标记：改完 textarea 不点保存就切 Tab / 关窗口会丢改动，给个常驻提示 */
 .dirty-tag {
   align-self: center;
@@ -787,12 +768,7 @@ select:focus,
   color: var(--fg);
 }
 /* 折叠组 / 说明面板 / SMTP 摘要（app.css 的 .fold / .guide / .mail-summary / .ok-tag） */
-.fold {
-  margin-top: 12px;
-}
-.fold > .link-btn {
-  margin-top: 0;
-}
+
 .guide {
   margin-top: 10px;
   padding: 10px 12px;
@@ -810,6 +786,14 @@ select:focus,
   margin: 10px 0 0;
   font-size: 12px;
   color: var(--fg-dim);
+}
+/* 提醒音音量摘要行：与 .mail-summary 同款（一行摘要 + 内联切换按钮），收起态就靠它播报当前口径 */
+.vol-sum {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 8px 0 0;
 }
 .link-btn.inline {
   margin-top: 0;

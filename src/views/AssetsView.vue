@@ -8,6 +8,8 @@
 // 不直接改写 cfg / 不直接落盘（导入形象、导入音效的两个裁剪弹层归父级所有）。
 // ============================================================================
 import { computed, onMounted, onUnmounted, reactive, ref, watch, nextTick } from 'vue'
+import SoundRow from '../components/SoundRow.vue'
+import DownloadBox from '../components/DownloadBox.vue'
 import type {
   AssetsApplyResult, AssetsExportResult, AssetsPreviewResult, BubbleMeta, DownloadProgress,
   SharedSkinList, SharedSoundItem, SharedSoundList, SkinGallery, SkinMeta, SkinPackList,
@@ -79,6 +81,8 @@ const emit = defineEmits<{
   (e: 'thumb-error', key: string): void
   (e: 'toggle-builtin-fold', on: boolean): void
   (e: 'preview-sound', role: SoundRole, idx: number): void
+  // 试听共享库里的一段（本卡槽位内「选用…」面板用）：file 是落盘文件名，done 让面板复位高亮
+  (e: 'preview-shared-sound', file: string, done: () => void): void
   (e: 'import-sound', role: SoundRole): void
   (e: 'remove-sound', role: SoundRole, file?: string): void
   (e: 'import-bubble'): void
@@ -135,6 +139,92 @@ function doImportSound(role: SoundRole) {
 }
 function doRemoveSound(role: SoundRole, file?: string) {
   emit('remove-sound', role, file)
+}
+// 槽位里当前那段的名字（用于提示文案里点名「已导入的那段是谁」）。
+// 自己导入的段一个槽位只保留一段，所以取第一条即可。
+function soundNameOf(role: SoundRole): string {
+  const it = soundMetaOf(role)[0]
+  return it ? String(it.name || '') : ''
+}
+// 共享库里「参加了某槽位播放」的段（按 roles 反查）。槽位块下方列出来，可单独摘掉。
+function sharedPinnedTo(role: SoundRole): SharedSoundItem[] {
+  return sharedSoundInstalledItems.value.filter((it) => it.roles.indexOf(role) >= 0)
+}
+// 已下载、但还没挂到本槽位的段 —— 「从共享库添加…」面板里可加的那些。
+// 已挂上的不重复出现（改到槽位块下方的「来自共享音效库」列表里管理），避免同一段在一处既显示「添加」又显示「移出」。
+function sharedPickCandidates(role: SoundRole): SharedSoundItem[] {
+  return sharedSoundInstalledItems.value.filter((it) => it.roles.indexOf(role) < 0)
+}
+// 候选面板的关键词过滤。45 段全下载时，一个槽位就有 44 行候选 —— 不筛的话得靠滚动肉眼找。
+// 只按文件名匹配（这是行里唯一可读的信息），大小写不敏感。
+const soundPickQuery = ref('')
+const soundPickFiltered = computed(() => {
+  const q = soundPickQuery.value.trim().toLowerCase()
+  const list = sharedPickCandidates(soundPickOpen.value as SoundRole)
+  if (!q) return list
+  return list.filter((it) => String(it.name || '').toLowerCase().indexOf(q) >= 0)
+})
+
+// —— 从共享音效库添加音效到槽位（本卡内「这个槽位还想再挂几段共享库的」） ——
+// 语义与旧「选用」不同：不再把音频另存一份搬进槽位，而是把**当前槽位**加进池里那段的 roles。
+// 所以这里不需要选槽位（槽位就是当前展开的这个块），也就没有那个多余的下拉了。
+// 忙态与提示跟「共享音效」卡共用 sharedSoundBusy / sharedSoundFlash —— 两边操作的是同一份素材池。
+// 哪个槽位展开了「从共享库添加」面板（空串 = 都没展开，同时只开一个）
+const soundPickOpen = ref<SoundRole | ''>('')
+// 试听走父级（与本卡其它试听同一条音频通道，两个试听不会同时响）；
+// 和槽位已有的「试听」共用一条事件，父级只认角色不关心这声是从哪张卡点进来的。
+const pickPreviewRole = ref<SoundRole | ''>('')
+const previewingPickId = ref('')
+function doPreviewPickSound(it: SharedSoundItem) {
+  if (pickPreviewRole.value) {
+    emit('preview-sound', pickPreviewRole.value, -1)
+    pickPreviewRole.value = ''
+    if (previewingPickId.value === it.id) { previewingPickId.value = ''; return }
+  }
+  previewingPickId.value = it.id
+  pickPreviewRole.value = 'press'
+  emit('preview-shared-sound', it.file, () => {
+    if (previewingPickId.value === it.id) { previewingPickId.value = ''; pickPreviewRole.value = '' }
+  })
+}
+// 把当前槽位加进这段共享音效的 roles（这段就多参加一个槽位的播放）。
+// 「一段可同时挂多个槽位」是这次改动的核心 —— 槽位不再有「放不下」的容量焦虑。
+async function doAddPickSound(it: SharedSoundItem) {
+  const role = soundPickOpen.value
+  if (!role) return
+  await applySharedRoles(it, it.roles.concat(role), `已把「${it.name}」加到${SOUND_ROLE_LABEL[role] || role}`)
+}
+// 从某槽位摘掉这段共享音效（只影响这一个槽位）
+async function doUnpinPickSound(it: SharedSoundItem, role: SoundRole) {
+  await applySharedRoles(it, it.roles.filter((x) => x !== role), `已把「${it.name}」从${SOUND_ROLE_LABEL[role] || role}移出`)
+}
+// 共享库某段参加哪些槽位 —— 所有写入口最终都汇到这里，避免「切音色」的收尾逻辑在几处各写一遍
+async function applySharedRoles(it: SharedSoundItem, roles: SoundRole[], okMsg: string) {
+  if (sharedSoundBusy.value) return
+  sharedSoundFlash.msg = ''
+  sharedSoundFlash.err = false
+  sharedSoundBusy.value = true
+  try {
+    const r = services.value.setSharedRoles?.(it.file, roles)
+    emit('refresh-sounds')
+    refreshSharedSounds()
+    if (r && r.ok) {
+      // 挂上「按压 / 释放」这段时，若当前音色不是「自定义」，它不会响 —— 顺手切过去
+      let switched = false
+      const affectsTap = roles.some((x) => x === 'press' || x === 'release')
+      if (props.cfg.soundOn && props.cfg.soundSet !== 'custom' && affectsTap) {
+        emit('patch', { soundSet: 'custom' })
+        switched = true
+      }
+      sharedSoundFlash.msg = okMsg + (switched ? '，并把「音色」切到了「自定义」' : '')
+      sharedSoundFlash.err = false
+    } else {
+      sharedSoundFlash.msg = (r && r.error) || '设置失败'
+      sharedSoundFlash.err = true
+    }
+  } finally {
+    sharedSoundBusy.value = false
+  }
 }
 
 // —— 素材总览 / 占用统计 ——
@@ -194,9 +284,20 @@ const unusedCount = computed(() => unusedSkinIds.value.length + unusedSoundRoles
 
 // —— 折叠 / 目录 / 素材包 ——
 const assetsFold = reactive({ open: false })
-const galleryFolds = reactive({ skins: false, sharedSkins: false, sharedSounds: false })
+// 「导入的形象」默认展开：它是这一页最常用的卡，收起会让人以为「没有形象可管理」。
+// 两张下载大清单（共享形象 36 格 / 共享音效 45 段）仍默认收起。
+const galleryFolds = reactive({ skins: true, sharedSkins: false, sharedSounds: false })
 function galleryOpen(key: 'skins' | 'sharedSkins' | 'sharedSounds') {
+  // 搜索态下强制展开：命中的卡如果还收着，用户搜到了却看不到内容（还以为没搜到）。
+  // 与折叠态无关，只是「搜索时一律铺开」。
   return props.searchActive || galleryFolds[key]
+}
+// 分区小标题：命中 2 张以上才显示，搜索只命中单卡时不出现分隔线（纯噪音）
+const MINE_CARDS = ['assetsOverview', 'assetsSkins', 'assetsBubbles', 'assetsSounds']
+const DOWNLOAD_CARDS = ['assetsBuiltin', 'assetsSharedSkins', 'assetsSharedSounds']
+function showSection(group: 'mine' | 'download') {
+  const keys = group === 'mine' ? MINE_CARDS : DOWNLOAD_CARDS
+  return keys.filter((k) => props.cardOn('assets', k)).length >= 2
 }
 const assetsFlash: Flash = reactive({ msg: '', err: false })
 const dataDirs = ref<{ skins: string; sounds: string; bubbles: string } | null>(null)
@@ -346,6 +447,10 @@ function toggleRndMenu(e: MouseEvent) {
   rndMenu.value = 'organize'
 }
 const randomSkinPool = computed(() => props.skinGallery.items.filter((it) => it.random).map((it) => it.id))
+// 随机池的括号口径：随包内置那张是池里常驻的一员，池子规模的对外说法要带上它，
+// 否则用户按「参与随机 N 张」去数格子会对不上（格子只覆盖画廊里的项）。
+// 父级「内置形象也参与随机」开关关掉时它不在池里，这时不提
+const poolBuiltinNote = computed(() => (props.cfg.randomIncludeBuiltin === false ? '' : '（另含随包内置那张）'))
 // 选中 id 是父级持有的；「整理」面板的按钮文案 / 禁用态却按**当前可见清单**算数量。
 // 普通来源下二者恒等，但「共享形象」来源是个独立画廊：切过去时父级仍留着导入形象的选中 id，
 // pickedSkinned.length 会显示一个当前页面上根本点不出来的数，直接从 props 里滤掉这一批
@@ -373,9 +478,9 @@ const randomChoices = computed(() => {
   const n = props.skinGallery.items.length
   const hasCurrent = !!props.skinGallery.current && props.skinGallery.items.some((it) => it.id === props.skinGallery.current)
   return [
-    { mode: 'all' as const, label: '随机时会抽到它们', on: randomMode.value === 'all' },
-    { mode: 'none' as const, label: '随机时都不抽', on: randomMode.value === 'none' },
-    { mode: 'keepCurrent' as const, label: '只抽「使用中」那张', on: randomMode.value === 'keepCurrent' },
+    { mode: 'all' as const, label: `此页 ${n} 张全都参与随机`, on: randomMode.value === 'all' },
+    { mode: 'none' as const, label: '此页都不参与随机', on: randomMode.value === 'none' },
+    { mode: 'keepCurrent' as const, label: '只让「使用中」那张参与随机', on: randomMode.value === 'keepCurrent' },
   ].map((c) => ({ ...c, usable: n > 0 && (c.mode !== 'keepCurrent' || hasCurrent) && randomMode.value !== c.mode }))
 })
 function doRandomSkin() {
@@ -651,12 +756,26 @@ const sharedSoundTotalBytes = computed(() => Number(sharedSoundList.value?.total
 const sharedSoundInstalledItems = computed(() => sharedSoundItems.value.filter((it) => it.installed))
 const sharedSoundPendingItems = computed(() => sharedSoundItems.value.filter((it) => !it.installed))
 const sharedSoundPendingOpen = ref(false)
+// 45 段铺开时「已下载」那半截要滚很久才找得到某一段；这两个控件把它收窄：
+// 关键词按文件名筛，筛选档在「全部 / 已参加播放 / 一段都没挂」之间切。
+// 只作用于「已下载」组 —— 「未下载」组的用途是逐段补下载，筛它没有意义。
+const sharedSoundQuery = ref('')
+const sharedSoundFilter = ref<'all' | 'pinned' | 'unpinned'>('all')
+function filterSoundItems(list: SharedSoundItem[]): SharedSoundItem[] {
+  const q = sharedSoundQuery.value.trim().toLowerCase()
+  return list.filter((it) => {
+    if (sharedSoundFilter.value === 'pinned' && !it.roles.length) return false
+    if (sharedSoundFilter.value === 'unpinned' && it.roles.length) return false
+    if (q && String(it.name || '').toLowerCase().indexOf(q) < 0) return false
+    return true
+  })
+}
+const sharedSoundInstalledShown = computed(() => filterSoundItems(sharedSoundInstalledItems.value))
 const previewingSharedId = ref<string | null>(null)
 const removeConfirmId = ref<string | null>(null)
 let removeConfirmTimer: ReturnType<typeof setTimeout> | null = null
 const sharedSoundRemainBytes = computed(() => Number(sharedSoundList.value?.totalSize || 0)
   - sharedSoundItems.value.reduce((n, it) => n + (it.installed ? (Number(it.size) || 0) : 0), 0))
-const sharedSoundUseRole = reactive<Record<string, SoundRole>>({})
 function refreshSharedSounds() {
   const r = services.value.listSharedSounds?.()
   sharedSoundList.value = r && Array.isArray(r.items) ? r : null
@@ -728,32 +847,17 @@ function doRemoveSharedSound(it: SharedSoundItem) {
   }
   refreshSharedSounds()
   emit('refresh-sounds')
-  // 清掉这段残留的选用值，否则重新下载回同一 id 时下拉会带着上次选择复现
-  delete sharedSoundUseRole[it.id]
   if (previewingSharedId.value === it.id) stopPreviewShared()
-  const cleared = (r.clearedRoles || [])
   sharedSoundFlash.msg = `已删除「${it.name}」`
-    + (cleared.length ? `，并清掉了它在${cleared.map((x) => SOUND_ROLE_LABEL[x] || x).join(' / ')}上的选用` : '')
+    + (it.roles.length ? `（它原本参加的${it.roles.map((x) => SOUND_ROLE_LABEL[x] || x).join(' / ')}也一并退出播放）` : '')
 }
-async function doUseSharedSound(it: SharedSoundItem) {
-  const role = sharedSoundUseRole[it.id]
-  if (!role) return
-  const r = services.value.useSharedSound?.(it.file, role)
-  emit('refresh-sounds')
-  if (r && r.ok) {
-    let switched = false
-    if (props.cfg.soundOn && props.cfg.soundSet !== 'custom' && (role === 'press' || role === 'release')) {
-      emit('patch', { soundSet: 'custom' })
-      switched = true
-    }
-    sharedSoundFlash.msg = `已把「${it.name}」选用到${SOUND_ROLE_LABEL[role] || role}`
-      + (switched ? '，并把「音色」切到了「自定义」' : '')
-    delete sharedSoundUseRole[it.id]
-    sharedSoundFlash.err = false
-  } else {
-    sharedSoundFlash.msg = (r && r.error) || '选用失败'
-    sharedSoundFlash.err = true
-  }
+// 切换「这段共享音效参加某个槽位的播放」（勾选 / 取消勾选）。
+// 一眼看上去像纯前端 toggle，但每次都要落盘并让宿主重推给挂件，故仍走 applySharedRoles 的统一收尾。
+async function toggleSharedRole(it: SharedSoundItem, role: SoundRole, on: boolean) {
+  const next = on ? it.roles.concat(role) : it.roles.filter((x) => x !== role)
+  await applySharedRoles(it, next, on
+    ? `「${it.name}」已参加${SOUND_ROLE_LABEL[role] || role}的播放`
+    : `「${it.name}」已退出${SOUND_ROLE_LABEL[role] || role}的播放`)
 }
 function doPreviewSharedSound(it: SharedSoundItem) {
   sharedSoundFlash.msg = ''
@@ -869,13 +973,14 @@ onMounted(() => {
   document.addEventListener('keydown', onKeydownCloseRndMenu)
   window.addEventListener('scroll', onScrollCloseRndMenu, true)
 })
-// 三张画廊卡默认收起，展开才去拉私有数据（共享角色 / 共享音效清单、素材包已装状态）。
-// 为什么不放 onMounted 一次拉完：这三张卡是 v-if，本组件挂载时它们并不在 DOM 里，
+// 两张下载大清单（共享形象 / 共享音效）与内置资源卡默认收起，展开才去拉私有数据。
+// 为什么不放 onMounted 一次拉完：这些卡是 v-if，本组件挂载时它们并不在 DOM 里，
 // onMounted 拉回来的数据会因为没有可见消费方而一直被忽略；等用户点开时又不会再拉，
 // 于是「共享形象 / 共享音效」永远显示 0 张（曾踩：展开后一片空，点「下载全部」也没反应）。
-// 卡片展开或搜索态强制展开时补拉一次，补齐「onMounted 只覆盖已展开卡」的缺口。
+// 卡片展开时补拉一次。搜索态也会让 galleryOpen 变 true（见上），故依赖里仍含 searchActive ——
+// 搜索命中的下载卡同样会在展开时补拉，不会出现「搜到了却渲染 0 张」。
 watch(
-  () => [galleryOpen('skins'), galleryOpen('sharedSkins'), galleryOpen('sharedSounds'), props.searchActive],
+  () => [galleryOpen('skins'), galleryOpen('sharedSkins'), galleryOpen('sharedSounds')],
   () => {
     nextTick(() => {
       refreshSkinPacks()
@@ -898,8 +1003,13 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds, expand
 
 <template>
   <div>
-    <!-- [资源] 素材集中管理：概览（占用 / 清理 / 素材包）· 导入的形象 · 导入的音效 · 内置资源对照。
+    <!-- [资源] 素材集中管理，按「素材从哪来」分两区：
+         · 我的素材 —— 导进来 / 下回来、落在本机、能删能用的那些（概览 · 形象 · 气泡图 · 音效）
+         · 下载素材 —— 上游有、按需从 GitHub 拉的目录（内置资源与下载源 · 共享形象 · 共享音效）
+         原来七张卡平铺，用户分不清「哪些是我已有的、哪些还要下载」，两组之间还夹着互不相邻的下载卡。
+         分区标题只在两张以上卡片命中时显示（搜索命中单卡时分隔线纯属噪音）。
          与「挂件外观」分工：那边只选「用哪个」，这里管「导了什么、占多大、要不要删、换机器怎么带走」 -->
+    <div v-if="showSection('mine')" class="assets-section">我的素材</div>
     <section v-if="cardOn('assets', 'assetsOverview')" class="card" data-search="assetsOverview">
       <div class="card-head">
         <h2>资源概览</h2>
@@ -1068,6 +1178,10 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds, expand
                      现在摊平，并改成一组成员状态的选项：命中项打勾（.on）、点了不改变现状的项置灰
                      （!usable），勾选态的判定与可点性都来自 randomChoices / randomMode，不再逐项手写 -->
                 <p class="rnd-menu-title">随机时抽哪些</p>
+                <!-- 三项不只是「可选动作」，也是「当前取图范围」的三种状态（命中项打勾）。
+                     所以文案写成状态描述（「此页 N 张全都参与…」）而不是动作描述（「随机时会抽到它们」）：
+                     用户读到的就是「我现在处于哪一档」，不必先在心里把动作名翻译成状态，
+                     也不容易把「抽到」与「不抽」按反。勾选 / 可点性仍来自 randomChoices / randomMode -->
                 <button v-for="c in randomChoices" :key="c.mode" type="button"
                         :class="{ on: c.on }"
                         :disabled="!c.usable"
@@ -1109,6 +1223,11 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds, expand
               <span v-else class="skin-cell-none">无预览</span>
             </button>
             <span v-if="it.id === skinGallery.current" class="skin-cell-tag">使用中</span>
+            <!-- 不在随机池里的那张挂一条「不参与随机」通栏角标。
+                 与「使用中」不同，这里刻意**标不在池里的少数派**：用户关掉一张时的心理是
+                 「别让它再出现」，扫一遍能确认「关掉了哪几张」比扫「留在池里的几十张」省事得多。
+                 角标沉在格子底部、浅色半透明，不挡住缩略图主体。 -->
+            <span v-if="it.random === false" class="skin-cell-pool-off">不参与随机</span>
           </div>
         </div>
         <button class="skin-cell skin-cell-add" type="button" title="导入图片" @click="doImportSkin()">
@@ -1119,6 +1238,13 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds, expand
       <p v-if="skinMeta" class="hint">
         当前使用：{{ skinMeta.name }}（{{ assetSize(skinMeta) }} · {{ assetAt(skinMeta) }}）
         <button class="link-btn" type="button" @click="emit('toggle-skin-hint')">{{ skinHintOpen ? '收起说明' : '操作说明' }}</button>
+      </p>
+      <!-- 随机池规模常驻在画廊下方：此前只在「操作说明」展开时才看得到，用户停在画廊时
+           不知道「随机一张」到底会从几张里抽。这里只报规模；「是哪几张」靠缩略图上的
+           「不参与随机」角标直接看，不再要求用户去找折叠说明 -->
+      <p v-if="skinMeta" class="hint">
+        参与随机 {{ randomSkinPool.length }} / {{ skinGallery.items.length }} 张{{ poolBuiltinNote }}，
+        「随机一张」会从它们里挑；带「不参与随机」角标的格子不会被抽到。
       </p>
       <p v-if="skinMeta && skinHintOpen" class="hint">
         单击缩略图选中（可连点多张），再点卡片上方「整理」，可对它们：切换使用 / 移到最前 / 移到最后 / 参与随机 / 不参与随机 / 删除；
@@ -1189,37 +1315,103 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds, expand
             <template v-if="soundMetaOf(r).length">已导入</template>
             <template v-else>{{ (ALERT_SOUND_ROLES as string[]).indexOf(r) >= 0 ? '未导入（静音）' : '未导入（可选）' }}</template>
           </span>
+          <!-- 「从共享库添加」：把共享音效库已下载的段挂到本槽位（可先试听）。
+               只在本槽位还有没挂上的段时才显示 —— 全挂上了就没必要再开这个面板。
+               槽位是当前展开的这个块，所以面板里不再让用户选槽位（见 doAddPickSound） -->
+          <button v-if="sharedSoundInstalledItems.length && sharedPinnedTo(r).length < sharedSoundInstalledItems.length"
+                  class="export-btn utils-btn utils-outline" type="button"
+                  @click="soundPickOpen = soundPickOpen === r ? '' : r">
+            {{ soundPickOpen === r ? '收起' : '从共享库添加…' }}
+          </button>
           <button class="export-btn utils-btn utils-outline" type="button" @click="doImportSound(r)">
             {{ soundMetaOf(r).length ? '替换' : '导入' }}
           </button>
         </div>
+        <!-- 共享库挑选区：列出已下载的段，每行只有「添加」（把当前槽位加进这段的 roles）+「试听」。
+             已挂在本槽位的段不在这里重复出现，改到下方「槽位正在播的共享段」里管理 -->
+        <div v-if="soundPickOpen === r" class="sound-pick">
+          <template v-if="sharedSoundInstalledItems.length">
+            <template v-if="sharedPickCandidates(r).length">
+              <!-- 段多时的两道闸：关键词筛 + 限高滚动。候选只列「还没挂到本槽位」的段，
+                   45 段全下载时这里是 44 行 —— 不限高会把整个槽位列表撑得极长 -->
+              <div class="sound-pick-search field row">
+                <span class="label">筛选</span>
+                <input type="text" spellcheck="false" autocomplete="off"
+                       placeholder="按音效名过滤…"
+                       :value="soundPickQuery"
+                       @input="soundPickQuery = ($event.target as HTMLInputElement).value" />
+              </div>
+              <div class="sound-pick-list">
+                <div class="sound-pick-row" v-for="it in soundPickFiltered" :key="'sp-' + it.id">
+                  <SoundRow :name="it.name" :size="fmtBytes(it.size)" />
+                  <div class="sound-pick-ops">
+                    <button class="export-btn utils-btn utils-primary" type="button"
+                            :disabled="sharedSoundBusy" @click="doAddPickSound(it)">添加到{{ SOUND_ROLE_LABEL[r] }}</button>
+                    <button class="export-btn utils-btn utils-outline" type="button"
+                            :class="{ 'preview-on': previewingPickId === it.id }"
+                            @click="doPreviewPickSound(it)">{{ previewingPickId === it.id ? '停止' : '试听' }}</button>
+                  </div>
+                </div>
+                <p v-if="!soundPickFiltered.length" class="hint">没有名字匹配「{{ soundPickQuery }}」的段。</p>
+              </div>
+              <p class="hint">
+                添加后这段会与「{{ soundNameOf(r) || '你导入的那段' }}」<strong>一起随机播放</strong>，
+                不会顶掉它 —— 挂件每次触发时随机选一段。
+              </p>
+            </template>
+            <p v-else class="hint">
+              共享音效库已下载的段都挂到了本槽位。要去库里下载更多、或调整它们参加哪些槽位，见本页底部的「共享音效」卡。
+            </p>
+          </template>
+          <p v-else class="hint">
+            共享音效库还没有已下载的段 —— 切到本页底部的「共享音效」卡，展开后下载几段再来添加。
+          </p>
+        </div>
         <!-- 单段时直接并进槽位头一行：既然只有一个，再单起一行纯属浪费纵向空间 -->
         <div class="sound-seg" v-for="(it, i) in soundMetaOf(r)" :key="it.file">
-          <span class="sound-file" :title="it.name">{{ it.name }}</span>
-          <span class="seg-ops">
-            <button class="export-btn utils-btn utils-outline" type="button" @click="doPreviewSound(r, i)">试听</button>
-            <button class="export-btn utils-btn utils-outline" type="button" @click="doRemoveSound(r, it.file)">删除</button>
-          </span>
-          <!-- 体积与导入时间都是次要信息，合成一行放在最下面 -->
-          <span class="seg-time" :title="assetAt(it)">{{ assetSize(it) }} · {{ assetAtShort(it) }}</span>
+          <SoundRow :name="it.name">
+            <span class="seg-ops">
+              <button class="export-btn utils-btn utils-outline" type="button" @click="doPreviewSound(r, i)">试听</button>
+              <button class="export-btn utils-btn utils-outline" type="button" @click="doRemoveSound(r, it.file)">删除</button>
+            </span>
+            <!-- 体积与导入时间都是次要信息，合成一行放在最下面 -->
+            <span class="seg-time" :title="assetAt(it)">{{ assetSize(it) }} · {{ assetAtShort(it) }}</span>
+          </SoundRow>
+        </div>
+        <!-- 本槽位还挂着哪些共享库的段：与上面「自己导入的」并列展示，各自可单独试听 / 移出。
+             用虚线框 + 「共享库」小标与本槽位导入的那段区分开 -->
+        <div class="sound-seg sound-seg-shared" v-for="it in sharedPinnedTo(r)" :key="'pin-' + it.id">
+          <SoundRow :name="it.name" :size="fmtBytes(it.size)">
+            <span class="seg-ops">
+              <button class="export-btn utils-btn utils-outline" type="button"
+                      :class="{ 'preview-on': previewingPickId === it.id }"
+                      @click="doPreviewPickSound(it)">{{ previewingPickId === it.id ? '停止' : '试听' }}</button>
+              <button class="export-btn utils-btn utils-outline" type="button"
+                      :disabled="sharedSoundBusy" @click="doUnpinPickSound(it, r)">移出</button>
+            </span>
+            <span class="seg-time">来自共享音效库</span>
+          </SoundRow>
         </div>
       </div>
-      <p v-if="cfg.soundSet === 'custom' && !soundsMeta.press.length" class="hint">
+      <p v-if="cfg.soundSet === 'custom' && !soundsMeta.press.length && !sharedPinnedTo('press').length" class="hint">
         还没有导入按压音，「挂件外观 → 音色」的「自定义」当前会回退为「小黄鸭」。
       </p>
       <p v-if="soundUnused" class="hint">
         按压 / 释放音已导入但当前未使用：「音效开关」没开，或「音色」选的不是「自定义」。
       </p>
       <p class="hint">
-        <strong>一个槽位只保留一段</strong> —— 再导入（按钮显示「替换」）会顶掉旧的。
+        <strong>自己导入的段一个槽位只保留一段</strong> —— 再导入（按钮显示「替换」）会顶掉旧的。
+        想再加更多声音，用槽位上的「从共享库添加…」把<strong>共享音效库已下载的段</strong>挂到本槽位，
+        可与导入的那段<strong>一起随机播放</strong>（一段也能同时挂到多个槽位）。
         提醒音留空 = 静音（不打扰是默认），只在对应提醒真的弹出时响一次；播放跟随「挂件外观」里的音效开关与音量。
         音效支持 mp3 / wav / ogg 等，导入时可先拖选片段试听（最长 10 秒），结果转成单声道 WAV。
       </p>
       <p v-if="soundFlash.msg" class="msg" :class="msgCls(soundFlash)">{{ soundFlash.msg }}</p>
     </section>
 
-    <!-- [资源] 内置资源：随插件附带、不可删，只作对照（选哪个在「挂件外观」）。
+    <!-- [资源 → 下载素材] 内置资源：随插件附带、不可删，只作对照（选哪个在「挂件外观」）。
          纯查阅用，默认收起，避免与「导入的…」三张卡一起铺满一屏 -->
+    <div v-if="showSection('download')" class="assets-section">下载素材</div>
     <section v-if="cardOn('assets', 'assetsBuiltin')" class="card" data-search="assetsBuiltin">
       <div class="fold">
         <button class="link-btn utils-btn utils-secondary" @click="emit('toggle-builtin-fold', !builtinFold)">{{ builtinFold ? '收起内置资源与下载源' : '内置资源与下载源' }}</button>
@@ -1272,21 +1464,8 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds, expand
                          : `下载全部 ${skinPackSkins.length} 张（约 ${fmtBytes(skinPackBytes)}）`) }}
             </button>
           </div>
-          <div v-if="dlProgress && dlProgress.pack === 'skins'" class="dl-box">
-            <div class="dl-track" :class="{ indet: dlPercent === null }">
-              <div class="dl-bar" :class="{ indet: dlPercent === null, done: dlProgress.phase === 'done', err: dlProgress.phase === 'failed' }"
-                   :style="dlPercent === null ? undefined : { width: dlPercent + '%' }"></div>
-            </div>
-            <div class="dl-line">
-              <span class="dl-label">{{ dlProgress.label }}</span>
-              <span class="dl-amt">{{ dlAmountText }}</span>
-              <span v-if="dlPercent !== null" class="dl-pct">{{ dlPercent }}%</span>
-            </div>
-            <div v-if="dlProgress.url" class="dl-src">
-              <span class="dl-src-tag">下载源</span>
-              <a class="dl-src-url" :href="dlProgress.url" target="_blank" rel="noreferrer" :title="dlProgress.url">{{ dlProgress.url }}</a>
-            </div>
-          </div>
+          <DownloadBox v-if="dlProgress && dlProgress.pack === 'skins'"
+                       :progress="dlProgress" :percent="dlPercent" :amount="dlAmountText" />
           <p class="hint">
             <strong>一次操作下载的是整包</strong>：形象打包在同一个 Release 文件里，没有按张分片，所以无论点缩略图还是点上面按钮，
             都会把未下载的那几张一起下回来（已下载的自动跳过，不重复占体积），下完自动切到你点的那张。
@@ -1340,21 +1519,8 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds, expand
         共 {{ sharedSkinItems.length }} 张，已下载 {{ sharedSkinInstalledCount }} 张。默认收起，点标题展开。
       </p>
       <template v-if="galleryOpen('sharedSkins')">
-      <div v-if="dlProgress && dlProgress.pack === 'shared-skins'" class="dl-box">
-        <div class="dl-track" :class="{ indet: dlPercent === null }">
-          <div class="dl-bar" :class="{ indet: dlPercent === null, done: dlProgress.phase === 'done', err: dlProgress.phase === 'failed' }"
-               :style="dlPercent === null ? undefined : { width: dlPercent + '%' }"></div>
-        </div>
-        <div class="dl-line">
-          <span class="dl-label">{{ dlProgress.label }}</span>
-          <span class="dl-amt">{{ dlAmountText }}</span>
-          <span v-if="dlPercent !== null" class="dl-pct">{{ dlPercent }}%</span>
-        </div>
-        <div v-if="dlProgress.url" class="dl-src">
-          <span class="dl-src-tag">下载源</span>
-          <a class="dl-src-url" :href="dlProgress.url" target="_blank" rel="noreferrer" :title="dlProgress.url">{{ dlProgress.url }}</a>
-        </div>
-      </div>
+      <DownloadBox v-if="dlProgress && dlProgress.pack === 'shared-skins'"
+                   :progress="dlProgress" :percent="dlPercent" :amount="dlAmountText" />
       <div class="skin-grid">
         <div v-for="s in sharedSkinItems" :key="'sh-' + s.id" class="skin-cell"
              :class="{ active: cfg.skin === s.id, 'is-remote': !sharedSkinInstalled[s.id] }">
@@ -1389,8 +1555,8 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds, expand
     </section>
 
     <!-- [资源] 共享音效库：与共享角色同一批上游素材（45 段），落 sounds 的 shared 槽位。
-         它是「素材池」不直接参与实播 —— 要到下面选一个实播槽位「选用」才生效，
-         否则一装几十段、把原本选好的音效挤掉 -->
+         它本身就是「可参与播放」的段 —— 每段自带一组 roles（参加哪些实播槽位的播放），
+         下载后默认不挂到任何槽位（不打扰），用户在行内的槽位按钮上勾选要参加哪几个。 -->
     <section v-if="cardOn('assets', 'assetsSharedSounds')" class="card" data-search="assetsSharedSounds">
       <div class="card-head">
         <button class="fold-title" type="button" @click="galleryFolds.sharedSounds = !galleryFolds.sharedSounds">
@@ -1412,61 +1578,73 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds, expand
         共 {{ sharedSoundItems.length }} 段，已下载 {{ sharedSoundInstalledCount }} 段。默认收起，点标题展开。
       </p>
       <template v-if="galleryOpen('sharedSounds')">
-      <div v-if="dlProgress && dlProgress.pack === 'shared-sounds'" class="dl-box">
-        <div class="dl-track" :class="{ indet: dlPercent === null }">
-          <div class="dl-bar" :class="{ indet: dlPercent === null, done: dlProgress.phase === 'done', err: dlProgress.phase === 'failed' }"
-               :style="dlPercent === null ? undefined : { width: dlPercent + '%' }"></div>
-        </div>
-        <div class="dl-line">
-          <span class="dl-label">{{ dlProgress.label }}</span>
-          <span class="dl-amt">{{ dlAmountText }}</span>
-          <span v-if="dlPercent !== null" class="dl-pct">{{ dlPercent }}%</span>
-        </div>
-        <div v-if="dlProgress.url" class="dl-src">
-          <span class="dl-src-tag">下载源</span>
-          <a class="dl-src-url" :href="dlProgress.url" target="_blank" rel="noreferrer" :title="dlProgress.url">{{ dlProgress.url }}</a>
-        </div>
-      </div>
-      <!-- 列表按「是否已下载」分两组：两组的控件数量差 3 个（未下载行没有试听/下拉/选用/删），
+      <DownloadBox v-if="dlProgress && dlProgress.pack === 'shared-sounds'"
+                   :progress="dlProgress" :percent="dlPercent" :amount="dlAmountText" />
+      <!-- 列表按「是否已下载」分两组：两组的控件数量差 3 个（未下载行没有试听/槽位勾选/删），
            混排会让整列文件名的右边界在两种行之间来回跳，45 行看下来就是锯齿。
            分组后同组内控件结构一致，列能对齐；未下载的那组默认收进 .fold 里，
            免得 45 行未下载项把「已下载」这半截推到屏外。 -->
       <div class="shs-list">
         <template v-if="sharedSoundInstalledItems.length">
-          <p class="group-title">已下载 <em>（{{ sharedSoundInstalledItems.length }} 段，可试听 / 选用 / 删）</em></p>
-          <div class="shs-row" v-for="it in sharedSoundInstalledItems" :key="'shs-' + it.id">
-            <!-- 主线：文件名是这一行唯一需要读的信息，独占剩余宽度、不再被控件挤到截断 -->
-            <div class="shs-main">
-              <span class="sound-file" :title="it.name">{{ it.name }}</span>
-              <span class="asset-meta">{{ fmtBytes(it.size) }}</span>
-            </div>
-            <!-- 副线：三个动作归到一行，与文件名左对齐。原先 4 个控件横铺在文件名右边，
-                 「选择要加入的音效段…」这个全场最长的文案还逐行重复，把文件名压成了 AUGH#H -->
-            <div class="shs-ops">
-              <!-- 下拉按语义分组：按压 / 释放是「音色」的两段（要配合音色=自定义才响），
-                   另外四类是独立的提醒音。混在一个平铺列表里，用户看不出这层区别 -->
-              <select class="sound-role-pick" :value="sharedSoundUseRole[it.id] || ''"
-                      @change="sharedSoundUseRole[it.id] = ($event.target as HTMLSelectElement).value as SoundRole">
-                <option value="">选用到槽位…</option>
-                <optgroup label="音色 · 按压 / 释放">
-                  <option value="press">{{ SOUND_ROLE_LABEL.press }}</option>
-                  <option value="release">{{ SOUND_ROLE_LABEL.release }}</option>
-                </optgroup>
-                <optgroup label="提醒音 · 四类提醒">
-                  <option v-for="r in ALERT_SOUND_ROLES" :key="'sr-' + r" :value="r">{{ SOUND_ROLE_LABEL[r] }}</option>
-                </optgroup>
-              </select>
-              <button class="export-btn utils-btn utils-primary" type="button"
-                      :disabled="!sharedSoundUseRole[it.id]" @click="doUseSharedSound(it)">选用</button>
-              <button class="export-btn utils-btn utils-outline" type="button"
-                      :class="{ 'preview-on': previewingSharedId === it.id }"
-                      @click="doPreviewSharedSound(it)">{{ previewingSharedId === it.id ? '停止' : '试听' }}</button>
-              <button class="export-btn utils-btn" type="button"
-                      :class="removeConfirmId === it.id ? 'utils-danger' : 'utils-outline'"
-                      :title="removeConfirmId === it.id ? '再点一次确认删除（3 秒后自动取消）' : '从共享音效库删掉这一段；若已选用到槽位，槽位上的那份也一并清掉'"
-                      @click="doRemoveSharedSound(it)">{{ removeConfirmId === it.id ? '确认删' : '删' }}</button>
+          <p class="group-title">已下载 <em>（{{ sharedSoundInstalledItems.length }} 段，勾选槽位即参加播放 / 可试听 / 可删）</em></p>
+          <!-- 45 行铺开时找一段要滚很久；搜索 + 三档筛选把「已下载」这半截收窄。
+               筛选只作用于本组（未下载组是逐段补下载用的，筛它没意义） -->
+          <div class="shs-filter">
+            <input type="text" spellcheck="false" autocomplete="off"
+                   placeholder="按音效名过滤…"
+                   :value="sharedSoundQuery"
+                   @input="sharedSoundQuery = ($event.target as HTMLInputElement).value" />
+            <button class="role-chip utils-btn" type="button"
+                    :class="sharedSoundFilter === 'all' ? 'utils-primary' : 'utils-outline'"
+                    @click="sharedSoundFilter = 'all'">全部</button>
+            <button class="role-chip utils-btn" type="button"
+                    :class="sharedSoundFilter === 'pinned' ? 'utils-primary' : 'utils-outline'"
+                    @click="sharedSoundFilter = 'pinned'">已参加播放</button>
+            <button class="role-chip utils-btn" type="button"
+                    :class="sharedSoundFilter === 'unpinned' ? 'utils-primary' : 'utils-outline'"
+                    @click="sharedSoundFilter = 'unpinned'">一段都没挂</button>
+          </div>
+          <!-- 已下载段列表：限高内滚。45 段铺开会让整张卡长到几十屏，
+               滚完「已下载」早就忘了上面还有什么 —— 卡高度收敛成固定值（约 6 行），
+               剩余内容交给内部滚动条，卡外的页面长度因此可预期。
+               搜索 / 筛选行留在滚动区外，过滤时不用先滚回顶部 -->
+          <div class="shs-scroll">
+            <div class="shs-row" v-for="it in sharedSoundInstalledShown" :key="'shs-' + it.id">
+              <!-- 主线：文件名 + 体积 + 试听 / 删 归到同一行。
+                   45 行时纵向空间是稀缺资源 —— 早先把「试听 / 删」并进下面的 chip 行，
+                   6 个 chip 一撑满，「试听 / 删」就被挤到第三行，每段白占 3 行。
+                   现在动作跟文件名同排（右端对齐），chip 单独占一行 -->
+              <div class="shs-main">
+                <SoundRow :name="it.name" :size="fmtBytes(it.size)">
+                  <span class="seg-ops">
+                    <button class="export-btn utils-btn utils-outline" type="button"
+                            :class="{ 'preview-on': previewingSharedId === it.id }"
+                            @click="doPreviewSharedSound(it)">{{ previewingSharedId === it.id ? '停止' : '试听' }}</button>
+                    <button class="export-btn utils-btn" type="button"
+                            :class="removeConfirmId === it.id ? 'utils-danger' : 'utils-outline'"
+                            :title="removeConfirmId === it.id ? '再点一次确认删除（3 秒后自动取消）' : '从共享音效库删掉这一段；各槽位上挂的这段也一并失效'"
+                            @click="doRemoveSharedSound(it)">{{ removeConfirmId === it.id ? '确认删' : '删' }}</button>
+                  </span>
+                </SoundRow>
+              </div>
+              <!-- 副线：槽位勾选。每个槽位一个小 chip，点一下加入 / 再点移出（即 setSharedRoles）——
+                   取代了旧的「先选槽位再点选用」（那套是另存一份拷贝，一个槽位只能有一段）。
+                   「参加播放：」标签与 chip 同排换行，窄卡片里 chip 换行后仍贴着标签列 -->
+              <div class="shs-ops">
+                <!-- 按压 / 释放是「音色」的两段（要配合音色=自定义才响）；另外四类是独立提醒音。
+                     两组间用 .shs-roles-gap 拉开一点，让用户看出这层区别 -->
+                <template v-for="r in SOUND_ROLES" :key="r">
+                  <span v-if="r === ALERT_SOUND_ROLES[0]" class="shs-roles-gap" />
+                  <button class="role-chip utils-btn" type="button"
+                          :class="it.roles.indexOf(r) >= 0 ? 'utils-primary' : 'utils-outline'"
+                          :disabled="sharedSoundBusy"
+                          :title="ALERT_SOUND_WHEN[r] || ''"
+                          @click="toggleSharedRole(it, r, it.roles.indexOf(r) < 0)">{{ SOUND_ROLE_LABEL[r] }}</button>
+                </template>
+              </div>
             </div>
           </div>
+          <p v-if="!sharedSoundInstalledShown.length" class="hint">没有符合条件的已下载段。</p>
         </template>
         <p v-else class="hint">共享音效库暂时是空的 —— 上方按钮若显示「下载全部 N 段」，点它把音效拉回来。</p>
 
@@ -1478,8 +1656,7 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds, expand
           <template v-if="sharedSoundPendingOpen">
             <div class="shs-row" v-for="it in sharedSoundPendingItems" :key="'shs-' + it.id">
               <div class="shs-main">
-                <span class="sound-file" :title="it.name">{{ it.name }}</span>
-                <span class="asset-meta">{{ fmtBytes(it.size) }}</span>
+                <SoundRow :name="it.name" :size="fmtBytes(it.size)" />
               </div>
               <div class="shs-ops">
                 <!-- 措辞带上「这一段」：顶部还有一个「下载剩余 N 段」（逐段串行下完），
@@ -1494,11 +1671,10 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds, expand
       <p class="hint">
         这些音效来自上游 QQ 群分享，<strong>不随插件包分发</strong>，改为按需从 GitHub 直链下载。
         <strong>「下载这一段」只拉当前这一条</strong>；卡头的按钮是把还没下载的<strong>逐段</strong>串行下回来。
-        下载后先进「共享音效库」这个素材池，<strong>不会自动播放</strong> —— 从下拉里选一个音效段（按压 / 释放 / 四类提醒音）再点「选用」，
-        才会把这段放进那个槽位（一个槽位只保留一段，再选用就是顶掉旧的）。
-        这样不会一装几十段、把原本选好的音效挤掉。
-        <br>「选用」是<strong>另存一份</strong>到槽位，所以这里点「删」时，<strong>槽位上那份也会跟着清掉</strong>
-        （不然删完挂件还在响，像是没删干净）；清掉了哪个槽位会写在下面的提示里。
+        下载后这段就进了共享音效库，<strong>默认不参加任何槽位的播放</strong>（不打扰）——
+        在上面的行里点亮想让它响的槽位即可，一段能同时挂在多个槽位，一个槽位也能同时挂多段。
+        <br>加入播放后，它<strong>不会顶掉</strong>「导入的音效」卡里你手导的那段：挂件每次触发会在「导入的那段 + 挂到本槽位的共享段」里<strong>随机选一段</strong>播放。
+        点「删」删掉这段，它从所有挂过的槽位上一起消失。
       </p>
       <p v-if="sharedSoundFlash.msg" class="msg" :class="msgCls(sharedSoundFlash)">{{ sharedSoundFlash.msg }}</p>
       </template>
@@ -1508,27 +1684,29 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds, expand
 
 <style scoped>
 /* 设计令牌来自 main.css 的 :root。通用控件样式（.card / .field / .label / .msg / .hint /
-   .export-btn / .head-actions / .fold 等）原本由 App.vue 的 scoped 样式提供，
-   组件拆分后 scoped 隔离掉了，这里按本组件用到的部分补齐一份。utils 档位配色与
-   .link-btn 基类已在 main.css（单一来源），此处不再留副本。
+   .fold 等）已由 main.css 统一提供（全局唯一来源）。utils 档位配色与
+   .link-btn 基类也已在 main.css，此处不再留副本。
    ★ 本组件此前漏了这一步（样式标签是空的 `<style scoped />`），而 App.vue 内联的规则
      带的是 App 的哈希、匹配不上本组件渲染的元素 —— 症状是整卡样式失效：画廊网格无尺寸、
      棋盘格底 / 悬停操作条 / 角标全丢，素材包与共享音效的进度条塌成空白。这里一次性补齐。 */
-.card {
-  background: var(--card-bg);
-  border: 1px solid var(--card-border);
-  border-radius: 12px;
-  padding: 16px;
-  margin-bottom: 16px;
-  /* 点搜索命中标签滚到卡片时，吸顶的 .tab-bar 会盖住卡头；预留它的高度让卡顶落在下方 */
-  scroll-margin-top: var(--tab-bar-h, 96px);
-}
-.card h2 {
-  margin: 0 0 12px;
-  font-size: 14px;
+/* 分区小标题（「我的素材」/「下载素材」）：横线 + 小字，把七张卡分成「本机已有 / 上游待下载」两组。
+   只在同组命中 2 张以上时渲染（见 showSection），搜索只命中单卡时不会突兀地出现一条分割线 */
+.assets-section {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 4px 0 12px;
+  font-size: 12px;
   font-weight: 600;
   color: var(--fg-dim);
 }
+.assets-section::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--line);
+}
+
 /* 可折叠卡片的标题本身是按钮：抹掉 button 默认外观，视觉上对齐 .card-head h2，
    让用户仍然一眼认出这是标题（有 hover 反馈暗示可点） */
 .fold-title {
@@ -1659,42 +1837,7 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds, expand
   color: var(--fg);
   border-color: var(--accent);
 }
-.field {
-  display: block;
-  margin: 10px 0;
-}
-.field.row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-.field.check {
-  justify-content: flex-start;
-  /* 标签换行成多行时，复选框跟首行对齐 —— 居中对齐会飘到两行之间，看起来像对错了行 */
-  align-items: flex-start;
-}
-.label {
-  font-size: 13px;
-  /* 短标签保持 72px 起始宽度、纵向对齐；flex-shrink 允许长标签在窄卡片里收缩换行 */
-  flex: 0 1 auto;
-  min-width: 72px;
-  /* 长标签的换行点：中文没有空格，靠 break-word 才能在盒子内折行 */
-  overflow-wrap: anywhere;
-}
-.field.check .label {
-  flex: 1 1 auto;
-  min-width: 0;
-  line-height: 1.5;
-}
-.field:not(.row) .label {
-  display: block;
-  margin-bottom: 5px;
-}
-.label em {
-  font-style: normal;
-  color: var(--fg-faint);
-  font-size: 11px;
-}
+
 input[type='text'] {
   width: 100%;
   box-sizing: border-box;
@@ -1715,96 +1858,10 @@ input[type='checkbox'] {
   height: 16px;
   accent-color: var(--accent);
 }
-.msg {
-  margin: 10px 0 0;
-  font-size: 12px;
-}
-.msg.ok {
-  color: var(--ok);
-}
-.msg.err {
-  color: var(--err);
-}
+
 /* 有失败项时可点，直接去插件市场更新 */
 .msg.clickable {
   cursor: pointer;
-  text-decoration: underline;
-}
-/* ── 素材包下载进度（内置形象 / 共享角色 / 共享音效三张卡共用一套样式） ──
-   条子固定 8px 高：40.6MB 的角色包在慢网下要下好几分钟，进度条要够显眼又不能顶开版式 */
-.dl-box {
-  margin: 8px 0 0;
-  padding: 8px 10px;
-  border-radius: 6px;
-  background: var(--track);
-}
-.dl-track {
-  position: relative;
-  height: 8px;
-  border-radius: 999px;
-  background: var(--track);
-  overflow: hidden;
-}
-.dl-bar {
-  height: 100%;
-  border-radius: 999px;
-  background: var(--accent);
-  /* 宽度每 250ms 跳一档，加过渡把台阶磨平，否则看起来像在抖 */
-  transition: width 0.25s linear;
-}
-.dl-bar.done { background: var(--ok); }
-.dl-bar.err { background: var(--err); }
-/* 总量未知（加速代理回 Transfer-Encoding: chunked，拿不到 Content-Length）：
-   不谎报百分比，改成来回扫的滑块表示「在动，但说不准还有多久」 */
-.dl-bar.indet {
-  width: 35%;
-  transition: none;
-  animation: dl-slide 1.1s ease-in-out infinite;
-}
-@keyframes dl-slide {
-  0% { margin-left: -35%; }
-  100% { margin-left: 100%; }
-}
-.dl-line {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  margin-top: 6px;
-  font-size: 12px;
-}
-.dl-label { flex: 0 0 auto; }
-/* 字节数用等宽：数字每 250ms 变一次，比例字体下宽度会跳，整行跟着抖 */
-.dl-amt {
-  flex: 0 1 auto;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 11px;
-  opacity: 0.85;
-}
-.dl-pct {
-  flex: 0 0 auto;
-  margin-left: auto;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 11px;
-  opacity: 0.85;
-}
-/* 下载源一行：URL 很长（github.com/.../releases/download/...），必须能断行 + 可复制 */
-.dl-src {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  margin-top: 4px;
-  font-size: 11px;
-}
-.dl-src-tag {
-  flex: 0 0 auto;
-  opacity: 0.7;
-}
-.dl-src-url {
-  flex: 1 1 auto;
-  min-width: 0;
-  color: inherit;
-  opacity: 0.75;
-  word-break: break-all;
   text-decoration: underline;
 }
 /* 折叠面板（「数据目录」「素材包导入导出」）与凭据获取教程同款观感 */
@@ -1847,16 +1904,7 @@ input[type='checkbox'] {
   font-family: ui-monospace, Consolas, monospace;
 }
 /* 分组折叠：组间留白并用分隔线隔开 */
-.fold {
-  margin-top: 12px;
-}
-.fold > .link-btn {
-  margin-top: 0;
-}
-.fold + .fold {
-  padding-top: 12px;
-  border-top: 1px solid var(--line);
-}
+
 /* 覆盖 .link-btn 的 margin-top / 下划线，避免在 flex 行里把行高撑开 */
 .link-btn.inline {
   margin-top: 0;
@@ -1890,30 +1938,11 @@ input[type='checkbox'] {
   font-size: 11px;
   color: var(--fg-faint);
 }
-.hint {
-  margin: 10px 0 0;
-  font-size: 12px;
-  color: var(--fg-faint);
-  line-height: 1.6;
-}
-.hint a {
-  color: var(--accent);
-  text-decoration: underline;
-  text-underline-offset: 2px;
-  cursor: pointer;
-}
+
 /* ===== 「导入的音效」：六个槽位各成一个块 =====
    块 = 槽位头（角色名 + 概况 + 导入/替换按钮）+ 该槽位那一段（最多一段）的明细。
-   没有底色 / 描边 / 块间距时，六个槽位连同各自的明细会在视觉上连成一片，看不出归属。 */
-.sound-file {
-  flex: 1;
-  min-width: 0;
-  font-size: 12px;
-  color: var(--fg-dim);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
+   没有底色 / 描边 / 块间距时，六个槽位连同各自的明细会在视觉上连成一片，看不出归属。
+   文件名（.sound-file）与体积（.asset-meta）这两格属于「音效行」骨架，随 SoundRow 组件走 */
 .sound-group {
   margin-top: 10px;
   padding: 10px 12px;
@@ -1955,12 +1984,63 @@ input[type='checkbox'] {
   gap: 6px;
 }
 /* 导入时间：单独占满一行（flex-basis:100% 逼它换行），比挤在行尾更短更易扫。
-   同一个槽位里多个同名段（都叫「来财」）就是靠这里的时分来区分先后 */
+   一个槽位只留一段，这里只是给「这音是什么时候导进来的」留个时间戳 */
 .seg-time {
   flex: 1 1 100%;
   font-size: 11px;
   color: var(--fg-faint);
   white-space: nowrap;
+}
+/* 槽位下的「从共享库选用」面板：缩进一格 + 左侧色条，视觉上从属于上面那个槽位。
+   六个槽位同时展开会很长，所以同一时刻只允许开一个（见 soundPickOpen）。 */
+.sound-pick {
+  margin-top: 8px;
+  padding: 6px 0 2px 10px;
+  border-left: 2px solid var(--track);
+}
+.sound-pick-row {
+  padding: 5px 0;
+}
+/* 候选区限高内滚：45 段全下载时一个槽位有 44 行候选，铺开会把整张卡撑到几屏长。
+   内部滚动让面板高度可预期（滚动条本身也提示「这里还有更多」）。
+   max-height 用 vh 而非固定 px：窄卡片与宽窗口下都取「大约一屏的六成」 */
+.sound-pick-list {
+  max-height: 260px;
+  overflow-y: auto;
+  /* 只给纵向留缝：横向滚动条会把行末的按钮推到需要左右拖才能点到 */
+  padding-right: 2px;
+}
+/* 筛选行：与下面列表拉开、不要贴太紧（列表缩进是从 .sound-pick 的 border-left 来的） */
+.sound-pick-search {
+  margin: 4px 0 2px;
+}
+.sound-pick-search .label {
+  flex: 0 0 auto;
+  min-width: 34px;
+}
+.sound-pick-row + .sound-pick-row {
+  border-top: 1px solid var(--track);
+}
+/* 动作行：与「共享音效」卡的 .shs-ops 同款（换行 + 基准宽度下拉），只是嵌套选择器不同。
+   下拉不再铺满 —— 铺满后「使用 / 试听」被推到行尾、离开文件名的视线范围，
+   窄卡片里也让两行控件各换各的行 */
+.sound-pick-ops {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+/* 正在试听的那一段：按钮切成「停止」并给强调色描边，与「共享音效」卡同一套视觉 */
+.sound-pick-ops .preview-on {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+/* 选择区在槽位内部，可用宽度比「共享音效」卡窄，窄到放不下时让体积换到第二行，
+   不然文件名会被压成省略号。
+   SoundRow 是子组件（scoped 哈希不同），用 :deep 才够得着它内部的 .sound-file */
+.sound-pick-row :deep(.sound-file) {
+  flex-wrap: wrap;
 }
 /* ===== 共享音效库的分组列表 =====
    「已下载」与「未下载」分开渲染（见模板注释：两类行控件数差 3 个，混排必然列对不齐）。
@@ -1968,6 +2048,33 @@ input[type='checkbox'] {
    .shs-ops 副线（动作控件，与文件名左对齐，窄卡片里可换行）。 */
 .shs-list {
   margin-top: 4px;
+}
+/* 「已下载」组的搜索 + 筛选行：输入框吃掉剩余宽度，三档 chip 保持紧凑不换行时也能全露 */
+.shs-filter {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.shs-filter input[type='text'] {
+  /* 与 .label 的 72px 起始宽度呼应，让输入框与上面的「参加播放：」列起点对齐 */
+  flex: 1 1 140px;
+  min-width: 0;
+}
+/* 已下载段的滚动容器：限高内滚，把卡的高度钉在「约 6 行 + 表头」。
+   45 段时不再让整张卡往下长几十屏 —— 页面总长可预期，滚出这半截也不会把
+   搜索 / 筛选行一起滚走（它们在滚动区外）。
+   用 vh 取值：窗口拉高时多露几行，窄窗口也不会矮到看不见列表 */
+.shs-scroll {
+  max-height: 42vh;
+  overflow-y: auto;
+  /* 只留纵向：横向滚动条会让行末的「删」需要左右拖才点得到 */
+  padding-right: 2px;
+}
+/* 滚动区内的行首尾边距单独收一下：外层 .shs-list 的 margin-top 已提供顶部留白 */
+.shs-scroll .shs-row:first-of-type {
+  padding-top: 0;
 }
 .shs-row {
   padding: 6px 0;
@@ -1985,37 +2092,51 @@ input[type='checkbox'] {
   gap: 8px;
   min-width: 0;
 }
+/* 行内动作组（试听 / 删）跟在体积后面、右端对齐。
+   不设 flex:1 —— 让文件名吃掉剩余宽度，动作组被挤到最右 */
+.seg-ops {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  /* 与上面的文件名基线错开一点，避免按钮比文字高出半行显得歪 */
+  align-self: center;
+}
 .shs-ops {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 6px;
-  margin-top: 6px;
+  margin-top: 4px;
 }
-/* 槽位下拉：给个基准宽度而不是 flex:1 铺满 —— 铺满后「选用 / 试听 / 删」会被推到行尾，
-   离开文件名的视线范围；固定宽度更紧凑，也让 45 行的按钮列左右对齐。
-   用 --input-bg 而非透明：它是个可选下拉，透明底会和「试听 / 删」两个描边按钮糊在一起 */
-.shs-ops .sound-role-pick {
-  flex: 0 1 150px;
-  min-width: 0;
-  padding: 3px 6px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--input-bg);
-  color: var(--fg-dim);
+/* 「参加播放：」标签不再单独占位：塞进 chip 行首，用 ::before 省一层 DOM，
+   且 chip 换行时首行仍以它为起点（flex 换行不会把它挤到第二行） */
+.shs-ops::before {
+  content: '参加播放：';
+  flex: 0 0 auto;
   font-size: 12px;
+  color: var(--fg-faint);
+  align-self: center;
+}
+/* 槽位 chip：一段共享音效「参加哪些槽位的播放」。点亮 = utils-primary（已参加），
+   熄灭 = utils-outline（未参加）。比旧的下拉更直观 —— 一眼看出这段参与了哪几个槽位，
+   且能同时选多个（下拉是单选 + 再点一次「选用」另存一份，语义完全不同）。 */
+.shs-roles-gap {
+  /* 分组分隔：按压 / 释放（音色）与四类提醒音之间拉开一点 */
+  flex: 0 0 0;
+  margin-left: 4px;
+}
+.role-chip {
+  /* 比普通按钮紧凑：一行 6 个 chip 加一个分组缝刚好铺满，别把行撑爆 */
+  padding: 3px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+  line-height: 1.4;
 }
 /* 正在试听的那一段：按钮切成「停止」并给强调色描边，让用户在 45 行里一眼找到在放哪条 */
 .shs-ops .preview-on {
   color: var(--accent);
   border-color: var(--accent);
-}
-/* 素材的体积与导入时间：次要信息，跟在文件名后面，不参与换行挤压 */
-.asset-meta {
-  flex: 0 0 auto;
-  font-size: 12px;
-  color: var(--fg-dim);
-  white-space: nowrap;
 }
 /* 形象画廊：缩略图网格。棋盘格底让透明 PNG 的透明区域能看出来 */
 .skin-grid {
@@ -2257,6 +2378,22 @@ input[type='checkbox'] {
 }
 .skin-cell.is-remote .skin-cell-tag.warn {
   background: rgba(200, 120, 30, 0.92);
+}
+/* 「不参与随机」角标：通栏沉在格子底部。用中性灰而非红色 —— 这不是错误态，
+   只是用户主动排除的一张，标红会让人误以为这张图有问题。
+   pointer-events: none 与「使用中」一致，不吃掉缩略图上的单击选中 / 双击使用。 */
+.skin-cell-pool-off {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 1px 0;
+  font-size: 9px;
+  line-height: 1.3;
+  text-align: center;
+  background: rgba(60, 66, 78, 0.82);
+  color: #fff;
+  pointer-events: none;
 }
 /* 「导入」格：内容为「＋ / 导入」，位置与其它 64×64 图框对齐。
    边框用实线、底色与 .skin-box 同款棋盘 —— 夹在一排棋盘格里时它是一枚正常的「加图」按钮 */

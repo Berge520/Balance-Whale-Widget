@@ -346,3 +346,112 @@ html.dark ::-webkit-scrollbar-thumb:active {
 .card.search-flash {
   animation: whale-search-flash 0.9s ease-out 1;
 }
+
+/* ===== 跨卡片共用的六个基类：全局唯一来源 =====
+   .card / .card h2 / .field / .field.row select / .label / .field.check .label /
+   .field:not(.row) .label / .label em / .hint / .hint a / .msg / .fold / .fold > .link-btn /
+   .fold + .fold —— 这些类被 App.vue 与十余个子组件各自复制过一份（多时 13 份逐字相同），
+   是「观感漂移」的根因：改一处不可能改全。上提到这里，`main.css` 由 main.js 直接 import、
+   是全局非 scoped 样式，对所有组件一次性生效。
+
+   ⚠️ 与上方「含局部主题变量的规则别放全局」的警告不冲突：本条只用到 --card-bg / --card-border /
+   --fg-faint / --accent / --fg-dim / --ok / --err / --line / --tab-bar-h，这些全部已在
+   :root 与 html.dark 里是全局真源（见本文件顶部），不属 `.page` 作用域局部变量。
+
+   ⚠️ 三处有意的例外，**保留在各自组件里、不要上提、也不要"顺手统一"**：
+   · FirstRunGuide.vue：.field 用 margin: 12px 0 6px、.label 用 display:block/margin-bottom:5px、
+     .label em 用 --fg-dim/12px —— 引导页是刻意更松的排版，不是漏改。
+   · AccelView.vue 的 .gh-accel .card：没有 scroll-margin-top —— 它在「GitHub 加速」tab 内
+     作为子卡呈现，不参与搜索命中滚动，留着反而更贴近原设计。
+   · CodexView.vue 的 .fold：没有 .fold + .fold 分隔线 —— 该卡只有单个折叠钮，加不上。
+   以上例外若被"统一"，等同改动既有观感，需单独确认。 */
+.card {
+  background: var(--card-bg);
+  border: 1px solid var(--card-border);
+  border-radius: 12px;
+  padding: 16px;
+  margin-bottom: 16px;
+  /* 点搜索命中标签滚到卡片时，吸顶的 .tab-bar 会盖住卡头；预留它的高度让卡顶落在下方 */
+  scroll-margin-top: var(--tab-bar-h, 96px);
+}
+.card h2 {
+  margin: 0 0 12px;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--fg-dim);
+}
+.field {
+  display: block;
+  margin: 10px 0;
+}
+.field.row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.field.row select {
+  flex: 1;
+}
+.field.check {
+  justify-content: flex-start;
+  /* 标签换行成多行时，复选框跟首行对齐 —— 居中对齐会飘到两行之间，看起来像对错了行 */
+  align-items: flex-start;
+}
+.label {
+  font-size: 13px;
+  /* 短标签保持 72px 起始宽度、纵向对齐（同组控件左侧对齐）；
+     flex-shrink 允许长标签（常带 <em> 说明）在窄卡片里收缩换行，
+     而不是顶住不缩把同行控件乃至整张卡片撑出边界 */
+  flex: 0 1 auto;
+  min-width: 72px;
+  /* 长标签的换行点：中文没有空格，靠 break-word 才能在盒子内折行 */
+  overflow-wrap: anywhere;
+}
+/* 勾选行（.field.check）：标签独占剩余宽度，复选框固定靠右不被挤出卡片。
+   这类标签的 <em> 补充说明最长（如 dsh 的三条），是横向溢出的主要来源 */
+.field.check .label {
+  flex: 1 1 auto;
+  min-width: 0;
+  line-height: 1.5;
+}
+.field:not(.row) .label {
+  display: block;
+  margin-bottom: 5px;
+}
+.label em {
+  font-style: normal;
+  color: var(--fg-faint);
+  font-size: 11px;
+}
+.hint {
+  margin: 10px 0 0;
+  font-size: 12px;
+  color: var(--fg-faint);
+  line-height: 1.6;
+}
+.hint a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.msg {
+  margin: 10px 0 0;
+  font-size: 12px;
+}
+.msg.ok {
+  color: var(--ok);
+}
+.msg.err {
+  color: var(--err);
+}
+.fold {
+  margin-top: 12px;
+}
+.fold > .link-btn {
+  margin-top: 0;
+}
+.fold + .fold {
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}

@@ -195,6 +195,11 @@ function importUsageCsv() {
   }
 }
 
+// 自定义单价折叠态：整块（4 列价格网格 + 按模型覆盖列表）平时用不到但很长，故可折。
+// 默认展开 —— 本块只在「平台令牌」模式下渲染，进得来的基本就是要改价的。
+// 纯展示态、不给父级，故留组件内部（同 usageRange）
+const priceFold = ref(true)
+
 // —— 账本明细（可折叠）——
 // 数据源是宿主账本：每日用量 + 当天的「未计入用量的余额变动」「手动校准」记录。
 // 展开时才取一次（拉满保留天数），区间跟着上方区间切换在前端截取，筛选也在前端做。
@@ -400,8 +405,14 @@ defineExpose({ applyHistory, refreshTodayModels, refreshDetail })
 
     <!-- 自定义单价（可选）：官方调价没跟上、或走中转站按自己的价目结算时用。
          填的是谷价，峰价按官方规则（谷价 × 2）自动翻倍；美元单价按汇率折成人民币记账。
-         两种覆盖方式可分别使用：全局开关（对所有模型）与「按模型覆盖」的条目（只改列出的） -->
+         两种覆盖方式可分别使用：全局开关（对所有模型）与「按模型覆盖」的条目（只改列出的）。
+         整块收进折叠：多数人用不到，但展开后有四列价格网格 + 按模型覆盖的列表，很长。
+         默认展开（与「位置类默认收起」不同——本块只在令牌模式下出现，进来的就是来改价的） -->
     <div v-if="cfg.usageMode === 'token'" class="price-box">
+      <button class="link-btn utils-btn utils-secondary" type="button" @click="priceFold = !priceFold">
+        {{ priceFold ? '收起自定义单价' : '自定义单价（调价没跟上 / 按自己的价目结算）' }}
+      </button>
+      <div v-if="priceFold">
       <label class="field row check">
         <span class="label">自定义单价</span>
         <input type="checkbox" :checked="cfg.tokenPrice.on"
@@ -476,6 +487,7 @@ defineExpose({ applyHistory, refreshTodayModels, refreshDetail })
       <button class="export-btn utils-btn utils-outline" type="button"
               :disabled="cfg.tokenPrice.models.length >= priceModelMax"
               @click="emit('add-price-model')">＋ 添加模型</button>
+      </div>
     </div>
 
     <div v-if="historyMax > 0" class="chart"
@@ -601,28 +613,15 @@ defineExpose({ applyHistory, refreshTodayModels, refreshDetail })
 </template>
 
 <style scoped>
-/* 设计令牌来自 main.css 的 :root。通用控件样式原本由 App.vue 的 scoped 样式提供，
-   组件拆分后 scoped 隔离掉了，这里按本组件用到的部分补齐一份。utils 档位配色与 .link-btn
-   基类已在 main.css（单一来源），此处不再留副本。
+/* 设计令牌来自 main.css 的 :root。通用控件样式已由 main.css 统一提供（全局唯一来源），
+   本组件只留自身特有的控件样式。utils 档位配色与 .link-btn
+   基类也已在 main.css，此处不再留副本。
    ★ 趋势柱状图那套（.chart / .bar-* / .chart-dense / .chart-ultra）必须带进来：
      原先它们只写在 UsageChart.vue 的 scoped 块里，而本卡的趋势图是 App.vue 内联 markup、
      带的是 App 的哈希，规则整段失效 —— 症状是柱子完全不出（.bar-track 的 height:90px 没生效）。
      随本卡抽成独立组件后在这里补齐，正好修掉这个既有 bug。
      阈值按本卡口径：dense ≥14、ultra ≥90（UsageChart 组件内是 14 / 30，与本卡不同）。 */
-.card {
-  background: var(--card-bg);
-  border: 1px solid var(--card-border);
-  border-radius: 12px;
-  padding: 16px;
-  margin-bottom: 16px;
-  scroll-margin-top: var(--tab-bar-h, 96px);
-}
-.card h2 {
-  margin: 0 0 12px;
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--fg-dim);
-}
+
 .card-head {
   display: flex;
   align-items: center;
@@ -652,35 +651,7 @@ defineExpose({ applyHistory, refreshTodayModels, refreshDetail })
   color: var(--fg);
   border-color: var(--accent);
 }
-.field {
-  display: block;
-  margin: 10px 0;
-}
-.field.row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-.field.check {
-  justify-content: flex-start;
-  align-items: flex-start;
-}
-.label {
-  font-size: 13px;
-  flex: 0 1 auto;
-  min-width: 72px;
-  overflow-wrap: anywhere;
-}
-.field.check .label {
-  flex: 1 1 auto;
-  min-width: 0;
-  line-height: 1.5;
-}
-.label em {
-  font-style: normal;
-  color: var(--fg-faint);
-  font-size: 11px;
-}
+
 input[type='text'],
 select {
   width: 100%;
@@ -703,9 +674,7 @@ select:focus,
   border-color: var(--accent);
   box-shadow: 0 0 0 3px rgba(83, 107, 169, 0.18);
 }
-.field.row select {
-  flex: 1;
-}
+
 .num {
   width: 56px;
   padding: 5px 6px;
@@ -733,22 +702,7 @@ select:focus,
   font-size: 11px;
   color: var(--fg-faint);
 }
-.hint {
-  margin: 10px 0 0;
-  font-size: 12px;
-  color: var(--fg-faint);
-  line-height: 1.6;
-}
-.msg {
-  margin: 10px 0 0;
-  font-size: 12px;
-}
-.msg.ok {
-  color: var(--ok);
-}
-.msg.err {
-  color: var(--err);
-}
+
 .month-sum {
   margin-top: 6px;
 }

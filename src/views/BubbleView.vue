@@ -81,6 +81,7 @@ function pushUndo(editKey: string) {
 function undo() {
   const prev = undoStack.value.pop()
   if (!prev) return
+  resetConfirm.value = false
   redoStack.value.push(snapshot())
   lastEditKey = ''
   emit('patch', { bubble: { items: prev.items, lib: prev.lib } })
@@ -89,6 +90,7 @@ function undo() {
 function redo() {
   const next = redoStack.value.pop()
   if (!next) return
+  resetConfirm.value = false
   undoStack.value.push(snapshot())
   lastEditKey = ''
   emit('patch', { bubble: { items: next.items, lib: next.lib } })
@@ -116,6 +118,9 @@ onBeforeUnmount(() => {
 // —— 试播：把当前队列整份发给挂件真弹一次（宿主 bubblePreview → whale:bubble-preview）——
 // 载荷必须与配置脱钩（挂件那边会存引用），故走 cloneBubbleItems 深拷贝
 const previewing = ref(false)
+// 编辑器折叠态（队列 + 模块库两层长列表）：纯展示态、不给父级，故留组件内部。
+// 默认展开 —— 本卡主要功能就是编辑器，折起来只服务「只想看 / 改开关」的人
+const editorCollapsed = ref(false)
 async function doPreview() {
   flash.msg = ''
   flash.err = false
@@ -147,6 +152,7 @@ async function doPreview() {
 function onToggleOn(e: Event) {
   flash.msg = ''
   flash.err = false
+  resetConfirm.value = false
   const on = (e.target as HTMLInputElement).checked
   emit('patch', { bubble: { on } })
 }
@@ -160,8 +166,29 @@ function onToggleThinking(e: Event) {
 function onQueueChange(next: any[]) {
   flash.msg = ''
   flash.err = false
+  resetConfirm.value = false
   pushUndo('queue')
   emit('patch', { bubble: { items: next } })
+}
+
+// —— 恢复出厂默认队列 ——
+// 队列删空 → 保存 → 宿主 normBubbleItems(null) 回填出厂默认，但那是隐式路径且要「保存」才生效；
+// 这里给一个显式入口。传 { items: null } 而非 { bubble: null }：后者会连 lib（用户攒的模块库）
+// 一起清空（store.js normBubble 的 `if (!src) out.lib = []`），只重置队列不动模块库才是本意。
+// 出厂默认由宿主 bubbleDefaultItems() 生成，前端不重复实现一份，避免两处漂移。
+const resetConfirm = ref(false)
+function onResetQueue() {
+  if (!resetConfirm.value) {
+    resetConfirm.value = true
+    flash.msg = ''
+    flash.err = false
+    return
+  }
+  resetConfirm.value = false
+  pushUndo('reset')
+  emit('patch', { bubble: { items: null } })
+  flash.err = false
+  flash.msg = '已恢复出厂默认队列（模块库保留）'
 }
 // 打开某一步某侧的内容编辑（W2）：记录「正在编辑哪一步的哪一侧」。
 // 面板本身是居中弹层（见 BubbleModPanel 文件头）：队列上同一个索引再点一次即收起，
@@ -174,6 +201,7 @@ const editing = ref<{ idx: number; side: number } | null>(null)
 function onQueueEdit(payload: { idx: number; side: number }) {
   flash.msg = ''
   flash.err = false
+  resetConfirm.value = false
   const cur = editing.value
   if (cur && cur.idx === payload.idx && cur.side === payload.side) {
     editing.value = null
@@ -275,26 +303,42 @@ onMounted(() => {
 
     <!-- 点击队列编辑器（W1）：增删步骤 / 上移下移 / 单泡↔并列 / A·B 权重 / 进泡编辑。
          点「编辑内容」开的是泡内容面板（W2）—— 面板本身是居中弹层（见 BubbleModPanel 文件头），
-         位置与这个插槽无关；保留具名插槽只是为了把面板挂在队列编辑器之下（组件树清晰、状态同居） -->
-    <BubbleQueueEditor :items="items" :editing="editing" @change="onQueueChange" @edit="onQueueEdit">
-      <template #editor>
-        <BubbleModPanel v-if="editingTitle"
-                        :title="editingTitle" :modules="editingModules" :lib="bubbleLib" :bubbles="bubbles"
-                        :theme="cfg.theme" :side="editingSide" :sides="editingSides"
-                        @change="onModChange" @lib="onLibChange" @edit="setEditSide" @close="closeEditor" />
-      </template>
-    </BubbleQueueEditor>
+         位置与这个插槽无关；保留具名插槽只是为了把面板挂在队列编辑器之下（组件树清晰、状态同居）。
+         可折叠：编辑器带队列 + 模块库两层长列表，看开关 / 文案的人不必每次都滚过它。
+         折叠按钮用 .fold + .link-btn 的既有范式（本卡原来没有折叠，故此处的「收起」默认展开） -->
+    <div class="fold">
+      <button class="link-btn utils-btn utils-secondary" type="button" @click="editorCollapsed = !editorCollapsed">
+        {{ editorCollapsed ? '展开编辑器（队列与模块）' : '收起编辑器' }}
+      </button>
+      <template v-if="!editorCollapsed">
+        <BubbleQueueEditor :items="items" :editing="editing" @change="onQueueChange" @edit="onQueueEdit">
+          <template #editor>
+            <BubbleModPanel v-if="editingTitle"
+                            :title="editingTitle" :modules="editingModules" :lib="bubbleLib" :bubbles="bubbles"
+                            :theme="cfg.theme" :side="editingSide" :sides="editingSides"
+                            @change="onModChange" @lib="onLibChange" @edit="setEditSide" @close="closeEditor" />
+          </template>
+        </BubbleQueueEditor>
 
-    <div class="btn-row">
-      <!-- 撤销 / 重做：覆盖队列 + 泡内容 + 模块库三类编辑；宿主推送的回填（挂件菜单 / 备份恢复）
-           不入栈，故「撤销」永远只回退用户在编辑器里做过的操作。快捷键 Ctrl+Z / Ctrl+Y 同款 -->
-      <button class="utils-btn utils-secondary" type="button" :disabled="!canUndo"
-              title="撤销上一次编辑（Ctrl+Z）" @click="undo">撤销</button>
-      <button class="utils-btn utils-secondary" type="button" :disabled="!canRedo"
-              title="重做被撤销的编辑（Ctrl+Y）" @click="redo">重做</button>
-      <button class="utils-btn utils-secondary" type="button" :disabled="previewing || !widgetVisible"
-              :title="widgetVisible ? '把当前队列发给挂件真弹一次' : '挂件未显示，先在「窗口」页显示挂件'"
-              @click="doPreview">{{ previewing ? '已试播' : '试播到挂件' }}</button>
+        <div class="btn-row">
+          <!-- 撤销 / 重做：覆盖队列 + 泡内容 + 模块库三类编辑；宿主推送的回填（挂件菜单 / 备份恢复）
+               不入栈，故「撤销」永远只回退用户在编辑器里做过的操作。快捷键 Ctrl+Z / Ctrl+Y 同款 -->
+          <button class="utils-btn utils-secondary" type="button" :disabled="!canUndo"
+                  title="撤销上一次编辑（Ctrl+Z）" @click="undo">撤销</button>
+          <button class="utils-btn utils-secondary" type="button" :disabled="!canRedo"
+                  title="重做被撤销的编辑（Ctrl+Y）" @click="redo">重做</button>
+          <button class="utils-btn utils-secondary" type="button" :disabled="previewing || !widgetVisible"
+                  :title="widgetVisible ? '把当前队列发给挂件真弹一次' : '挂件未显示，先在「窗口」页显示挂件'"
+                  @click="doPreview">{{ previewing ? '已试播' : '试播到挂件' }}</button>
+          <!-- 恢复默认：两段式确认（首点变「确认恢复默认？」+ 危险色，再点执行；旁边给「取消」），
+               范式照 NotifyView 的提醒文案恢复默认。执行前先 pushUndo，仍可 Ctrl+Z 撤回这一次重置 -->
+          <button class="utils-btn" :class="resetConfirm ? 'utils-danger' : 'utils-secondary'" type="button"
+                  title="把点击队列恢复成出厂默认（不动模块库）"
+                  @click="onResetQueue">{{ resetConfirm ? '确认恢复默认？' : '恢复默认' }}</button>
+          <button v-if="resetConfirm" class="utils-btn utils-secondary" type="button"
+                  @click="resetConfirm = false">取消</button>
+        </div>
+      </template>
     </div>
     <p v-if="!widgetVisible" class="hint">
       挂件还没显示，试播发不出去 —— 先去「窗口」页把它显示出来。
@@ -306,70 +350,12 @@ onMounted(() => {
 <style scoped>
 /* 设计令牌来自 main.css 的 :root；.card / .field / .label / .hint / .msg / .btn-row / utils 档位
    是设置页跨卡共用的基类（各自 scoped，故这里补齐本组件用到的部分）。 */
-.card {
-  background: var(--card-bg);
-  border: 1px solid var(--card-border);
-  border-radius: 12px;
-  padding: 16px;
-  margin-bottom: 16px;
-  /* 搜索命中滚到本卡时避开吸顶的 .tab-bar（值由 App.vue 实测写入） */
-  scroll-margin-top: var(--tab-bar-h, 96px);
-}
-.card h2 {
-  margin: 0 0 12px;
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--fg-dim);
-}
-.field {
-  display: block;
-  margin: 10px 0;
-}
-.field.row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-.field.check {
-  justify-content: flex-start;
-  align-items: flex-start;
-}
-.label {
-  font-size: 13px;
-  flex: 0 1 auto;
-  min-width: 72px;
-  overflow-wrap: anywhere;
-}
-.field.check .label {
-  flex: 1 1 auto;
-  min-width: 0;
-  line-height: 1.5;
-}
-.label em {
-  font-style: normal;
-  color: var(--fg-faint);
-  font-size: 11px;
-}
+
 input[type='checkbox'] {
   width: 16px;
   height: 16px;
   accent-color: var(--accent);
 }
-.hint {
-  margin: 10px 0 0;
-  font-size: 12px;
-  color: var(--fg-faint);
-  line-height: 1.6;
-}
-.msg {
-  margin: 10px 0 0;
-  font-size: 12px;
-}
-.msg.ok {
-  color: var(--ok);
-}
-.msg.err {
-  color: var(--err);
-}
+
 /* 队列编辑器（BubbleQueueEditor）自带样式；本卡只留外壳与开关类 */
 </style>

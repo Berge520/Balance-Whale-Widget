@@ -378,9 +378,9 @@ const CHECKS = [
       { file: FLOATING_CSS, pick: cssPx('whale-pad') },
     ],
   },
-  // 缩放范围有三份：宿主判定上下限、挂件滚轮缩放、设置页滑块。
-  // 注意同在这三处的还有「1–20 档 ↔ 实际倍率」的换算（(MAX_SCALE - MIN_SCALE) / 19），
-  // 那是表达式、没法在这里比对，改范围时记得一起看。
+  // 缩放范围与档位数有三份同值副本：宿主判定上下限/落库归一、挂件菜单滑块、设置页滑块与数字框。
+  // 档位数 SCALE_STEPS 决定「整数档 ↔ 倍率」的换算（numToScale 的分母是 SCALE_STEPS - 1），
+  // 三处必须同值，否则设置页数字框与滑块会映射到不同倍率（曾出现 20 档 vs 15 档并存）。
   {
     name: '缩放下限 MIN_SCALE',
     parts: [
@@ -395,6 +395,14 @@ const CHECKS = [
       { file: CONSTANTS, pick: jsNumber('const MAX_SCALE') },
       { file: FLOATING_PAGE, pick: jsNumber('MAX_SCALE') },
       { file: APP_VUE, pick: jsNumber('const MAX_SCALE') },
+    ],
+  },
+  {
+    name: '大小档位数 SCALE_STEPS',
+    parts: [
+      { file: CONSTANTS, pick: jsNumber('const SCALE_STEPS') },
+      { file: FLOATING_PAGE, pick: jsNumber('SCALE_STEPS') },
+      { file: APP_VUE, pick: jsNumber('const SCALE_STEPS') },
     ],
   },
   {
