@@ -750,6 +750,8 @@
     modText: bubbleModText,
     modImageSrc: bubbleModImageSrc,
     modStyle: bubbleModStyle,
+    // random 模块抽中台词的样式（字号/配色逐条带）；与 modText 共用同一次抽签，见 bubbleRandomPick
+    modPick: bubbleModPick,
   });
   var textBox = renderer.els.textBox;
   var labelEl = renderer.els.labelEl;
@@ -1172,7 +1174,7 @@
     if (type === 'random') {
       var lines = Array.isArray(mod.lines) ? mod.lines : [];
       if (!lines.length) return '';
-      var pick = lines[Math.floor(Math.random() * lines.length)];
+      var pick = bubbleRandomPick(mod);
       return renderLinePlaceholders(String((pick && pick.t) || ''));
     }
     if (type === 'link') return renderLinePlaceholders(String(mod.text || mod.url || ''));
@@ -1186,6 +1188,36 @@
     if (type === 'session') return bubbleApplyTpl(mod.tpl, bubbleSessionText());
     if (type === 'quota' || type === 'plan') return bubbleApplyTpl(mod.tpl, bubbleQuotaModuleText(mod));
     return '';
+  }
+  // random 模块抽取：按台词自带权重 w 抽一条（缺省 1），并按模块对象避重（连着两次不抽同一条）。
+  // 口径与 randSegText（段级句池）一致 —— 用模块对象当 WeakMap 键，同一模块跨多次渲染记住上次下标。
+  // 抽签结果只在这里定一次，bubbleModText 与 bubbleModPick 都来取它，
+  // 保证「文本」与「字号/配色」来自同一条：各自 Math.random() 一次会错位（文本 A、样式 B）
+  var randModLast = new WeakMap();
+  function bubbleRandomPick(mod) {
+    var lines = Array.isArray(mod && mod.lines) ? mod.lines : [];
+    if (!lines.length) return null;
+    if (lines.length === 1) return lines[0];
+    var last = randModLast.get(mod);
+    var idx = weightedPick(lines, function (l) { return (l && !Array.isArray(l) && l.w) || 1; }, function () { return last; });
+    if (idx < 0) idx = 0;
+    randModLast.set(mod, idx);
+    return lines[idx];
+  }
+  // 压中那条台词自带样式的回调（渲染器只认 { size, color, rgb, bold, italic, ul }）：
+  // 上游 random 口径就是「字色 / 字号逐条带」，模块级 size 只是兜底；纯字符串台词无色无号 → 回 null
+  function bubbleModPick(mod) {
+    if (!mod || typeof mod !== 'object' || mod.type !== 'random') return null;
+    var pick = bubbleRandomPick(mod);
+    if (!pick || typeof pick !== 'object' || Array.isArray(pick)) return null;
+    var o = {};
+    if (pick.size != null) o.size = pick.size;
+    if (pick.color) o.color = pick.color;
+    if (pick.rgb) o.rgb = pick.rgb;
+    if (pick.bold === true) o.bold = true;
+    if (pick.italic === true) o.italic = true;
+    if (pick.ul === true) o.ul = true;
+    return o;
   }
   // quota/plan 模块：本项目暂无订阅额度 / 订阅窗口数据源，一律占位「—」（全做但占位；tpl 为空时给「—」）
   function bubbleQuotaModuleText() {
@@ -1210,6 +1242,8 @@
       if (mod.peakColor) o.color = mod.peakColor;
       if (mod.peakRgb) o.rgb = mod.peakRgb;
       if (mod.peakBg) o.bg = mod.peakBg;
+      // 峰态徽章底：默认模板把「峰」做成白字压 rouge 底；漏传它会让白字压在白卡上、整个字隐形（显示不清楚）
+      if (mod.peakBgRgb) o.bgRgb = mod.peakBgRgb;
     } else {
       if (mod.offColor) o.color = mod.offColor;
       if (mod.offRgb) o.rgb = mod.offRgb;

@@ -230,7 +230,7 @@ const SEARCH_INDEX: Record<string, { label: string; tab: TabKey; keys: string }>
   credentials: { label: 'DeepSeek 凭据（API Key / 平台 Token）', tab: 'data', keys: 'apikey api key 密钥 token 令牌 凭据 授权 余额 认证' },
   // keys 覆盖守卫（build-gates）：卡内每个字段名至少要有一个 ≥2 字词出现在 label+keys 里，
   // 缺词会构建红 —— 下面各卡的「生僻字段词」（音量 / 币种 / 授权码 / 写入位置…）就是补欠账补出来的
-  look: { label: '挂件外观', tab: 'look', keys: '形象 皮肤 音色 音效 音量 大小 缩放 气泡 主题 报时 点按 播放 界面 深浅色 深色 浅色 暗色 亮色 跟随 uTools 峰谷 文案 随机' },
+  look: { label: '挂件外观', tab: 'look', keys: '形象 皮肤 音色 音效 音量 大小 缩放 气泡 主题 报时 点按 播放 界面 深浅色 深色 浅色 暗色 亮色 跟随 uTools 峰谷 文案 随机 节假日 法定节假日表 更新' },
   // 按压气泡（自定义泡泡）：卡内字段名简单（「按压气泡开关」「思考气泡」），
   // 但真正要能被搜到的是「自定义泡泡 / 点我弹什么 / 点击队列」这类叫法，一并收进 keys。
   // 挂件菜单的「气泡设置」按钮也指向本卡（导航 target='bubble'）
@@ -1505,6 +1505,12 @@ function pickSkin(id: string) {
   const i = skinPicked.value.indexOf(id)
   if (i >= 0) skinPicked.value.splice(i, 1)
   else skinPicked.value.push(id)
+  // 选中反馈：整理面板的批量动作反馈也写同一个 skinFlash（由「资源」页画廊与「外观」页渲染），
+  // 这里补一句选中提示。只在选中（而非反选）时说一句 —— 取消是用户主动反悔，不必再确认一遍
+  if (i < 0) {
+    skinFlash.err = false
+    skinFlash.msg = `已选中 ${skinPicked.value.length} 张：再到卡头「整理」里统一使用 / 排序 / 删除 / 参与随机`
+  }
 }
 // 双击缩略图 = 切换使用（原来单击干的事）
 function doUseSkinPick(id: string) {
@@ -2572,6 +2578,7 @@ onUnmounted(() => {
          所以素材说明统一放在卡片开头一句，各设置项下面只留「当前用的是什么」的状态 -->
     <LookView v-if="cardOn('look', 'look')"
               :cfg="cfg"
+              :services="services"
               :builtin-skins="BUILTIN_SKINS"
               :legacy-builtin-skins="LEGACY_BUILTIN_SKINS"
               :skin-meta="skinMeta"
@@ -2611,6 +2618,7 @@ onUnmounted(() => {
       :skin-meta="skinMeta"
       :skin-picked="skinPicked"
       :picked-skinned="pickedSkinned"
+      :skin-flash="skinFlash"
       :thumb-broken="thumbBroken"
       :skin-hint-open="skinHintOpen"
       :sounds-meta="soundsMeta"

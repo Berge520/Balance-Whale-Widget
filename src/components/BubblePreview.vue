@@ -18,10 +18,12 @@ const props = defineProps<{
   modelText?: (model: string) => string
   // v2 randimg 段取图：从「已装共享角色图」池随机抽一张。不传时渲染器整段丢弃
   randImgSrc?: () => string | null
-  // 按压气泡 { mods } 形态的模块回调（渲染器 modText / modImageSrc / modStyle）：
+  // 按压气泡 { mods } 形态的模块回调（渲染器 modText / modImageSrc / modPick / modStyle）：
   // 不传时模块文本为空、图片整行丢弃 —— 按压气泡编辑页要传全才能真预览
   modText?: (mod: any) => string
   modImageSrc?: (mod: any) => string | null
+  // random 模块抽中台词的样式（size/color/rgb/bold/italic/ul）覆盖模块级；不传则一律用模块级 size
+  modPick?: (mod: any) => Record<string, any> | null
   modStyle?: (mod: any) => Record<string, string> | null
   // 缩放（默认 1 = 真机 1:1）。弹层里要同时塞下模块编辑列表，0.7 约合 255px 高。
   // 舞台高与 root 几何同步乘，--dshw-base 也随之缩放 —— 模块字号 / 图片尺寸都按
@@ -65,6 +67,7 @@ onMounted(() => {
     // 按压气泡模块回调：与宿主 floating-page.js 的同名回调同签名，只是取的是示例值
     modText: (mod: any) => (props.modText ? props.modText(mod) : ''),
     modImageSrc: (mod: any) => (props.modImageSrc ? props.modImageSrc(mod) : null),
+    modPick: (mod: any) => (props.modPick ? props.modPick(mod) : null),
     modStyle: (mod: any) => (props.modStyle ? props.modStyle(mod) : null),
   })
   // 预览里的气泡常开（不做收起状态机）：文本/动图的显隐全由 applyLines 按行模型控制

@@ -21,9 +21,6 @@ type Flash = { msg: string; err: boolean }
 function msgCls(f: { err: boolean }) {
   return f.err ? 'msg err' : 'msg ok'
 }
-// 缩略图整理菜单里的提示完全是组件内的瞬时反馈（点一下就写一句、父级不消费），
-// 故自持本地草稿，避免改写父级 prop（vue/no-mutating-props）
-const skinFlash = reactive<Flash>({ msg: '', err: false })
 
 const props = defineProps<{
   cfg: any
@@ -37,6 +34,10 @@ const props = defineProps<{
   skinMeta: SkinMeta | null
   skinPicked: string[]
   pickedSkinned: SkinMeta[]
+  // 形象消息槽：与「挂件外观」页共用父级同一份。整理面板里的批量动作（参与随机 / 置顶 /
+  // 删除等）由父级改它，本卡负责在「资源」页把它渲染出来 —— 若自持本地 reactive，
+  // 父级写的消息就落不到这里，用户点「参与随机」看不到任何反馈（「点了没反应」）
+  skinFlash: Flash
   thumbBroken: Record<string, boolean>
   skinHintOpen: boolean
   soundsMeta: Record<SoundRole, SoundMeta[]>
@@ -492,15 +493,10 @@ function doBatchRandom(mode: 'all' | 'none' | 'keepCurrent') {
 function doUseSkin(id: string) {
   emit('use-skin', id)
 }
-// 单击缩略图的反馈：选中是「整理」面板的前置状态，若不给一句文案，
-// 用户点完只看到描边变化，未必意识到卡头那个按钮已经换成「已选 N 张」。
-// 只在选中（而非取消选中）时说一句，取消是用户主动反悔，不必再确认一遍
-function onSkinPicked(id: string, picked: boolean) {
+// 单击缩略图 = 切换选中。选中反馈文案由父级写进共用的 skinFlash（本卡只负责渲染），
+// 避免本卡自持消息槽导致父级写的批量动作反馈落不到「资源」页
+function onSkinPicked(id: string) {
   emit('pick-skin', id)
-  if (picked) {
-    skinFlash.err = false
-    skinFlash.msg = '已选中 1 张：可连点多张，再到卡头「整理」里统一使用 / 排序 / 删除'
-  }
 }
 function doUseSkinPick(id: string) {
   emit('use-skin-pick', id)
@@ -1215,7 +1211,7 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds, expand
                  功能靠「选中」这一个中间态承接。 -->
             <button class="skin-cell-pick" type="button"
                     :title="`${it.name}（${assetSize(it)} · ${assetAt(it)}）· 单击选中（可多选），双击切换使用`"
-                    @click="onSkinPicked(it.id, !(props.skinPicked.indexOf(it.id) >= 0))"
+                    @click="onSkinPicked(it.id)"
                     @dblclick="doUseSkinPick(it.id)">
               <img v-if="it.thumb && !thumbBroken[it.id]" class="skin-cell-img" :src="it.thumb" :alt="it.name"
                    @error="onThumbError(it.id)" />
@@ -2307,6 +2303,13 @@ input[type='checkbox'] {
 .skin-cell:hover .skin-cell-idx,
 .skin-cell:focus-within .skin-cell-idx,
 .skin-cell.dragging .skin-cell-idx {
+  opacity: 0;
+}
+/* 挂了「不参与随机」通栏角标时藏掉左下角的序号：两者都是 bottom:0 的绝对定位，
+   角标又是整宽居中 —— 序号（尤其两位数）会压在角标首字「不」上，把它盖住，
+   用户只看到后四个字「参与随机」，正好把状态读反（2026-10-08 反馈）。
+   这里用 :has 直接把序号让位，角标文字始终完整。 */
+.skin-cell:has(.skin-cell-pool-off) .skin-cell-idx {
   opacity: 0;
 }
 /* 拖拽排序：源格半透明表示「正在被搬走」；落点格用左侧/右侧一条竖线提示插入位置。

@@ -3,7 +3,7 @@
 // 已做归一化（小写 + 删空白）。模板改动后由 prebuild 重新生成；手改会被 --check 拦下。
 export const CARD_TEXT: Record<string, string> = {
   credentials: "apikey平台token",
-  look: "挂件外观大小形象内置形象也参与随机界面深浅色气泡配色峰谷文案思考气泡小鲸鱼报时挂件右上角菜单按钮音效开关音色音量",
+  look: "挂件外观大小形象内置形象也参与随机界面深浅色气泡配色峰谷文案法定节假日表思考气泡小鲸鱼报时挂件右上角菜单按钮音效开关音色音量",
   bubbleCustom: "按压气泡按压气泡开关思考气泡",
   assetsOverview: "资源概览导入素材形象音效气泡图形象气泡图音效",
   assetsSkins: "导入的形象",

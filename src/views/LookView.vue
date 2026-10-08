@@ -1,6 +1,6 @@
 <script lang="ts" setup>
 import { computed, reactive, ref, watch } from 'vue'
-import type { SkinGallery, SkinMeta, SoundMeta, SoundRole } from '../types/services'
+import type { HolidayStatus, SkinGallery, SkinMeta, SoundMeta, SoundRole, WhaleServices } from '../types/services'
 
 // 「挂件外观」整卡：大小 / 形象 / 深浅色 / 气泡与文案 / 音效，从设置页 App.vue 抽出。
 // 仍有多处留在父级，按 props 下传或 emit 触发，不能跟着搬：
@@ -42,6 +42,8 @@ const props = defineProps<{
   soundUnused: boolean
   // 大小档位数（父级 SCALE_STEPS，模板 number 输入的 max）
   scaleSteps: number
+  // 宿主 API（父级注入）：仅「更新节假日表」用，不在此组件内直接引用全局变量
+  services: Partial<WhaleServices>
 }>()
 const emit = defineEmits<{
   (e: 'patch', p: Record<string, any>): void
@@ -82,6 +84,53 @@ function onVolInput(e: Event) {
   volDraft.value = clampVol(Number((e.target as HTMLInputElement).value))
   emit('patch', { vol: volDraft.value })
 }
+
+// —— 节假日表：只读状态 + 手动联网更新。默认零网络，只有点按钮才发请求 ——
+const holiday = ref<HolidayStatus | null>(null)
+const holidayBusy = ref(false)
+const holidayFlash = ref<Flash | null>(null)
+function refreshHoliday() {
+  try {
+    holiday.value = props.services.holidayStatus?.() || null
+  } catch { holiday.value = null }
+}
+refreshHoliday()
+async function onHolidayUpdate() {
+  if (holidayBusy.value) return
+  holidayBusy.value = true
+  holidayFlash.value = null
+  try {
+    const r = await props.services.holidayUpdate?.()
+    if (r && r.ok) {
+      const years = (r.years || []).join('、')
+      const extra = (r.failed && r.failed.length) ? `；${r.failed.join('、')} 年暂未发布（可稍后再更新）` : ''
+      holidayFlash.value = { msg: `已更新：${years} 年全年 ${r.total || 0} 天${extra}`, err: !!(r.failed && r.failed.length) }
+    } else {
+      holidayFlash.value = { msg: (r && r.error) || '更新失败，请检查网络后重试', err: true }
+    }
+  } catch (err: any) {
+    holidayFlash.value = { msg: '更新失败：' + String((err && err.message) || err), err: true }
+  } finally {
+    holidayBusy.value = false
+    refreshHoliday()
+  }
+}
+function onHolidayClear() {
+  try { props.services.holidayClear?.() } catch (err) {}
+  holidayFlash.value = { msg: '已回到内置节假日表', err: false }
+  refreshHoliday()
+}
+// 状态行：已更新显示覆盖年份 + 整表天数 + 拉取时间；未更新提示当前只有内置年份。
+// 「N 天」说的是该年整张节假日表的天数（7 个假期加起来），与今天是否是节假日无关：
+// 原先写成「覆盖 2026 年，共 33 天」时，用户会把它读成「针对今天更新了 33 天」，
+// 进而怀疑「今天凭什么算节假日」（2026-10-08 实际是节后上班日）。用「全年」点明范围即可。
+const holidayNote = computed(() => {
+  const h = holiday.value
+  if (!h) return ''
+  if (!h.updated) return `当前使用内置表（${h.builtinYears.join('、')} 年）`
+  const at = h.fetchedAt ? new Date(h.fetchedAt * 1000).toLocaleString() : ''
+  return `已更新：${h.years.join('、')} 年全年 ${h.total} 天${at ? '（' + at + '）' : ''}`
+})
 </script>
 
 <template>
@@ -191,6 +240,20 @@ function onVolInput(e: Event) {
           </select>
         </label>
 
+        <!-- 法定节假日表（峰谷判定的依据）：内置表 + 可选的联网覆盖层。
+             默认不联网，「更新」按钮点一下才拉当年 + 次年的放假日子（数据源 chinese-days） -->
+        <div class="field">
+          <div class="holiday-head">
+            <span class="label">法定节假日表</span>
+            <button class="link-btn utils-btn utils-secondary" :disabled="holidayBusy"
+                    @click="onHolidayUpdate">{{ holidayBusy ? '更新中…' : '更新节假日表' }}</button>
+            <button v-if="holiday && holiday.updated" class="link-btn utils-btn utils-secondary"
+                    @click="onHolidayClear">恢复内置表</button>
+          </div>
+          <p class="hint holiday-note">{{ holidayNote }}（表内日期全天谷价）</p>
+          <p v-if="holidayFlash" class="hint" :class="msgCls(holidayFlash)">{{ holidayFlash.msg }}</p>
+        </div>
+
         <label class="field row check">
           <span class="label">思考气泡</span>
           <input type="checkbox" :checked="cfg.bubbleOn" @change="emit('patch', { bubbleOn: ($event.target as HTMLInputElement).checked })" />
@@ -265,6 +328,20 @@ function onVolInput(e: Event) {
   border-radius: 50%;
   background: var(--ok);
   vertical-align: middle;
+}
+
+/* 节假日表卡：标题行左侧文字 + 右侧操作按钮；状态说明行留小间距 */
+.holiday-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.holiday-head .label {
+  margin-right: auto;
+}
+.holiday-note {
+  margin: 6px 0 0;
 }
 
 select {

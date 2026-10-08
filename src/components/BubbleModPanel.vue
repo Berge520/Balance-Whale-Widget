@@ -406,6 +406,23 @@ function previewModImageSrc(m: any): string | null {
   const n = Number(imgIdOf(m.imgId))
   return props.bubbles[(n > 0 ? n : 1) - 1]?.thumb || null
 }
+// random 模块抽中台词的样式（字号 / 配色逐条带，同浮动页 bubbleModPick）：真机每次随机抽，
+// 预览固定取第 1 条 —— 否则一渲染一个样，用户根本没法照着调。与 previewModText 的 random 分支
+// 取同一条（都 lines[0]），文本与字号/配色才不会对不上
+function previewModPick(m: any): Record<string, unknown> | null {
+  if (m?.type !== 'random') return null
+  const lines = Array.isArray(m.lines) ? m.lines : []
+  const it = lines[0]
+  if (!it || typeof it !== 'object' || Array.isArray(it)) return null
+  const o: Record<string, unknown> = {}
+  if (it.size != null) o.size = it.size
+  if (it.color) o.color = it.color
+  if (it.rgb) o.rgb = it.rgb
+  if (it.bold === true) o.bold = true
+  if (it.italic === true) o.italic = true
+  if (it.ul === true) o.ul = true
+  return o
+}
 // 峰谷模块的动态配色：渲染器不知道该取峰还是谷，这里固定按「峰」态预览（可见性最好）
 function previewModStyle(m: any): Record<string, string> | null {
   if (m?.type !== 'peak') return null
@@ -452,7 +469,7 @@ const HELP: Record<string, string> = {
       </div>
       <BubblePreview :lines="previewLines" :theme="theme" :scale="0.7"
                      :mod-text="previewModText" :mod-image-src="previewModImageSrc"
-                     :mod-style="previewModStyle" />
+                     :mod-pick="previewModPick" :mod-style="previewModStyle" />
       <p v-if="help === 'add'" class="bmp-help">{{ HELP.add }}</p>
     </div>
 
@@ -720,13 +737,22 @@ const HELP: Record<string, string> = {
                     </span>
                   </label>
                 </div>
-                <label class="bmp-f bmp-f-sm">
-                  <span>谷底色跑马灯</span>
-                  <select :value="m.offBgRgb || ''"
-                          @change="patchMod(ri, mi, { offBgRgb: ($event.target as HTMLSelectElement).value || undefined })">
-                    <option v-for="s in rgbOptions" :key="s" :value="s">{{ s || '无' }}</option>
-                  </select>
-                </label>
+                <div class="bmp-grid">
+                  <label class="bmp-f bmp-f-sm">
+                    <span>峰底色跑马灯</span>
+                    <select :value="m.peakBgRgb || ''"
+                            @change="patchMod(ri, mi, { peakBgRgb: ($event.target as HTMLSelectElement).value || undefined })">
+                      <option v-for="s in rgbOptions" :key="s" :value="s">{{ s || '无' }}</option>
+                    </select>
+                  </label>
+                  <label class="bmp-f bmp-f-sm">
+                    <span>谷底色跑马灯</span>
+                    <select :value="m.offBgRgb || ''"
+                            @change="patchMod(ri, mi, { offBgRgb: ($event.target as HTMLSelectElement).value || undefined })">
+                      <option v-for="s in rgbOptions" :key="s" :value="s">{{ s || '无' }}</option>
+                    </select>
+                  </label>
+                </div>
               </template>
 
               <!-- 本模块操作 -->

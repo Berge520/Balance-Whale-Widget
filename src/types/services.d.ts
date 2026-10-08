@@ -242,6 +242,9 @@ export interface WhaleBubbleMod {
   offRgb?: string
   peakBg?: string
   offBg?: string
+  // peak：峰/谷底色的跑马灯（渐变底），与顶部 bgRgb 同一套配色名
+  peakBgRgb?: string
+  offBgRgb?: string
   peakStyle?: 'mini' | 'text' | 'count'
   // session：对话名保留字数
   len?: number
@@ -1644,6 +1647,27 @@ export interface GhAccelProbeResult {
   status?: number
   error?: string
 }
+// 节假日表状态：updated=是否已联网更新过；years=当前覆盖的年份（内置 ∪ 覆盖层）；
+// builtinYears=内置表年份；sources=各年份命中的源序号（0 起）
+export interface HolidayStatus {
+  updated: boolean
+  fetchedAt: number
+  total: number
+  years: string[]
+  builtinYears: string[]
+  sources: Record<string, number>
+}
+// 节假日表更新结果：ok=false 时看 error（网络/数据源异常或写存储失败）；
+// added=本次相比原覆盖层新增的天数；failed=拉取失败的年份
+export interface HolidayUpdateResult {
+  ok: boolean
+  added?: number
+  total?: number
+  years?: string[]
+  sources?: Record<string, number>
+  failed?: number[]
+  error?: string
+}
 // IP 表校验结果：results = 每条逐项探测结论；bad = 不可达（建议删除）；
 // stale = 不可达但命中当前实时 A 记录（多为探测抖动，界面不推荐删除）
 export interface GhAccelVerifyItem {
@@ -2143,6 +2167,13 @@ export interface WhaleServices {
   ghAccelClearOpLogs(): { cleared: number }
   // 连通性自检（HEAD https://github.com），开启前后各测一次做对比
   ghAccelProbe(): Promise<GhAccelProbeResult>
+  // —— 节假日表（峰谷判定的法定节假日，手动联网更新） ——
+  // 当前状态：是否已联网更新过 / 覆盖年份 / 拉取时间 / 各年份命中源
+  holidayStatus(): HolidayStatus
+  // 手动联网更新（当年 + 次年），只在用户点击时发起。失败不抛，返回 { ok:false, error }
+  holidayUpdate(): Promise<HolidayUpdateResult>
+  // 清除联网覆盖层，回到纯内置表
+  holidayClear(): { ok: boolean }
   // —— 备份 / 恢复 ——
   // 导出备份（secrets=true 时用 password 加密后才写入凭据）
   backupExport(opts: { secrets?: boolean; password?: string }): BackupExportResult

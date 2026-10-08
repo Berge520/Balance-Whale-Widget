@@ -98,8 +98,15 @@
      每个模块自带字号（行内 calc(var(--dshw-u) * N)），行内模块依次紧排、超宽在模块内折行；
      模块的底色/跑马灯在 .dshwv-trow 层，文字跑马灯在其内层 span（dshwv-trowtx）叠加 */
   .dshwv-mods { white-space: normal; }
+  /* trowline 是「一行模块」的容器：常态允许折行（超长模块自己折），
+     极长且折行也塞不下时，渲染器的 fitRowOverflow 会给它写 nowrap + overflow:hidden +
+     text-overflow:ellipsis（内联覆盖），这里只需保证 max-width 能生效（模块行是 block，
+     默认就吃 max-width，无需额外设置）。overflow 默认 visible，故必须靠内联 hidden 才截断 */
   .dshwv-trowline { display: block; white-space: normal; line-height: 1.25; text-align: center; }
   .dshwv-trow { display: inline; vertical-align: baseline; white-space: normal; overflow-wrap: anywhere; word-break: break-word; }
+  /* 单模块独占一行（如峰谷徽章）：inline 无法被 max-width 约束，截断失效。
+     渲染器在截断时会给它写 white-space:nowrap，配合这里改用 inline-block 才能出省略号 */
+  .dshwv-trowline > .dshwv-trow:only-child { max-width: calc(var(--dshw-u) * 660); }
   .dshwv-mimg {
     display: block; margin: 0 auto;
     max-width: calc(var(--dshw-u) * 540);

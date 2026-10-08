@@ -15,7 +15,7 @@ const {
   readSecrets, sanitizeKey, recordLedgerUsage, keyFingerprint, readConfig, setTodayUsage,
   claimDailyNotice, readModelState, writeModelState, todayKey, alertFor, alertOneLine,
 } = require('./store')
-const { isPeakTime, nextPeakChangeAt, priceFor, customPriceTable, customModelPrice } = require('./pricing')
+const { isPeakTime, nextPeakChangeAt, warnIfHolidayCalendarStale, priceFor, customPriceTable, customModelPrice } = require('./pricing')
 const { notify } = require('./notify')
 // codex(33KB) 只在解析「Codex 本地会话统计」时用得到（parseModelCodex，运行时）。
 // 顶层 require 会把它压进启动求值阶段（本模块在启动路径上必加载），而用户很可能不开这个模型统计。
@@ -755,6 +755,8 @@ async function getBalancePayload(manual) {
   const full = Object.assign({}, payload)
   const nowSec = Math.floor(Date.now() / 1000)
   full.isPeak = isPeakTime(nowSec)
+  // 跨年兜底：节假日表是手工维护的，当年未收录时记一次日志（不改变判定，只提示该更新表了）
+  warnIfHolidayCalendarStale(nowSec)
   // 下次峰谷切换的绝对时刻（挂件按它显示「距峰时/谷时」倒计时，避免页面自己再实现一套时段规则）
   full.peakNextAt = nextPeakChangeAt(nowSec)
   // 本次采样的余额下降量（挂件气泡占位符 {change} 用）：仅自动刷新有意义 ——

@@ -247,6 +247,11 @@ const BUBBLE_DRAG_LINES_DFT = ['哇——轻点轻点！', '起飞咯——', '�
 //     image 模块的 imgId 是**数字下标**（'' / '0' = 随机、1..N = 用户导入的第 N 张），没有具名内置图，
 //     照搬会让 `bimg_petpet` 解析成 0 → 新用户 customBubbles 为空 → 抽中即整泡空白。
 //     故换成 `{ type:'randimg' }`（从「已装共享角色图」池随机抽，与项内其余内容同源）。
+//   · 首泡三个注脚模块的字号上调（today 4→12、peak mini 2→10、peak count 4→12；用户 2026-10-08 拍板）：
+//     上游原值按「挂件中等偏大档位」设计，缩到外观大小档位 1（MIN_SCALE 0.6、本体约 122px、u≈0.119px）时
+//     size 2/4 只剩 5~6px，注脚与徽章糊成一片。这 5 个模块走模块级 size 直出（不经 random 的逐条台词样式），
+//     所以只能在此改数值；模块 size 是连续值（1–50），12/10 落在可读区（档位 1 下约 10/9px），大档位下也仍远小于主角余额。
+//     注意别顺手把 balance(20) 或 text(8) 一起抬高 —— 主角/标题的层级比例是上游设计，档位 1 下它们本就清楚。
 //   · 首泡保留上游的 5 模块 4 行形态，不再用此前那版「单行纯色余额」简化（用户 2026-10-06 拍板对齐上游）。
 // 注意：这里只写上游原样的初始值，真正的归一化走 normBubble，函数返回后即稳定。
 // 台词条数 47 > BUBBLE_LINES_MAX(60) 之内；size 均已落在 1–50（上游 size 1–50 与本插件同口径）。
@@ -308,9 +313,9 @@ function bubbleDefaultItems() {
       modules: [
         { type: 'text', text: 'DeepSeek 余额', size: 8, bold: true, rgb: '', ul: false, italic: false, color: '' },
         { type: 'balance', size: 20, rgb: 'indigo', color: '', tpl: '{balance_ds}', bgRgb: '', bg: '', fontFamily: '', bold: false },
-        { type: 'today', size: 4, color: '#9fb0d9', tpl: '今日已用 {expense_ds}' },
-        { type: 'peak', size: 2, peakColor: '#ffffff', offColor: '#ffffff', tpl: '{status}', peakRgb: '', offRgb: '', peakBgRgb: 'rouge', peakBg: '', offBgRgb: 'bamboo', offBg: '', peakStyle: 'mini', bold: true, row: 4, fontFamily: '"Microsoft YaHei",sans-serif' },
-        { type: 'peak', size: 4, bold: true, peakColor: '#e0433f', offColor: '#2fa24c', peakRgb: 'rouge', offRgb: 'bamboo', peakStyle: 'count', tpl: '{countdown}', row: 4, fontFamily: '', italic: false, ul: true },
+        { type: 'today', size: 12, color: '#9fb0d9', tpl: '今日已用 {expense_ds}' },
+        { type: 'peak', size: 10, peakColor: '#ffffff', offColor: '#ffffff', tpl: '{status}', peakRgb: '', offRgb: '', peakBgRgb: 'rouge', peakBg: '', offBgRgb: 'bamboo', offBg: '', peakStyle: 'mini', bold: true, row: 4, fontFamily: '"Microsoft YaHei",sans-serif' },
+        { type: 'peak', size: 12, bold: true, peakColor: '#e0433f', offColor: '#2fa24c', peakRgb: 'rouge', offRgb: 'bamboo', peakStyle: 'count', tpl: '{countdown}', row: 4, fontFamily: '', italic: false, ul: true },
       ],
     },
     {
@@ -443,7 +448,7 @@ function normBubbleMod(v) {
   if (!type) return null
   const KNOWN = ['type', 'size', 'color', 'rgb', 'bg', 'bgRgb', 'bold', 'italic', 'ul', 'fontFamily', 'row',
     'tpl', 'text', 'lines', 'url', 'text2', 'imgId', 'imgs', 'imgScale',
-    'peakColor', 'offColor', 'peakRgb', 'offRgb', 'peakBg', 'offBgRgb', 'offBg', 'peakStyle',
+    'peakColor', 'offColor', 'peakRgb', 'offRgb', 'peakBg', 'peakBgRgb', 'offBgRgb', 'offBg', 'peakStyle',
     'len', 'modelId', 'planWin']
   const out = Object.assign(passOwn(v, KNOWN), { type: type })
   out.size = Math.round(clampNum(v.size, BUBBLE_SIZE_MIN, BUBBLE_SIZE_MAX, BUBBLE_SIZE_DFT))
@@ -490,9 +495,10 @@ function normBubbleMod(v) {
     out.offColor = normBubbleColor(v.offColor)
     out.peakRgb = normBubbleRgb(v.peakRgb)
     out.offRgb = normBubbleRgb(v.offRgb)
-    // 峰 / 谷各自的底色与「谷底色跑马灯」：与顶部 bg / bgRgb 同一套清洗口径
+    // 峰 / 谷各自的底色与「峰谷底色跑马灯」：与顶部 bg / bgRgb 同一套清洗口径
     out.peakBg = normBubbleColor(v.peakBg)
     out.offBg = normBubbleColor(v.offBg)
+    out.peakBgRgb = normBubbleRgb(v.peakBgRgb)
     out.offBgRgb = normBubbleRgb(v.offBgRgb)
     out.peakStyle = BUBBLE_PEAK_STYLES.indexOf(v.peakStyle) >= 0 ? v.peakStyle : 'text'
     if (tpl) out.tpl = tpl

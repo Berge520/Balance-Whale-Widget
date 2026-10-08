@@ -39,7 +39,11 @@ export const FONT_TIERS = [26, 32, 40, 48, 58, 66, 72, 90, 104, 114, 140];
 // 圆圈放大多少，这里就放大多少，字号才会跟着变大而不是被压小。
 // FIT_H 430 是按「说明行折成两行」定的：三行全展开约 404u（72×1.15 + 140×1.05 + 9 + 2×72×1.15），
 // 留到 430u 才不会被折行后的高度反压回去；再大就顶到大椭圆下缘（内高约 547u，居中后下侧仅 251u）
-const FIT_W = 660, FIT_H = 430, FIT_MIN = 0.5;
+const FIT_W = 660, FIT_H = 430;
+// 缩字下限：单行缩到 FIT_HARD_MIN 仍放不下时不再缩，改走「换行 → 省略号」（见 fitRowOverflow）。
+// 0.34 来自实测：档位 1（u≈0.119px）下最小模块 41u 缩到 0.34 约 1.7px —— 已到可读性底线，
+// 再缩等于把字糊掉，不如换行或截断
+const FIT_HARD_MIN = 0.34;
 
 // 跑马灯（文字/底色渐变）每次渲染随机 1.5s~4.5s 的动画时长，各行速度不同。
 // 与上游 bubbleMarqueeDur 同口径（实时泡泡与设置页预览共用同一渲染器，速度一致）
@@ -130,94 +134,211 @@ export function createBubbleRenderer(opts) {
     labelEl.style.fontSize = '';
     amountEl.style.fontSize = '';
     hintEl.style.fontSize = '';
+    delete labelEl.dataset.k; delete amountEl.dataset.k; delete hintEl.dataset.k;
     var segs = rowsBox.querySelectorAll('.dshwv-seg');
     for (var i = 0; i < segs.length; i++) {
       segs[i].style.fontSize = '';
       segs[i].style.height = '';
+      delete segs[i].dataset.k;
     }
-    // 模块行字号记在模块元素自身的 dataset.fz（applyMods 写入），超框缩放后复位基准
+    // 模块行字号记在模块元素自身的 dataset.fz（applyMods 写入），超框缩放后复位基准。
+    // dataset.k 是逐行适配累积的缩放系数（shrinkSeg/shrinkImg 写），必须一并清掉：
+    // 不清的话下一次 applyMods 建的是新元素（无影响），但同批元素被重复 fitText 时系数会叠加
     var mods = modsBox.querySelectorAll('[data-fz]');
     for (var j = 0; j < mods.length; j++) {
       var base = parseFloat(mods[j].dataset.fz || '0');
       if (base) mods[j].style.fontSize = 'calc(var(--dshw-u) * ' + base + ')';
+      delete mods[j].dataset.k;
     }
     // 图片段基准宽在 dataset.mw（buildModImg 写入），复位它的 max-width 覆盖
     var mimg = modsBox.querySelectorAll('.dshwv-mimg');
     for (var q = 0; q < mimg.length; q++) {
       var mw = parseFloat(mimg[q].dataset.mw || '0');
       if (mw) mimg[q].style.maxWidth = 'calc(var(--dshw-u) * ' + mw + ')';
+      delete mimg[q].dataset.k;
     }
   }
   // 量出文本块的真实占位：宽取各行「内容宽度」的最大值（scrollWidth 能反映 nowrap 溢出的宽度，
   // 而 offsetWidth 会被绝对定位的 shrink-to-fit 上限截断），高为可见各行 offsetHeight 之和。
   // 均用布局尺寸而非 getBoundingClientRect：后者会带上 Q 弹的 scaleY(.88)/scaleX(1.05)
   // 与贴左镜像的 scaleX(-1)，导致测量失真。v2 的行是段容器（dshwv-row），行本身无字号，
-  // 宽高都落在段元素上，所以按「行内全部段」量
-  function measureText(els) {
+  // 宽高都落在段元素上，所以按「行内全部段」量。
+  // 传 single=true 只量「该块自身」的宽高（逐行适配用，不跨行取最大），
+  // 且额外回一行内部所有可缩元素的当前宽和（供逐元素独立缩，见 fitRow）
+  function measureText(els, single) {
     var w = 0, h = 0, i;
     for (i = 0; i < els.length; i++) {
       var el = els[i];
       if (el.style.display === 'none') continue;
       if (el.classList.contains('dshwv-row')) {
         var segs = el.querySelectorAll('.dshwv-seg');
+        var rw = 0, rh = 0;
         for (var j = 0; j < segs.length; j++) {
-          if (segs[j].scrollWidth > w) w = segs[j].scrollWidth;
-          h += segs[j].offsetHeight;
+          if (segs[j].scrollWidth > rw) rw = segs[j].scrollWidth;
+          rh += segs[j].offsetHeight;
         }
+        if (single) return { w: rw, h: rh };
+        if (rw > w) w = rw;
+        h += rh;
         continue;
       }
-      if (el.scrollWidth > w) w = el.scrollWidth;
-      h += el.offsetHeight;
+      var ew = el.scrollWidth, eh = el.offsetHeight;
+      if (single) return { w: ew, h: eh };
+      if (ew > w) w = ew;
+      h += eh;
     }
     return { w: w, h: h };
   }
-  // els 排布：三行结构传 [label, amount, hint]；rows 结构传 rowsBox 的可见行（applyRows 里缓存）
+  // 取一个块（行容器 / 模块行 / 三行中的单行）内「可缩放元素」的集合。
+  // 三类各自记基准：段/模块行字号在 dataset.fz，图片基准宽在 dataset.mw。
+  // 三行结构（label/amount/hint）没有 data-fz，基准在 BUBBLE_FONT，返回它自己由 scaleBlock 特殊处理
+  function collectScalables(el) {
+    var out = [];
+    if (el.classList.contains('dshwv-row')) {
+      var segs = el.querySelectorAll('.dshwv-seg');
+      for (var j = 0; j < segs.length; j++) out.push(segs[j]);
+      return out;
+    }
+    if (el.classList.contains('dshwv-mimg')) return [el]; // 图片块只有图，无文字
+    if (el.querySelector('.dshwv-mimg')) {
+      var imgs = el.querySelectorAll('.dshwv-mimg');
+      for (var q = 0; q < imgs.length; q++) out.push(imgs[q]);
+      return out;
+    }
+    var tx = el.querySelectorAll('[data-fz]');
+    if (tx.length) {
+      for (var t = 0; t < tx.length; t++) out.push(tx[t]);
+      return out;
+    }
+    // 三行结构：单行元素自己就是缩放目标（基准取 BUBBLE_FONT 的类名键）
+    if (el.classList.contains('dshwv-label') || el.classList.contains('dshwv-amount')
+      || el.classList.contains('dshwv-period') || el.classList.contains('dshwv-hint')) out.push(el);
+    return out;
+  }
+  // 把一个块内所有可缩放元素按系数 k 缩放（字号基准乘 k、图片基准宽乘 k）。
+  // 缩放到「无超框」是靠反复调用并累积 k 完成的，单次调用不重置 —— 与旧 fitText 同口径
+  function scaleBlock(el, k) {
+    var s = collectScalables(el);
+    for (var i = 0; i < s.length; i++) {
+      var node = s[i];
+      if (node.classList.contains('dshwv-mimg')) { shrinkImg(node, k); continue; }
+      // 三行结构：字号基准不在 dataset.fz，而在 BUBBLE_FONT（类名首段为键）
+      if (!node.dataset.fz) {
+        var key = String(node.className).split(' ')[0];
+        var base = BUBBLE_FONT[key];
+        if (!base) continue;
+        var cur = parseFloat(node.dataset.k || '1') * k;
+        node.dataset.k = String(cur);
+        node.style.fontSize = 'calc(var(--dshw-u) * ' + (base * cur).toFixed(1) + ')';
+        continue;
+      }
+      shrinkSeg(node, k);
+    }
+  }
+  // 判断一个块是否真的超框（用布局尺寸，避开 transform）
+  function overflows(el, availW, availH) {
+    var m = measureText([el], true);
+    return (m.w > availW * 1.001) || (m.h > availH * 1.001);
+  }
+  // 逐行独立适配：旧实现把「全部行」当一个整体算一个系数 k —— 任一行超宽，整泡字全变小
+  // （余额这种不该缩的主角也跟着缩）。这里改成每行各自适配：谁超框缩谁，其余保持原字号。
+  // 单个块缩到 FIT_HARD_MIN 还是超框时，进入二级兜底（换行 / 省略号，见 fitRowOverflow）
+  function fitBlock(el, availW, availH) {
+    if (!el) return;
+    el.style.whiteSpace = '';   // 复位上一轮可能写过的 nowrap/ellipsis 兜底
+    el.style.overflow = '';
+    el.style.textOverflow = '';
+    el.style.maxWidth = '';
+    var k = 1, pass;
+    for (pass = 0; pass < 4; pass++) {
+      if (!overflows(el, availW, availH)) return;
+      var m = measureText([el], true);
+      if (!m.w || !m.h) return;
+      var f = Math.min(availW / m.w, availH / m.h);
+      if (!(f < 1)) return;             // 已经放得下却仍判定超框（量不准），交给兜底
+      if (k * f <= FIT_HARD_MIN + 0.001) break;
+      k = k * f;
+      scaleBlock(el, f);
+    }
+    // 缩到底仍放不下：交给换行/截断，绝不溢出
+    fitRowOverflow(el, availW, availH);
+  }
+  // 二级兜底：先试换行（保信息完整），换行后仍超高就截断出省略号（保版式）。
+  // 只对「行内容器」生效；图片块不换行不截断（它的宽已由 max-width 约束）
+  function fitRowOverflow(el, availW, availH) {
+    if (!availW || !availH) return;
+    if (el.querySelector('.dshwv-mimg') || el.classList.contains('dshwv-mimg')) return;
+    var nodes = el.querySelectorAll('.dshwv-trow, .dshwv-seg');
+    var i;
+    // ① 换行：trowline 已允许换行（CSS .dshwv-trowline white-space:normal），
+    //    但它内部的模块默认是 inline + nowrap（跑马灯/底色模块还需 inline-block），
+    //    放开 nowrap 让长模块能折行；折行后仍超高则走 ② 截断
+    for (i = 0; i < nodes.length; i++) nodes[i].style.whiteSpace = 'normal';
+    el.style.whiteSpace = 'normal';
+    if (!overflows(el, availW, availH)) return;
+    // ② 截断：单行省略号。inline 元素吃不到 max-width，且 nowrap 下 ellipsis 才生效，
+    //    故多模块行把 trowline 本身降级为 nowrap + hidden（单模块 inline-block 在 CSS 里已备好）
+    var u = (rootEl.clientWidth || 0) / 1026;
+    if (!u) return;
+    var maxW = 'calc(var(--dshw-u) * ' + Math.round(availW / u) + ')';
+    for (i = 0; i < nodes.length; i++) {
+      nodes[i].style.whiteSpace = 'nowrap';
+      nodes[i].style.overflow = 'hidden';
+      nodes[i].style.textOverflow = 'ellipsis';
+      nodes[i].style.maxWidth = maxW;
+    }
+    el.style.whiteSpace = 'nowrap';
+    el.style.overflow = 'hidden';
+    el.style.textOverflow = 'ellipsis';
+    el.style.maxWidth = maxW;
+  }
+  // els 排布：三行结构传 [label, amount, hint]；rows 结构传 rowsBox 的可见行（applyRows 里缓存）；
+  // 按压气泡传 modsBox 的可见行（applyMods 里缓存）。三行结构整体受 FIT_H 约束，
+  // 但每一行各自横向适配（余额行不被说明行连坐）
   function fitText(els) {
     if (gifEl.style.display === 'block') return;
     var u = (rootEl.clientWidth || 0) / 1026;
     if (!u) return;
     if (!els) els = [labelEl, amountEl, hintEl];
     var availW = FIT_W * u, availH = FIT_H * u;
-    var i, k = 1, pass, m;
-    for (pass = 0; pass < 3; pass++) {
-      m = measureText(els);
-      if (!m.w || !m.h) return;
-      var f = Math.min(1, availW / m.w, availH / m.h);
-      if (f > 0.995) return;
-      k = Math.max(FIT_MIN, k * f);
-      for (i = 0; i < els.length; i++) {
-        var el = els[i];
-        if (el.classList.contains('dshwv-row')) {
-          var segs = el.querySelectorAll('.dshwv-seg');
-          for (var j = 0; j < segs.length; j++) shrinkSeg(segs[j], k);
-          continue;
+    var i, m;
+    // 单行块（模块行 / v2 行）各自独占 fit；多行块（三行结构）按总高约束、逐行横向适配
+    if (els.length === 1) { fitBlock(els[0], availW, availH); return; }
+    // 逐行横向适配：先各自缩到「不超宽」，再统一按剩余高度复核。
+    // 单行传 availH（一般远大于单行高，等于只受宽度约束），避免某行被误判超高而缩
+    for (i = 0; i < els.length; i++) {
+      if (els[i].style.display === 'none') continue;
+      fitBlock(els[i], availW, availH);
+    }
+    // 全部行累加后若总高超框，再对整组等比缩一次（保持行间比例，避免只缩某行后行距失衡）
+    m = measureText(els);
+    if (m.h > availH * 1.001 && m.h > 0) {
+      var fh = availH / m.h;
+      if (fh < 1) {
+        for (i = 0; i < els.length; i++) {
+          if (els[i].style.display === 'none') continue;
+          scaleBlock(els[i], Math.max(fh, FIT_HARD_MIN));
         }
-        // 按压气泡的模块：图片段按基准宽等比缩、文字段把行内 [data-fz] 模块一起缩。
-        // 这两类此前都被漏掉 —— 图片没有 data-fz、trowline 的类名也不在 BUBBLE_FONT 里，
-        // 于是 fitText 量出超框却谁都不缩，竖图会直接顶出气泡（用户 2026-10-08 报的 bug）
-        if (el.classList.contains('dshwv-mimg')) { shrinkImg(el, k); continue; }
-        if (el.classList.contains('dshwv-trowline')) {
-          var trows = el.querySelectorAll('[data-fz]');
-          for (var t = 0; t < trows.length; t++) shrinkSeg(trows[t], k);
-          continue;
-        }
-        var base = BUBBLE_FONT[String(el.className).split(' ')[0]];
-        if (base) el.style.fontSize = 'calc(var(--dshw-u) * ' + (base * k).toFixed(1) + ')';
       }
-      if (k <= FIT_MIN + 0.001) return;
     }
   }
   // 段的当前基准字号记在 dataset（applyRows 写入），缩放只乘系数，重复 fit 不叠加
   function shrinkSeg(seg, k) {
     var base = parseFloat(seg.dataset.fz || '0');
     if (!base) return;
-    seg.style.fontSize = 'calc(var(--dshw-u) * ' + (base * k).toFixed(1) + ')';
+    // 记录已累积的缩放系数：resetFont 复位时同时清 dataset.k，否则二次渲染会叠加缩小
+    var cur = parseFloat(seg.dataset.k || '1') * k;
+    seg.dataset.k = String(cur);
+    seg.style.fontSize = 'calc(var(--dshw-u) * ' + (base * cur).toFixed(1) + ')';
   }
   // 图片段的基准宽记在 dataset.mw（buildModImg 写入），超高/超宽时按系数等比缩宽度
   function shrinkImg(img, k) {
-    var base = parseFloat(img.dataset.mw || '0');
+    var base = parseFloat(img.dataset.mw || img.dataset.fz || '0');
     if (!base) return;
-    img.style.maxWidth = 'calc(var(--dshw-u) * ' + (base * k).toFixed(1) + ')';
+    var cur = parseFloat(img.dataset.k || '1') * k;
+    img.dataset.k = String(cur);
+    if (img.dataset.mw) img.style.maxWidth = 'calc(var(--dshw-u) * ' + (base * cur).toFixed(1) + ')';
+    else img.style.height = 'calc(var(--dshw-u) * ' + (base * cur).toFixed(1) + ')';
   }
   // 应用 3 行模型 { t, s: 'A'|'B'|'P'|'C', c, w }，或 { gif: true, src } 只显示动图。
   // 行序固定为 标签 / 金额 / 说明，s 决定套哪套字号样式。
@@ -387,12 +508,34 @@ export function createBubbleRenderer(opts) {
     if (seg.b === 1) el.style.fontWeight = '700';
     if (seg.i === 1) el.style.fontStyle = 'italic';
   }
+  // —— 模块样式落地（v3 按压气泡与旧行×段模型共用同一套落法）——
+  // 旧模型（applyTextStyle）与 v3 模块（buildModBlock）此前各写一份等价逻辑，最容易漂移的
+  // 就是「跑马灯 vs 纯色」的互斥分支：同一条既给 rgb 又给 color 时，两边必须同样以 rgb 优先。
+  // 抽成一份：opts = { color, rgb, bold, italic, ul, fontFamily }，未给值的键保持不动。
+  // 底色（bg / bgRgb）不在这里 —— 它要另造一层内层 span 承载，结构耦合太深，留在 buildModBlock。
+  function applyModStyle(el, opts) {
+    var m = opts || {};
+    if (m.fontFamily) el.style.fontFamily = String(m.fontFamily);
+    if (m.bold) el.style.fontWeight = '700';
+    if (m.italic) el.style.fontStyle = 'italic';
+    if (m.ul) el.style.textDecoration = 'underline';
+    // 跑马灯（rgb）压过纯色：同一条台词的 rgb 与 color 同时存在时以 rgb 为准，与 applyTextStyle 同口径
+    if (m.rgb) {
+      el.classList.add('dshwv-rgb');
+      el.classList.add('dshwv-rgb-' + (m.rgb === true ? 'macaron' : String(m.rgb)));
+      el.style.animationDuration = bubbleMarqueeDur();
+    } else if (m.color) {
+      el.style.color = String(m.color);
+    }
+  }
 
   // —— 按压气泡：行×模块渲染 ——
   // mods 形态与 store.js normBubbleModules 出口一致：平铺模块数组（同行模块带同一 row 键，
   // 图片/随机图片独占一行）。模块取文本/取图/取色都交给宿主回调（渲染器不掌握实时数据）：
   //   modText(mod) 取模块文本（text/random/link 直读；balance/bonus/…/plan 由宿主现算，缺省 '—'）
   //   modImageSrc(mod) 取图片/随机图片地址（index 进 customBubbles，缺省回 null 整行丢）
+  //   modPick(mod) random 模块抽中那条台词的样式（{size,color,rgb,bold,italic,ul}）；空回 null = 用模块级
+  //   modStyle(mod) 运行时换色覆盖（如峰谷按当前时段取色）；空回 null = 用模块自带值
   //   onLinkClick(url) 链接模块点击（渲染器只标 dataset.url，宿主接 click）
   // 行数上限 6、每行模块数上限 6（BUBBLE_ROW_MAX / BUBBLE_MOD_MAX，与 store.js 同值）；
   // 底色/跑马灯按模块独立，字号 size 经 data-fz 记基准供超框缩放（复用 resetFont 通道）
@@ -424,6 +567,10 @@ export function createBubbleRenderer(opts) {
     // 峰谷这类「同一个模块随运行时状态换色」的模块：渲染器不知道当前是峰是谷，交给宿主回调
     // modStyle(m) 回一份 {color, rgb, bg, bgRgb} 覆盖（未回的键沿用模块自带值）
     var dyn = opts.modStyle ? (opts.modStyle(m) || null) : null;
+    // random 模块：抽中的那条台词自带样式，优先级高于模块级 —— 宿主 modPick(m) 回
+    // { size, color, rgb, bold, italic, ul }（上游 random 口径：size/配色逐条带，模块级只是兜底）。
+    // 抽哪条与 modText 取哪条文本必须一致，故两个回调由宿主基于同一次抽签结果给值
+    var pick = (m.type === 'random' && opts.modPick) ? (opts.modPick(m) || null) : null;
     var dColor = dyn && dyn.color ? String(dyn.color) : '';
     var dRgb = dyn && dyn.rgb ? String(dyn.rgb) : '';
     var dBg = dyn && dyn.bg ? String(dyn.bg) : '';
@@ -433,7 +580,8 @@ export function createBubbleRenderer(opts) {
     var row = document.createElement('span');
     row.className = 'dshwv-trow';
     if (m.type === 'link') { row.className += ' dshwv-link'; row.dataset.url = String(m.url || ''); }
-    var fzU = modFontU(m.size);
+    // 字号：台词级 size 压过模块级（缺省回落到模块 size，再落到 modFontU 的兜底 6）
+    var fzU = modFontU(pick && pick.size != null ? pick.size : m.size);
     row.dataset.fz = String(fzU);
     row.style.fontSize = 'calc(var(--dshw-u) * ' + fzU + ')';
     if (needBg) {
@@ -444,19 +592,16 @@ export function createBubbleRenderer(opts) {
     var tx = row;
     if (needBg) { tx = document.createElement('span'); row.appendChild(tx); }
     tx.textContent = txt;
-    if (m.bold) row.style.fontWeight = '700';
-    if (m.italic) row.style.fontStyle = 'italic';
-    if (m.ul) row.style.textDecoration = 'underline';
-    if (m.fontFamily) row.style.fontFamily = String(m.fontFamily);
-    var marquee = dRgb || m.rgb;
-    if (marquee) {
-      tx.classList.add('dshwv-rgb');
-      var scheme = marquee === true ? 'macaron' : String(marquee || 'macaron');
-      if (scheme) tx.classList.add('dshwv-rgb-' + scheme);
-      tx.style.animationDuration = bubbleMarqueeDur();
-    } else if (dColor || m.color) {
-      row.style.color = dColor || String(m.color);
-    }
+    // 字体/粗细/斜体/下划线/配色一次性落地。取值优先级：运行时覆盖(dyn) > 台词自带(pick) > 模块级(m)。
+    // 注意 bold/italic/ul 只在「显式 true」时才压过——它们没有 false 形态，缺省=不改，与旧行为一致
+    applyModStyle(row, {
+      fontFamily: m.fontFamily,
+      bold: (pick && pick.bold === true) || !!m.bold,
+      italic: (pick && pick.italic === true) || !!m.italic,
+      ul: (pick && pick.ul === true) || !!m.ul,
+      rgb: dRgb || (pick && pick.rgb) || m.rgb,
+      color: dColor || (pick && pick.color) || m.color,
+    });
     if (needBg) {
       var bgRgb = dBgRgb || m.bgRgb;
       var bg = dBg || m.bg;

@@ -1,8 +1,16 @@
 /*
  * 峰谷时段判定与模型定价（CommonJS）。
+ *
+ * 峰谷判据以 DeepSeek 官方定价页为准（api-docs.deepseek.com/zh-cn/quick_start/pricing/），原文：
+ *   「北京时间周一至周五（不含中国法定节假日）9:00 - 12:00、14:00 - 18:00 为高峰时段；
+ *     其余时段，包括周末及中国法定节假日全天均为空闲时段。」
+ * 注意判据是「周一至周五」而不是「工作日」：只认星期几 + 法定节假日两条，与调休 / 补班无关。
  */
-const { PEAK_HOURS, PRICING, WEEKEND_VALLEY_FROM_SEC, CN_HOLIDAYS } = require('./constants')
+const { PEAK_HOURS, PRICING } = require('./constants')
 const { logErr } = require('./log')
+// 节假日判定收进 holidays 模块（内置 CN_HOLIDAYS ∪ 用户手动联网更新的覆盖层）。
+// 只 require holidays，不直接碰 CN_HOLIDAYS —— 否则「联网更新」对判定无效。
+const holidays = require('./holidays')
 
 // 北京时间 YYYY-MM-DD（isPeakTime 与节假日表都用这一格式）
 function bjDayKey(timeSec) {
@@ -16,13 +24,13 @@ function isPeakTime(timeSec) {
   const n = Number(timeSec)
   const bj = new Date(n * 1000 + 8 * 3600 * 1000)
   // 法定节假日全天谷价：放假日常落在工作日，只看星期几会把它们当峰时按双倍价记账。
-  // 不受 WEEKEND_VALLEY_FROM_SEC 约束 —— 那张表是「周末谷价」规则的生效点，而节假日全天谷价是
-  // 官方一直以来的口径，二者生效时间不同（同受周末门槛会让上半年所有节假日漏判成峰时）。
-  if (CN_HOLIDAYS.has(bjDayKey(n))) return false
-  if (n >= WEEKEND_VALLEY_FROM_SEC) {
-    const dow = bj.getUTCDay() // 0=周日 6=周六
-    if (dow === 0 || dow === 6) return false
-  }
+  if (holidays.isHoliday(bjDayKey(n))) return false
+  // 周末全天谷价。官方判据是「周一至周五」而非「工作日」——只认星期几与法定节假日两条，
+  // 与调休 / 补班无关。所以补班日即便要上班也仍是谷：它落在周六周日，星期几这条就不满足。
+  // 反过来说，若哪天把补班日（源里的 workdays）当工作日算，反而会给周六的 9-12 点算出峰价，
+  // 与官方口径相反。这一层不要接 workdays。
+  const dow = bj.getUTCDay() // 0=周日 6=周六
+  if (dow === 0 || dow === 6) return false
   const hour = bj.getUTCHours()
   for (const [start, end] of PEAK_HOURS) {
     if (hour >= start && hour < end) return true
@@ -42,6 +50,32 @@ function nextPeakChangeAt(timeSec) {
     if (isPeakTime(t) !== cur) return t
   }
   return 0
+}
+
+// 节假日表覆盖的年份集合（内置 ∪ 联网更新层，见 holidays.coveredYears）。
+// 官方次年安排一般头一年 11 月前后才公布，跨年前后必然有一段空窗期：空窗期内当年日期查不到，
+// 放假的工作日会被按峰时高估。这里不改变判定（仍按普通工作日算），只在「当年未被覆盖」时
+// 记一次日志、便于发现「该更新表了」，而不是让用户以为算错了。
+// 当前时间所属年份是否已收录在节假日表里。取不到时间（无效入参）当作已覆盖，不误报。
+function holidayCalendarCovers(timeSec) {
+  const n = Number(timeSec)
+  if (!isFinite(n)) return true
+  const bj = new Date(n * 1000 + 8 * 3600 * 1000)
+  return holidays.coveredYears().has(String(bj.getUTCFullYear()))
+}
+
+// 未覆盖年份只提示一次（每次刷新都会走到，不去重会把 dev 日志刷满）
+let warnedHolidayYear = ''
+
+function warnIfHolidayCalendarStale(timeSec) {
+  const n = Number(timeSec)
+  if (!isFinite(n)) return
+  if (holidayCalendarCovers(n)) return
+  const bj = new Date(n * 1000 + 8 * 3600 * 1000)
+  const y = String(bj.getUTCFullYear())
+  if (warnedHolidayYear === y) return
+  warnedHolidayYear = y
+  logErr('节假日表未覆盖 ' + y + ' 年，该年的法定节假日将按普通工作日判定（可能把放假日子按峰时高估）；可在设置页「外观与形象」点「更新节假日表」拉取')
 }
 
 // 未命中价目表的模型名只记一次（同一模型每次刷新都会走到这里，不去重会把 dev 日志刷满）
@@ -108,4 +142,4 @@ function customModelPrice(custom, model) {
   return null
 }
 
-module.exports = { isPeakTime, nextPeakChangeAt, priceFor, customPriceTable, customModelPrice }
+module.exports = { isPeakTime, nextPeakChangeAt, holidayCalendarCovers, warnIfHolidayCalendarStale, priceFor, customPriceTable, customModelPrice }

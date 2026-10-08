@@ -62,6 +62,7 @@ const dshIsolate = require('./dsh-isolate')
 const dshMarket = require('./dsh-market')
 const dshHostCompat = require('./dsh-host-compat')
 const { readTextSafe } = require('./util')
+const holidays = require('./holidays')
 
 // 镜像测速超时：只打元数据（几百字节），8s 足够；等不到就说明该源当下不可用
 const PING_TIMEOUT_MS = 8000
@@ -2371,6 +2372,19 @@ module.exports = {
       res.ok
         ? ['ok', 'github.com 可达，HTTP ' + res.status + '，耗时 ' + res.ms + 'ms']
         : ['fail', '无法访问 github.com：' + (res.error || '未知错误')])
+  },
+  // 节假日表状态（内置年份 / 是否已联网更新过 / 覆盖年份 / 拉取时间）
+  holidayStatus() {
+    return holidays.status()
+  },
+  // 手动联网更新节假日表（当年 + 次年）：**只在用户点击时**发起，不自动联网。
+  // 失败不抛异常，返回 { ok:false, error } 由设置页展示
+  holidayUpdate() {
+    return holidays.update()
+  },
+  // 清除联网覆盖层，回到纯内置表
+  holidayClear() {
+    return holidays.clear()
   },
   saveConfig(patch) {
     // 设置页拖动滑块中的实时预览：只改窗口几何（rAF 合帧），不写存储、不广播
