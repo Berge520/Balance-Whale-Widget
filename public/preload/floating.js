@@ -6,7 +6,7 @@
  *              / whale:skin / whale:bubbles / whale:models
  *              / whale:bubble-preview（设置页按压气泡试播）
  *              （另有本地推送 dark：preload 轮询 utools.isDarkColors() 检测 uTools 深浅色变化）
- *  - 向宿主上报：whale:ready / whale:refresh / whale:config / whale:timer / whale:timer-done
+ *  - 向宿主上报：whale:ready / whale:show / whale:refresh / whale:config / whale:timer / whale:timer-done
  *              / whale:drag-begin / whale:drag-move / whale:drag-end / whale:ignore-mouse
  *              / whale:open-settings（可带 { target } 直达某张设置卡，无载荷则只唤出主窗）
  *              / whale:models-refresh / whale:set-main-model / whale:hide-widget / whale:open-external
@@ -100,6 +100,9 @@ const api = {
 
   // —— 向宿主上报 ——
   ready() { send('whale:ready') },
+  // 首帧就绪后请求显示挂件窗口：窗口以 show:false 创建（防首帧露出随包内置形象，见 lib/widget.js），
+  // 页面把配置（含自定义形象本体）落地后再调这里。宿主对重复/异常调用做了兜底，可放心调
+  show() { send('whale:show') },
   refresh(manual) { send('whale:refresh', { manual: !!manual }) },
   saveConfig(patch) { send('whale:config', patch || {}) },
   // 计时状态落库（state 传 null 表示清除）；宿主 pushInit 时回推给页面恢复

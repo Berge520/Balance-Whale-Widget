@@ -100,7 +100,15 @@
   .dshwv-mods { white-space: normal; }
   .dshwv-trowline { display: block; white-space: normal; line-height: 1.25; text-align: center; }
   .dshwv-trow { display: inline; vertical-align: baseline; white-space: normal; overflow-wrap: anywhere; word-break: break-word; }
-  .dshwv-mimg { display: block; margin: 0 auto; max-width: calc(var(--dshw-u) * 540); }
+  .dshwv-mimg {
+    display: block; margin: 0 auto;
+    max-width: calc(var(--dshw-u) * 540);
+    /* 必须同时限高：只限宽时竖图会按原比例纵向撑开，把内容顶出气泡
+       （气泡可用区 FIT_H=430u；与渲染器 bubble-render.js 的 FIT_H 同值，改一处要同步另一处）。
+       object-fit: contain 保证被宽高共同约束时仍完整显示、不裁切 */
+    max-height: calc(var(--dshw-u) * 430);
+    object-fit: contain;
+  }
   /* 文字/底色跑马灯渐变：与上游 18 套配色同名（.dshwv-rgb-<scheme> /.dshwv-bgrgb-<scheme>），
      颜色停止点的取色与上游一致（macaron 为基础方案，其余为同类渐变） */
   .dshwv-rgb, .dshwv-bgrgb {

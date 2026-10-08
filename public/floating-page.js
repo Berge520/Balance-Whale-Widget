@@ -4,7 +4,20 @@
   window.__dshWhaleWidget = true;
 
   // —— 常量 ——
-  var MIN_SCALE = 0.6, MAX_SCALE = 2.5, CLICK_SQ = 9;
+  var MIN_SCALE = 0.6, MAX_SCALE = 2.5, SCALE_STEPS = 15, CLICK_SQ = 9;
+  // 档位 ↔ 倍率换算（与设置页 App.vue 同一刻度，SCALE_STEPS 同值由 check-shared.mjs 校验）。
+  // 菜单滑块现在走 1–SCALE_STEPS 整数档，值即档位；真正推给宿主的仍是倍率 scale。
+  function numToScale(n) {
+    var v = Math.max(1, Math.min(SCALE_STEPS, Math.round(Number(n) || 1)));
+    return MIN_SCALE + (v - 1) * ((MAX_SCALE - MIN_SCALE) / (SCALE_STEPS - 1));
+  }
+  function scaleToNum(s) {
+    return Math.round((Number(s) - MIN_SCALE) / ((MAX_SCALE - MIN_SCALE) / (SCALE_STEPS - 1))) + 1;
+  }
+  // 任意倍率吸附到最近整数档：旧存储的 1.3 这类非整档值要归到档位
+  function snapNum(s) {
+    return Math.max(1, Math.min(SCALE_STEPS, scaleToNum(s)));
+  }
   var REFRESH_MS = 60000, CHANGE_MS = 900, ANIM_MS = 700, BUBBLE_MS = 5000;
   // 出厂默认气泡停留时长（5s）。BUBBLE_MS 保留为「出厂常量」，运行期实际取值走 bubbleDwellMs，
   // 由设置页 cfg.bubbleDwell（3–60 整数）覆盖；所有「按默认口径收起」的引用点都改读它
@@ -107,11 +120,13 @@
   function menuRow() { var r = document.createElement('div'); r.className = 'dshwv-menu-row'; return r; }
 
   // 菜单分组的展开状态（key → 布尔）：随 config.menuGroups 落盘，重开挂件后保持上次的组合。
-  // 默认只展开 models（切模型最高频）；其余组收起，菜单一打开就是一屏以内
-  var menuGroups = { look: false, models: true, usage: false, timer: false, dsh: false };
+  // 全部组默认收起：菜单一打开就是一屏、每组的标题都可扫到，想用哪组再点开，
+  // 免得「默认展开 models」把别的组挤到折叠线以下、找起来费劲
+  var menuGroups = { look: false, models: false, usage: false, timer: false, dsh: false };
   // 展开组合的「版本」：改了某组默认展开态 / 删掉某组就 +1，用来把老配置里存过的旧值迁移掉（见 onInit）。
   // v3：删掉 timer 组内的子折叠 timerAdv，老配置里残留的该键不再被读取
-  var MENU_GROUPS_REV = 3;
+  // v4：默认全收起；老配置里存过 models:true 的，一次性迁移掉（见 onInit 的 needGroupsMigration）
+  var MENU_GROUPS_REV = 4;
   var menuGroupEls = {};
 
   // 菜单分组：点标题折叠/展开。只默认展开常用组，避免菜单过长
@@ -172,14 +187,42 @@
   }
 
   // 大小：菜单里只留滑块（原先滑块旁还挂一个 1–15 档位数字框，同一行两个控件冗余，
-  // 精确输入去设置页「外观」用连续滑块/数字框）。滑块值就是 scale，不再有档位换算。
+  // 精确输入去设置页「外观」）。滑块走整数档位 1–SCALE_STEPS，与设置页同一刻度；
+  // 值经 numToScale 换算成倍率后推给宿主。
   var scaleInput = document.createElement('input');
   scaleInput.type = 'range';
-  scaleInput.min = String(MIN_SCALE); scaleInput.max = String(MAX_SCALE); scaleInput.step = '0.1';
-  scaleInput.className = 'dshwv-range'; scaleInput.value = '1.3';
-  scaleInput.title = '挂件大小（' + MIN_SCALE + '–' + MAX_SCALE + ' 倍，精确调整见设置页「外观」）';
-  scaleInput.addEventListener('input', function () { setScale(scaleInput.value, false); });
-  scaleInput.addEventListener('change', function () { setScale(scaleInput.value, true); });
+  scaleInput.min = '1'; scaleInput.max = String(SCALE_STEPS); scaleInput.step = '1';
+  scaleInput.className = 'dshwv-range';
+  // 初值由 curScale（本地默认倍率）反推档位，不写死数字：写死会在改默认倍率 / 档位数后错位。
+  // applyConfig 落地时会再校正一次，这里只保证首帧滑块与读数和 curScale 一致。
+  scaleInput.value = String(snapNum(curScale));
+  scaleInput.title = '挂件大小（1–' + SCALE_STEPS + ' 档，' + MIN_SCALE + '–' + MAX_SCALE + ' 倍，精确调整见设置页「外观」）';
+  scaleInput.addEventListener('input', function () { setScale(scaleInput.value, false, false); });
+  scaleInput.addEventListener('change', function () { setScale(scaleInput.value, false, true); });
+  // 刻度点：给整数档提供视觉锚点。拖动中窗口不实时变（见 setScale 注释），
+  // 靠它确认当前停在第几档。点亮规则与设置页「外观」一致（n <= 当前档位）。
+  var scaleTicks = document.createElement('span');
+  scaleTicks.className = 'dshwv-scaleticks';
+  for (var ti = 0; ti < SCALE_STEPS; ti++) {
+    var tick = document.createElement('i');
+    scaleTicks.appendChild(tick);
+  }
+  function paintScaleTicks(n) {
+    for (var i = 0; i < scaleTicks.children.length; i++) {
+      if (i < n) scaleTicks.children[i].classList.add('on');
+      else scaleTicks.children[i].classList.remove('on');
+    }
+  }
+  // 滑块 + 刻度纵向成组：刻度贴在滑块正下方，与设置页同款布局
+  var scaleWrap = document.createElement('span');
+  scaleWrap.className = 'dshwv-scalewrap';
+  scaleWrap.appendChild(scaleInput);
+  scaleWrap.appendChild(scaleTicks);
+  // 数值读数：滑块缩短后空出的位置放当前档位（与音量行的百分号同款）
+  var scaleVal = document.createElement('span');
+  scaleVal.className = 'dshwv-scaleval';
+  scaleVal.textContent = '6';
+  paintScaleTicks(6);
 
   function soundOpt(value, label) { var o = document.createElement('option'); o.value = value; o.textContent = label; return o; }
   var soundSelect = document.createElement('select');
@@ -380,7 +423,7 @@
   });
 
   var row1 = menuRow();
-  row1.appendChild(menuLabel('大小')); row1.appendChild(scaleInput);
+  row1.appendChild(menuLabel('大小')); row1.appendChild(scaleWrap); row1.appendChild(scaleVal);
   var row2 = menuRow();
   row2.appendChild(menuLabel('音效')); row2.appendChild(soundToggle); row2.appendChild(soundSelect);
   var row3 = menuRow();
@@ -534,7 +577,7 @@
   groupDsh.el.style.display = 'none';
 
   // —— 多厂商模型：点一行即把它设为挂件主显示 ——
-  var groupModels = menuGroup('models', '模型', true);
+  var groupModels = menuGroup('models', '模型', false);
   var modelsListEl = document.createElement('div');
   modelsListEl.className = 'dshwv-models';
   var rowModelsRefresh = menuRow();
@@ -772,7 +815,9 @@
   var mainModelId = 'deepseek';
   // 币种前缀与宿主 constants.js 的 MODEL_MONEY_PREFIX 保持一致（浮动页没有 require，读不到宿主常量）
   var MODEL_MONEY_PREFIX = { CNY: '¥ ', USD: '$' };
+  // 当前倍率（不是档位）。默认 1.3 即默认档位 6（与设置页 cfg.scale 默认一致）；宿主回推会覆盖
   var curScale = 1.3;
+  // 滑块初值所用的本地默认倍率即上方 curScale（见 scaleInput 初始化）。
   var flipped = false;
   var animDelayTimer = null, drag = null, shown = null, animId = null;
   var bubbleShown = false, bubbleTimer = null, bubbleRandomActive = false, bubbleRandomLines = null;
@@ -2484,20 +2529,39 @@
   // 被滚轮调到、且已被上游拦住。这里不再重复判 `drag.active` —— 拖拽冻结的**最终防线在宿主**
   // （applyScaleToWindow 的 dragFrozen，它同时兜住 commit=true 的 saveCfg 路径），
   // 页面侧只负责拦本地滚轮手势，两处判据职责不同，合成一处反而会让 commit 路径丢请求。
-  var liveRaf = 0;
-  function sendLiveScale() {
-    if (liveRaf) return;
-    liveRaf = requestAnimationFrame(function () {
-      liveRaf = 0;
-      whaleApi.saveConfig({ scale: curScale, __live: true });
-    });
+  var liveRaf = 0, liveTimer = 0;
+  function cancelLiveSlot() {
+    if (liveRaf) { cancelAnimationFrame(liveRaf); liveRaf = 0; }
+    if (liveTimer) { clearTimeout(liveTimer); liveTimer = 0; }
   }
-  function setScale(v, commit) {
-    // 窗口尺寸由宿主调整（以鲸鱼角为不动点）；拖动中仅实时预览，松手(change)才持久化
-    curScale = Math.round(Math.min(MAX_SCALE, Math.max(MIN_SCALE, Number(v))) * 10) / 10;
-    scaleInput.value = String(curScale);
-    if (commit) { if (liveRaf) { cancelAnimationFrame(liveRaf); liveRaf = 0; } saveCfg(); }
-    else sendLiveScale();
+  // 页面侧 rAF 在窗口被遮挡时会被 Chromium 暂停（挂件常被别的窗口盖住），
+  // 只靠 rAF 会让「排队的那次推送永远不发」→ 宿主收不到实时值、拖动中不实时。
+  // 用 setTimeout 与 rAF 竞速，谁先到谁执行，保证最坏 ~16ms 一定把最新 scale 推出去。
+  // ⚠️ 现在只有滚轮缩放（setScale 的 live 分支）走这里；菜单/设置页滑块拖动一律不推实时值，
+  //    见 setScale 的注释（拖动中改窗口尺寸是「拖不动 + 快滑闪」的根因）。
+  function sendLiveScale() {
+    if (liveRaf || liveTimer) return;
+    var push = function () {
+      cancelLiveSlot();
+      whaleApi.saveConfig({ scale: curScale, __live: true });
+    };
+    liveRaf = requestAnimationFrame(push);
+    liveTimer = setTimeout(push, 16);
+  }
+  // live=true 才推实时值给宿主（现仅滚轮用）；菜单滑块拖动走 live=false —— 只更新读数与
+  // 本地 curScale，窗口尺寸一次都不改，松手(change)才 numToScale 落库并让宿主改窗口。
+  // 为什么：滑块所在窗口就是被缩放的对象，拖动中 setBounds 会让窗口边动边缩、thumb 追着手抖，
+  // 快速滑动更是每帧一次 setBounds 导致闪烁。拖动期只动 DOM、零重绘，体感最稳。
+  function setScale(v, live, commit) {
+    // v 是滑块档位（1–SCALE_STEPS）；窗口尺寸由宿主调整（以鲸鱼角为不动点），
+    // 推给宿主的始终是倍率 curScale。
+    var n = Math.max(1, Math.min(SCALE_STEPS, Math.round(Number(v) || 1)));
+    curScale = numToScale(n);
+    scaleInput.value = String(n);
+    scaleVal.textContent = String(n);
+    paintScaleTicks(n);
+    if (commit) { cancelLiveSlot(); saveCfg(); }
+    else if (live) sendLiveScale();
   }
   function setVol(v, commit) {
     var next = Math.round(Math.min(1, Math.max(0, Number(v))) * 100) / 100;
@@ -2570,8 +2634,13 @@
   function applyConfig(cfg) {
     if (!cfg || typeof cfg !== 'object') return;
     if (typeof cfg.scale === 'number' && isFinite(cfg.scale)) {
-      curScale = Math.min(MAX_SCALE, Math.max(MIN_SCALE, cfg.scale));
-      scaleInput.value = String(curScale);
+      // 吸附到最近整数档：旧存储里的 1.3 这类非整档倍率要归到档位，
+      // 否则滑块停在两档之间、读数与滑块位置对不上（滑块 step=1 只能停整数档）
+      var n = snapNum(cfg.scale);
+      curScale = numToScale(n);
+      scaleInput.value = String(n);
+      scaleVal.textContent = String(n);
+      paintScaleTicks(n);
     }
     if (typeof cfg.vol === 'number' && isFinite(cfg.vol)) {
       soundVol = Math.min(1, Math.max(0, cfg.vol));
@@ -2655,13 +2724,12 @@
     }
     // 菜单分组展开态：设置页 / 别的窗口改过就同步过来；不在这里回写（saveCfg），
     // 否则自己刚存的展开组合会被自己再提交一遍。
-    // look 组从「默认展开」改成「默认收起」后，老配置里存量 look:true 会盖掉新默认值，
-    // 菜单看起来跟没改一样 —— 这里对 look 做一次性迁移：旧配置从没存过 menuGroupsRev，
-    // 认作迁移前的数据，强制收起一次；之后用户的点击都会带上 rev 正常生效
-    var needLookMigration = cfg.menuGroupsRev !== MENU_GROUPS_REV;
+    // 组的「默认展开态」改过之后（v3 look 收、v4 models 收），老配置里存过的旧默认会盖住新默认，
+    // 看起来像改动没生效 —— 版本号对不上时整表按新默认收起一次；之后用户的点击都会带上 rev 正常生效
+    var needGroupsMigration = cfg.menuGroupsRev !== MENU_GROUPS_REV;
     if (cfg.menuGroups && typeof cfg.menuGroups === 'object') {
       Object.keys(menuGroupEls).forEach(function (k) {
-        if (needLookMigration && k === 'look') { menuGroups[k] = false; menuGroupEls[k].setOpen(false); return; }
+        if (needGroupsMigration) { menuGroups[k] = false; menuGroupEls[k].setOpen(false); return; }
         if (typeof cfg.menuGroups[k] !== 'boolean') return;
         menuGroups[k] = cfg.menuGroups[k];
         menuGroupEls[k].setOpen(cfg.menuGroups[k]);
@@ -2768,7 +2836,13 @@
     }
     // 挂件形象与气泡配色：值没变时 applySkin/applyTheme 内部自己短路，不必先比对
     if (typeof cfg.skin === 'string') {
-      skinId = (cfg.skin === 'custom' || BUILTIN_SKIN_IDS.indexOf(cfg.skin) >= 0) ? cfg.skin : DEFAULT_SKIN;
+      // 认不出的值（老配置里的历史内置 id、或形象已从包里移出）不能直接落回默认形象：
+      // 那些图都在「自定义画廊」里，宿主 current 就指着它 —— 落回默认会让挂件先闪一下内置形象。
+      // 与宿主 store.normSkin 的「不打回默认」同口径，改用宿主推来的 current 那张。
+      // 注意只能回 'custom'（而不是 DEFAULT_SKIN）：否则 img.src 会先切到内置相对路径，
+      // 紧接着下面 customSkin 被赋值、onSkin 回调又换一次图，同样闪一下
+      skinId = (cfg.skin === 'custom' || BUILTIN_SKIN_IDS.indexOf(cfg.skin) >= 0) ? cfg.skin
+        : (customSkin ? 'custom' : DEFAULT_SKIN);
       applySkin();
     }
     if (typeof cfg.theme === 'string') {
@@ -2828,6 +2902,10 @@
     }
     syncTimerMenu();
     applySoundVolume();
+    // 配置落地即首帧就位：放行画面（见 floating.css 的 .dshwv-root:not(.dshwv-ready)）。
+    // 放在 applyConfig 而非启动末尾 —— 自定义形象本体要等这里 whale:skin 落地才对，
+    // 提前放行仍会闪内置形象。配置没推来时由宿主 createWidget 的超时兜底显示，不会永远隐形
+    try { root.classList.add('dshwv-ready'); } catch (err) {}
   }
 
   // —— 音效 ——
@@ -3488,9 +3566,19 @@
     toggleMenu();
   }, true);
 
-  // 窗口尺寸变化（滚轮缩放在鲸鱼上实时预览时宿主会连续 setSize）：
-  // 菜单是按按钮的旧位置摆的，不重摆就会和按钮错位
-  window.addEventListener('resize', function () { positionMenu(); positionTimerActions(); });
+  // 窗口尺寸变化（滚轮/菜单滑块缩放在实时预览时宿主会连续 setSize）：
+  // 菜单是按按钮的旧位置摆的，不重摆就会和按钮错位。
+  // ⚠️ 必须合并到 rAF：positionMenu 内部会 `maxHeight = 'none'` 量自然高度（强制同步 layout），
+  //    连续 setSize 时 resize 每帧触发一次，逐帧同步 layout 在 Windows 上会让窗口重绘跟不上
+  //    → 挂件花/重影。合并到下一帧，同一帧内多次 resize 只重排一次。
+  var menuReposRaf = 0;
+  window.addEventListener('resize', function () {
+    if (menuReposRaf) return;
+    menuReposRaf = requestAnimationFrame(function () {
+      menuReposRaf = 0;
+      positionMenu(); positionTimerActions();
+    });
+  });
 
   // 滚轮缩放：指针在鲸鱼上时滚动调整大小（滚动中实时预览，停手 260ms 后持久化）
   // 锁定位置时禁用缩放（锁定 = 位置与大小都固定），仅保留点击刷新
@@ -3505,14 +3593,17 @@
     if (e.target && e.target.closest && e.target.closest('.dshwv-menu')) return; // 菜单内滚动不缩放
     if (!isWhaleHit(e)) return;
     try { e.preventDefault(); } catch (err) {}
-    var target = Math.min(MAX_SCALE, Math.max(MIN_SCALE, curScale + (e.deltaY < 0 ? 0.1 : -0.1)));
-    target = Math.round(target * 10) / 10;
-    if (target === curScale) return;
-    setScale(target, false);
+    // 滚轮一次走一档（整数档位），再换算成倍率：curScale 可能是吸附前的非整档值，
+    // 先 snapNum 归到当前档再 ±1，避免「滚一下没跨过档」
+    var cur = snapNum(curScale);
+    var target = Math.max(1, Math.min(SCALE_STEPS, cur + (e.deltaY < 0 ? 1 : -1)));
+    if (target === cur) return;
+    setScale(target, true, false);
     if (wheelCommitTimer) clearTimeout(wheelCommitTimer);
     wheelCommitTimer = setTimeout(function () {
       wheelCommitTimer = null;
-      setScale(curScale, true);
+      // 落库要传档位（setScale 的参数是档位 1–SCALE_STEPS），不能传倍率 curScale
+      setScale(target, false, true);
     }, 260);
   }, { passive: false });
 
@@ -3635,5 +3726,9 @@
   // 先取一次 dsh 状态：既决定 dsh 组显不显示（装过才显示，见 dshRender），
   // 也让菜单里的状态行/按钮一开始就是对的。无宿主桥接时问了也没人答，跳过
   if (HAS_BRIDGE) dshSend('status');
+  // 请求宿主显示窗口：窗口以 show:false 创建（见宿主 lib/widget.js 的 createWidget），
+  // 页面此时已 applySkin 落地首帧，显示出来就直接是用户设置的形象，不会先闪一下随包内置形象。
+  // 放在 ready() 之前：宿主收到 ready 后会回推 init/balance，但那都只是改数字，不会换回内置形象
+  if (typeof whaleApi.show === 'function') whaleApi.show();
   whaleApi.ready();
 })();

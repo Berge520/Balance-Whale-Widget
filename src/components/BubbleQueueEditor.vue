@@ -343,7 +343,7 @@ function sideModCount(step: any, side: number): number {
         </div>
       </li>
 
-      <li v-if="!rows.length" class="bqe-empty">队列已删空 —— 保存后会恢复出厂默认队列（3 步），不是「删不掉」</li>
+      <li v-if="!rows.length" class="bqe-empty">队列已删空 —— 保存后会恢复出厂默认队列（2 步），不是「删不掉」；也可用下方「恢复默认」按钮立即重置</li>
     </ol>
   </div>
 </template>

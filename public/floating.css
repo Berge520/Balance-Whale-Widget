@@ -61,6 +61,11 @@
     font-family: inherit;
     transition: transform .3s ease;
   }
+  /* 首帧防闪：窗口以 show:false 创建，但页面从「HTML 解析」到「applySkin 换掉内置形象」之间
+     仍有一段空档（preload 加载、host 推 init/皮肤）。这期间挂件先整体隐形，
+     由 JS 在落地首帧后给 root 加 .dshwv-ready（见 floating-page.js 的 do-init）。
+     与上面的窗口 show:false 互补：窗口是「肉眼可见」这一层的兜底，这里再保一层画面内容 */
+  .dshwv-root:not(.dshwv-ready) { visibility: hidden; }
   .dshwv-root.dshwv-left { transform: scaleX(-1) }
   /* 光标：由 JS 切 root 上的类（不是写 document.body.style.cursor —— 那是可继承属性，
      写 body 会让渲染引擎失效整棵文档树样式，而它在按下/抬手各写一次，正好压在点击链路上）。
@@ -245,9 +250,11 @@
   .dshwv-menu-foot { margin-top: 8px; padding: 8px 6px 2px; border-top: 1px solid rgba(32,49,112,.1); }
 
   /* —— 控件 —— */
+  /* 滑块只吃剩余宽度，右侧固定给数值读数留位（大小显示倍数、音量显示百分比）。
+     不能写成固定 width：readout 也是 flex 子项，固定宽会在窄面板里把读数挤出右缘（曾踩） */
   .dshwv-range {
     -webkit-appearance: none; appearance: none;
-    flex: 1; min-width: 0; height: 16px;
+    flex: 1 1 auto; min-width: 0; height: 16px;
     background: transparent; cursor: pointer; margin: 0;
   }
   .dshwv-range::-webkit-slider-runnable-track { height: 4px; border-radius: 2px; background: rgba(32,49,112,.18); }
@@ -332,7 +339,16 @@
   }
   .dshwv-menu-foot .dshwv-menu-link.dshwv-menu-link-warn:hover { background: #c9362f; border-color: #c9362f; box-shadow: none; }
 
-  .dshwv-volpct { width: 40px; text-align: right; color: #5b6ba1; font-size: 12px; font-variant-numeric: tabular-nums; }
+  /* 读数宽度固定不可压缩：滑块 shrink 后剩下的空间留给它，短了会被裁掉 */
+  .dshwv-volpct { flex: 0 0 auto; width: 40px; text-align: right; color: #5b6ba1; font-size: 12px; font-variant-numeric: tabular-nums; }
+  /* 挂件大小读数：宽度与字号跟 .dshwv-volpct 对齐，两行的数字列视觉一致 */
+  .dshwv-scaleval { flex: 0 0 auto; width: 40px; text-align: right; color: #5b6ba1; font-size: 12px; font-variant-numeric: tabular-nums; }
+  /* 大小行：滑块 + 刻度点纵向成组（刻度贴在滑块正下方）。与设置页「外观」同款，
+     给整数档提供视觉锚点 —— 拖动中窗口不实时变，靠它确认当前停在第几档 */
+  .dshwv-scalewrap { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+  .dshwv-scaleticks { display: flex; justify-content: space-between; padding: 0 8px; box-sizing: border-box; }
+  .dshwv-scaleticks i { width: 2px; height: 4px; border-radius: 1px; background: rgba(32,49,112,.24); }
+  .dshwv-scaleticks i.on { background: #2f57d6; }
   /* 计时行：模式下拉 + 开始/暂停/继续按钮。「目标」拆成两个互斥子行
      （倒计时三段 / 定时刻），每行只放自己那套控件，不再让另一套隐形占位 */
   .dshwv-timer-btn { flex: 0 0 auto; width: 52px; padding: 4px 0; }
@@ -426,6 +442,7 @@
   html.dark .dshwv-menu-foot .dshwv-menu-link.dshwv-menu-link-warn { background: #e0433f; border-color: #e0433f; color: #fff; }
   html.dark .dshwv-menu-foot .dshwv-menu-link.dshwv-menu-link-warn:hover { background: #c9362f; border-color: #c9362f; }
   html.dark .dshwv-volpct { color: #9fb0d9; }
+  html.dark .dshwv-scaleval { color: #9fb0d9; }
   html.dark .dshwv-timer-unit { color: #7f8db3; }
   html.dark .dshwv-timer-reset { border-color: rgba(255,255,255,.18); background: rgba(255,255,255,.06); color: #aebadb; }
   html.dark .dshwv-timer-reset:hover { background: rgba(255,255,255,.12); border-color: rgba(255,255,255,.3); }

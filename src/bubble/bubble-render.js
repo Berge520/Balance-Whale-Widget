@@ -141,6 +141,12 @@ export function createBubbleRenderer(opts) {
       var base = parseFloat(mods[j].dataset.fz || '0');
       if (base) mods[j].style.fontSize = 'calc(var(--dshw-u) * ' + base + ')';
     }
+    // 图片段基准宽在 dataset.mw（buildModImg 写入），复位它的 max-width 覆盖
+    var mimg = modsBox.querySelectorAll('.dshwv-mimg');
+    for (var q = 0; q < mimg.length; q++) {
+      var mw = parseFloat(mimg[q].dataset.mw || '0');
+      if (mw) mimg[q].style.maxWidth = 'calc(var(--dshw-u) * ' + mw + ')';
+    }
   }
   // 量出文本块的真实占位：宽取各行「内容宽度」的最大值（scrollWidth 能反映 nowrap 溢出的宽度，
   // 而 offsetWidth 会被绝对定位的 shrink-to-fit 上限截断），高为可见各行 offsetHeight 之和。
@@ -186,6 +192,15 @@ export function createBubbleRenderer(opts) {
           for (var j = 0; j < segs.length; j++) shrinkSeg(segs[j], k);
           continue;
         }
+        // 按压气泡的模块：图片段按基准宽等比缩、文字段把行内 [data-fz] 模块一起缩。
+        // 这两类此前都被漏掉 —— 图片没有 data-fz、trowline 的类名也不在 BUBBLE_FONT 里，
+        // 于是 fitText 量出超框却谁都不缩，竖图会直接顶出气泡（用户 2026-10-08 报的 bug）
+        if (el.classList.contains('dshwv-mimg')) { shrinkImg(el, k); continue; }
+        if (el.classList.contains('dshwv-trowline')) {
+          var trows = el.querySelectorAll('[data-fz]');
+          for (var t = 0; t < trows.length; t++) shrinkSeg(trows[t], k);
+          continue;
+        }
         var base = BUBBLE_FONT[String(el.className).split(' ')[0]];
         if (base) el.style.fontSize = 'calc(var(--dshw-u) * ' + (base * k).toFixed(1) + ')';
       }
@@ -197,6 +212,12 @@ export function createBubbleRenderer(opts) {
     var base = parseFloat(seg.dataset.fz || '0');
     if (!base) return;
     seg.style.fontSize = 'calc(var(--dshw-u) * ' + (base * k).toFixed(1) + ')';
+  }
+  // 图片段的基准宽记在 dataset.mw（buildModImg 写入），超高/超宽时按系数等比缩宽度
+  function shrinkImg(img, k) {
+    var base = parseFloat(img.dataset.mw || '0');
+    if (!base) return;
+    img.style.maxWidth = 'calc(var(--dshw-u) * ' + (base * k).toFixed(1) + ')';
   }
   // 应用 3 行模型 { t, s: 'A'|'B'|'P'|'C', c, w }，或 { gif: true, src } 只显示动图。
   // 行序固定为 标签 / 金额 / 说明，s 决定套哪套字号样式。
@@ -456,8 +477,12 @@ export function createBubbleRenderer(opts) {
     img.className = 'dshwv-mimg';
     img.alt = '';
     img.draggable = false;
+    // 基准宽（u）记在 dataset.mw：CSS 里 .dshwv-mimg 只给默认上限，这里按 imgScale 覆盖，
+    // 并交给 fitText 的 shrinkImg 在整泡超框时继续等比缩（宽度与最大高度都跟着缩）
     var sc = Number(m.imgScale);
-    if (isFinite(sc) && sc > 0) img.style.maxWidth = 'calc(var(--dshw-u) * ' + (540 * Math.max(0.1, Math.min(1, sc))) + ')';
+    var mw = 540 * (isFinite(sc) && sc > 0 ? Math.max(0.1, Math.min(1, sc)) : 1);
+    img.dataset.mw = String(Math.round(mw * 10) / 10);
+    img.style.maxWidth = 'calc(var(--dshw-u) * ' + img.dataset.mw + ')';
     img.src = src;
     return img;
   }
