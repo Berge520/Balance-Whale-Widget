@@ -234,16 +234,6 @@ function codexClearCache() {
    通用控件样式已由 main.css 统一提供（全局唯一来源），本组件只留自身特有的控件样式。
    .btn-row 骨架、.link-btn 与 utils 档位配色也已在 main.css，此处不再留副本。 */
 
-.card-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 12px;
-}
-.card-head h2 {
-  margin: 0;
-}
 /* 开发者 Tab 统计卡的整卡折叠：标题即按钮，收起态在标题右侧挂一行摘要 */
 .card-toggle {
   display: flex;

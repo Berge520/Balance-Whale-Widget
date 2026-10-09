@@ -380,6 +380,48 @@ html.dark ::-webkit-scrollbar-thumb:active {
   font-weight: 600;
   color: var(--fg-dim);
 }
+/* 卡头：标题（左） + 操作按钮组（右）一行排开。
+   ★ 这条此前在几个组件里各留了一份 scoped 副本（2969bf8 的收敛漏了补进这里），
+     而 AssetsView 那份被删掉后没补回 —— 于是它的七张卡头 div 塌成块级，
+     标题与右侧按钮竖着堆（孤儿 CSS 闸门只查「样式没人用」，查不出「元素没有样式」）。
+     统一放全局当唯一来源，各组件不再留副本。 */
+.card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.card-head h2 {
+  margin: 0;
+}
+/* 整卡可折叠的卡片：标题即按钮，收起态在标题右侧挂一行摘要（.card-sum）。
+   摘要用次级色、可换行，窄窗口下换到第二行，不把标题挤走。
+   原先只写在 App.vue 的 scoped 块里（当时只有「开发者」Tab 两张统计卡用），
+   AssetsView 也要用 —— 子组件拿不到兄弟组件的 scoped 样式，故上提到全局。 */
+.card-toggle {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+  cursor: pointer;
+  user-select: none;
+}
+/* 三角字符在标题字号下会继承 600 字重，小字号加粗后 ▸/▾ 会糊成一道短横，
+   所以固定宽度并显式 400 字重（与 .fold-caret 同口径） */
+.card-toggle .caret {
+  width: 1em;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--fg-dim);
+}
+.card-sum {
+  margin-left: auto;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--fg-dim);
+  text-align: right;
+}
 .field {
   display: block;
   margin: 10px 0;
@@ -413,6 +455,14 @@ html.dark ::-webkit-scrollbar-thumb:active {
   flex: 1 1 auto;
   min-width: 0;
   line-height: 1.5;
+}
+/* 置灰的勾选行（如「小鲸鱼报时」在启用自定义泡泡后失效）：整行降透明度 + 禁用光标，
+   提示用户这条当前不生效（原因由紧随其后的 .hint 说明） */
+.field.check:has(input[type="checkbox"]:disabled) {
+  opacity: 0.5;
+}
+.field.check input[type="checkbox"]:disabled {
+  cursor: not-allowed;
 }
 .field:not(.row) .label {
   display: block;

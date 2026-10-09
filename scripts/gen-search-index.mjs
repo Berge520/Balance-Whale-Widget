@@ -57,7 +57,12 @@ function extractCardText(segment) {
   for (const m of segment.matchAll(/<span class="label[^"]*">([\s\S]*?)<\/span>/g)) raws.push(m[1])
   return raws
     .map((s) => s
-      .replace(/<span class="fold-caret">[\s\S]*?<\/span>/g, '') // 折叠箭头（▾/▸）纯装饰
+      .replace(/<span[^>]*class="fold-caret[^"]*"[^>]*>[\s\S]*?<\/span>/g, '') // 折叠箭头（▾/▸）纯装饰
+      .replace(/<span[^>]*class="caret[^"]*"[^>]*>[\s\S]*?<\/span>/g, '') // 整卡折叠（.card-toggle）的箭头，同上
+      // 收起态摘要（.card-sum）：纯插值的单行摘要（如「已导入 {{n}} / {{m}} 个槽位」）剥掉 ——
+      // 去掉 {{}} 后只剩「已导入 / 个槽位」这种残句，纯噪声。
+      // 内嵌 <template> 的条件兜底文案（「点击展开诊断」）含标签，不匹配，保留下来可搜
+      .replace(/<span[^>]*class="card-sum[^"]*"[^>]*>[^<]*<\/span>/g, '')
       .replace(/<[^>]+>/g, '')
       .replace(/\{\{[^}]*\}\}/g, '')
       .replace(/（[^（）]*）/g, '')

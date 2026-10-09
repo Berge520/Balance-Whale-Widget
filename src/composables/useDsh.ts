@@ -912,12 +912,20 @@ function dshQueryVersions() {
       if (token !== dshQueryToken) return
       if (dsh.versions && dsh.versions.latest) {
         dshVersionsQueried.value = true
+        // 查到版本就是本轮收尾：把「正在查询可用版本…」收掉，否则它会一直挂在卡片底部
+        // （先前这里 return 得干干净净、只落 queried 标记，提示文案没人清 —— 成功反而比失败更像卡住）。
+        // 只在「还是我发的那条」时清，避免抹掉用户期间其他操作（启动 / 更新等）的回执
+        if (dshFlash.msg === DSH_QUERY_MSG) dshFlash.msg = ''
         // 说明的取数在宿主侧已挂在 listVersions 结束时（宿主那侧是 force），这里不再补一刀：
         // 设置页拿不到版本列表，没法自己判断区间是否已取全，重复触发只会多打一趟网络
         return
       }
       // 查到「没有可用版本」也是有效结论：不再自动重查，但保留「重试」入口
-      if (dshVersionsCode.value === 'empty') { dshQueryFailed.value = true; return }
+      if (dshVersionsCode.value === 'empty') {
+        dshQueryFailed.value = true
+        if (dshFlash.msg === DSH_QUERY_MSG) dshFlash.msg = ''
+        return
+      }
       // 只有「还是我发的那条」才改，避免覆盖用户期间其他操作的消息
       if (dshFlash.msg === DSH_QUERY_MSG && Date.now() - t0 > 12000) {
         dshQueryFailed.value = true // 留下来给用户一个「重试」入口，按钮不再自动隐藏

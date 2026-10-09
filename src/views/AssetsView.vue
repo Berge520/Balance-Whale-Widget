@@ -51,6 +51,8 @@ const props = defineProps<{
   // —— 父级的折叠 / 忙碌态（与 assets 卡片联动） ——
   // 折叠态归父级（App.vue 另有 watch 自动展开的逻辑），本组件只读 + emit 回改
   builtinFold: boolean
+  // 「导入的音效」整卡折叠态：六个槽位默认收起，与父级同源（搜索命中时父级会强制展开）
+  soundsFold: boolean
   assetsBusy: boolean
   // 读打包缩略图转 data URL（下共享角色时一并落盘）：LookView 域的 backfillMissingThumbs 也用，父级唯一来源
   sharedSkinThumbDataUrl: (id: string) => Promise<string>
@@ -81,6 +83,8 @@ const emit = defineEmits<{
   (e: 'random-skin'): void
   (e: 'thumb-error', key: string): void
   (e: 'toggle-builtin-fold', on: boolean): void
+  // 「导入的音效」整卡折叠开关（折叠态归父级）
+  (e: 'toggle-sounds-fold', on: boolean): void
   (e: 'preview-sound', role: SoundRole, idx: number): void
   // 试听共享库里的一段（本卡槽位内「选用…」面板用）：file 是落盘文件名，done 让面板复位高亮
   (e: 'preview-shared-sound', file: string, done: () => void): void
@@ -172,6 +176,8 @@ const soundPickFiltered = computed(() => {
 // 忙态与提示跟「共享音效」卡共用 sharedSoundBusy / sharedSoundFlash —— 两边操作的是同一份素材池。
 // 哪个槽位展开了「从共享库添加」面板（空串 = 都没展开，同时只开一个）
 const soundPickOpen = ref<SoundRole | ''>('')
+// 卡尾「音效使用说明」的展开态。低频说明文字，默认收起 —— 纯展示态、不给父级
+const soundHelpOpen = ref(false)
 // 试听走父级（与本卡其它试听同一条音频通道，两个试听不会同时响）；
 // 和槽位已有的「试听」共用一条事件，父级只认角色不关心这声是从哪张卡点进来的。
 const pickPreviewRole = ref<SoundRole | ''>('')
@@ -230,6 +236,9 @@ async function applySharedRoles(it: SharedSoundItem, roles: SoundRole[], okMsg: 
 
 // —— 素材总览 / 占用统计 ——
 const importedSoundCount = computed(() => SOUND_ROLES.reduce((n, r) => n + (props.soundsMeta[r] || []).length, 0))
+// 「导入的音效」折叠标题右侧的概览：有几个槽位导入了自己那段（与每行的「已导入」同口径）。
+// 与上面的 importedSoundCount 不同 —— 后者是总段数（用于占用统计），这里是槽位数
+const soundImportedCount = computed(() => SOUND_ROLES.filter((r) => (props.soundsMeta[r] || []).length > 0).length)
 const assetTotalBytes = computed(() => {
   let n = 0
   for (const it of props.skinGallery.items) n += Number(it.size) || 0
@@ -447,7 +456,10 @@ function toggleRndMenu(e: MouseEvent) {
   rndPanelPos.minWidth = w
   rndMenu.value = 'organize'
 }
-const randomSkinPool = computed(() => props.skinGallery.items.filter((it) => it.random).map((it) => it.id))
+// 口径统一为 `random !== false`（缺省参与）——宿主 listSkins 已把该字段归一化成真布尔，
+// 但设置页各处读法此前不一（此处真值、别处 `!== false`、角标处 `=== false`），
+// 一旦数据源变化就会出现「计数与角标对不上」。全项目一律按「缺省 = 参与」判定。
+const randomSkinPool = computed(() => props.skinGallery.items.filter((it) => it.random !== false).map((it) => it.id))
 // 随机池的括号口径：随包内置那张是池里常驻的一员，池子规模的对外说法要带上它，
 // 否则用户按「参与随机 N 张」去数格子会对不上（格子只覆盖画廊里的项）。
 // 父级「内置形象也参与随机」开关关掉时它不在池里，这时不提
@@ -1191,7 +1203,7 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds, expand
         </div>
       </div>
       <p v-if="!galleryOpen('skins')" class="hint">
-        共 {{ skinGallery.items.length }} 张{{ skinMeta ? `，当前使用「${skinMeta.name}」` : '' }}。默认收起，点标题展开。
+        共 {{ skinGallery.items.length }} 张{{ skinMeta ? `，当前使用「${skinMeta.name}」` : '' }}。
       </p>
       <template v-if="galleryOpen('skins')">
       <div class="skin-grid">
@@ -1219,11 +1231,14 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds, expand
               <span v-else class="skin-cell-none">无预览</span>
             </button>
             <span v-if="it.id === skinGallery.current" class="skin-cell-tag">使用中</span>
-            <!-- 不在随机池里的那张挂一条「不参与随机」通栏角标。
-                 与「使用中」不同，这里刻意**标不在池里的少数派**：用户关掉一张时的心理是
-                 「别让它再出现」，扫一遍能确认「关掉了哪几张」比扫「留在池里的几十张」省事得多。
-                 角标沉在格子底部、浅色半透明，不挡住缩略图主体。 -->
-            <span v-if="it.random === false" class="skin-cell-pool-off">不参与随机</span>
+            <!-- 随机态**双向都标、且都不用文字**（2026-10-08 反馈）：
+                 同一套圆点标准，靠颜色区分，不再用「不参与随机」通栏文字 ——
+                 文字角标会盖住缩略图底部、还和左下角序号抢位置，读起来也慢。
+                 · 参与 → 右上角绿点（沿用「外观」页图例那枚的形态与配色）；
+                 · 不参与 → 右上角灰点，与绿点同尺寸同位置，只有颜色不同。
+                 两枚点位置一致，扫一眼颜色即可判断，不占任何文案空间。 -->
+            <span class="skin-cell-pool-dot" :class="it.random !== false ? 'is-on' : 'is-off'"
+                  :title="it.random !== false ? '参与随机：会被「随机一张」抽到' : '不参与随机：不会被抽到'"></span>
           </div>
         </div>
         <button class="skin-cell skin-cell-add" type="button" title="导入图片" @click="doImportSkin()">
@@ -1236,18 +1251,15 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds, expand
         <button class="link-btn" type="button" @click="emit('toggle-skin-hint')">{{ skinHintOpen ? '收起说明' : '操作说明' }}</button>
       </p>
       <!-- 随机池规模常驻在画廊下方：此前只在「操作说明」展开时才看得到，用户停在画廊时
-           不知道「随机一张」到底会从几张里抽。这里只报规模；「是哪几张」靠缩略图上的
-           「不参与随机」角标直接看，不再要求用户去找折叠说明 -->
+           不知道「随机一张」到底会从几张里抽。颜色含义不再写在这里 —— 点就在格子上，
+           写完反而成了每次都要读一遍的长句；悬停有 title 兜底。 -->
       <p v-if="skinMeta" class="hint">
-        参与随机 {{ randomSkinPool.length }} / {{ skinGallery.items.length }} 张{{ poolBuiltinNote }}，
-        「随机一张」会从它们里挑；带「不参与随机」角标的格子不会被抽到。
+        参与随机 {{ randomSkinPool.length }} / {{ skinGallery.items.length }} 张{{ poolBuiltinNote }}，「随机一张」从它们里挑。
       </p>
       <p v-if="skinMeta && skinHintOpen" class="hint">
         单击缩略图选中（可连点多张），再点卡片上方「整理」，可对它们：切换使用 / 移到最前 / 移到最后 / 参与随机 / 不参与随机 / 删除；
-        双击缩略图也能直接切换使用，最多保留 20 张；
-        直接拖动缩略图可排到任意位置；
-        参与随机的共 {{ randomSkinPool.length }} 张（随包内置那张始终参与），「随机一张」会从它们里挑；
-        「整理 → 随机时抽哪些」那一段不用先选中，可整批指定随机时的取图范围。
+        双击缩略图直接切换使用，最多保留 20 张；直接拖动缩略图可排到任意位置；
+        右上角圆点表示是否参与随机，绿 = 参与、灰 = 不参与。
       </p>
       <p v-else-if="!skinMeta" class="hint">
         还没有导入形象。点「导入图片…」加一张，支持 png / jpg / webp / gif / apng（动图不裁剪，保留动画）。
@@ -1299,7 +1311,17 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds, expand
 
     <!-- [资源] 导入的音效：六槽位（按压 / 释放 + 四类提醒音），每槽位只保留一段 -->
     <section v-if="cardOn('assets', 'assetsSounds')" class="card" data-search="assetsSounds">
-      <h2>导入的音效</h2>
+      <!-- 整卡可折叠（默认收起）：六个槽位铺满一屏，只有真要导入 / 替换时才需要。
+           标题即开关，收起态在右侧挂一行概览，不会「藏了就等于没有」。
+           `.card-toggle` / `.caret` / `.card-sum` 与「开发者」Tab 那几张统计卡同一套写法。
+           搜索命中时父级会强制展开（见 App.vue 的搜索联动） -->
+      <h2 class="card-toggle" @click="emit('toggle-sounds-fold', !soundsFold)">
+        <span class="caret">{{ soundsFold ? '▾' : '▸' }}</span>导入的音效
+        <span v-if="!soundsFold" class="card-sum">
+          已导入 {{ soundImportedCount }} / {{ SOUND_ROLES.length }} 个槽位
+        </span>
+      </h2>
+      <template v-if="soundsFold">
       <!-- 六个槽位各成一个块（.sound-group 有底色与描边）。
            每个槽位最多一段：再导入就是替换掉旧的，所以没有「第 1 段 / 第 2 段」的编号，
            也不需要「哪几段属于谁」的分组暗示。 -->
@@ -1395,101 +1417,121 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds, expand
       <p v-if="soundUnused" class="hint">
         按压 / 释放音已导入但当前未使用：「音效开关」没开，或「音色」选的不是「自定义」。
       </p>
-      <p class="hint">
-        <strong>自己导入的段一个槽位只保留一段</strong> —— 再导入（按钮显示「替换」）会顶掉旧的。
-        想再加更多声音，用槽位上的「从共享库添加…」把<strong>共享音效库已下载的段</strong>挂到本槽位，
-        可与导入的那段<strong>一起随机播放</strong>（一段也能同时挂到多个槽位）。
-        提醒音留空 = 静音（不打扰是默认），只在对应提醒真的弹出时响一次；播放跟随「挂件外观」里的音效开关与音量。
-        音效支持 mp3 / wav / ogg 等，导入时可先拖选片段试听（最长 10 秒），结果转成单声道 WAV。
-      </p>
+      <!-- 使用说明默认折叠：原先四行小字常驻卡尾，把六个槽位压到下面去了。
+           摘要只报「能干什么」，不重复上方每行状态（那些行里已经写着「已导入 / 未导入（静音）」） -->
+      <div class="fold">
+        <button class="link-btn utils-btn utils-secondary" type="button" @click="soundHelpOpen = !soundHelpOpen">
+          {{ soundHelpOpen ? '收起音效使用说明' : '音效使用说明' }}
+        </button>
+        <div v-if="soundHelpOpen" class="guide">
+          <p class="hint">每槽位一段，再导入 = 替换；想加更多，用「从共享库添加…」挂共享段，一起随机播放。</p>
+          <p class="hint">提醒音留空 = 静音；播放跟随「挂件外观」的音效开关与音量。</p>
+          <p class="hint">支持 mp3 / wav / ogg，导入时可拖选片段试听（最长 10 秒），存为单声道 WAV。</p>
+        </div>
+      </div>
       <p v-if="soundFlash.msg" class="msg" :class="msgCls(soundFlash)">{{ soundFlash.msg }}</p>
+      </template>
     </section>
 
     <!-- [资源 → 下载素材] 内置资源：随插件附带、不可删，只作对照（选哪个在「挂件外观」）。
          纯查阅用，默认收起，避免与「导入的…」三张卡一起铺满一屏 -->
     <div v-if="showSection('download')" class="assets-section">下载素材</div>
     <section v-if="cardOn('assets', 'assetsBuiltin')" class="card" data-search="assetsBuiltin">
-      <div class="fold">
-        <button class="link-btn utils-btn utils-secondary" @click="emit('toggle-builtin-fold', !builtinFold)">{{ builtinFold ? '收起内置资源与下载源' : '内置资源与下载源' }}</button>
-        <div v-if="builtinFold">
-          <p class="hint">随插件附带、不可删除，列在这里只作对照；换形象 / 音色请到「挂件外观」。</p>
-          <p v-if="skinInUseMissing" class="msg err">
-            你正在使用的形象「{{ missingSkinName }}」随新版移出了插件包，挂件暂用默认形象显示。
-            点下方它的缩略图即可下载找回（也可整体「下载全部」）。
-          </p>
-          <p class="group-title">内置形象 <em>（随包 {{ builtinSkins.length }} 张 · 可下载 {{ skinPackSkins.length }} 张，共约 {{ fmtBytes(skinPackBytes) }}；当前：{{ cfg.skin === 'custom' ? '自定义' : cfg.skin }}）</em></p>
-          <div class="skin-grid">
-            <div v-for="s in builtinSkins" :key="'b-' + s" class="skin-cell" :class="{ active: cfg.skin === s }">
-              <div class="skin-box">
-                <img class="skin-cell-img" :src="builtinSkinUrl(s)" :alt="s" :title="s" />
-                <span class="skin-cell-tag">{{ s }}</span>
-              </div>
-            </div>
-            <!-- 可下载的那批（v1.8.0 起只剩 1 张）：未装灰底 + 下载角标（缩略图是设置页内嵌的，不下载也能看见长什么样）；
-                 已装则与「导入的形象」共用一套展示（缩略图从画廊来），可选用 / 可删 -->
-            <div v-for="s in skinPackItems" :key="'p-' + s.id" class="skin-cell"
-                 :class="{ active: cfg.skin === s.id, 'is-remote': !skinPackInstalled[s.id] }">
-              <div class="skin-box">
-                <button class="skin-cell-pick" type="button"
-                        :title="skinPackInstalled[s.id] ? `${skinPackLabel(s.id)}（已下载，点选用）`
-                          : `${skinPackLabel(s.id)}（未下载，点一下下载，下完自动切到这张）`"
-                        @click="doSkinPackCell(s.id)">
-                  <img class="skin-cell-img" :src="skinPackThumb(s.id)" :alt="skinPackLabel(s.id)" />
-                </button>
-                <!-- 角标写「下载」：v1.8.0 起这批只剩 1 张，「下载全部」显得莫名其妙 -->
-                <span v-if="!skinPackInstalled[s.id]" class="skin-cell-badge">下载</span>
-                <!-- 名字与警示标签二选一：两个都贴 bottom:0，同时渲染会叠在一起看不清。
-                     「正在使用 · 未下载」本身已含「是哪张」的信息（它只可能出现在 cfg.skin 那张上） -->
-                <span v-if="skinInUseMissing && s.id === cfg.skin" class="skin-cell-tag warn">正在使用 · 未下载</span>
-                <span v-else class="skin-cell-tag">{{ skinPackLabel(s.id) }}</span>
-                <span v-if="skinPackInstalled[s.id]" class="skin-cell-ops">
-                  <button class="skin-op danger" type="button" title="从本地删除这张（可重新下载）"
-                          @click.stop="doRemoveSkin(s.id)">删</button>
-                </span>
-              </div>
-            </div>
-          </div>
-          <div class="btn-row">
-            <button class="export-btn utils-btn utils-primary" type="button"
-                    :disabled="skinPackBusy || skinPackAllInstalled"
-                    @click="doDownloadSkinPacks()">
-              {{ skinPackBusy ? '正在下载…'
-                : skinPackAllInstalled ? '已全部下载'
-                  : skinPackInstalledAny ? `下载剩余 ${skinPackSkins.length - skinPackInstalledCount} 张（约 ${fmtBytes(skinPackRemainBytes)}）`
-                      : (skinPackSkins.length === 1 ? `下载（约 ${fmtBytes(skinPackBytes)}）`
-                         : `下载全部 ${skinPackSkins.length} 张（约 ${fmtBytes(skinPackBytes)}）`) }}
-            </button>
-          </div>
-          <DownloadBox v-if="dlProgress && dlProgress.pack === 'skins'"
-                       :progress="dlProgress" :percent="dlPercent" :amount="dlAmountText" />
-          <p class="hint">
-            <strong>一次操作下载的是整包</strong>：形象打包在同一个 Release 文件里，没有按张分片，所以无论点缩略图还是点上面按钮，
-            都会把未下载的那几张一起下回来（已下载的自动跳过，不重复占体积），下完自动切到你点的那张。
-            已下载的缩略图悬停可「删」单张，删了能重新下载。下载回来的形象存本地、不占导入配额（「导入的形象」最多 20 张另算）。
-          </p>
-          <!-- 下载源：留空即内置候选链（ghfast.top 加速 → 直连 github.com 兜底）。
-               自填须是 http(s) 绝对 URL 前缀，宿主会归一化（非法串回空并回落内置），末尾 '/' 可省略 -->
-          <label class="field row">
-            <span class="label">形象下载源 <em>（留空用内置：ghfast.top，失败自动直连 github.com）</em></span>
-            <input type="text" :maxlength="SKIN_PACK_PREFIX_MAX" spellcheck="false" autocomplete="off"
-                   placeholder="https://ghfast.top/"
-                   :value="cfg.skinPackSrc"
-                   @change="emit('patch', { skinPackSrc: ($event.target as HTMLInputElement).value })" />
-          </label>
-          <p v-if="skinPackFlash.msg" class="msg" :class="msgCls(skinPackFlash)">{{ skinPackFlash.msg }}</p>
-          <p class="group-title">内置音色 <em>（两组，在「挂件外观 → 音色」里选；提醒音没有内置回落）</em></p>
-          <div class="field row" v-for="g in BUILTIN_SOUND_SETS" :key="g.key">
-            <span class="label">{{ g.label }}</span>
-            <span class="sound-file">按压 {{ g.press }} · 释放 {{ g.release }}</span>
-            <button class="export-btn utils-btn utils-outline" type="button" @click="doPreviewBuiltin(g.press)">试听按压</button>
-            <button class="export-btn utils-btn utils-outline" type="button" @click="doPreviewBuiltin(g.release)">试听释放</button>
-          </div>
-          <p class="hint">
-            内置音色是插件包里的文件，不占本地数据目录空间，也不会被「清除素材」删掉。
-          </p>
-          <p v-if="builtinFlash.msg" class="msg" :class="msgCls(builtinFlash)">{{ builtinFlash.msg }}</p>
+      <!-- 卡头与「导入的形象 / 共享形象 / 共享音效」同款：fold-title 折叠 + 右侧主操作 + 收起态摘要。
+           本卡定位特殊（随包附带、只作对照），但折叠交互没必要另起一套 —— 原先的
+           link-btn（文案在「内置资源与下载源 / 收起内置资源与下载源」间跳）缺折叠箭头，
+           和下面几张卡的 ▸/▾ 范式也对不上。 -->
+      <div class="card-head">
+        <button class="fold-title" type="button" @click="emit('toggle-builtin-fold', !builtinFold)">
+          <span class="fold-caret">{{ builtinFold ? '▾' : '▸' }}</span>
+          内置资源与下载源
+        </button>
+        <div class="head-actions">
+          <!-- 主操作 = 把可下载的那批形象拉回来（目前 1 张）。与共享形象卡同款措辞与禁用条件 -->
+          <button v-if="skinPackSkins.length" class="export-btn utils-btn utils-primary" type="button"
+                  :disabled="skinPackBusy || skinPackAllInstalled"
+                  @click="doDownloadSkinPacks()">
+            {{ skinPackBusy ? '正在下载…'
+              : skinPackAllInstalled ? '已全部下载'
+                : skinPackInstalledAny ? `下载剩余 ${skinPackSkins.length - skinPackInstalledCount} 张（约 ${fmtBytes(skinPackRemainBytes)}）`
+                    : (skinPackSkins.length === 1 ? `下载（约 ${fmtBytes(skinPackBytes)}）`
+                       : `下载全部 ${skinPackSkins.length} 张（约 ${fmtBytes(skinPackBytes)}）`) }}
+          </button>
         </div>
       </div>
+      <p v-if="!builtinFold" class="hint">
+        随包形象 {{ builtinSkins.length }} 张 · 可下载 {{ skinPackSkins.length }} 张 · 音色 {{ BUILTIN_SOUND_SETS.length }} 组。
+        随插件附带、不可删除，列出只作对照。
+      </p>
+      <template v-if="builtinFold">
+        <p class="hint">随插件附带、不可删除，列在这里只作对照；换形象 / 音色请到「挂件外观」。</p>
+        <p v-if="skinInUseMissing" class="msg err">
+          你正在使用的形象「{{ missingSkinName }}」随新版移出了插件包，挂件暂用默认形象显示。
+          点下方它的缩略图即可下载找回（也可整体「下载全部」）。
+        </p>
+        <p class="group-title">内置形象 <em>（随包 {{ builtinSkins.length }} 张 · 可下载 {{ skinPackSkins.length }} 张，共约 {{ fmtBytes(skinPackBytes) }}；当前：{{ cfg.skin === 'custom' ? '自定义' : cfg.skin }}）</em></p>
+        <div class="skin-grid">
+          <div v-for="s in builtinSkins" :key="'b-' + s" class="skin-cell" :class="{ active: cfg.skin === s }">
+            <div class="skin-box">
+              <img class="skin-cell-img" :src="builtinSkinUrl(s)" :alt="s" :title="s" />
+              <span class="skin-cell-tag">{{ s }}</span>
+            </div>
+          </div>
+          <!-- 可下载的那批（v1.8.0 起只剩 1 张）：未装灰底 + 下载角标（缩略图是设置页内嵌的，不下载也能看见长什么样）；
+               已装则与「导入的形象」共用一套展示（缩略图从画廊来），可选用 / 可删 -->
+          <div v-for="s in skinPackItems" :key="'p-' + s.id" class="skin-cell"
+               :class="{ active: cfg.skin === s.id, 'is-remote': !skinPackInstalled[s.id] }">
+            <div class="skin-box">
+              <button class="skin-cell-pick" type="button"
+                      :title="skinPackInstalled[s.id] ? `${skinPackLabel(s.id)}（已下载，点选用）`
+                        : `${skinPackLabel(s.id)}（未下载，点一下下载，下完自动切到这张）`"
+                      @click="doSkinPackCell(s.id)">
+                <img class="skin-cell-img" :src="skinPackThumb(s.id)" :alt="skinPackLabel(s.id)" />
+              </button>
+              <!-- 角标写「下载」：v1.8.0 起这批只剩 1 张，「下载全部」显得莫名其妙 -->
+              <span v-if="!skinPackInstalled[s.id]" class="skin-cell-badge">下载</span>
+              <!-- 名字与警示标签二选一：两个都贴 bottom:0，同时渲染会叠在一起看不清。
+                   「正在使用 · 未下载」本身已含「是哪张」的信息（它只可能出现在 cfg.skin 那张上） -->
+              <span v-if="skinInUseMissing && s.id === cfg.skin" class="skin-cell-tag warn">正在使用 · 未下载</span>
+              <span v-else class="skin-cell-tag">{{ skinPackLabel(s.id) }}</span>
+              <span v-if="skinPackInstalled[s.id]" class="skin-cell-ops">
+                <button class="skin-op danger" type="button" title="从本地删除这张（可重新下载）"
+                        @click.stop="doRemoveSkin(s.id)">删</button>
+              </span>
+            </div>
+          </div>
+        </div>
+        <!-- 「下载」主按钮已上移到卡头（.head-actions），与共享形象 / 共享音效同款，
+             卡内不再重复一个一模一样的按钮 -->
+        <DownloadBox v-if="dlProgress && dlProgress.pack === 'skins'"
+                     :progress="dlProgress" :percent="dlPercent" :amount="dlAmountText" />
+        <p class="hint">
+          <strong>一次操作下载的是整包</strong>：形象打包在同一个 Release 文件里，没有按张分片，所以无论点缩略图还是点上面按钮，
+          都会把未下载的那几张一起下回来（已下载的自动跳过，不重复占体积），下完自动切到你点的那张。
+          已下载的缩略图悬停可「删」单张，删了能重新下载。下载回来的形象存本地、不占导入配额（「导入的形象」最多 20 张另算）。
+        </p>
+        <!-- 下载源：留空即内置候选链（ghfast.top 加速 → 直连 github.com 兜底）。
+             自填须是 http(s) 绝对 URL 前缀，宿主会归一化（非法串回空并回落内置），末尾 '/' 可省略 -->
+        <label class="field row">
+          <span class="label">形象下载源 <em>（留空用内置：ghfast.top，失败自动直连 github.com）</em></span>
+          <input type="text" :maxlength="SKIN_PACK_PREFIX_MAX" spellcheck="false" autocomplete="off"
+                 placeholder="https://ghfast.top/"
+                 :value="cfg.skinPackSrc"
+                 @change="emit('patch', { skinPackSrc: ($event.target as HTMLInputElement).value })" />
+        </label>
+        <p v-if="skinPackFlash.msg" class="msg" :class="msgCls(skinPackFlash)">{{ skinPackFlash.msg }}</p>
+        <p class="group-title">内置音色 <em>（两组，在「挂件外观 → 音色」里选；提醒音没有内置回落）</em></p>
+        <div class="field row" v-for="g in BUILTIN_SOUND_SETS" :key="g.key">
+          <span class="label">{{ g.label }}</span>
+          <span class="sound-file">按压 {{ g.press }} · 释放 {{ g.release }}</span>
+          <button class="export-btn utils-btn utils-outline" type="button" @click="doPreviewBuiltin(g.press)">试听按压</button>
+          <button class="export-btn utils-btn utils-outline" type="button" @click="doPreviewBuiltin(g.release)">试听释放</button>
+        </div>
+        <p class="hint">
+          内置音色是插件包里的文件，不占本地数据目录空间，也不会被「清除素材」删掉。
+        </p>
+        <p v-if="builtinFlash.msg" class="msg" :class="msgCls(builtinFlash)">{{ builtinFlash.msg }}</p>
+      </template>
     </section>
 
     <!-- [资源] 共享角色：上游 QQ 群素材（36 张），v1.9.0 起按需单张下载（走 raw 直链，不再整包）。
@@ -1501,7 +1543,9 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds, expand
           共享形象
         </button>
         <div class="head-actions">
-          <button class="export-btn utils-btn utils-primary" type="button"
+          <!-- v-if 兜住「清单还没拉到」的空窗：这时 count / totalBytes 都是 0，
+               按钮会显示成「下载全部 0 张（约 0 KB）」。空窗一过（watch 补拉）就正常 -->
+          <button v-if="sharedSkinItems.length" class="export-btn utils-btn utils-primary" type="button"
                   :disabled="sharedSkinBusy || sharedSkinAllInstalled"
                   @click="doDownloadSharedSkins()">
             {{ sharedSkinBusy ? '正在下载…'
@@ -1512,7 +1556,7 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds, expand
         </div>
       </div>
       <p v-if="!galleryOpen('sharedSkins')" class="hint">
-        共 {{ sharedSkinItems.length }} 张，已下载 {{ sharedSkinInstalledCount }} 张。默认收起，点标题展开。
+        共 {{ sharedSkinItems.length }} 张，已下载 {{ sharedSkinInstalledCount }} 张。
       </p>
       <template v-if="galleryOpen('sharedSkins')">
       <DownloadBox v-if="dlProgress && dlProgress.pack === 'shared-skins'"
@@ -1560,7 +1604,8 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds, expand
           共享音效
         </button>
         <div class="head-actions">
-          <button class="export-btn utils-btn utils-primary" type="button"
+          <!-- 同「共享形象」：清单未拉到时先不渲染，免得出现「下载全部 0 段（约 0 KB）」 -->
+          <button v-if="sharedSoundItems.length" class="export-btn utils-btn utils-primary" type="button"
                   :disabled="sharedSoundBusy || sharedSoundAllInstalled"
                   @click="doDownloadSharedSounds()">
             {{ sharedSoundBusy ? '正在下载…'
@@ -1571,7 +1616,7 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds, expand
         </div>
       </div>
       <p v-if="!galleryOpen('sharedSounds')" class="hint">
-        共 {{ sharedSoundItems.length }} 段，已下载 {{ sharedSoundInstalledCount }} 段。默认收起，点标题展开。
+        共 {{ sharedSoundItems.length }} 段，已下载 {{ sharedSoundInstalledCount }} 段。
       </p>
       <template v-if="galleryOpen('sharedSounds')">
       <DownloadBox v-if="dlProgress && dlProgress.pack === 'shared-sounds'"
@@ -1703,6 +1748,12 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds, expand
   background: var(--line);
 }
 
+/* 卡头：标题（左） + 操作按钮组（右）一行排开。
+   ★ 这条此前漏了 —— 2969bf8 把通用控件样式收敛到 main.css 时，`.card-head` 只在
+     UsageView / CodexView / App.vue 各留了一份 scoped 副本，AssetsView 这份被一并删掉
+     而没进 main.css（孤儿 CSS 闸门只查「样式没人用」，查不出「元素没有样式」）。
+     于是本组件七张卡的卡头 div 一直是块级，标题与右侧按钮**竖着堆**。
+     现已上提到 main.css（本组件与 UsageView / App.vue 共用同一份），此处不再留副本。 */
 /* 可折叠卡片的标题本身是按钮：抹掉 button 默认外观，视觉上对齐 .card-head h2，
    让用户仍然一眼认出这是标题（有 hover 反馈暗示可点） */
 .fold-title {
@@ -2305,13 +2356,6 @@ input[type='checkbox'] {
 .skin-cell.dragging .skin-cell-idx {
   opacity: 0;
 }
-/* 挂了「不参与随机」通栏角标时藏掉左下角的序号：两者都是 bottom:0 的绝对定位，
-   角标又是整宽居中 —— 序号（尤其两位数）会压在角标首字「不」上，把它盖住，
-   用户只看到后四个字「参与随机」，正好把状态读反（2026-10-08 反馈）。
-   这里用 :has 直接把序号让位，角标文字始终完整。 */
-.skin-cell:has(.skin-cell-pool-off) .skin-cell-idx {
-  opacity: 0;
-}
 /* 拖拽排序：源格半透明表示「正在被搬走」；落点格用左侧/右侧一条竖线提示插入位置。
    指示线用 ::before/::after 画，避免再加 DOM 节点影响 flex 布局。 */
 .skin-cell.dragging {
@@ -2382,21 +2426,29 @@ input[type='checkbox'] {
 .skin-cell.is-remote .skin-cell-tag.warn {
   background: rgba(200, 120, 30, 0.92);
 }
-/* 「不参与随机」角标：通栏沉在格子底部。用中性灰而非红色 —— 这不是错误态，
-   只是用户主动排除的一张，标红会让人误以为这张图有问题。
-   pointer-events: none 与「使用中」一致，不吃掉缩略图上的单击选中 / 双击使用。 */
-.skin-cell-pool-off {
+/* 随机态标记：**一枚圆点，靠颜色区分**（2026-10-08 反馈：不要文字）。
+   此前「不参与随机」是通栏文字角标，盖住缩略图底部、还和左下角序号抢位置（见上方
+   .skin-cell:has(...) 那条让位规则），读起来也慢。现在两种态共用同一枚点：
+   同尺寸、同位置（右上角 —— 右下角是「使用中」、左上角是「下载」、左下角是序号，只剩这里不打架），
+   只有颜色不同。绿点沿用「外观」页图例那枚的形态与配色，两页视觉终于对得上。
+   小圆点 + 一点白色描边：缩略图明暗不定时也能看清；pointer-events:none 不吃
+   缩略图上的单击选中 / 双击使用。 */
+.skin-cell-pool-dot {
   position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  padding: 1px 0;
-  font-size: 9px;
-  line-height: 1.3;
-  text-align: center;
-  background: rgba(60, 66, 78, 0.82);
-  color: #fff;
+  right: 3px;
+  top: 3px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1.5px rgba(255, 255, 255, 0.65);
   pointer-events: none;
+}
+.skin-cell-pool-dot.is-on {
+  background: var(--ok);
+}
+/* 用中性灰而非红色 —— 这不是错误态，只是用户主动排除的一张，标红会让人以为这张图有问题 */
+.skin-cell-pool-dot.is-off {
+  background: rgba(120, 126, 138, 0.9);
 }
 /* 「导入」格：内容为「＋ / 导入」，位置与其它 64×64 图框对齐。
    边框用实线、底色与 .skin-box 同款棋盘 —— 夹在一排棋盘格里时它是一枚正常的「加图」按钮 */

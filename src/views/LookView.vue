@@ -65,6 +65,11 @@ const randomPoolNote = computed(() => (props.cfg.randomIncludeBuiltin === false
   ? '只算你标了「参与随机」的'
   : '含随包内置那张'))
 
+// 按压气泡（自定义泡泡）模型是否已启用：一旦启用，气泡内容全部由「按压气泡」卡片里的模块决定，
+// 常规三行气泡（含它的首行报时）不再渲染 —— 顶层的「小鲸鱼报时」开关随之失效。
+// 这里据此把该开关置灰并给提示，避免用户以为是开关坏了（报时改在按压气泡里加「报时」模块）
+const bubbleModelOn = computed(() => props.cfg.bubble?.on === true)
+
 // 统一的消息态：与父级 App.vue 里的同名工具保持同一定义（内联一份，免父子透传 4 行工具）
 type Flash = { msg: string; err: boolean }
 function msgCls(f: Flash) { return { ok: !f.err, err: f.err } }
@@ -182,17 +187,16 @@ const holidayNote = computed(() => {
       <button class="export-btn utils-btn utils-outline" type="button" title="从所有勾选了「参与随机」的形象里随机换一张" @click="emit('random-skin')">随机</button>
     </label>
     <label class="field row check">
-      <span class="label">内置形象也参与随机 <em>（关掉后随机池只剩你勾选「参与随机」的形象）</em></span>
+      <span class="label">内置形象也参与随机</span>
       <input type="checkbox" :checked="cfg.randomIncludeBuiltin !== false"
              @change="emit('toggle-include-builtin', ($event.target as HTMLInputElement).checked)" />
     </label>
     <!-- 「随机抽的是哪一池」此前只在「资源」页的操作说明里提一句，用户在外观页点「随机」时
-         既不知道池子里有几张、也不知道是哪几张。这里把规模常驻出来（随 inbox 实时变化），
-         「是哪几张」交给资源页缩略图上的标记（那里才有格子可标）。 -->
+         既不知道池子里有几张、也不知道是哪几张。这里只报规模 + 指路，「是哪几张」交给
+         资源页缩略图右上角那枚圆点（那里才有格子可标）。 -->
     <p v-if="skinGallery" class="hint">
-      「随机」从 {{ randomPoolCount }} 张里挑（{{ randomPoolNote }}）。
-      具体是哪几张，见「资源 → 导入的形象」里带
-      <span class="skin-pool-legend-dot"></span> 标记的格子。
+      「随机」从 {{ randomPoolCount }} 张里挑（{{ randomPoolNote }}），带
+      <span class="skin-pool-legend-dot"></span> 绿点的是参与随机的。
     </p>
     <p v-if="cfg.skin === 'custom' && !skinMeta" class="hint">
       还没有导入形象，去「资源」页加一张后这里才有「自定义」可用（当前会回退为「默认形象」）。
@@ -261,8 +265,13 @@ const holidayNote = computed(() => {
 
         <label class="field row check">
           <span class="label">小鲸鱼报时 <em>（气泡首行显示当前时间）</em></span>
-          <input type="checkbox" :checked="cfg.timeBubbleOn" @change="emit('patch', { timeBubbleOn: ($event.target as HTMLInputElement).checked })" />
+          <input type="checkbox" :checked="cfg.timeBubbleOn" :disabled="bubbleModelOn"
+                 @change="emit('patch', { timeBubbleOn: ($event.target as HTMLInputElement).checked })" />
         </label>
+        <p v-if="bubbleModelOn" class="hint">
+          已启用「按压气泡（自定义泡泡）」，气泡内容由那里的模块决定，本开关不再生效 ——
+          报时请到「按压气泡」卡片里加一个「报时」模块（可写成 <em>现在是 {time}</em> 之类）。
+        </p>
 
         <label class="field row check">
           <span class="label">挂件右上角菜单按钮</span>

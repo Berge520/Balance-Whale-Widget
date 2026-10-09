@@ -9,7 +9,7 @@ export const CARD_TEXT: Record<string, string> = {
   assetsSkins: "导入的形象",
   assetsBubbles: "导入的气泡图",
   assetsSounds: "导入的音效筛选",
-  assetsBuiltin: "形象下载源",
+  assetsBuiltin: "内置资源与下载源形象下载源",
   assetsSharedSkins: "共享形象",
   assetsSharedSounds: "共享音效",
   usage: "用量与账本用量历史保留自定义单价币种汇率额度总量",

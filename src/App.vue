@@ -180,8 +180,8 @@ const guides = reactive({ apiKey: false, token: false })
 // 「帮助」组里使用说明 / 故障排查的折叠态已随 HelpView 迁走
 // 长卡片内部的折叠态：凭据（填一次就不动，默认收起）
 const toolOpen = reactive({ credentials: false })
-// 「资源」页折叠态：内置资源纯查阅用，默认收起
-const assetFolds = reactive({ builtin: false })
+// 「资源」页折叠态：内置资源纯查阅用，默认收起；「导入的音效」六个槽位也铺满一屏，同样默认收起
+const assetFolds = reactive({ builtin: false, sounds: false })
 // —— 设置页顶部 Tab ——
 // 原先 12 张卡片竖排一屏到底（模板近千行），找一项要滚很久；按主题分 7 组，一次只看一组。
 // 每张卡片用 v-if="activeTab === 'xxx'" 归到组里（不额外套容器层）。组内顺序 = 卡片在模板里的先后；
@@ -333,6 +333,11 @@ function cardOn(tab: string, key: string) {
   if (searchActive.value) return searchHits.value.includes(key)
   return activeTab.value === tab
 }
+// 默认收起的整卡被搜到时强制展开：否则用户搜到「导入的音效」却只看到一行标题，
+// 命中的内容全藏在折叠里。只在「未被用户手动动过」时展开（不抢用户的操作）
+watch(searchHits, (hits) => {
+  if (hits.includes('assetsSounds')) assetFolds.sounds = true
+})
 // 卡片在搜索结果里的来源标签（如「用量」），用于告诉用户这张卡本来在哪一组
 function cardTabLabel(key: string) {
   const t = SEARCH_INDEX[key]?.tab
@@ -1560,8 +1565,8 @@ function applyPickedRandom(on: boolean) {
     }
     refreshSkin()
     skinFlash.err = false
-    skinFlash.msg = `已把 ${picked.length} 张设为${on ? '参与' : '不参与'}随机（现共 `
-      + `${skinGallery.value.items.filter(it => it.random !== false).length} / ${skinGallery.value.items.length} 张参与）`
+    skinFlash.msg = `已把 ${picked.length} 张设为${on ? '参与' : '不参与'}随机`
+      + `（现共 ${skinGallery.value.items.filter(it => it.random !== false).length}/${skinGallery.value.items.length} 张参与）`
   } catch (err: any) {
     skinFlash.err = true
     skinFlash.msg = '应用失败：' + String(err?.message || err)
@@ -2630,6 +2635,7 @@ onUnmounted(() => {
       :skin-unused="skinUnused"
       :sound-unused="soundUnused"
       :builtin-fold="assetFolds.builtin"
+      :sounds-fold="assetFolds.sounds"
       :assets-busy="assetsBusy"
       :shared-skin-thumb-data-url="sharedSkinThumbDataUrl"
       :builtin-skins="BUILTIN_SKINS"
@@ -2654,6 +2660,7 @@ onUnmounted(() => {
       @toggle-include-builtin="onToggleIncludeBuiltin"
       @thumb-error="(k: string) => { thumbBroken[k] = true }"
       @toggle-builtin-fold="(on: boolean) => { assetFolds.builtin = on }"
+      @toggle-sounds-fold="(on: boolean) => { assetFolds.sounds = on }"
       @preview-sound="doPreviewSound"
       @preview-shared-sound="doPreviewSharedSound"
       @import-sound="doImportSound"
@@ -4607,42 +4614,6 @@ h1 {
   line-height: 1.7;
 }
 
-.card-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 12px;
-}
-.card-head h2 {
-  margin: 0;
-}
-/* 开发者 Tab 两张统计卡的整卡折叠：标题即按钮，收起态在标题右侧挂一行摘要。
-   摘要用次级色、可换行，保证窄窗口下不把标题挤走 */
-.card-toggle {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  /* 窄窗口下摘要换到第二行，不挤压标题 */
-  flex-wrap: wrap;
-  cursor: pointer;
-  user-select: none;
-}
-/* 对齐既有 .fold-caret：三角字符在标题字号下会继承 600 字重，
-   小字号加粗后 ▸/▾ 会糊成一道短横，所以固定宽度并显式 400 字重 */
-.card-toggle .caret {
-  width: 1em;
-  font-size: 12px;
-  font-weight: 400;
-  color: var(--fg-dim);
-}
-.card-sum {
-  margin-left: auto;
-  font-size: 12px;
-  font-weight: 400;
-  color: var(--fg-dim);
-  text-align: right;
-}
 /* 卡片组之间的纯分界线（如 dsh 组与 Codex 卡之间）：只划线不写字 ——
    文字会和紧邻的卡标题重复。纯装饰，不抢卡片标题的视觉权重。
    上下间距要自己给足：卡片只在下侧留 margin-bottom，紧挨着的下一张卡没有 margin-top，

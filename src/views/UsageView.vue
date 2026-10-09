@@ -622,16 +622,6 @@ defineExpose({ applyHistory, refreshTodayModels, refreshDetail })
      随本卡抽成独立组件后在这里补齐，正好修掉这个既有 bug。
      阈值按本卡口径：dense ≥14、ultra ≥90（UsageChart 组件内是 14 / 30，与本卡不同）。 */
 
-.card-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 12px;
-}
-.card-head h2 {
-  margin: 0;
-}
 .head-actions {
   display: flex;
   gap: 8px;
