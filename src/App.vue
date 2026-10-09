@@ -12,7 +12,7 @@ import { CARD_TEXT } from './search-index.gen'
 // 它只在「帮助」Tab 才渲染，抽成独立 chunk 后 App.vue 首屏包明显变小，其余 Tab 的打开更快。
 // 渲染时机不变（下面模板仍是 v-if="activeTab === 'help'"），首次切到帮助时才去取这段 JS
 const AccelView = defineAsyncComponent(() => import('./views/AccelView.vue'))
-// 「资源」Tab 整组（7 张卡）。含 7 张可独立命中的卡，故把 cardOn 作为 prop 传入、
+// 「资源」Tab 整组（4 张卡）。含 4 张可独立命中的卡，故把 cardOn 作为 prop 传入、
 // 由组件内各 section 自行判定显隐，不能在本层包一层 v-if（那样搜索态只能整组显隐）。
 // 按需异步加载：全仓最大的视图（形象画廊 / 音效 / 素材包编辑都在这），抽成独立 chunk 给主包瘦身；
 // 组件恒挂载（无 v-if），chunk 在启动即取，但主包解析变小变快。expose 仅供外部预留，父级无 ref 调用点，异步安全。

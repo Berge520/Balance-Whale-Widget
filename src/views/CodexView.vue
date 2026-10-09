@@ -232,32 +232,9 @@ function codexClearCache() {
 <style scoped>
 /* 设计令牌（--fg / --accent / --line / --ok / --err 等）来自 main.css 的 :root。
    通用控件样式已由 main.css 统一提供（全局唯一来源），本组件只留自身特有的控件样式。
-   .btn-row 骨架、.link-btn 与 utils 档位配色也已在 main.css，此处不再留副本。 */
+   .btn-row 骨架、.link-btn 与 utils 档位配色也已在 main.css，此处不再留副本。
+   .card-toggle / .card-toggle .caret / .card-sum（整卡折叠）同样已在 main.css，此处不再留副本。 */
 
-/* 开发者 Tab 统计卡的整卡折叠：标题即按钮，收起态在标题右侧挂一行摘要 */
-.card-toggle {
-  display: flex;
-  align-items: baseline;
-  gap: 6px;
-  /* 窄窗口下摘要换到第二行，不挤压标题 */
-  flex-wrap: wrap;
-  cursor: pointer;
-  user-select: none;
-}
-/* 三角字符在标题字号下会继承 600 字重、糊成一道短横，故固定宽度并显式 400 字重 */
-.card-toggle .caret {
-  width: 1em;
-  font-size: 12px;
-  font-weight: 400;
-  color: var(--fg-dim);
-}
-.card-sum {
-  margin-left: auto;
-  font-size: 12px;
-  font-weight: 400;
-  color: var(--fg-dim);
-  text-align: right;
-}
 /* dsh 分组卡的按钮排版：本卡沿用同一观感（不强制等宽，按钮贴内容宽） */
 .dsh-card .btn-row button {
   flex: 1 1 auto;

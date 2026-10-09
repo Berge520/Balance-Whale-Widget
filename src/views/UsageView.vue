@@ -57,6 +57,10 @@ type Flash = { msg: string; err: boolean }
 function useFlash(): Flash { return reactive({ msg: '', err: false }) }
 function msgCls(f: Flash) { return { ok: !f.err, err: f.err } }
 
+// 单价模型行的删除确认：删错一条要手抄三组价格回来，代价高 —— 与模型卡的删除同款，
+// 点「删」先把那一行切成确认条，点「确认删除」才真删、点「取消」退回（同一时刻只开一行）。
+const priceDelConfirm = ref<number | null>(null)
+
 // —— 用量趋势 ——
 // 宿主按「账本历史保留天数」给足（默认 365 天），图表按 usageRange 截尾部显示，「本月汇总」用整段算。
 // 账本数据（usageHistory / usageCurrency）由父级 refreshHistory 填，本卡只负责截取与展示。
@@ -493,8 +497,15 @@ defineExpose({ applyHistory, refreshTodayModels, refreshDetail })
           <input class="num" type="number" min="0" step="0.01" :value="it.out"
                  @change="emit('token-price-change', { index: i, key: 'out', value: Number(($event.target as HTMLInputElement).value) })" />
         </label>
-        <button class="export-btn price-del utils-btn utils-outline" type="button" title="删除这一条"
-                @click="emit('remove-price-model', i)">删</button>
+        <button class="export-btn price-del utils-btn utils-outline" type="button"
+                :title="priceDelConfirm === i ? '取消删除' : '删除这一条'"
+                @click="priceDelConfirm = priceDelConfirm === i ? null : i">{{ priceDelConfirm === i ? '取消' : '删' }}</button>
+      </div>
+      <div v-if="priceDelConfirm !== null && cfg.tokenPrice.models[priceDelConfirm]" class="price-row price-confirm">
+        <span>删除「{{ cfg.tokenPrice.models[priceDelConfirm].name || '未命名模型' }}」这条单价覆盖？删后它的价格要重新填。</span>
+        <button class="export-btn utils-btn utils-outline"
+                @click="emit('remove-price-model', priceDelConfirm as number); priceDelConfirm = null">确认删除</button>
+        <button class="link-btn utils-btn utils-secondary" @click="priceDelConfirm = null">取消</button>
       </div>
       <button class="export-btn utils-btn utils-outline" type="button"
               :disabled="cfg.tokenPrice.models.length >= priceModelMax"
@@ -992,6 +1003,13 @@ select:focus,
 /* 删除按钮与输入框底边对齐（price-cell 是列布局，标签在上、输入在下） */
 .price-del {
   align-self: flex-end;
+}
+/* 确认条：复用 .price-row 的间距，但横向排文字与按钮（与模型卡的 .mm-confirm 同款） */
+.price-confirm {
+  flex-wrap: wrap;
+  align-items: center;
+  font-size: 12px;
+  color: var(--fg-dim);
 }
 .quota-reset {
   margin-left: 8px;

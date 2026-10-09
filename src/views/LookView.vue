@@ -5,7 +5,7 @@ import type { HolidayStatus, SkinGallery, SkinMeta, SoundMeta, SoundRole, WhaleS
 // 「挂件外观」整卡：大小 / 形象 / 深浅色 / 气泡与文案 / 音效，从设置页 App.vue 抽出。
 // 仍有多处留在父级，按 props 下传或 emit 触发，不能跟着搬：
 //   - 素材状态（skinMeta / skinUnused / skinFlash / assetSize / soundsMeta / soundLabel /
-//     soundUnused）：本卡与「资源」页七张卡共用同一套（画廊导入、试听、清理都会刷新它们），
+//     soundUnused）：本卡与「资源」页共用同一套（画廊导入、试听、清理都会刷新它们），
 //     唯一来源留在父级，这里只收结果展示。
 //   - skinFlash：本卡与「资源」页画廊共用同一消息槽（随机按钮的反馈也写它），故留父级。
 //   - doRandomSkin / onToggleIncludeBuiltin：都要写 skinFlash 并刷新画廊，留父级，本卡 emit 触发。

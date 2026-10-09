@@ -28,7 +28,7 @@ function msgCls(f: { err: boolean }) {
 const props = defineProps<{
   cfg: any
   // 卡片显隐判定：与父级同源（搜索态按 searchHits 命中，否则看 activeTab），
-  // 本组件含 7 张可独立命中的卡，故逐段调用而不能整体包一层 v-if
+  // 本组件含 4 张可独立命中的卡，故逐段调用而不能整体包一层 v-if
   cardOn: (tab: string, key: string) => boolean
   searchActive: boolean
   services: Partial<WhaleServices>
@@ -142,6 +142,7 @@ function doImportSound(role: SoundRole) {
   emit('import-sound', role)
 }
 function doRemoveSound(role: SoundRole, file?: string) {
+  if (needDeleteConfirm('seg:' + role + ':' + (file || ''))) return
   emit('remove-sound', role, file)
 }
 // 槽位里当前那段的名字（用于提示文案里点名「已导入的那段是谁」）。
@@ -531,6 +532,7 @@ function doRemovePicked() {
   emit('remove-picked')
 }
 function doRemoveSkin(id: string) {
+  if (needDeleteConfirm('skin:' + id)) return
   emit('remove-skin', id)
 }
 function doImportSkin() {
@@ -582,6 +584,7 @@ function doImportBubble() {
   emit('import-bubble')
 }
 function doRemoveBubble(id: string) {
+  if (needDeleteConfirm('bubble:' + id)) return
   emit('remove-bubble', id)
 }
 
@@ -847,8 +850,23 @@ function filterSoundItems(list: SharedSoundItem[]): SharedSoundItem[] {
 }
 const sharedSoundInstalledShown = computed(() => filterSoundItems(sharedSoundInstalledItems.value))
 const previewingSharedId = ref<string | null>(null)
+// 二次确认：第一下点「删」只把该行切成「确认删」，3 秒内再点才真删。
+// 全组删除动作（共享音效段 / 用户导入形象 / 气泡图 / 槽位音效段）共用这一个 key，
+// 用前缀区分来源（如 'skin:<id>'）——删错形象或删错音效段都不可撤销，交互必须一致。
 const removeConfirmId = ref<string | null>(null)
 let removeConfirmTimer: ReturnType<typeof setTimeout> | null = null
+// 返回 true = 已进入确认态、本次不执行；返回 false = 用户已二次点下，调用方照常执行删除。
+function needDeleteConfirm(key: string): boolean {
+  if (removeConfirmId.value !== key) {
+    removeConfirmId.value = key
+    if (removeConfirmTimer) clearTimeout(removeConfirmTimer)
+    removeConfirmTimer = setTimeout(() => { removeConfirmId.value = null }, 3000)
+    return true
+  }
+  if (removeConfirmTimer) { clearTimeout(removeConfirmTimer); removeConfirmTimer = null }
+  removeConfirmId.value = null
+  return false
+}
 const sharedSoundRemainBytes = computed(() => Number(sharedSoundList.value?.totalSize || 0)
   - sharedSoundItems.value.reduce((n, it) => n + (it.installed ? (Number(it.size) || 0) : 0), 0))
 
@@ -921,14 +939,7 @@ async function doDownloadSharedSound(it: SharedSoundItem) {
   }
 }
 function doRemoveSharedSound(it: SharedSoundItem) {
-  if (removeConfirmId.value !== it.id) {
-    removeConfirmId.value = it.id
-    if (removeConfirmTimer) clearTimeout(removeConfirmTimer)
-    removeConfirmTimer = setTimeout(() => { removeConfirmId.value = null }, 3000)
-    return
-  }
-  if (removeConfirmTimer) { clearTimeout(removeConfirmTimer); removeConfirmTimer = null }
-  removeConfirmId.value = null
+  if (needDeleteConfirm('shared:' + it.id)) return
   soundFlash.msg = ''
   soundFlash.err = false
   const r = services.value.removeSharedSound?.(it.file || '')
@@ -1402,8 +1413,9 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
               <span v-if="skinInUseMissing && s.id === cfg.skin" class="skin-cell-tag warn">正在使用 · 未下载</span>
               <span v-else class="skin-cell-tag">{{ skinPackLabel(s.id) }}</span>
               <span v-if="skinPackInstalled[s.id]" class="skin-cell-ops">
-                <button class="skin-op danger" type="button" title="从本地删除这张（可重新下载）"
-                        @click.stop="doRemoveSkin(s.id)">删</button>
+                <button class="skin-op danger" type="button"
+                        :title="removeConfirmId === 'skin:' + s.id ? '再点一次确认删除（3 秒后自动取消）' : '从本地删除这张（可重新下载）'"
+                        @click.stop="doRemoveSkin(s.id)">{{ removeConfirmId === 'skin:' + s.id ? '确认删' : '删' }}</button>
               </span>
             </div>
           </div>
@@ -1426,8 +1438,9 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
               <span v-if="!sharedSkinInstalled[s.id]" class="skin-cell-badge">下载</span>
               <span class="skin-cell-tag">{{ sharedSkinNames[s.id] || s.id }}</span>
               <span v-if="sharedSkinInstalled[s.id]" class="skin-cell-ops">
-                <button class="skin-op danger" type="button" title="从本地删除这张（可重新下载）"
-                        @click.stop="doRemoveSkin(s.id)">删</button>
+                <button class="skin-op danger" type="button"
+                        :title="removeConfirmId === 'skin:' + s.id ? '再点一次确认删除（3 秒后自动取消）' : '从本地删除这张（可重新下载）'"
+                        @click.stop="doRemoveSkin(s.id)">{{ removeConfirmId === 'skin:' + s.id ? '确认删' : '删' }}</button>
               </span>
             </div>
           </div>
@@ -1475,7 +1488,9 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
               <span v-else class="skin-cell-none">无预览</span>
             </span>
             <span class="skin-cell-ops">
-              <button class="skin-op danger" type="button" title="删除这张" @click.stop="doRemoveBubble(it.id)">删</button>
+              <button class="skin-op danger" type="button"
+                      :title="removeConfirmId === 'bubble:' + it.id ? '再点一次确认删除（3 秒后自动取消）' : '删除这张'"
+                      @click.stop="doRemoveBubble(it.id)">{{ removeConfirmId === 'bubble:' + it.id ? '确认删' : '删' }}</button>
             </span>
           </div>
         </div>
@@ -1594,7 +1609,11 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
           <SoundRow :name="it.name">
             <span class="seg-ops">
               <button class="export-btn utils-btn utils-outline" type="button" @click="doPreviewSound(r, i)">试听</button>
-              <button class="export-btn utils-btn utils-outline" type="button" @click="doRemoveSound(r, it.file)">删除</button>
+              <button class="export-btn utils-btn"
+                      :class="removeConfirmId === 'seg:' + r + ':' + it.file ? 'utils-danger' : 'utils-outline'"
+                      type="button"
+                      :title="removeConfirmId === 'seg:' + r + ':' + it.file ? '再点一次确认删除（3 秒后自动取消）' : '删除这段'"
+                      @click="doRemoveSound(r, it.file)">{{ removeConfirmId === 'seg:' + r + ':' + it.file ? '确认删' : '删除' }}</button>
             </span>
             <!-- 体积与导入时间都是次要信息，合成一行放在最下面 -->
             <span class="seg-time" :title="assetAt(it)">{{ assetSize(it) }} · {{ assetAtShort(it) }}</span>
@@ -1672,9 +1691,9 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
                               :class="{ 'preview-on': previewingSharedId === it.id }"
                               @click="doPreviewSharedSound(it)">{{ previewingSharedId === it.id ? '停止' : '试听' }}</button>
                       <button class="export-btn utils-btn" type="button"
-                              :class="removeConfirmId === it.id ? 'utils-danger' : 'utils-outline'"
-                              :title="removeConfirmId === it.id ? '再点一次确认删除（3 秒后自动取消）' : '从共享音效库删掉这一段；各槽位上挂的这段也一并失效'"
-                              @click="doRemoveSharedSound(it)">{{ removeConfirmId === it.id ? '确认删' : '删' }}</button>
+                              :class="removeConfirmId === 'shared:' + it.id ? 'utils-danger' : 'utils-outline'"
+                              :title="removeConfirmId === 'shared:' + it.id ? '再点一次确认删除（3 秒后自动取消）' : '从共享音效库删掉这一段；各槽位上挂的这段也一并失效'"
+                              @click="doRemoveSharedSound(it)">{{ removeConfirmId === 'shared:' + it.id ? '确认删' : '删' }}</button>
                     </span>
                   </SoundRow>
                 </div>
@@ -1755,7 +1774,7 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
    ★ 本组件此前漏了这一步（样式标签是空的 `<style scoped />`），而 App.vue 内联的规则
      带的是 App 的哈希、匹配不上本组件渲染的元素 —— 症状是整卡样式失效：画廊网格无尺寸、
      棋盘格底 / 悬停操作条 / 角标全丢，素材包与共享音效的进度条塌成空白。这里一次性补齐。 */
-/* 分区小标题（「我的素材」/「下载素材」）：横线 + 小字，把七张卡分成「本机已有 / 上游待下载」两组。
+/* 分区小标题（「我的素材」/「下载素材」）：横线 + 小字，把卡分成「本机已有 / 上游待下载」两组。
    只在同组命中 2 张以上时渲染（见 showSection），搜索只命中单卡时不会突兀地出现一条分割线 */
 .assets-section {
   display: flex;
@@ -1777,7 +1796,7 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
    ★ 这条此前漏了 —— 2969bf8 把通用控件样式收敛到 main.css 时，`.card-head` 只在
      UsageView / CodexView / App.vue 各留了一份 scoped 副本，AssetsView 这份被一并删掉
      而没进 main.css（孤儿 CSS 闸门只查「样式没人用」，查不出「元素没有样式」）。
-     于是本组件七张卡的卡头 div 一直是块级，标题与右侧按钮**竖着堆**。
+     于是本组件各卡头 div 一直是块级，标题与右侧按钮**竖着堆**。
      现已上提到 main.css（本组件与 UsageView / App.vue 共用同一份），此处不再留副本。 */
 /* 可折叠卡片的标题本身是按钮：抹掉 button 默认外观，视觉上对齐 .card-head h2，
    让用户仍然一眼认出这是标题（有 hover 反馈暗示可点） */

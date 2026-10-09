@@ -127,7 +127,7 @@ npm run dev      # Vite watch 构建到 dist/（改 src/ 自动重建）
 npm run build      # 产物输出到 dist/（prebuild 会先同步版本号 + 校验跨文件常量副本）
 npm run lint       # 可选：eslint . 静态检查（未定义 / 未使用变量、Vue 模板错误用法等）
 npm run typecheck  # 可选：vue-tsc --noEmit 类型检查
-npm test           # 可选：Node 内置 node --test 跑单测（覆盖定价 / 取余额 / 归一化 / 备份加解密 / Codex 解析五组纯函数）
+npm test           # 可选：Node 内置 node --test 跑单测（覆盖业务模块 / dsh 一族 / 资源与素材包 / 构建闸门等）
 ```
 
 uTools 开发者工具中把插件入口目录指向 **`dist/`**。需要分发时可再「打包」为 `.upx`，拖入 uTools 主输入框即可安装。
@@ -156,7 +156,7 @@ uTools 开发者工具中把插件入口目录指向 **`dist/`**。需要分发�
 
 ## 配置
 
-呼出插件后，主窗口即设置页。设置页按主题分 **7 个顶部 Tab**：**外观**（大小 / 形象与音色 / 界面深浅色 / 按压气泡）、**资源**（资源概览 / 形象 / 导入的气泡图 / 音效）、**用量**（趋势与账本 / 提醒与通知 / 模型余额）、**窗口**（显隐 / 位置 / 透明度 / 穿透）、**数据**（凭据设置 / 清除数据 / 备份与恢复）、**帮助**（使用说明 / GitHub 加速 / 故障排查 / 关于与更新）、**开发者**（DeepSeek Harness / dsh 用量统计 / 插件开关 / 插件市场 / Codex 会话统计），Tab 条吸顶、下方一行小字说明本组内容。
+呼出插件后，主窗口即设置页。设置页按主题分 **7 个顶部 Tab**：**外观**（挂件外观 · 按压气泡）、**资源**（我的素材：资源概览 · 气泡图　｜　下载素材：形象 · 音效）、**用量**（用量与账本 · 提醒与通知 · 模型与余额）、**窗口**（挂件窗口：显隐 · 位置 · 透明度 · 穿透）、**数据**（DeepSeek 凭据 · 清除数据 · 备份与恢复）、**帮助**（使用帮助 · 关于与更新 · GitHub 加速）、**开发者**（DeepSeek Harness（dsh） · dsh 环境诊断 · dsh 配置转储 · dsh 全量导出 · dsh 用量统计 · dsh 插件开关 · dsh 插件市场　｜　Codex 会话统计），Tab 条吸顶、下方一行小字说明本组内容。
 
 1. **DeepSeek API Key（必需）**：[platform.deepseek.com](https://platform.deepseek.com) →「API keys」创建（`sk-` 开头）→ 粘贴到 **API Key** 框 →「保存凭据（加密存储）」。
 2. **平台 Token（可选，仅「实时·令牌」用量模式）**：登录 [platform.deepseek.com](https://platform.deepseek.com) → `F12` → Network → 打开「用量」页 → 找 `usage/by_api_key/amount` 请求 → 复制其 Request Headers 里 `Authorization` 的值（形如 `Bearer eyJ...`，前缀可带可不带）→ 粘贴到 **平台 Token** 框保存。
@@ -246,7 +246,7 @@ uTools 开发者工具中把插件入口目录指向 **`dist/`**。需要分发�
 
 ## 常见问题
 
-- **挂件不出现**：确认入口目录（dev = `public/`，打包 = `dist/`）；点设置页「显示挂件」；点「挂件异常？查看错误详情」看宿主记录的失败原因并复制，或主窗右键 → 检查看 `[whale][widget]` 日志。
+- **挂件不出现**：确认 uTools 开发者工具的入口目录指向本项目的 `dist/`（开发与打包同源，不要选 `public/`）；点设置页「显示挂件」；点「挂件异常？查看错误详情」看宿主记录的失败原因并复制，或主窗右键 → 检查看 `[whale][widget]` 日志。
 - **悬浮窗调试**：焦点在挂件窗口上按 `Ctrl+Shift+I`。
 - **开启鼠标穿透后挂件点不动**：这是预期行为（连挂件菜单也穿透了）。用「切换鼠标穿透」全局快捷键关掉，或把鼠标**停在鲸鱼上约 1 秒**临时接管后，从挂件菜单「打开设置」回设置页关闭。建议先在设置页「挂件窗口 → 鼠标穿透」处点「新增快捷键」绑好，再开启穿透。
 - **听不到自定义音效**：确认「音效开关」为开、音量不为 0、音色选的是「自定义」且**已导入「按压音」**（未导入时会回退「小黄鸭」）；只导入按压音、没导入释放音时，松手那一下是静音（这是预期）。若导入的是 flac/m4a 而系统解不了码，换 mp3 / wav 再试。
@@ -286,15 +286,14 @@ public/                  # 开发入口目录（打包时整体复制进 dist/�
 ├─ whale/                # 基础挂件素材（默认形象 / 内置音效 / 气泡图）
 ├─ whale-pack/           # 内置形象包（thumbs/ + manifest 随包分发，大图按需下载）
 └─ shared/               # 共享角色 / 共享音效原文件（入库但不进插件包，按需单张下载）
-resources/               # 共享素材缩略图与原图源（thumbs/ 随包分发，skins-src/ 为素材源不入库）
+resources/               # 共享素材缩略图（thumbs/ 随包分发；素材源 skins-src/ 为发布者本地保留、不入库亦无此目录）
 src/                     # 设置页（Vue 3 单文件组件）
 ├─ App.vue               # 设置页主界面与逻辑
 ├─ views/                # 按 Tab 拆分的视图组件（AccelView.vue = GitHub 加速）
-├─ components/           # 形象裁剪 SkinCropper.vue / 音效裁剪 SoundTrimmer.vue
+├─ components/           # 可复用控件（裁剪器 / 试听 / 下载框 / 首启引导 / 气泡编辑等，以目录实际内容为准）
 └─ types/services.d.ts   # 宿主注入 API 的类型声明
 test/                    # 单元测试（node --test，npm test）
-scripts/sync-version.mjs # 构建前把 package.json 的 version 同步到插件清单与常量
-scripts/check-shared.mjs # 构建前校验跨文件常量副本一致（宿主 / 设置页 / 浮动页 / 样式表）
+scripts/                 # 构建与发布脚本（sync-version / check-shared / check-dead-settings / gen-search-index / check-orphan-css = prebuild 五道闸门；另有 release / verify-release-zip / build-skin-pack.py / export-shared-assets，以目录实际内容为准）
 eslint.config.js         # ESLint 扁平配置（npm run lint）
 .github/workflows/ci.yml # 持续集成（push / PR 依次跑 lint + typecheck + test + build）
 .github/workflows/release.yml # 发版（打 v* tag 时校验版本 → 跑同一套检查 → 构建打包 zip → 建 Release）
@@ -305,7 +304,7 @@ docs/whale-widget-spec.md # 开发维护规格（架构 / IPC / 存储 / 视觉�
 
 ```powershell
 npm install
-npm run dev         # Vite 开发服务器（配合 uTools 开发者工具指向 public/）
+npm run dev         # Vite watch 构建到 dist/（改 src/ 自动重建，入口仍指向 dist/）
 npm run lint        # eslint . 静态检查
 npm run typecheck   # vue-tsc --noEmit 类型检查
 npm test            # node --test 单测（test/*.test.mjs）
