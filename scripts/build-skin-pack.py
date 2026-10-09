@@ -23,6 +23,7 @@
 
 产物（都在 public/whale-pack/ 下，随插件分发）：
   - thumbs/<id>.webp      设置页内嵌用的小缩略图
+  - src/<file>            单张原图副本（v1.9.0 起，入库走 raw 直链，供点缩略图单张下载）
   - skins-pack.whaleassets  远程素材包本体（发 Release 用，不进插件包）
   - manifest.json          id → { file, sha256, size }，供核对
 
@@ -46,6 +47,10 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SRC = os.path.join(ROOT, 'resources', 'skins-src')
 OUT = os.path.join(ROOT, 'public', 'whale-pack')
 THUMB_DIR = os.path.join(OUT, 'thumbs')
+# 单张原图导出目录（v1.9.0 起）：设置页点「随包内置」某张缩略图时按 raw 直链取这一张，
+# 与「共享角色」同一套单张下载语义（点一张下一张）。这里放的是**入库**的原图副本，
+# 体积很小（当前仅 DSniang02 约 73KB）；体积大的素材一律不进这个目录。
+ITEM_DIR = os.path.join(OUT, 'src')
 
 # 随包保留的默认形象，不参与远程包（它不在此脚本管辖范围内，列出仅为语义完整）
 KEEP = 'DSniang1.webp'
@@ -91,6 +96,9 @@ def main():
     manifest = {}
     written_thumbs = set()
 
+    os.makedirs(ITEM_DIR, exist_ok=True)
+    written_items = set()
+
     for name in files:
         stem = os.path.splitext(name)[0]
         # 落盘 id：默认取文件主干，中文等不合法名走 RENAME 表换成 ASCII（见上方注释）
@@ -110,6 +118,12 @@ def main():
         with open(thumb_path, 'wb') as fh:
             fh.write(thumb)
         written_thumbs.add(skin_id + '.webp')
+
+        # 单张原图副本：文件名就是 constants.SKIN_PACK_SKINS 的 file（含扩展名），
+        # 供 downloadSkinPackItem 按 raw 直链取单张（见 public/preload/lib/skin-packs.js）。
+        with open(os.path.join(ITEM_DIR, name), 'wb') as fh:
+            fh.write(data)
+        written_items.add(name)
 
         digest = hashlib.sha256(data).hexdigest()
         manifest[skin_id] = {
@@ -167,6 +181,14 @@ def main():
     ]
     for f in stale:
         os.remove(os.path.join(THUMB_DIR, f))
+
+    # 同样清理 src/ 里已不在清单的单张原图副本（保持目录与清单一致，避免 raw 上留悬空文件）
+    stale_items = [
+        f for f in os.listdir(ITEM_DIR)
+        if f not in written_items
+    ]
+    for f in stale_items:
+        os.remove(os.path.join(ITEM_DIR, f))
 
     total = sum(m['size'] for m in manifest.values())
     thumb_total = sum(m['thumbSize'] for m in manifest.values())

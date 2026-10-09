@@ -1,6 +1,6 @@
 <script lang="ts" setup>
 import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
-import type { AlertRole, BubbleMeta, CodexWindow, CodexWindows, DshMarketPlugin, SkinGallery, SkinMeta, SkinPackList, SoundMeta, SoundRole, WhaleModel, WhaleModelRow, WhaleModelTemplate, WhalePriceModel, WhaleServices, WhaleTokenPrice } from './types/services'
+import type { AlertRole, BubbleMeta, CodexWindow, CodexWindows, DshMarketPlugin, SkinGallery, SkinMeta, SoundMeta, SoundRole, WhaleModel, WhaleModelRow, WhaleModelTemplate, WhalePriceModel, WhaleServices, WhaleTokenPrice } from './types/services'
 import SkinCropper from './components/SkinCropper.vue'
 import SoundTrimmer from './components/SoundTrimmer.vue'
 import FirstRunGuide from './components/FirstRunGuide.vue'
@@ -107,13 +107,11 @@ const LEGACY_BUILTIN_SKINS = [
   'DSniang5', 'DSniang6', 'DSniang7', 'glby', 'Jian', 'wjztg',
 ]
 
-// 可下载的内置形象（同值副本：宿主 lib/constants.js 的 SKIN_PACK_SKINS，由 check-shared.mjs
-// 比对 id 清单；size 供界面显示「共约 x MB」，缩略图是下面 THUMB_* 内嵌的静态资源）。
-// v1.8.0 起从 12 张精简为 1 张：其余 11 张与「共享角色包」是同图重复（那批本是用户从 QQ 群
-// 挑一部分转 webp 单独打包，原图同时也在共享角色包里整包分发），一律改由共享角色包提供。
-const SKIN_PACK_SKINS = [
-  { id: 'DSniang02', size: 74578 },
-]
+// 可下载的随包内置形象清单不再在设置页留副本：合并后的「形象」卡整组由宿主
+// listSkinPacks() 的运行时清单渲染（id / name / size / installed 都从那来），
+// 原先这份 `SKIN_PACK_SKINS` 字面量副本已无消费方，故删除；
+// check-shared 里对应的那条比对也一并去掉（比对的正是「两侧同值」，一侧没了即无意义）。
+// 宿主 constants.js 的 SKIN_PACK_SKINS 仍是唯一真源（决定下载落盘时的 id 校验）。
 
 // 共享角色（36 张，上游 QQ 群素材，入库 public/shared/ 按需单张下）。与宿主 lib/constants.js 的
 // SHARED_SKIN_PACK_SKINS 同值（scripts/check-shared.mjs 逐项比对 id 与展示名）——
@@ -164,10 +162,17 @@ const SHARED_SKIN_PACK_SKINS = [
   { id: 'sf16b3b9610', name: '流萤' },
 ]
 
+// 内置音色两组（按压 / 释放）的文件路径：与挂件页 floating-page.js 的 `SOUND_FILES` 同值
+// （实际播放用那份），由 scripts/check-shared.mjs 抠出 ./whale/*.mp3 排序比对。
+// 「挂件外观 → 音色」选 duck / fx1 时试听用的就是这里。改一处忘另一处会让试听与实际播的不是同一个文件。
+const BUILTIN_SOUND_FILES: Array<{ key: string; label: string; press: string; release: string }> = [
+  { key: 'duck', label: '小黄鸭', press: './whale/Ya1.mp3', release: './whale/Ya2.mp3' },
+  { key: 'fx1', label: '音效 1', press: './whale/D1.mp3', release: './whale/D2.mp3' },
+]
+
 // 避让滚动条的默认留白像素，同宿主 store.js 的 SCROLL_GAP_DEFAULT（同值副本，
 // 由 scripts/check-shared.mjs 比对）
 const SCROLL_GAP_DEFAULT = 17
-
 // 吸附区宽度（可用区宽/高的百分比）范围与默认值，同宿主 store.js 的 SNAP_RATIO_*
 // （同值副本，由 scripts/check-shared.mjs 比对）
 // 下限 / 上限已被 WindowView.vue 随卡搬走（那里有副本），此处只留默认值
@@ -180,8 +185,6 @@ const guides = reactive({ apiKey: false, token: false })
 // 「帮助」组里使用说明 / 故障排查的折叠态已随 HelpView 迁走
 // 长卡片内部的折叠态：凭据（填一次就不动，默认收起）
 const toolOpen = reactive({ credentials: false })
-// 「资源」页折叠态：内置资源纯查阅用，默认收起；「导入的音效」六个槽位也铺满一屏，同样默认收起
-const assetFolds = reactive({ builtin: false, sounds: false })
 // —— 设置页顶部 Tab ——
 // 原先 12 张卡片竖排一屏到底（模板近千行），找一项要滚很久；按主题分 7 组，一次只看一组。
 // 每张卡片用 v-if="activeTab === 'xxx'" 归到组里（不额外套容器层）。组内顺序 = 卡片在模板里的先后；
@@ -193,8 +196,8 @@ const TABS = [
   { key: 'look', label: '外观', desc: '挂件外观 · 按压气泡' },
   // desc 只列**真实存在的卡片**、且用卡片标题的原词：此前写「形象画廊」（卡名是「导入的形象」）、
   // 又把「素材包」当并列卡列出（它其实是「资源概览」卡里的导出/导入入口，不是独立卡）→ 用户按描述找不到。
-  // 同理，「内置资源（随插件附带，只作对照）」已改名为「内置资源与下载源」（卡内确有可编辑的下载源）。
-  { key: 'assets', label: '资源', desc: '我的素材：资源概览 · 形象 · 气泡图 · 音效　｜　下载素材：内置资源与下载源 · 共享形象 · 共享音效' },
+  // 「内置资源与下载源」卡已并入「形象」卡（形象部分）与「音效」卡（内置音色 + 共享音效库），故不再单列。
+  { key: 'assets', label: '资源', desc: '我的素材：资源概览 · 气泡图　｜　下载素材：形象 · 音效' },
   { key: 'usage', label: '用量', desc: '用量与账本 · 提醒与通知 · 模型与余额' },
   // 本组只有一张卡，「挂件窗口」这个卡名起头最有用（原先只列分区名，用户不知道这页就是挂件窗口）
   { key: 'window', label: '窗口', desc: '挂件窗口：显隐 · 位置 · 透明度 · 穿透' },
@@ -236,15 +239,13 @@ const SEARCH_INDEX: Record<string, { label: string; tab: TabKey; keys: string }>
   // 挂件菜单的「气泡设置」按钮也指向本卡（导航 target='bubble'）
   bubbleCustom: { label: '按压气泡（自定义泡泡）', tab: 'look', keys: '按压气泡 自定义泡泡 泡泡 气泡 编辑 撤销 重做 队列 排序 步骤 模块 行 文本 报时 余额 赠金 充值 今日 峰谷 对话名 随机 超链接 图片 动图 额度 订阅 试播 预览 开关 思考 点我 点击 停留' },
   assetsOverview: { label: '资源概览', tab: 'assets', keys: '素材 形象 音效 气泡图 占用 体积 清除 未使用 素材包 导出 导入' },
-  assetsSkins: { label: '导入的形象', tab: 'assets', keys: '形象 皮肤 图片 缩略图 置顶 删除 导入' },
+  // 「形象」卡合并了三个来源（用户导入 / 随包内置 / 上游共享角色），keys 要覆盖这三类叫法 ——
+  // 否则搜「共享」「内置」「角色」都命中不了这张卡（曾把这三张各登记一条，合并后必须并成一条）
+  assetsSkins: { label: '形象', tab: 'assets', keys: '形象 皮肤 图片 缩略图 置顶 删除 导入 内置 下载源 共享 角色 下载 选用 预览 随机' },
   assetsBubbles: { label: '导入的气泡图', tab: 'assets', keys: '气泡 图 动图 gif 图片 导入 删除' },
-  assetsSounds: { label: '导入的音效', tab: 'assets', keys: '音效 声音 按压 释放 提醒音 试听 导入 删除 共享音效库 筛选 过滤 搜索 候选' },
-  assetsBuiltin: { label: '内置资源与下载源', tab: 'assets', keys: '内置 形象 音色 对照 预览 下载源' },
-  // 这两张卡此前漏登记：模板里有 data-search="assetsSharedSkins/SharedSounds"，
-  // 但 SEARCH_INDEX 没登记 → 搜「共享」「角色」找不到，且搜索态下这两张卡永不渲染
-  // （cardOn 走 searchHits，不在索引里就等于命中不了）。别再漏。
-  assetsSharedSkins: { label: '共享形象', tab: 'assets', keys: '共享 角色 形象 下载 选用 预览 缩略图' },
-  assetsSharedSounds: { label: '共享音效', tab: 'assets', keys: '共享 音效 声音 下载 选用 试听 角色 段 筛选 过滤 搜索 已参加播放 一段都没挂' },
+  // 「音效」卡合并了两个来源（用户手导的六槽位 / 上游共享音效库），keys 要覆盖这两类叫法 ——
+  // 否则搜「共享」「下载」「段」都命中不了这张卡（曾把这两张各登记一条，合并后必须并成一条）
+  assetsSounds: { label: '音效', tab: 'assets', keys: '音效 声音 按压 释放 提醒音 试听 导入 删除 共享音效库 共享 下载 段 筛选 过滤 搜索 候选 已参加播放 一段都没挂 下载源' },
   usage: { label: '用量与账本', tab: 'usage', keys: '用量 趋势 账本 历史 区间 导出 csv 导入 校准 额度 单价 模型占比 明细 币种 汇率 保留' },
   notify: { label: '提醒与通知', tab: 'usage', keys: '提醒 通知 系统通知 邮件 smtp 预算 低余额 波动 免打扰 计时 倒计时 休息 预警 阈值 端口 ssl tls 直连 账号 授权码 发件人 收件人 主题 前缀 停留 切换' },
   models: { label: '模型与余额', tab: 'usage', keys: '模型 余额 提供商 厂商 刷新 api key 额度 主显示 密钥 凭据 token 名称 类型 币种 接口 地址 base url scale 认证 字段 路径 取值 倍数 重置 提醒 阈值' },
@@ -333,11 +334,6 @@ function cardOn(tab: string, key: string) {
   if (searchActive.value) return searchHits.value.includes(key)
   return activeTab.value === tab
 }
-// 默认收起的整卡被搜到时强制展开：否则用户搜到「导入的音效」却只看到一行标题，
-// 命中的内容全藏在折叠里。只在「未被用户手动动过」时展开（不抢用户的操作）
-watch(searchHits, (hits) => {
-  if (hits.includes('assetsSounds')) assetFolds.sounds = true
-})
 // 卡片在搜索结果里的来源标签（如「用量」），用于告诉用户这张卡本来在哪一组
 function cardTabLabel(key: string) {
   const t = SEARCH_INDEX[key]?.tab
@@ -1148,6 +1144,14 @@ function doPreviewSound(role: SoundRole, idx: number) {
   }
   playAudioUrl(url, soundFlash)
 }
+// 试听一段内置音色（「挂件外观 → 音色」里小黄鸭 / 音效 1 的试听）。
+// 内置音色的路径是挂件页同值副本（见下面 BUILTIN_SOUND_FILES 与 check-shared 的比对），
+// 直接 new Audio(url) 即可，不走 soundData —— 那份只装用户导入的槽位音。
+function doPreviewBuiltinSound(url: string) {
+  soundFlash.msg = ''
+  soundFlash.err = false
+  playAudioUrl(url, soundFlash)
+}
 // 试听共享库里的一段（资源 tab 槽位内的「选用…」面板用）：按落盘文件名取 data URL。
 // 本来只有「共享音效」卡自己的试听函数，但那条路在 AssetsView 内部、只认卡内的选中 id，
 // 槽位面板没法复用，故在父级单开一条（两边读的是同一个素材池，取数据方式一致）。
@@ -1843,7 +1847,7 @@ function doClearAssets() {
     refreshSkin()
     refreshBubbles()
     refreshSounds()
-    refreshSkinPacks()
+    // 形象卡里的「已下载」态由资产页自己在下一次渲染时重拉（组件常挂载，无需父级代劳）
     skinPicked.value = []
     if (failed) {
       skinFlash.err = true
@@ -1867,43 +1871,12 @@ function doClearAssets() {
 
 // —— 「资源」Tab 素材包 / 下载进度（模板已迁至 AssetsView.vue；此处保留被其它域共用的部分） ——
 const assetsBusy = ref(false)
-const builtinFlash: Flash = useFlash()
-function doPreviewBuiltin(url: string) {
-  builtinFlash.msg = ''
-  builtinFlash.err = false
-  playAudioUrl(url, builtinFlash)
-}
+// 「展开形象卡」指令计数器：AssetsView 内部 watch 它自增即展开（折叠态是本组件私有，父级改不了）
+const browseSkinsTick = ref(0)
 
-const skinPackList = ref<SkinPackList | null>(null)
-// 已装状态从宿主清单来（以磁盘为准），而不是本地信心 —— 用户在「导入的形象」里删掉后这里要跟着变
-const skinPackInstalled = computed<Record<string, boolean>>(() => {
-  const out: Record<string, boolean> = {}
-  for (const it of (skinPackList.value?.items || [])) out[it.id] = it.installed === true
-  return out
-})
-// 「正在使用的形象当前拿不到」：配置里选的是历史内置形象（已移出插件包），但本地还没下载回来
-// —— 挂件此刻只能回退显示默认形象，对用户是**静默降级**（不下到「资源」页根本看不出）。
-// 判据走 LEGACY_BUILTIN_SKINS 与皮肤包清单，不新增存储键；「未下载」以宿主清单的 installed 为准
-const skinInUseMissing = computed<boolean>(() => {
-  const s = cfg.skin
-  if (!s || s === 'custom') return false
-  if (BUILTIN_SKINS.includes(s)) return false
-  if (!LEGACY_BUILTIN_SKINS.includes(s)) return false
-  return skinPackInstalled.value[s] !== true
-})
-// 首次判定出缺失时自动展开「内置资源」折叠区（否则提示藏在收起区里等于没有）。
-// 只在「从未展开过」时替用户展开一次，之后尊重他的手动收起（不反复弹开）
-const builtinFoldAutoOpened = ref(false)
-watch(skinInUseMissing, (v) => {
-  if (v && !builtinFoldAutoOpened.value) {
-    builtinFoldAutoOpened.value = true
-    assetFolds.builtin = true
-  }
-}, { immediate: true })
-function refreshSkinPacks() {
-  const r = services.listSkinPacks?.()
-  skinPackList.value = r && Array.isArray(r.items) ? r : null
-}
+// 皮肤包 / 共享素材的「已装清单」与「正在使用的形象缺失」判定，都随「形象」卡下沉到了
+// AssetsView（它自己 listSkinPacks / listSharedSkins 并渲染下载态）。这里不再持有镜像副本 ——
+// 原先 App 与 AssetsView 各拉一次清单，App 那份只服务一个自动展开的 watch，纯属重复。
 
 // —— 共享素材（角色图 36 张 + 音效库 45 个，上游 QQ 群素材，挂 Release 按需下） ——
 // v1.9.0 起与「可下载的内置形象」同一套单张下载：点缩略图只下这一张（走 raw 直链），
@@ -1979,7 +1952,7 @@ function doClearUnused() {
     }
     refreshSkin()
     refreshSounds()
-    refreshSkinPacks()
+    // 同上：形象卡的下载态由资产页自管
     skinPicked.value = []
     if (failed) {
       skinFlash.err = true
@@ -2099,16 +2072,18 @@ function onGuideReopen() {
   guideReopen.value = true
   showGuide.value = true
 }
-// 引导完成页的「去挑形象」：关掉引导 → 切到「资源」Tab → 展开内置资源折叠区 → 滚到该卡。
+// 引导完成页的「去挑形象」：关掉引导 → 切到「资源」Tab → 展开「形象」卡折叠区 → 滚到该卡。
 // 不在这里直接下形象 —— 下载是设置页形象区的活儿（含进度、失败提示、已装状态），
-// 引导层只负责把用户带到那儿，免得同一套逻辑写两份（历史上这种重复漏过收件人）
+// 引导层只负责把用户带到那儿，免得同一套逻辑写两份（历史上这种重复漏过收件人）。
+// 「展开折叠区」是 AssetsView 内部状态（galleryFolds），父级读不到，故用自增计数下发指令；
+// 加一次 nextTick 让「切 Tab + 命令展开」先落地，再量卡片位置滚动。
 function onGuideBrowseSkins() {
   onGuideSkip()
   clearSearch()
   activeTab.value = 'assets'
-  assetFolds.builtin = true
+  browseSkinsTick.value++
   nextTick(() => {
-    const el = document.querySelector('[data-search="assetsBuiltin"]')
+    const el = document.querySelector('[data-search="assetsSkins"]')
     if (el && typeof el.scrollIntoView === 'function') el.scrollIntoView({ block: 'start', behavior: 'smooth' })
   })
 }
@@ -2628,11 +2603,13 @@ onUnmounted(() => {
               :sound-label="soundLabel"
               :sound-unused="soundUnused"
               :scale-steps="SCALE_STEPS"
+              :builtin-sound-sets="BUILTIN_SOUND_FILES"
               @patch="patchCfg"
               @scale-num-live="onScaleNumLive"
               @scale-commit="onScaleCommit"
               @random-skin="doRandomSkin"
               @toggle-include-builtin="onToggleIncludeBuiltin"
+              @preview-builtin-sound="doPreviewBuiltinSound"
               @ui-mode-change="onUiModeChange" />
 
     <!-- [外观] 按压气泡（自定义泡泡）：点小鲸鱼时按顺序弹的泡泡队列。
@@ -2667,14 +2644,12 @@ onUnmounted(() => {
       :has-assets="hasAssets"
       :skin-unused="skinUnused"
       :sound-unused="soundUnused"
-      :builtin-fold="assetFolds.builtin"
-      :sounds-fold="assetFolds.sounds"
       :assets-busy="assetsBusy"
       :shared-skin-thumb-data-url="sharedSkinThumbDataUrl"
       :builtin-skins="BUILTIN_SKINS"
       :legacy-builtin-skins="LEGACY_BUILTIN_SKINS"
-      :skin-pack-skins="SKIN_PACK_SKINS"
       :shared-skin-pack-skins="SHARED_SKIN_PACK_SKINS"
+      :browse-skins-tick="browseSkinsTick"
       @patch="patchCfg"
       @import-skin="doImportSkin"
       @use-skin="doUseSkin"
@@ -2692,8 +2667,6 @@ onUnmounted(() => {
       @random-skin="doRandomSkin"
       @toggle-include-builtin="onToggleIncludeBuiltin"
       @thumb-error="(k: string) => { thumbBroken[k] = true }"
-      @toggle-builtin-fold="(on: boolean) => { assetFolds.builtin = on }"
-      @toggle-sounds-fold="(on: boolean) => { assetFolds.sounds = on }"
       @preview-sound="doPreviewSound"
       @preview-shared-sound="doPreviewSharedSound"
       @import-sound="doImportSound"
@@ -2704,12 +2677,10 @@ onUnmounted(() => {
       @clear-assets="doClearAssets"
       @clear-picked="skinPicked = []"
       @toggle-skin-hint="skinHintOpen = !skinHintOpen"
-      @preview-builtin="doPreviewBuiltin"
       @stop-preview="stopPreviewSound"
       @refresh-sounds="refreshSounds"
       @refresh-skin="refreshSkin"
       @refresh-bubbles="refreshBubbles"
-      @refresh-skin-packs="refreshSkinPacks"
     />
 
     <!-- [用量] 用量与账本：用量口径（记账 / 令牌）+ 趋势 + 明细 + 额度 + 校准。

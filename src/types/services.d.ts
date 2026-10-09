@@ -1946,6 +1946,10 @@ export interface WhaleServices {
   // 下载并安装整包（已装过的跳过写盘）；成功后宿主会把新形象推给挂件。
   // prefix 是用户自填的加速前缀（'' = 只用内置候选链：默认 ghfast + 直连兜底）
   downloadSkinPacks(prefix?: string): Promise<SkinPackDownloadResult>
+  // 下载并安装单张随包内置形象（与共享角色同语义：点一张下一张，走单张 raw 直链）。
+  // thumb 是缩略图的 data URL（webp），由设置页从打包资源 whale-pack/thumbs 读好传来 ——
+  // 宿主定位不到插件目录，不给的话画廊只能回落读原图
+  downloadSkinPackItem(id: string, prefix?: string, thumb?: string): Promise<SharedPackDownloadResult>
   // —— 共享素材（角色图 36 张 / 音效库 45 个，上游 QQ 群素材，v1.9.0 起按需单张下载） ——
   // 可下载清单 + 已装状态（缩略图是设置页内嵌静态资源 resources/thumbs，不走这条 IPC）
   listSharedSkins(): SharedSkinList

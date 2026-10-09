@@ -363,13 +363,24 @@ function applyHistory(h?: { days?: any[]; currency?: string; todayAdjust?: numbe
   lastAdjustAt.value = h.lastAdjustAt || ''
   if (detailOpen.value) refreshDetail()
 }
+// 整卡折叠：本卡是「用量」Tab 的首卡、也最长（口径 + 图表 + 汇总 + 明细 + 额度 + 单价），
+// 故给一层卡级折叠（沿 dsh 卡的 .card-toggle 范式），默认展开、可收起。
+// 收起态摘要播报「口径 + 保留天数」，图表等本就要展开才渲染的项不预读
+const cardFold = reactive({ open: true })
+const cardSummary = computed(() => {
+  const mode = props.cfg.usageMode === 'token' ? '实时·令牌' : '小鲸鱼记账'
+  return `${mode} · 保留 ${props.cfg.historyKeepDays} 天`
+})
 defineExpose({ applyHistory, refreshTodayModels, refreshDetail })
 </script>
 
 <template>
   <section class="card" data-search="usage">
     <div class="card-head">
-      <h2>用量与账本</h2>
+      <h2 class="card-toggle" @click="cardFold.open = !cardFold.open">
+        <span class="caret">{{ cardFold.open ? '▾' : '▸' }}</span>用量与账本
+        <span v-if="!cardFold.open" class="card-sum">{{ cardSummary }}</span>
+      </h2>
       <div class="head-actions">
         <!-- 区间切换：同一组按钮在下方 UsageChart 组件里还有一份（那才是主入口，
              本行是卡片头部就近快捷）。样式走 main.css 的 utils 基类，与组件内那份一致。 -->
@@ -381,6 +392,7 @@ defineExpose({ applyHistory, refreshTodayModels, refreshDetail })
         <button class="export-btn utils-btn utils-outline" :disabled="historyMax <= 0" @click="exportUsageCsv">导出 CSV</button>
       </div>
     </div>
+    <template v-if="cardFold.open">
 
     <label class="field row">
       <span class="label">用量</span>
@@ -609,6 +621,7 @@ defineExpose({ applyHistory, refreshTodayModels, refreshDetail })
     <p v-if="calibrateFlash.msg" class="msg" :class="msgCls(calibrateFlash)">{{ calibrateFlash.msg }}</p>
     <p v-if="exportFlash.msg" class="msg" :class="msgCls(exportFlash)">{{ exportFlash.msg }}</p>
     <p v-if="importFlash.msg" class="msg" :class="msgCls(importFlash)">{{ importFlash.msg }}</p>
+    </template>
   </section>
 </template>
 

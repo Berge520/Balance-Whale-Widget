@@ -41,6 +41,14 @@ const clearItemNames = computed(() => {
 })
 const dataFlash: Flash = useFlash()
 
+// 卡级折叠：本卡正文长（两段隐私说明 + 六个勾选项 + 清除按钮），收起后只留标题与摘要，
+// 让「数据」组的其它卡上浮。摘要播报当前勾选了几项，收起态也能看出「会不会清东西」
+const cardFold = reactive({ open: true })
+const cardSummary = computed(() => {
+  const n = [clearItems.secrets, clearItems.config, clearItems.ledger, clearItems.window, clearItems.bubble, clearItems.assets].filter(Boolean).length
+  return `已勾选 ${n}/6 项`
+})
+
 // 清除本地数据：按勾选项清除，需二次确认，避免误触
 function clearSelectedData() {
   if (!anyClearItem.value) return
@@ -84,7 +92,13 @@ function clearSelectedData() {
   <!-- [数据] 数据与隐私：按项清除本地数据。根元素即 .card：父级 v-if 控显隐，
        data-search 供搜索滚动锚点定位（构建期据此抽卡片全文索引）。 -->
   <section class="card" data-search="privacy">
-    <h2>清除数据</h2>
+    <div class="card-head">
+      <h2 class="card-toggle" @click="cardFold.open = !cardFold.open">
+        <span class="caret">{{ cardFold.open ? '▾' : '▸' }}</span>清除数据
+        <span v-if="!cardFold.open" class="card-sum">{{ cardSummary }}</span>
+      </h2>
+    </div>
+    <template v-if="cardFold.open">
     <p class="hint">API Key 与平台 Token 通过 uTools 加密存储，账本、窗口位置与导入的素材（形象 / 气泡图 / 音效）也只保存在本机，不会上传到任何第三方服务器。</p>
     <p class="hint">卸载 uTools 插件不会自动删除这些数据，需要彻底清除时请勾选下方要清除的内容（<strong>清除前建议先导出一份备份</strong>，见下方「备份与恢复」）：</p>
     <label class="field row check">
@@ -119,6 +133,7 @@ function clearSelectedData() {
     </div>
     <p v-if="clearConfirm" class="hint">将清除：{{ clearItemNames || '（未选中任何项）' }}。此操作不可撤销。</p>
     <p v-if="dataFlash.msg" class="msg" :class="msgCls(dataFlash)">{{ dataFlash.msg }}</p>
+    </template>
   </section>
 </template>
 

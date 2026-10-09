@@ -178,8 +178,9 @@ function historyKeepFromObject(marker) {
 }
 
 // 内置音色两组（按压 / 释放）的文件路径同样是两份副本：挂件页是 `SOUND_FILES` 对象（真正播放用），
-// 设置页「资源」Tab 的「内置资源」试听用 `BUILTIN_SOUND_SETS` 数组。两边形态不同，统一抽成
-// 「排序后逗号连接」的 ./whale/*.mp3 路径再比对 —— 改一处忘另一处会让试听与挂件实际播的不是同一个文件。
+// 设置页「挂件外观 → 音色」的试听用 `BUILTIN_SOUND_FILES` 数组（落在 App.vue，以 prop 下传 LookView）。
+// 两边形态不同，统一抽成「排序后逗号连接」的 ./whale/*.mp3 路径再比对 —— 改一处忘另一处会让试听
+// 与挂件实际播的不是同一个文件。
 function whaleMp3Paths(marker) {
   return (src, file) => {
     const at = src.indexOf(marker)
@@ -315,8 +316,6 @@ const WINDOW_VIEW = 'src/views/WindowView.vue'
 // dsh 一族的设置页常量随整套逻辑抽到了 useDsh composable（见 src/composables/useDsh.ts），
 // MAX_BATCH / NEWEST_VERSION 两项的抠取路径指向这里；DEFAULT_DSH_PORT 仍留 App.vue（cfg 初始化消费）
 const USE_DSH = 'src/composables/useDsh.ts'
-// 内置音色试听清单随「资源」卡抽到了 AssetsView（BUILTIN_SOUND_SETS），抠取路径指向子组件
-const ASSETS_VIEW = 'src/views/AssetsView.vue'
 
 const CHECKS = [
   {
@@ -457,20 +456,10 @@ const CHECKS = [
       { file: APP_VUE, pick: skinIdsFromArray('const LEGACY_BUILTIN_SKINS =') },
     ],
   },
-  // 可下载形象清单（v1.8.0 起精简为 1 张）：宿主 constants 的 SKIN_PACK_SKINS（对象数组，
-  // 含 sha256）与设置页的字面量副本（`{ id, size }` 数组）同值。设置页那份决定资源页列出哪些
-  // 可下载，宿主那份决定下载后落到画廊的 id 校验，两边不一致会出现「设置页点了下载、宿主不认」。
-  //
-  // 走 sharedSkinIds 抽 id:name —— name 可以两边都没有（当前 1 张就没有 name，回归 id 展示，
-  // 「不带 displayName 时回落到 id」有单测守着），但**不能只有一边有**：那边一加中文名，
-  // 另一边抽出来的是空 name，拼接串整体不等，闸门立刻报警。这正是要拦的静默漂移。
-  {
-    name: '可下载形象清单 SKIN_PACK_SKINS',
-    parts: [
-      { file: CONSTANTS, pick: sharedSkinIds('const SKIN_PACK_SKINS =') },
-      { file: APP_VUE, pick: sharedSkinIds('const SKIN_PACK_SKINS =') },
-    ],
-  },
+  // 可下载形象清单（v1.8.0 起精简为 1 张）：曾有一份设置页字面量副本（`{ id, size }` 数组）
+  // 与宿主 constants 的 SKIN_PACK_SKINS 同值比对。合并后的「形象」卡整组改由宿主
+  // listSkinPacks() 的运行时清单渲染，设置页那份副本已删，故这条比对不再需要 ——
+  // 宿主 constants.js 的 SKIN_PACK_SKINS 是唯一真源（决定下载落盘时的 id 校验）。
   {
     name: '默认形象 DEFAULT_SKIN',
     parts: [
@@ -499,7 +488,7 @@ const CHECKS = [
     name: '内置音效文件 SOUND_FILES',
     parts: [
       { file: FLOATING_PAGE, pick: whaleMp3Paths('var SOUND_FILES') },
-      { file: ASSETS_VIEW, pick: whaleMp3Paths('const BUILTIN_SOUND_SETS') },
+      { file: APP_VUE, pick: whaleMp3Paths('const BUILTIN_SOUND_FILES') },
     ],
   },
   // 音效实播槽位清单：宿主 sounds.js 的 PLAY_ROLES 决定「能往哪几个槽位写文件、哪些槽位参与播放」，

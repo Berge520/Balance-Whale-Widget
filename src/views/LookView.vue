@@ -42,6 +42,9 @@ const props = defineProps<{
   soundUnused: boolean
   // 大小档位数（父级 SCALE_STEPS，模板 number 输入的 max）
   scaleSteps: number
+  // 内置音色两组（按压 / 释放）的显示名与文件路径：路径那份与挂件页 SOUND_FILES 同值、
+  // 由父级 BUILTIN_SOUND_FILES + check-shared 统一把关，本卡只负责渲染与 emit 试听
+  builtinSoundSets: Array<{ key: string; label: string; press: string; release: string }>
   // 宿主 API（父级注入）：仅「更新节假日表」用，不在此组件内直接引用全局变量
   services: Partial<WhaleServices>
 }>()
@@ -52,6 +55,9 @@ const emit = defineEmits<{
   (e: 'scale-commit'): void
   (e: 'random-skin'): void
   (e: 'toggle-include-builtin', on: boolean): void
+  // 试听内置音色（小黄鸭 / 音效 1 的按压 / 释放）：音频通道与消息槽都在父级（soundFlash），
+  // 这里只把要播的 ./whale/*.mp3 路径递上去
+  (e: 'preview-builtin-sound', url: string): void
   (e: 'ui-mode-change', mode: string): void
 }>()
 // 「随机」抽签池规模：内置那张（开关打开时）+ 画廊里未取消参与随机的项。
@@ -74,8 +80,22 @@ const bubbleModelOn = computed(() => props.cfg.bubble?.on === true)
 type Flash = { msg: string; err: boolean }
 function msgCls(f: Flash) { return { ok: !f.err, err: f.err } }
 
-// 两个折叠组（气泡与文案 / 音效）：仅本卡消费，随卡搬入
-const lookFolds = reactive({ bubble: true, sound: true })
+// 两个折叠组（气泡与文案 / 音效）：仅本卡消费，随卡搬入。
+// 默认收起：这两组都是「配置一次后很少再动」的低频项（气泡配色 / 峰谷文案 / 节假日表 /
+// 音色音量），展开后很长，会把上方常用的「大小 / 形象 / 深浅色」挤到屏幕外。
+const lookFolds = reactive({ bubble: false, sound: false })
+
+// 整卡折叠：本卡是「外观」Tab 的第一张、也是最长的一张（大小 / 形象 / 深浅色 + 气泡与文案 +
+// 音效三组），进 Tab 就要滚很久。标题即按钮、默认展开、可收起（沿 dsh 卡的 .card-toggle 范式）。
+// 收起态摘要播报「当前用的形象 + 音效口径」，避免折起来等于把现状藏了。
+const cardFold = reactive({ open: true })
+const cardSummary = computed(() => {
+  const skin = props.cfg.skin === 'custom'
+    ? (props.skinMeta ? '自定义 · ' + props.skinMeta.name : '自定义（未导入）')
+    : props.cfg.skin
+  const sound = props.cfg.soundOn ? '音效 ' + props.cfg.soundSet : '音效关'
+  return `形象：${skin} · ${sound} · 大小 ${props.cfg.scaleNum} 档`
+})
 
 // —— 音效音量：本地草稿。父级 cfg.vol 还供挂件预览，故本卡只 emit 落盘，
 // 显示值走草稿避免依赖父级回推的时序 ——
@@ -143,7 +163,13 @@ const holidayNote = computed(() => {
        素材的「导入 / 删除 / 试听 / 素材包」都在「资源」页，这里只选「用哪个」——
        所以素材说明统一放在卡片开头一句，各设置项下面只留「当前用的是什么」的状态 -->
   <section class="card" data-search="look">
-    <h2>挂件外观</h2>
+    <div class="card-head">
+      <h2 class="card-toggle" @click="cardFold.open = !cardFold.open">
+        <span class="caret">{{ cardFold.open ? '▾' : '▸' }}</span>挂件外观
+        <span v-if="!cardFold.open" class="card-sum">{{ cardSummary }}</span>
+      </h2>
+    </div>
+    <template v-if="cardFold.open">
 
     <p class="hint">
       素材都会复制到本地数据目录（不引用源文件），单文件 ≤5MB。导入 / 删除 / 试听、素材占用与素材包导出
@@ -296,6 +322,14 @@ const holidayNote = computed(() => {
             <option value="custom">自定义</option>
           </select>
         </label>
+        <!-- 内置音色的试听：原先寄生在「资源」页的「内置资源与下载源」卡里（那张卡已拆掉），
+             而音色是在本卡选的 —— 试听跟着选择走，用户不必为了听一耳朵跳去「资源」页。
+             每组一对「按压 / 释放」；自定义音色的试听在「资源 → 导入的音效」里（那是用户自己的文件） -->
+        <div class="builtin-sound-try" v-for="g in builtinSoundSets" :key="g.key">
+          <span class="label">{{ g.label }}</span>
+          <button class="export-btn utils-btn utils-outline" type="button" @click="emit('preview-builtin-sound', g.press)">试听按压</button>
+          <button class="export-btn utils-btn utils-outline" type="button" @click="emit('preview-builtin-sound', g.release)">试听释放</button>
+        </div>
 
         <label class="field row">
           <span class="label">音量</span>
@@ -319,6 +353,7 @@ const holidayNote = computed(() => {
         </p>
       </div>
     </div>
+    </template>
   </section>
 </template>
 
@@ -337,6 +372,18 @@ const holidayNote = computed(() => {
   border-radius: 50%;
   background: var(--ok);
   vertical-align: middle;
+}
+
+/* 内置音色的试听行：左侧音色名、右侧一对试听按钮，与 .field.row 同骨架。
+   每组一对（按压 / 释放）各占一行，音色名用 .label 左推，按钮靠右排齐 */
+.builtin-sound-try {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+.builtin-sound-try .label {
+  margin-right: auto;
 }
 
 /* 节假日表卡：标题行左侧文字 + 右侧操作按钮；状态说明行留小间距 */

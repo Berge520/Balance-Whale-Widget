@@ -36,6 +36,7 @@
 const crypto = require('crypto')
 const {
   SKIN_PACK_URL, SKIN_PACK_ORIGIN, SKIN_PACK_DEFAULT_PREFIX, SKIN_PACK_RAW_MAIN,
+  SKIN_PACK_RAW_ITEM_BASE,
   SKIN_PACK_SHA256, SKIN_PACK_TIMEOUT_MS, SKIN_PACK_MAX_BYTES, SKIN_PACK_SKINS,
 } = require('./constants')
 const { log, logErr } = require('./log')
@@ -294,7 +295,103 @@ async function downloadSkinPacks(opts) {
   }
 }
 
+// ── 单张下载（v1.9.0 起）──
+// 设置页点「随包内置」里的某张缩略图 = 只下这一张。走向与整包**不同**：
+// 整包走 Release 上的 .whaleassets 容器（一次拿全、含整体 sha256），这里走 public/whale-pack/
+// 下的单张原图 raw 直链（该目录随仓入库，见 scripts/build-skin-pack.py 的导出）。
+// 为什么不复用整包链路：包只剩 1 张时「单张」与「整包」等价，但语义上要与「共享角色点一张下一张」
+// 对齐 —— 用户不该记「这张卡点缩略图会连带下别的」。且单张失败面更小（不必解容器）
+// 与共享角色同一套候选链 / 单张 sha256。
+// 缩略图由设置页从打包资源读好后经 opts.thumb 传入（宿主定位不到插件目录，见 skins.installBuiltin）。
+async function downloadSkinPackItem(id, opts) {
+  const meta = SKIN_PACK_SKINS.filter((s) => s.id === id)[0]
+  if (!meta) return { ok: false, error: '没有这个内置形象：' + String(id || '') }
+  if (skins.builtinIds().indexOf(meta.id) >= 0) return { ok: true, id: meta.id, name: meta.id, skipped: true }
+
+  const o = opts && typeof opts === 'object' ? opts : {}
+  if (running) return { ok: false, error: '正在下载中，请稍候' }
+  const fetchImpl = typeof o.fetchImpl === 'function' ? o.fetchImpl : fetch
+  running = true
+  dlp.begin('skins', Number(meta.size) || 0)
+  dlp.phase('connect', { label: '正在连接下载源…' })
+  try {
+    const origin = SKIN_PACK_RAW_ITEM_BASE + meta.file
+    const chain = itemSourceChain(o.prefix, origin)
+    const attempts = []
+    let got = null
+    for (const url of chain) {
+      const label = itemLabelOf(url, origin)
+      try {
+        dlp.source(url, label)
+        got = await fetchItemFrom(url, meta.sha256, fetchImpl)
+        attempts.push(label + '：成功')
+        break
+      } catch (err) {
+        const why = errMsg(err)
+        attempts.push(label + '：' + why)
+        logErr('[whale][skin-packs] 单张下载源失败，顺延下一个', label, why)
+      }
+    }
+    if (!got) throw new Error('所有下载源都失败 —— ' + attempts.join('；'))
+
+    dlp.phase('install', { label: '正在写入形象…', total: got.buf.length })
+    const ext = (meta.file.split('.').pop() || 'webp').toLowerCase()
+    const r = skins.installBuiltin(meta.id, ext, got.buf, o.thumb || '', meta.id)
+    if (!r || !r.ok) {
+      const why = (r && r.error) || '写入失败'
+      dlp.end(false, got.buf.length)
+      logErr('[whale][skin-packs] 安装内置形象失败', meta.id + ': ' + why)
+      return { ok: false, error: '形象写入失败：' + why }
+    }
+    log('[whale][skin-packs] 内置形象已下载', { id: meta.id, bytes: got.buf.length, source: got.url })
+    dlp.end(true, got.buf.length)
+    return { ok: true, id: meta.id, name: meta.id, source: got.url, bytes: got.buf.length }
+  } catch (err) {
+    const why = errMsg(err)
+    dlp.end(false, 0)
+    logErr('[whale][skin-packs] 下载内置形象失败', meta.id + ': ' + why)
+    return { ok: false, error: why }
+  } finally {
+    running = false
+  }
+}
+
+// 单张原图的候选链：用户自填前缀（若有）→ 内置默认前缀 → 真源直连。
+// 与 assets-packs.js#sourceChain 同构，只是目标是 public/whale-pack/ 下的单张原图。
+function itemSourceChain(prefix, origin) {
+  const out = []
+  const push = (u) => { if (u && !out.includes(u)) out.push(u) }
+  const p = typeof prefix === 'string' ? prefix.trim() : ''
+  if (p) push(p + origin)
+  push(SKIN_PACK_DEFAULT_PREFIX + origin)
+  push(origin)
+  return out
+}
+
+function itemLabelOf(url, origin) {
+  if (url === origin) return '直连 raw.githubusercontent.com'
+  if (url.indexOf(origin) >= 0 && url.indexOf(SKIN_PACK_DEFAULT_PREFIX) === 0) return '默认加速 ghfast.top'
+  return '自定义加速源'
+}
+
+// 从单个源取单张原图并逐张 sha256 校验。任何一步不过都抛错（供候选链顺延）。
+async function fetchItemFrom(url, wantSha, fetchImpl) {
+  const res = await fetchImpl(url, { signal: AbortSignal.timeout(SKIN_PACK_TIMEOUT_MS) })
+  if (!res.ok) throw new Error('HTTP ' + res.status + ' ' + (res.statusText || ''))
+  const buf = await readBodyWithProgress(res, (received, total) => dlp.progress(received, total))
+  if (!buf.length) throw new Error('下载到空内容')
+  if (buf.length > SKIN_PACK_MAX_BYTES) throw new Error('文件异常大（' + buf.length + ' 字节）')
+  dlp.phase('verify')
+  const digest = sha256(buf)
+  if (wantSha && digest !== wantSha) {
+    logErr('[whale][skin-packs] 单张校验失败', url, 'got ' + digest)
+    throw new Error('校验失败（内容与预期不符）')
+  }
+  return { buf: buf, url: url }
+}
+
 module.exports = {
-  listSkinPacks, downloadSkinPacks,
+  listSkinPacks, downloadSkinPacks, downloadSkinPackItem,
   _parsePack: parsePack, _sourceChain: sourceChain, _readBodyWithProgress: readBodyWithProgress,
+  _itemSourceChain: itemSourceChain, _labelOf: labelOf, _itemLabelOf: itemLabelOf,
 }

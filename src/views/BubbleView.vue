@@ -121,6 +121,14 @@ const previewing = ref(false)
 // 编辑器折叠态（队列 + 模块库两层长列表）：纯展示态、不给父级，故留组件内部。
 // 默认展开 —— 本卡主要功能就是编辑器，折起来只服务「只想看 / 改开关」的人
 const editorCollapsed = ref(false)
+// 整卡折叠：本卡与「挂件外观」同属外观 Tab，且编辑器折起来后仍占一整屏，
+// 故再给一层卡级折叠（沿 dsh 卡的 .card-toggle 范式），默认展开、可收起。
+// 收起态摘要播报「开关 + 步骤数」，不让人以为折起来就把配置藏没了
+const cardFold = reactive({ open: true })
+const cardSummary = computed(() => {
+  const steps = Array.isArray(items.value) ? items.value.length : 0
+  return (bubbleOn.value ? '已开启' : '已关闭') + ` · ${steps} 个步骤`
+})
 async function doPreview() {
   flash.msg = ''
   flash.err = false
@@ -279,7 +287,13 @@ onMounted(() => {
   <!-- [外观] 按压气泡（自定义泡泡）：点小鲸鱼时按顺序弹的泡泡队列，每个泡可以摆多行模块。
        本卡不改运行链路（queue / 渲染 / 试播 IPC / 挂件消费侧都已齐备），只补编辑入口。 -->
   <section class="card" data-search="bubbleCustom">
-    <h2>按压气泡（自定义泡泡）</h2>
+    <div class="card-head">
+      <h2 class="card-toggle" @click="cardFold.open = !cardFold.open">
+        <span class="caret">{{ cardFold.open ? '▾' : '▸' }}</span>按压气泡（自定义泡泡）
+        <span v-if="!cardFold.open" class="card-sum">{{ cardSummary }}</span>
+      </h2>
+    </div>
+    <template v-if="cardFold.open">
 
     <p class="hint">
       点小鲸鱼时按顺序弹出的泡泡：每个「步骤」是一次点击对应的泡，泡里可以按行摆多个模块
@@ -344,6 +358,7 @@ onMounted(() => {
       挂件还没显示，试播发不出去 —— 先去「窗口」页把它显示出来。
     </p>
     <p v-if="flash.msg" class="msg" :class="msgCls(flash)">{{ flash.msg }}</p>
+    </template>
   </section>
 </template>
 

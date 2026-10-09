@@ -299,13 +299,25 @@ function removeModelRow(id: string) {
   modelsFlash.msg = '已删除'
 }
 
+// 整卡折叠：模型行 + 行内表单展开后很长，故给一层卡级折叠（沿 dsh 卡的 .card-toggle 范式），
+// 默认展开、可收起。收起态摘要播报「主显示模型 + 已配数量」，不让人以为折起来就看不到现状
+const cardFold = reactive({ open: true })
+const cardSummary = computed(() => {
+  const main = props.models.find((m) => m.id === props.modelsMainId)
+  const mainName = main ? main.name : (props.modelsMainId || 'DeepSeek')
+  return `主显示：${mainName} · 已配 ${props.modelConfigs.length}/${props.modelMax}`
+})
+
 defineExpose({ closeModelForm })
 </script>
 
 <template>
   <section class="card" data-search="models">
     <div class="card-head">
-      <h2>模型与余额</h2>
+      <h2 class="card-toggle" @click="cardFold.open = !cardFold.open">
+        <span class="caret">{{ cardFold.open ? '▾' : '▸' }}</span>模型与余额
+        <span v-if="!cardFold.open" class="card-sum">{{ cardSummary }}</span>
+      </h2>
       <div class="head-actions">
         <button class="export-btn utils-btn utils-outline" :disabled="modelsRefreshing" @click="refreshModelRows()">
           {{ modelsRefreshing ? '刷新中…' : '刷新全部' }}
@@ -313,6 +325,7 @@ defineExpose({ closeModelForm })
         <button class="export-btn utils-btn utils-outline" :disabled="modelConfigs.length >= modelMax" @click="openNewModel">添加模型</button>
       </div>
     </div>
+    <template v-if="cardFold.open">
     <p class="hint">
       挂件默认显示 DeepSeek 余额；这里添加的厂商模型（{{ modelConfigs.length }}/{{ modelMax }}）可在挂件菜单里切换成主显示。
       余额按原币种展示、不折算汇率，只在本机查询；密钥用 uTools 加密存储，不写进备份文件。
@@ -461,6 +474,7 @@ defineExpose({ closeModelForm })
       </div>
     </div>
     <p v-if="modelsFlash.msg" class="msg" :class="msgCls(modelsFlash)">{{ modelsFlash.msg }}</p>
+    </template>
   </section>
 </template>
 

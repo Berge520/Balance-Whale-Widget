@@ -2860,6 +2860,17 @@ module.exports = {
     }
     return r
   },
+  // 下载并安装单张随包内置形象（设置页点「随包内置」里那张缩略图）。与 downloadSharedSkin 同语义：
+  // 只下这一张、走单张 raw 直链，装完把形象数据与随机图池推给挂件。
+  // thumb 由设置页从打包资源 whale-pack/thumbs/<id>.webp 读成 data URL 传来（宿主定位不到插件目录）。
+  async downloadSkinPackItem(id, prefix, thumb) {
+    const r = await skinPacks.downloadSkinPackItem(id, { prefix: prefix, thumb: thumb })
+    if (r && r.ok && !r.skipped) {
+      sendToWidget('whale:skin', skins.getSkinData())
+      sendToWidget('whale:shared-skins', skins.getBuiltinData())
+    }
+    return r
+  },
   // —— 共享素材（角色图 36 张 + 音效库 45 个，上游 QQ 群素材，v1.9.0 起改为按需单张下载）——
   // 可下载清单 + 已装状态。缩略图是设置页内嵌静态资源（resources/thumbs），宿主不搬运
   listSharedSkins() {

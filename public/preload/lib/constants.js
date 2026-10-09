@@ -50,6 +50,10 @@ const SKIN_PACK_URL = SKIN_PACK_DEFAULT_PREFIX + SKIN_PACK_ORIGIN
 // 前提：该文件确实提交在仓库 main（.gitignore 里未排除时才存在），否则只会多一次 404。
 // 用 raw 域名而非 github.com/.../raw/...：后者会 302 到 raw 域名，直连更省一跳。
 const SKIN_PACK_RAW_MAIN = 'https://raw.githubusercontent.com/Berge520/Balance-Whale-Widget/main/public/whale-pack/skins-pack.whaleassets'
+// 单张原图的 raw 直链基址（v1.9.0 起）：设置页点「随包内置」某张缩略图时走这条取单张
+// （见 skin-packs.js#downloadSkinPackItem）。目录由 scripts/build-skin-pack.py 导出到
+// public/whale-pack/src/（入库，仅 1 张约 73KB），拼上 SKIN_PACK_SKINS 里的 file 就是完整 URL。
+const SKIN_PACK_RAW_ITEM_BASE = 'https://raw.githubusercontent.com/Berge520/Balance-Whale-Widget/main/public/whale-pack/src/'
 // 自填前缀长度上限：正常加速站前缀几十字符，200 足够，也拦住整段粘贴
 const SKIN_PACK_PREFIX_MAX = 200
 // 素材包本体的 sha256（v1.8.0 起仅 1 张 DSniang02，约 73KB）。下载后先校验再解析，
@@ -513,6 +517,7 @@ module.exports = {
   SKIN_PACK_ORIGIN,
   SKIN_PACK_DEFAULT_PREFIX,
   SKIN_PACK_RAW_MAIN,
+  SKIN_PACK_RAW_ITEM_BASE,
   SKIN_PACK_PREFIX_MAX,
   SKIN_PACK_SHA256,
   SKIN_PACK_TIMEOUT_MS,

@@ -178,9 +178,10 @@ const volSummary = computed(() => {
   return parts.join(' · ') + ' · 其余' + follow
 })
 // 计时分区折叠：开关 4 个 + 时长 + 文案 + 休息快捷键共 9 个控件，多数人只在初次设一次，
-// 却把这卡的中段占满。默认展开（用户随时要开始/结束计时会来看它），仅方便随时收起。
+// 却把这卡的中段占满。默认收起：计时功能本身从挂件菜单进出，这里只是它的配置项，
+// 折起来能让下方的「低余额 / 预算 / 波动」提醒开关上浮（这几项才是本卡的主入口）。
 // 纯展示态、不给父级，故留组件内部
-const timerFold = reactive({ open: true })
+const timerFold = reactive({ open: false })
 // 与上次回填的内容比对，用于「未保存」提示。基线由父级 applyConfig 后经 syncAlertsBaseline 写入
 const alertsBaseline = ref<string | null>(null)
 const alertsDirty = computed(() => alertsBaseline.value !== null && JSON.stringify(props.cfg.alerts) !== alertsBaseline.value)

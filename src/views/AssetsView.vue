@@ -1,7 +1,10 @@
 <script lang="ts" setup>
 // ============================================================================
-// 资源页：素材集中管理（概览 / 导入的形象 / 导入的气泡图 / 导入的音效 / 内置资源 /
-// 共享角色 / 共享音效库）。
+// 资源页：素材集中管理（概览 / 形象 / 气泡图 / 音效 / 预览/导出素材包）。
+// 「形象」「音效」两张卡各自统管多个来源 —— 产物都落进同一处（skins 画廊 / sounds 六槽位），
+// 故都合并成「上段我的 X + 下段可下载 X」两段，用户不必再猜「我那张 / 那段在哪张卡里」。
+// 合并前的对照：形象 = 导入的形象 + 内置资源(形象部分) + 共享形象（三卡）；
+// 音效 = 导入的音效(六槽位) + 共享音效库(45 段素材池)（两卡）—— 现各并成一张。
 // 与「挂件外观」分工：那边只选「用哪个」，这里管「导了什么、占多大、要不要删、换机器怎么带走」。
 // 抽出约定：素材状态（skinGallery / soundsMeta / bubbleItems 等）由父级持有并 props 下传，
 // 本组件只做展示与交互，改动一律 emit('patch', {...}) 或语义化事件上抛，
@@ -48,19 +51,17 @@ const props = defineProps<{
   hasAssets: boolean
   skinUnused: boolean
   soundUnused: boolean
-  // —— 父级的折叠 / 忙碌态（与 assets 卡片联动） ——
-  // 折叠态归父级（App.vue 另有 watch 自动展开的逻辑），本组件只读 + emit 回改
-  builtinFold: boolean
-  // 「导入的音效」整卡折叠态：六个槽位默认收起，与父级同源（搜索命中时父级会强制展开）
-  soundsFold: boolean
+  // —— 父级的忙碌态（与 assets 卡片联动） ——
   assetsBusy: boolean
+  // 「展开形象卡」指令：新手引导的「去挑形象」会把它 +1。折叠态是本组件私有（galleryFolds），
+  // 父级改不了，故用自增计数器当一次性指令（父级只写、这里 watch 后展开）
+  browseSkinsTick: number
   // 读打包缩略图转 data URL（下共享角色时一并落盘）：LookView 域的 backfillMissingThumbs 也用，父级唯一来源
   sharedSkinThumbDataUrl: (id: string) => Promise<string>
   // —— 父级常量（值来自父级，避免容器双写） ——
   builtinSkins: string[]
   legacyBuiltinSkins: string[]
-  // 可下载形象的 id + 体积（清单里没有 name，展示名一律回落成 id，见 skinPackLabel）
-  skinPackSkins: Array<{ id: string; size: number }>
+  // 共享角色的 id + 展示名（清单里没 name，靠这份常量把 id 翻成中文名）
   sharedSkinPackSkins: Array<{ id: string; name: string }>
 }>()
 
@@ -82,9 +83,6 @@ const emit = defineEmits<{
   (e: 'move-skins', ids: string[], index: number, label?: string): void
   (e: 'random-skin'): void
   (e: 'thumb-error', key: string): void
-  (e: 'toggle-builtin-fold', on: boolean): void
-  // 「导入的音效」整卡折叠开关（折叠态归父级）
-  (e: 'toggle-sounds-fold', on: boolean): void
   (e: 'preview-sound', role: SoundRole, idx: number): void
   // 试听共享库里的一段（本卡槽位内「选用…」面板用）：file 是落盘文件名，done 让面板复位高亮
   (e: 'preview-shared-sound', file: string, done: () => void): void
@@ -97,17 +95,18 @@ const emit = defineEmits<{
   // 皮肤挑选态 / 操作说明折叠 / 内置音色试听：父级持有共享状态
   (e: 'clear-picked'): void
   (e: 'toggle-skin-hint'): void
-  (e: 'preview-builtin', url: string): void
   (e: 'stop-preview'): void
   (e: 'refresh-sounds'): void
   (e: 'refresh-skin'): void
   (e: 'refresh-bubbles'): void
-  (e: 'refresh-skin-packs'): void
-  (e: 'refresh-shared-skins'): void
-  (e: 'refresh-shared-sounds'): void
 }>()
 
 const services = computed(() => props.services)
+
+// 消息槽取值别名：props 是 reactive 对象，取出的引用与父级同一份 —— 本卡写它等于写父级持有的那份，
+// 卡片底部的 soundFlash 才能实时显示（同理 skinFlash / bubbleFlash 在模板里直接以 props 名访问）。
+// 音效相关的几个操作函数（applySharedRoles / 下载 / 删除 / 试听）都要写它，起个短名省得处处 props.
+const soundFlash = props.soundFlash
 
 // —— 通用小工具（与父级同源，避免各处重复实现） ——
 function fmtBytes(n: number) {
@@ -173,7 +172,7 @@ const soundPickFiltered = computed(() => {
 // —— 从共享音效库添加音效到槽位（本卡内「这个槽位还想再挂几段共享库的」） ——
 // 语义与旧「选用」不同：不再把音频另存一份搬进槽位，而是把**当前槽位**加进池里那段的 roles。
 // 所以这里不需要选槽位（槽位就是当前展开的这个块），也就没有那个多余的下拉了。
-// 忙态与提示跟「共享音效」卡共用 sharedSoundBusy / sharedSoundFlash —— 两边操作的是同一份素材池。
+// 忙态与提示跟「共享音效」卡共用 sharedSoundBusy / soundFlash —— 两边操作的是同一份素材池。
 // 哪个槽位展开了「从共享库添加」面板（空串 = 都没展开，同时只开一个）
 const soundPickOpen = ref<SoundRole | ''>('')
 // 卡尾「音效使用说明」的展开态。低频说明文字，默认收起 —— 纯展示态、不给父级
@@ -208,8 +207,8 @@ async function doUnpinPickSound(it: SharedSoundItem, role: SoundRole) {
 // 共享库某段参加哪些槽位 —— 所有写入口最终都汇到这里，避免「切音色」的收尾逻辑在几处各写一遍
 async function applySharedRoles(it: SharedSoundItem, roles: SoundRole[], okMsg: string) {
   if (sharedSoundBusy.value) return
-  sharedSoundFlash.msg = ''
-  sharedSoundFlash.err = false
+  soundFlash.msg = ''
+  soundFlash.err = false
   sharedSoundBusy.value = true
   try {
     const r = services.value.setSharedRoles?.(it.file, roles)
@@ -223,11 +222,11 @@ async function applySharedRoles(it: SharedSoundItem, roles: SoundRole[], okMsg: 
         emit('patch', { soundSet: 'custom' })
         switched = true
       }
-      sharedSoundFlash.msg = okMsg + (switched ? '，并把「音色」切到了「自定义」' : '')
-      sharedSoundFlash.err = false
+      soundFlash.msg = okMsg + (switched ? '，并把「音色」切到了「自定义」' : '')
+      soundFlash.err = false
     } else {
-      sharedSoundFlash.msg = (r && r.error) || '设置失败'
-      sharedSoundFlash.err = true
+      soundFlash.msg = (r && r.error) || '设置失败'
+      soundFlash.err = true
     }
   } finally {
     sharedSoundBusy.value = false
@@ -294,17 +293,22 @@ const unusedCount = computed(() => unusedSkinIds.value.length + unusedSoundRoles
 
 // —— 折叠 / 目录 / 素材包 ——
 const assetsFold = reactive({ open: false })
-// 「导入的形象」默认展开：它是这一页最常用的卡，收起会让人以为「没有形象可管理」。
-// 两张下载大清单（共享形象 36 格 / 共享音效 45 段）仍默认收起。
-const galleryFolds = reactive({ skins: true, sharedSkins: false, sharedSounds: false })
-function galleryOpen(key: 'skins' | 'sharedSkins' | 'sharedSounds') {
+// 「形象」与「音效」两张合并卡都默认收起：一展开就是三块网格 / 六个槽位加 45 段清单，一次铺满整屏。
+// 默认收起时只留一行「共 N 张 · 另有 M 张可下载」/「已导入 n / 6 个槽位」，
+// 用户扫一眼就知道有没有待下载的，需要挑 / 下载再点开（一个折叠换整页清爽）。
+// 合并前「音效」的折叠态在父级（assetFolds.sounds），合并后与形象统一收进这里 ——
+// 两张卡都是「私有折叠 + 搜索命中强制展开」的同一套，父级不必再持一份副本。
+const galleryFolds = reactive({ skins: false, sounds: false })
+function galleryOpen(key: 'skins' | 'sounds') {
   // 搜索态下强制展开：命中的卡如果还收着，用户搜到了却看不到内容（还以为没搜到）。
   // 与折叠态无关，只是「搜索时一律铺开」。
   return props.searchActive || galleryFolds[key]
 }
-// 分区小标题：命中 2 张以上才显示，搜索只命中单卡时不出现分隔线（纯噪音）
-const MINE_CARDS = ['assetsOverview', 'assetsSkins', 'assetsBubbles', 'assetsSounds']
-const DOWNLOAD_CARDS = ['assetsBuiltin', 'assetsSharedSkins', 'assetsSharedSounds']
+// 分区小标题：命中 2 张以上才显示，搜索只命中单卡时不出现分隔线（纯噪音）。
+// 合并后「形象」「音效」两张卡都横跨「我的素材」与「下载素材」两区（上段是本机的、下段是可下载的），
+// 按各自的主增量统一归到「下载素材」组。
+const MINE_CARDS = ['assetsOverview', 'assetsBubbles']
+const DOWNLOAD_CARDS = ['assetsSkins', 'assetsSounds']
 function showSection(group: 'mine' | 'download') {
   const keys = group === 'mine' ? MINE_CARDS : DOWNLOAD_CARDS
   return keys.filter((k) => props.cardOn('assets', k)).length >= 2
@@ -411,8 +415,6 @@ function doApplyAssets() {
       assetsFlash.msg = msg
       assetsPack.value = null
       emit('refresh-skin')
-      emit('refresh-skin-packs')
-      emit('refresh-shared-skins')
       emit('refresh-bubbles')
       emit('refresh-sounds')
     }
@@ -584,22 +586,27 @@ function doRemoveBubble(id: string) {
 }
 
 // —— 内置资源 / 形象包 ——
-const BUILTIN_SOUND_SETS: Array<{ key: string; label: string; press: string; release: string }> = [
-  { key: 'duck', label: '小黄鸭', press: './whale/Ya1.mp3', release: './whale/Ya2.mp3' },
-  { key: 'fx1', label: '音效 1', press: './whale/D1.mp3', release: './whale/D2.mp3' },
-]
 const SKIN_PACK_PREFIX_MAX = 200
-const builtinFlash: Flash = reactive({ msg: '', err: false })
-function builtinSkinUrl(id: string) {
-  return './whale/' + encodeURIComponent(id) + '.webp'
-}
-function doPreviewBuiltin(url: string) {
-  builtinFlash.msg = ''
-  builtinFlash.err = false
-  emit('preview-builtin', url)
-}
 function skinPackThumb(id: string) {
   return './whale-pack/thumbs/' + encodeURIComponent(id) + '.webp'
+}
+// 把打包好的「随包内置」缩略图（whale-pack/thumbs/<id>.webp）读成 data URL 交给宿主落盘。
+// 与父级 sharedSkinThumbDataUrl 同款（宿主定位不到插件目录，缩略图必须由渲染进程给）：
+// 下载内置形象时若不带缩略图，画廊只能回落读原图（MB 级），很快耗尽回落预算变「无预览」。
+// 读失败一律回 ''：宁可这张暂时没缩略图，也不能因为读图失败把下载带崩。
+async function skinPackThumbDataUrl(id: string): Promise<string> {
+  try {
+    const res = await fetch(skinPackThumb(id))
+    if (!res.ok) return ''
+    const buf = await res.arrayBuffer()
+    if (!buf.byteLength) return ''
+    let bin = ''
+    const bytes = new Uint8Array(buf)
+    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i])
+    return 'data:image/webp;base64,' + btoa(bin)
+  } catch (err) {
+    return ''
+  }
 }
 
 const skinPackList = ref<SkinPackList | null>(null)
@@ -612,10 +619,7 @@ const skinPackInstalled = computed<Record<string, boolean>>(() => {
 })
 const skinPackItems = computed(() => skinPackList.value?.items || [])
 const skinPackInstalledCount = computed(() => skinPackItems.value.filter((it) => it.installed).length)
-const skinPackInstalledAny = computed(() => skinPackInstalledCount.value > 0)
-const skinPackAllInstalled = computed(() => !!skinPackItems.value.length && skinPackInstalledCount.value >= skinPackItems.value.length)
 const skinPackRemainBytes = computed(() => skinPackItems.value.reduce((n, it) => n + (it.installed ? 0 : Number(it.size) || 0), 0))
-const skinPackBytes = computed(() => props.skinPackSkins.reduce((n, s) => n + (Number(s.size) || 0), 0))
 // 可下载形象的展示名。清单里没有 name 字段（DSniang02 是「DS 娘」的 id，中文名无意义），
 // 于是各处一律走它回落成 id —— 全卡统一，免得标题用 name、缩略图用 id，两处对不上
 // （曾踩：一面写「内置形象」一面标 id，用户以为点错了卡）。
@@ -631,17 +635,22 @@ const skinInUseMissing = computed<boolean>(() => {
   return skinPackInstalled.value[s] !== true
 })
 const missingSkinName = computed(() => (skinInUseMissing.value ? props.cfg.skin : ''))
+// 首次判定出缺失时自动展开「形象」折叠区（否则提示藏在收起区里等于没有）。
+// 只在「从未展开过」时替用户展开一次，之后尊重他的手动收起（不反复弹开）。
+// 合并前这里 emit('toggle-builtin-fold') 交给父级的 assetFolds.builtin；现在这张卡自己管折叠态，
+// 直接开本地 galleryFolds.skins 即可（父级那份 assetFolds.builtin 已随「内置资源」卡一并删掉）。
 const builtinFoldAutoOpened = ref(false)
 watch(skinInUseMissing, (v) => {
   if (v && !builtinFoldAutoOpened.value) {
     builtinFoldAutoOpened.value = true
-    emit('toggle-builtin-fold', true)
+    galleryFolds.skins = true
   }
 }, { immediate: true })
 function refreshSkinPacks() {
   const r = services.value.listSkinPacks?.()
   skinPackList.value = r && Array.isArray(r.items) ? r : null
 }
+// 整包下载：卡头「下载剩余 N 张」里属于随包内置那部分（一次 Release，含整包 sha256 校验）。
 async function doDownloadSkinPacks() {
   if (skinPackBusy.value) return
   skinPackFlash.msg = ''
@@ -667,8 +676,31 @@ async function doDownloadSkinPacks() {
 }
 async function doSkinPackCell(id: string) {
   if (skinPackInstalled.value[id]) { doUseSkin(id); return }
-  await doDownloadSkinPacks()
-  if (skinPackInstalled.value[id]) doUseSkin(id)
+  if (skinPackBusy.value) return
+  skinPackFlash.msg = ''
+  skinPackFlash.err = false
+  skinPackBusy.value = true
+  dlTickStart()
+  try {
+    // 单张下载（链路与「下载全部」不同）：宿主按 id 取那一张的原始图，逐张 sha256 校验后落盘。
+    // 早期这里是「点任意一张 = 下整包」，但本批只剩 1 张，整包与单张等价、单张失败面更小，
+    // 且与共享角色（点一张下一张）语义一致，用户不必记「这张卡点缩略图会连带下别的」。
+    // 缩略图先读成 data URL 一并传下去，否则画廊只能回落读原图（MB 级）。
+    const thumb = await skinPackThumbDataUrl(id)
+    const r = await services.value.downloadSkinPackItem?.(id, props.cfg.skinPackSrc || '', thumb)
+    emit('refresh-skin')
+    refreshSkinPacks()
+    if (!r || !r.ok) {
+      skinPackFlash.msg = (r && r.error) || '下载失败，请稍后重试'
+      skinPackFlash.err = true
+      return
+    }
+    skinPackFlash.msg = `已下载「${skinPackLabel(id)}」`
+    skinPackFlash.err = false
+    doUseSkin(id)
+  } finally {
+    skinPackBusy.value = false
+  }
 }
 
 // —— 共享角色 ——
@@ -687,10 +719,8 @@ const sharedSkinInstalled = computed<Record<string, boolean>>(() => {
 })
 const sharedSkinItems = computed(() => sharedSkinList.value?.items || [])
 const sharedSkinInstalledCount = computed(() => sharedSkinItems.value.filter((it) => it.installed).length)
-const sharedSkinAllInstalled = computed(() => !!sharedSkinItems.value.length && sharedSkinInstalledCount.value >= sharedSkinItems.value.length)
 const sharedSkinRemainBytes = computed(() => Number(sharedSkinList.value?.totalSize || 0)
   - sharedSkinItems.value.reduce((n, it) => n + (it.installed ? (Number(it.size) || 0) : 0), 0))
-const sharedSkinTotalBytes = computed(() => Number(sharedSkinList.value?.totalSize || 0))
 const sharedSkinNames = computed<Record<string, string>>(() => {
   const out: Record<string, string> = {}
   for (const s of props.sharedSkinPackSkins) out[s.id] = s.name
@@ -700,6 +730,8 @@ function refreshSharedSkins() {
   const r = services.value.listSharedSkins?.()
   sharedSkinList.value = r && Array.isArray(r.items) ? r : null
 }
+// 共享角色下载不适合 await：36 张串行、单张失败不中断（见上方说明）。
+// 调方（卡头「下载剩余」/ 点缩略图）只关心「把请求发出去」，这里的错误由 sharedSkinFlash 回显。
 async function doDownloadSharedSkins() {
   if (sharedSkinBusy.value) return
   sharedSkinFlash.msg = ''
@@ -728,16 +760,23 @@ async function doDownloadSharedSkins() {
     sharedSkinBusy.value = false
   }
 }
-async function doSharedSkinCell(id: string) {
+// 点共享角色缩略图：已下载 → 直接选用；未下载 → 只下这一张（不是整批）。
+// 不加 async：内层用 .then 在下载完的回调里选用，避免 await 让本函数返回的 Promise
+// 被「进度条/按钮禁用」等场景反复等待（同一张重复点也不会串行排队）。
+function doSharedSkinCell(id: string) {
   if (sharedSkinInstalled.value[id]) { doUseSkin(id); return }
   if (sharedSkinBusy.value) return
   sharedSkinFlash.msg = ''
   sharedSkinFlash.err = false
   sharedSkinBusy.value = true
   dlTickStart()
-  try {
-    const r = await services.value.downloadSharedSkin?.(id, props.cfg.skinPackSrc || '',
-      await props.sharedSkinThumbDataUrl(id))
+  // 缩略图 data URL 由父级提供（读打包资源），是 async；这里用 .then 串起来而不是 await，
+  // 好让本函数仍是非 async —— 否则「点一张」会被调用处 await，和整批下载的 busy 守卫互相卡住。
+  props.sharedSkinThumbDataUrl(id).then((thumb) => {
+    const p = services.value.downloadSharedSkin?.(id, props.cfg.skinPackSrc || '', thumb)
+    // 老宿主（无该 API）时 p 为 undefined，退回一个立即失败的结果，走同一套提示
+    return p && typeof p.then === 'function' ? p : { ok: false, error: '当前版本不支持单张下载' }
+  }).then((r) => {
     emit('refresh-skin')
     refreshSharedSkins()
     if (!r || !r.ok) {
@@ -748,19 +787,47 @@ async function doSharedSkinCell(id: string) {
     sharedSkinFlash.msg = `已下载「${r.name || id}」`
     sharedSkinFlash.err = false
     doUseSkin(id)
-  } finally {
+  }).catch((err) => {
+    sharedSkinFlash.msg = String((err && err.message) || err || '下载失败')
+    sharedSkinFlash.err = true
+  }).finally(() => {
     sharedSkinBusy.value = false
-  }
+  })
 }
 
-// —— 共享音效库（落 sounds 的 shared 槽位，是素材池，不直接参与实播） ——
-const sharedSoundList = ref<SharedSoundList | null>(null)
+// —— 合并卡的「可下载形象」汇总（随包内置 + 共享角色两批并成一个口径） ——
+// 两批的下载链路不同（整包 Release / 单张 raw 直链），但在卡内是同一个语义：
+// 「上游有、还没落盘，点缩略图就下一张」。卡头的「下载剩余 N 张」与收回态摘要都按这个合计走，
+// 用户不必分别数「内置剩几张 + 共享剩几张」。
+const remoteSkinCount = computed(() => skinPackItems.value.length + sharedSkinItems.value.length)
+const remoteSkinInstalledCount = computed(() => skinPackInstalledCount.value + sharedSkinInstalledCount.value)
+const skinRemainCount = computed(() =>
+  (skinPackItems.value.length - skinPackInstalledCount.value)
+  + (sharedSkinItems.value.length - sharedSkinInstalledCount.value))
+const skinRemainBytes = computed(() => skinPackRemainBytes.value + sharedSkinRemainBytes.value)
+const skinAnyBusy = computed(() => skinPackBusy.value || sharedSkinBusy.value)
+// 卡头的「下载剩余 N 张」= 把两批里还没下来的整批补齐。
+// 顺序上**先补共享角色**（36 张，逐张串行、每张都有独立失败反馈，是「大头」），
+// 再补随包内置（一次整包 Release，失败会写进 skinPackFlash）。
+// 两批各自的 flash 与进度条分别亮，用户看得到此刻在补哪一批。
+async function doDownloadAllSkins() {
+  if (skinAnyBusy.value) return
+  if (sharedSkinItems.value.some((it) => !it.installed)) await doDownloadSharedSkins()
+  if (skinPackItems.value.some((it) => !it.installed)) await doDownloadSkinPacks()
+}
+// 新手引导「去挑形象」：父级把 browseSkinsTick +1，这里展开「形象」卡。
+// 与 builtinFoldAutoOpened 同理 —— 折叠态是本组件私有，父级只能靠这种一次性指令驱动。
+watch(() => props.browseSkinsTick, () => { galleryFolds.skins = true })
+
+// —— 音效卡内「可下载音效」段的状态 ——
+// 合并后整张卡只有一个消息槽（卡片底部的 soundFlash，来自 props）与一个忙碌位。
+// 「共享音效」卡原来自持的 soundFlash 已取消 —— 消息统一写进 soundFlash，
+// 用户点「下载这一段」的反馈与槽位操作落在同一行，不再两处各自闪；
+// 忙碌位仍是独立布尔：它只表达「库里那段正在下载」，与槽位的导入 / 删除互不阻塞。
 const sharedSoundBusy = ref(false)
-const sharedSoundFlash: Flash = reactive({ msg: '', err: false })
+const sharedSoundList = ref<SharedSoundList | null>(null)
 const sharedSoundItems = computed(() => sharedSoundList.value?.items || [])
 const sharedSoundInstalledCount = computed(() => sharedSoundItems.value.filter((it) => it.installed).length)
-const sharedSoundAllInstalled = computed(() => !!sharedSoundItems.value.length && sharedSoundInstalledCount.value >= sharedSoundItems.value.length)
-const sharedSoundTotalBytes = computed(() => Number(sharedSoundList.value?.totalSize || 0))
 const sharedSoundInstalledItems = computed(() => sharedSoundItems.value.filter((it) => it.installed))
 const sharedSoundPendingItems = computed(() => sharedSoundItems.value.filter((it) => !it.installed))
 const sharedSoundPendingOpen = ref(false)
@@ -784,14 +851,31 @@ const removeConfirmId = ref<string | null>(null)
 let removeConfirmTimer: ReturnType<typeof setTimeout> | null = null
 const sharedSoundRemainBytes = computed(() => Number(sharedSoundList.value?.totalSize || 0)
   - sharedSoundItems.value.reduce((n, it) => n + (it.installed ? (Number(it.size) || 0) : 0), 0))
+
+// 未下载的共享段数：卡头「下载剩余 N 段」与收起态摘要都按它算，
+// 用户不必分别数「槽位导了几段 + 库里少了多少段」。
+const sharedSoundRemainCount = computed(() =>
+  sharedSoundItems.value.length - sharedSoundInstalledCount.value)
+// 下段列表里「哪一行展开了槽位 chip」（空串 = 都没展开）。6 个 chip 常驻会制造 45 行的噪音，
+// 收进行内展开后同一时刻只开一行，扫列表时整列文件名 + 试听 / 删对得齐。
+const soundRowOpen = ref('')
+
+// 一键下载：把共享库里还没下来的逐段补回来（与形象卡头的「下载剩余 N 张」同构）。
+// 六个槽位的「手导的那一段」不能这样补 —— 那是用户自己挑的文件，只能一段段拖进来。
+// 顺序在 **共享段先、槽位后** 是刻意的：下载只补「可下载音效」这半截，
+// 不与「从共享库添加…」抢同一处面板。
+function doDownloadAllSounds() {
+  if (sharedSoundBusy.value) return
+  void doDownloadSharedSounds()
+}
 function refreshSharedSounds() {
   const r = services.value.listSharedSounds?.()
   sharedSoundList.value = r && Array.isArray(r.items) ? r : null
 }
 async function doDownloadSharedSounds() {
   if (sharedSoundBusy.value) return
-  sharedSoundFlash.msg = ''
-  sharedSoundFlash.err = false
+  soundFlash.msg = ''
+  soundFlash.err = false
   sharedSoundBusy.value = true
   dlTickStart()
   try {
@@ -805,20 +889,20 @@ async function doDownloadSharedSounds() {
     }
     const okCount = todo.length - failed.length
     if (failed.length) {
-      sharedSoundFlash.msg = `已下载 ${okCount} 段，${failed.length} 段失败 —— ${failed[0]}`
-      sharedSoundFlash.err = true
+      soundFlash.msg = `已下载 ${okCount} 段，${failed.length} 段失败 —— ${failed[0]}`
+      soundFlash.err = true
       return
     }
-    sharedSoundFlash.msg = todo.length ? `已下载 ${todo.length} 段音效（存进「共享音效库」，可到下面选用）` : '共享音效已是最新，无需重复下载'
-    sharedSoundFlash.err = false
+    soundFlash.msg = todo.length ? `已下载 ${todo.length} 段音效（存进「共享音效库」，可到下面选用）` : '共享音效已是最新，无需重复下载'
+    soundFlash.err = false
   } finally {
     sharedSoundBusy.value = false
   }
 }
 async function doDownloadSharedSound(it: SharedSoundItem) {
   if (sharedSoundBusy.value || it.installed) return
-  sharedSoundFlash.msg = ''
-  sharedSoundFlash.err = false
+  soundFlash.msg = ''
+  soundFlash.err = false
   sharedSoundBusy.value = true
   dlTickStart()
   try {
@@ -826,12 +910,12 @@ async function doDownloadSharedSound(it: SharedSoundItem) {
     emit('refresh-sounds')
     refreshSharedSounds()
     if (!r || !r.ok) {
-      sharedSoundFlash.msg = (r && r.error) || '下载失败，请稍后重试'
-      sharedSoundFlash.err = true
+      soundFlash.msg = (r && r.error) || '下载失败，请稍后重试'
+      soundFlash.err = true
       return
     }
-    sharedSoundFlash.msg = `已下载「${r.name || it.name}」`
-    sharedSoundFlash.err = false
+    soundFlash.msg = `已下载「${r.name || it.name}」`
+    soundFlash.err = false
   } finally {
     sharedSoundBusy.value = false
   }
@@ -845,18 +929,18 @@ function doRemoveSharedSound(it: SharedSoundItem) {
   }
   if (removeConfirmTimer) { clearTimeout(removeConfirmTimer); removeConfirmTimer = null }
   removeConfirmId.value = null
-  sharedSoundFlash.msg = ''
-  sharedSoundFlash.err = false
+  soundFlash.msg = ''
+  soundFlash.err = false
   const r = services.value.removeSharedSound?.(it.file || '')
   if (!r || !r.ok) {
-    sharedSoundFlash.msg = (r && r.error) || '删除失败'
-    sharedSoundFlash.err = true
+    soundFlash.msg = (r && r.error) || '删除失败'
+    soundFlash.err = true
     return
   }
   refreshSharedSounds()
   emit('refresh-sounds')
   if (previewingSharedId.value === it.id) stopPreviewShared()
-  sharedSoundFlash.msg = `已删除「${it.name}」`
+  soundFlash.msg = `已删除「${it.name}」`
     + (it.roles.length ? `（它原本参加的${it.roles.map((x) => SOUND_ROLE_LABEL[x] || x).join(' / ')}也一并退出播放）` : '')
 }
 // 切换「这段共享音效参加某个槽位的播放」（勾选 / 取消勾选）。
@@ -868,17 +952,17 @@ async function toggleSharedRole(it: SharedSoundItem, role: SoundRole, on: boolea
     : `「${it.name}」已退出${SOUND_ROLE_LABEL[role] || role}的播放`)
 }
 function doPreviewSharedSound(it: SharedSoundItem) {
-  sharedSoundFlash.msg = ''
-  sharedSoundFlash.err = false
+  soundFlash.msg = ''
+  soundFlash.err = false
   if (previewingSharedId.value === it.id) { stopPreviewShared(); return }
   const r = services.value.readSharedSoundData?.(it.file)
   if (!r || !r.ok || !r.url) {
-    sharedSoundFlash.msg = (r && r.error) || '没有可试听的音效'
-    sharedSoundFlash.err = true
+    soundFlash.msg = (r && r.error) || '没有可试听的音效'
+    soundFlash.err = true
     return
   }
   previewingSharedId.value = it.id
-  playAudioUrl(r.url, sharedSoundFlash, () => { previewingSharedId.value = null })
+  playAudioUrl(r.url, soundFlash, () => { previewingSharedId.value = null })
 }
 function stopPreviewShared() {
   emit('stop-preview')
@@ -988,7 +1072,7 @@ onMounted(() => {
 // 卡片展开时补拉一次。搜索态也会让 galleryOpen 变 true（见上），故依赖里仍含 searchActive ——
 // 搜索命中的下载卡同样会在展开时补拉，不会出现「搜到了却渲染 0 张」。
 watch(
-  () => [galleryOpen('skins'), galleryOpen('sharedSkins'), galleryOpen('sharedSounds')],
+  () => [galleryOpen('skins'), galleryOpen('sounds')],
   () => {
     nextTick(() => {
       refreshSkinPacks()
@@ -1006,15 +1090,15 @@ onUnmounted(() => {
   window.removeEventListener('scroll', onScrollCloseRndMenu, true)
 })
 
-defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds, expandBuiltin: () => { emit('toggle-builtin-fold', true) } })
+defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
 </script>
 
 <template>
   <div>
     <!-- [资源] 素材集中管理，按「素材从哪来」分两区：
-         · 我的素材 —— 导进来 / 下回来、落在本机、能删能用的那些（概览 · 形象 · 气泡图 · 音效）
-         · 下载素材 —— 上游有、按需从 GitHub 拉的目录（内置资源与下载源 · 共享形象 · 共享音效）
-         原来七张卡平铺，用户分不清「哪些是我已有的、哪些还要下载」，两组之间还夹着互不相邻的下载卡。
+         · 我的素材 —— 导进来 / 下回来、落在本机、能删能用的那些（概览 · 气泡图）
+         · 下载素材 —— 上游有、按需从 GitHub 拉的目录（形象 · 音效）
+         「形象」「音效」两张卡都横跨两区（上段是本机的、下段是可下载的），按各自的主增量归到「下载素材」。
          分区标题只在两张以上卡片命中时显示（搜索命中单卡时分隔线纯属噪音）。
          与「挂件外观」分工：那边只选「用哪个」，这里管「导了什么、占多大、要不要删、换机器怎么带走」 -->
     <div v-if="showSection('mine')" class="assets-section">我的素材</div>
@@ -1114,12 +1198,16 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds, expand
       </div>
     </section>
 
-    <!-- [资源] 导入的形象：画廊（点缩略图切换、置顶、删除、勾选参与随机） -->
+    <!-- [资源] 形象：本机所有可用的形象统一在一张卡里管。三个来源（用户导入 / 随包内置 / 上游共享）
+         此前是三张彼此割裂的卡（「导入的形象」在「我的素材」、「内置资源与下载源」寄在音色卡里、
+         「共享形象」在「下载素材」），但它们的产物其实是**同一处** —— 都落进 skins 画廊（内置 / 共享打
+         builtin 标记，故不占「导入」的 20 张配额）。合并后：上段「我的形象」= 已落盘的（导入 + 已下载），
+         下段「可下载形象」= 上游有、还没落盘的（随包 1 张 + 共享 36 张）。用户不必再猜「我那张在哪张卡里」 -->
     <section v-if="cardOn('assets', 'assetsSkins')" class="card" data-search="assetsSkins">
       <div class="card-head">
         <button class="fold-title" type="button" @click="galleryFolds.skins = !galleryFolds.skins; rndMenu = ''; emit('clear-picked')">
           <span class="fold-caret">{{ galleryOpen('skins') ? '▾' : '▸' }}</span>
-          导入的形象
+          形象
         </button>
         <div class="head-actions">
             <button class="export-btn utils-btn utils-outline" type="button" @click="doRandomSkin()">随机一张</button>
@@ -1200,12 +1288,25 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds, expand
                 </div>
               </Teleport>
             </div>
+            <!-- 可下载形象的「下载剩余 N 张」：三卡合并后，「内置 1 张 + 共享 36 张」两个下载入口
+                 收进卡头这一个（次要对齐按钮，与「随机一张 / 导入图片…」同档；
+                 不再各占一张卡的主按钮）。点它 = 把没下来的整批补齐（单张仍可点下方缩略图） -->
+            <button v-if="skinRemainCount" class="export-btn utils-btn utils-outline" type="button"
+                    :disabled="skinAnyBusy"
+                    :title="`把还没下载的 ${skinRemainCount} 张一起下回来（已下载的自动跳过）`"
+                    @click="doDownloadAllSkins()">
+              {{ skinAnyBusy ? '正在下载…' : `下载剩余 ${skinRemainCount} 张（约 ${fmtBytes(skinRemainBytes)}）` }}
+            </button>
         </div>
       </div>
       <p v-if="!galleryOpen('skins')" class="hint">
-        共 {{ skinGallery.items.length }} 张{{ skinMeta ? `，当前使用「${skinMeta.name}」` : '' }}。
+        共 {{ skinGallery.items.length }} 张{{ skinMeta ? `，当前使用「${skinMeta.name}」` : '' }}
+        <template v-if="skinRemainCount">· 另有 {{ skinRemainCount }} 张可下载（约 {{ fmtBytes(skinRemainBytes) }}）</template>。
       </p>
       <template v-if="galleryOpen('skins')">
+      <!-- 上段：已落盘的形象。包含用户导入的（占 20 张配额、删了要重导）与已下载的内置 / 共享
+           （不占配额、删了能重下）—— 两类靠悬停「删」的 title 文案区分，不必再分两张卡 -->
+      <p class="group-title skin-group-title">我的形象 <em>（共 {{ skinGallery.items.length }} 张 · 点缩略图选用；单击选中可批量整理）</em></p>
       <div class="skin-grid">
         <div v-for="(it, idx) in skinGallery.items" :key="it.id" class="skin-cell"
              :class="{ active: it.id === skinGallery.current, picked: skinPicked.indexOf(it.id) >= 0, broken: thumbBroken[it.id], noprev: !it.thumb && !thumbBroken[it.id], dragging: draggingId === it.id, 'drop-before': dragOverId === it.id && !dragOverAfter, 'drop-after': dragOverId === it.id && dragOverAfter }"
@@ -1268,6 +1369,89 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds, expand
         已导入但当前未使用：「挂件外观 → 形象」选的不是「自定义」。
       </p>
       <p v-if="skinFlash.msg" class="msg" :class="msgCls(skinFlash)">{{ skinFlash.msg }}</p>
+
+      <!-- 下段：可下载形象。内置（随包 1 张）与共享（上游 QQ 群 36 张）分两小组列出 ——
+           两者的下载链路不同（整包 Release / 单张 raw 直链），但都是「点缩略图即下这一张」，
+           故并排呈现、各带自己的进度条与说明；下段整体只在有可下载项时出现 -->
+      <template v-if="remoteSkinCount">
+        <p class="group-title skin-group-title">可下载形象 <em>（点缩略图即可下载那一张，下完自动切到它；{{ remoteSkinInstalledCount }} / {{ remoteSkinCount }} 已下载）</em></p>
+        <DownloadBox v-if="dlProgress && dlProgress.pack === 'skins'"
+                     :progress="dlProgress" :percent="dlPercent" :amount="dlAmountText" />
+        <DownloadBox v-if="dlProgress && dlProgress.pack === 'shared-skins'"
+                     :progress="dlProgress" :percent="dlPercent" :amount="dlAmountText" />
+        <p v-if="skinInUseMissing" class="msg err">
+          你正在使用的形象「{{ missingSkinName }}」不在随包清单里，挂件暂用默认形象显示。
+          点下方它的缩略图即可下载找回。
+        </p>
+        <!-- 内置（随包声明、可下载）：未装灰底 + 「下载」角标；已装则与本卡上段共用一套展示（可选用 / 可删）。
+             已装的项也在上段画廊里（同一份数据），这里同时列出是为了「一个入口看全所有可选形象」 -->
+        <p v-if="skinPackItems.length" class="skin-sub-title">随包内置 <em>（{{ skinPackInstalledCount }} / {{ skinPackItems.length }} 已下载）</em></p>
+        <div v-if="skinPackItems.length" class="skin-grid">
+          <div v-for="s in skinPackItems" :key="'p-' + s.id" class="skin-cell"
+               :class="{ active: cfg.skin === s.id, 'is-remote': !skinPackInstalled[s.id] }">
+            <div class="skin-box">
+              <button class="skin-cell-pick" type="button"
+                      :title="skinPackInstalled[s.id] ? `${skinPackLabel(s.id)}（已下载，点选用）`
+                        : `${skinPackLabel(s.id)}（未下载，点一下下载，下完自动切到这张）`"
+                      @click="doSkinPackCell(s.id)">
+                <img class="skin-cell-img" :src="skinPackThumb(s.id)" :alt="skinPackLabel(s.id)" />
+              </button>
+              <span v-if="!skinPackInstalled[s.id]" class="skin-cell-badge">下载</span>
+              <!-- 名字与警示标签二选一：两个都贴 bottom:0，同时渲染会叠在一起看不清。
+                   「正在使用 · 未下载」本身已含「是哪张」的信息（它只可能出现在 cfg.skin 那张上） -->
+              <span v-if="skinInUseMissing && s.id === cfg.skin" class="skin-cell-tag warn">正在使用 · 未下载</span>
+              <span v-else class="skin-cell-tag">{{ skinPackLabel(s.id) }}</span>
+              <span v-if="skinPackInstalled[s.id]" class="skin-cell-ops">
+                <button class="skin-op danger" type="button" title="从本地删除这张（可重新下载）"
+                        @click.stop="doRemoveSkin(s.id)">删</button>
+              </span>
+            </div>
+          </div>
+        </div>
+        <!-- 共享角色（上游 QQ 群 36 张）：与内置那批同一套交互。清单是异步拉的，
+             未拉到时整组不渲染，免得出现「下载全部 0 张（约 0 KB）」的空壳 -->
+        <p v-if="sharedSkinItems.length" class="skin-sub-title">共享角色 <em>（上游分享、不随插件包分发；{{ sharedSkinInstalledCount }} / {{ sharedSkinItems.length }} 已下载）</em></p>
+        <div v-if="sharedSkinItems.length" class="skin-grid">
+          <div v-for="s in sharedSkinItems" :key="'sh-' + s.id" class="skin-cell"
+               :class="{ active: cfg.skin === s.id, 'is-remote': !sharedSkinInstalled[s.id] }">
+            <div class="skin-box">
+              <button class="skin-cell-pick" type="button"
+                      :title="sharedSkinInstalled[s.id] ? `${sharedSkinNames[s.id] || s.id}（已下载，点选用）`
+                        : `${sharedSkinNames[s.id] || s.id}（未下载，点一下下载这张，下完自动切到这张）`"
+                      @click="doSharedSkinCell(s.id)">
+                <img v-if="!thumbBroken['sh-' + s.id]" class="skin-cell-img" :src="sharedSkinThumb(s.id)"
+                     :alt="sharedSkinNames[s.id] || s.id" @error="onThumbError('sh-' + s.id)" />
+                <span v-else class="skin-cell-broken">预览加载失败</span>
+              </button>
+              <span v-if="!sharedSkinInstalled[s.id]" class="skin-cell-badge">下载</span>
+              <span class="skin-cell-tag">{{ sharedSkinNames[s.id] || s.id }}</span>
+              <span v-if="sharedSkinInstalled[s.id]" class="skin-cell-ops">
+                <button class="skin-op danger" type="button" title="从本地删除这张（可重新下载）"
+                        @click.stop="doRemoveSkin(s.id)">删</button>
+              </span>
+            </div>
+          </div>
+        </div>
+        <!-- 下载源：内置（ghfast.top → 直连）与共享（jsDelivr → ghfast → 直连 → raw）两条候选链
+             共用同一个前缀配置（宿主那边各自回落内置），所以一个输入框管两处 -->
+        <label class="field row">
+          <span class="label">形象下载源 <em>（留空用内置加速源，失败自动直连 GitHub）</em></span>
+          <input type="text" :maxlength="SKIN_PACK_PREFIX_MAX" spellcheck="false" autocomplete="off"
+                 placeholder="https://ghfast.top/"
+                 :value="cfg.skinPackSrc"
+                 @change="emit('patch', { skinPackSrc: ($event.target as HTMLInputElement).value })" />
+        </label>
+        <p class="hint">
+          下载回来的形象存本地、<strong>不占「导入」的 20 张配额</strong>（配额只算你自己导入的）。
+          点缩略图只下这一张（下完自动切到它），已下载的悬停可「删」单张、删了能重新下载；
+          卡头的「下载剩余 N 张」则把还没下来的整批补齐（已下载的自动跳过、不重复占体积）。
+        </p>
+        <p v-if="skinPackFlash.msg" class="msg" :class="msgCls(skinPackFlash)">{{ skinPackFlash.msg }}</p>
+        <p v-if="sharedSkinFlash.msg" class="msg" :class="msgCls(sharedSkinFlash)">{{ sharedSkinFlash.msg }}</p>
+      </template>
+      <p v-else-if="!skinGallery.items.length" class="hint">
+        暂无形象：点「导入图片…」加一张，支持 png / jpg / webp / gif / apng（动图不裁剪，保留动画）。
+      </p>
       </template>
     </section>
 
@@ -1309,22 +1493,42 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds, expand
       <p v-if="bubbleFlash.msg" class="msg" :class="msgCls(bubbleFlash)">{{ bubbleFlash.msg }}</p>
     </section>
 
-    <!-- [资源] 导入的音效：六槽位（按压 / 释放 + 四类提醒音），每槽位只保留一段 -->
+    <!-- [资源] 音效：本机所有能响的音效统一在一张卡里管。两个来源（用户手导的六槽位 / 上游共享音效库 45 段）
+         此前是两张彼此割裂的卡（「导入的音效」在「我的素材」、「共享音效」在「下载素材」），但同一件事
+         （「这段音效挂着响不响」）被拆成两种相反的操作心智：槽位卡是「先选槽位、再从库挑段」，
+         共享卡是「先选段、再勾它参加哪些槽位」——同一份 roles 数据两套入口，6 个 chip 还在 45 行里重复 45 次。
+         合并后：上段「我的音效」= 六个槽位各一段手导 + 挂在本槽的共享段；下段「可下载音效」= 上游 45 段
+         （点行展开 6 个槽位 chip，功能零损失，噪音只在展开的那一行里）。 -->
     <section v-if="cardOn('assets', 'assetsSounds')" class="card" data-search="assetsSounds">
-      <!-- 整卡可折叠（默认收起）：六个槽位铺满一屏，只有真要导入 / 替换时才需要。
-           标题即开关，收起态在右侧挂一行概览，不会「藏了就等于没有」。
-           `.card-toggle` / `.caret` / `.card-sum` 与「开发者」Tab 那几张统计卡同一套写法。
-           搜索命中时父级会强制展开（见 App.vue 的搜索联动） -->
-      <h2 class="card-toggle" @click="emit('toggle-sounds-fold', !soundsFold)">
-        <span class="caret">{{ soundsFold ? '▾' : '▸' }}</span>导入的音效
-        <span v-if="!soundsFold" class="card-sum">
-          已导入 {{ soundImportedCount }} / {{ SOUND_ROLES.length }} 个槽位
-        </span>
-      </h2>
-      <template v-if="soundsFold">
-      <!-- 六个槽位各成一个块（.sound-group 有底色与描边）。
-           每个槽位最多一段：再导入就是替换掉旧的，所以没有「第 1 段 / 第 2 段」的编号，
-           也不需要「哪几段属于谁」的分组暗示。 -->
+      <div class="card-head">
+        <!-- 整卡可折叠（默认收起）：六个槽位 + 45 段清单一次铺满整屏，只有真要导入 / 替换 / 下载时才需要。
+             标题即开关；收起态在下方挂一行概览，不会「藏了就等于没有」。
+             折叠态是本组件私有（galleryFolds），搜索命中时 galleryOpen 一律返回 true 强制展开 -->
+        <button class="fold-title" type="button" @click="galleryFolds.sounds = !galleryFolds.sounds; soundPickOpen = ''">
+          <span class="fold-caret">{{ galleryOpen('sounds') ? '▾' : '▸' }}</span>
+          音效
+        </button>
+        <div class="head-actions">
+          <button class="export-btn utils-btn utils-outline" type="button" @click="doImportSound('press')">导入音效…</button>
+          <!-- 卡头唯一的整批下载入口（与形象卡头的「下载剩余 N 张」同构）：
+               点它 = 把共享库里还没下来的段逐段串行补齐（已下载的自动跳过）。
+               单段仍可点下方行里的「下载这一段」 -->
+          <button v-if="sharedSoundRemainCount" class="export-btn utils-btn utils-outline" type="button"
+                  :disabled="sharedSoundBusy"
+                  :title="`把还没下载的 ${sharedSoundRemainCount} 段一起下回来（已下载的自动跳过）`"
+                  @click="doDownloadAllSounds()">
+            {{ sharedSoundBusy ? '正在下载…' : `下载剩余 ${sharedSoundRemainCount} 段（约 ${fmtBytes(sharedSoundRemainBytes)}）` }}
+          </button>
+        </div>
+      </div>
+      <p v-if="!galleryOpen('sounds')" class="hint">
+        已导入 {{ soundImportedCount }} / {{ SOUND_ROLES.length }} 个槽位<template v-if="sharedSoundRemainCount"> · 另有 {{ sharedSoundRemainCount }} 段可下载（约 {{ fmtBytes(sharedSoundRemainBytes) }}）</template>。
+      </p>
+      <template v-if="galleryOpen('sounds')">
+      <!-- 上段：我的音效。六槽位（按压 / 释放 + 四类提醒音），每槽位一段手导 + 若干挂在本槽的共享段。
+           每个槽位最多一段手导：再导入就是替换掉旧的，所以没有「第 1 段 / 第 2 段」的编号。
+           块有底色与描边 —— 六个槽位连同各自的明细不加框会连成一片，看不出归属 -->
+      <p class="group-title skin-group-title">我的音效 <em>（六个槽位各一段，再导入 = 替换；可挂共享库的段一起随机播放）</em></p>
       <div class="sound-group" v-for="r in SOUND_ROLES" :key="r">
         <div class="sound-group-head">
           <span class="label" :title="ALERT_SOUND_WHEN[r]">{{ SOUND_ROLE_LABEL[r] }}</span>
@@ -1346,7 +1550,7 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds, expand
           </button>
         </div>
         <!-- 共享库挑选区：列出已下载的段，每行只有「添加」（把当前槽位加进这段的 roles）+「试听」。
-             已挂在本槽位的段不在这里重复出现，改到下方「槽位正在播的共享段」里管理 -->
+             已挂在本槽位的段不在这里重复出现，改到下方「来自共享音效库」里管理 -->
         <div v-if="soundPickOpen === r" class="sound-pick">
           <template v-if="sharedSoundInstalledItems.length">
             <template v-if="sharedPickCandidates(r).length">
@@ -1378,11 +1582,11 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds, expand
               </p>
             </template>
             <p v-else class="hint">
-              共享音效库已下载的段都挂到了本槽位。要去库里下载更多、或调整它们参加哪些槽位，见本页底部的「共享音效」卡。
+              共享音效库已下载的段都挂到了本槽位，可以在下方「可下载音效」里下载更多、或调整它们参加哪些槽位。
             </p>
           </template>
           <p v-else class="hint">
-            共享音效库还没有已下载的段 —— 切到本页底部的「共享音效」卡，展开后下载几段再来添加。
+            共享音效库还没有已下载的段 —— 在下方「可下载音效」里先下载几段，再回来添加。
           </p>
         </div>
         <!-- 单段时直接并进槽位头一行：既然只有一个，再单起一行纯属浪费纵向空间 -->
@@ -1397,7 +1601,7 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds, expand
           </SoundRow>
         </div>
         <!-- 本槽位还挂着哪些共享库的段：与上面「自己导入的」并列展示，各自可单独试听 / 移出。
-             用虚线框 + 「共享库」小标与本槽位导入的那段区分开 -->
+             用虚线框 + 「来自共享音效库」小标与本槽位导入的那段区分开 -->
         <div class="sound-seg sound-seg-shared" v-for="it in sharedPinnedTo(r)" :key="'pin-' + it.id">
           <SoundRow :name="it.name" :size="fmtBytes(it.size)">
             <span class="seg-ops">
@@ -1417,6 +1621,113 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds, expand
       <p v-if="soundUnused" class="hint">
         按压 / 释放音已导入但当前未使用：「音效开关」没开，或「音色」选的不是「自定义」。
       </p>
+
+      <!-- 下段：可下载音效。与共享角色同一批上游素材（45 段），落 sounds 的 shared 槽位。
+           每段自带一组 roles（参加哪些实播槽位的播放），下载后默认不挂任何槽位（不打扰），
+           用户在行内展开的槽位 chip 上勾选要参加哪几个。 -->
+      <template v-if="sharedSoundItems.length">
+        <p class="group-title skin-group-title">可下载音效 <em>（上游分享、不随插件包分发；{{ sharedSoundInstalledCount }} / {{ sharedSoundItems.length }} 已下载，点行展开可勾选参加哪些槽位）</em></p>
+        <DownloadBox v-if="dlProgress && dlProgress.pack === 'shared-sounds'"
+                     :progress="dlProgress" :percent="dlPercent" :amount="dlAmountText" />
+        <!-- 列表按「是否已下载」分两组：两组的控件不同（未下载行没有试听 / 槽位勾选 / 删），
+             分组后同组内控件结构一致，列能对齐。未下载组默认收进 .fold 里，
+             免得 45 行未下载项把「已下载」这半截推到屏外。 -->
+        <div class="shs-list">
+          <template v-if="sharedSoundInstalledItems.length">
+            <p class="skin-sub-title">已下载 <em>（{{ sharedSoundInstalledItems.length }} 段，点行展开勾选槽位 / 可试听 / 可删）</em></p>
+            <!-- 45 行铺开时找一段要滚很久；搜索 + 三档筛选把「已下载」这半截收窄。
+                 筛选只作用于本组（未下载组是逐段补下载用的，筛它没意义） -->
+            <div class="shs-filter">
+              <input type="text" spellcheck="false" autocomplete="off"
+                     placeholder="按音效名过滤…"
+                     :value="sharedSoundQuery"
+                     @input="sharedSoundQuery = ($event.target as HTMLInputElement).value" />
+              <button class="role-chip utils-btn" type="button"
+                      :class="sharedSoundFilter === 'all' ? 'utils-primary' : 'utils-outline'"
+                      @click="sharedSoundFilter = 'all'">全部</button>
+              <button class="role-chip utils-btn" type="button"
+                      :class="sharedSoundFilter === 'pinned' ? 'utils-primary' : 'utils-outline'"
+                      @click="sharedSoundFilter = 'pinned'">已参加播放</button>
+              <button class="role-chip utils-btn" type="button"
+                      :class="sharedSoundFilter === 'unpinned' ? 'utils-primary' : 'utils-outline'"
+                      @click="sharedSoundFilter = 'unpinned'">一段都没挂</button>
+            </div>
+            <!-- 已下载段列表：限高内滚。45 段铺开会让整张卡长到几十屏 —— 卡高度收敛成固定值（约 6 行），
+                 剩余内容交给内部滚动条。搜索 / 筛选行留在滚动区外，过滤时不用先滚回顶部 -->
+            <div class="shs-scroll">
+              <!-- 每行分两段：主线（文件名 + 体积 + 试听 / 删，同排右端对齐）+ 展开后的槽位 chip。
+                   6 个 chip 此前常驻在 45 行里 = 270 个 chip 的视觉噪音；现在只在展开的那一行出现，
+                   点行头「参加播放」即展开（与「我的音效」上段同源，功能零损失）。 -->
+              <div class="shs-row" v-for="it in sharedSoundInstalledShown" :key="'shs-' + it.id">
+                <div class="shs-main">
+                  <button class="shs-row-toggle utils-btn" type="button"
+                          :title="soundRowOpen === it.id ? '收起槽位勾选' : '点开勾选这段参加哪些槽位的播放'"
+                          @click="soundRowOpen = soundRowOpen === it.id ? '' : it.id">
+                    <span class="shs-row-caret">{{ soundRowOpen === it.id ? '▾' : '▸' }}</span>
+                    <span class="shs-row-roles">参加 {{ it.roles.length }} 个槽位</span>
+                  </button>
+                  <SoundRow :name="it.name" :size="fmtBytes(it.size)">
+                    <span class="seg-ops">
+                      <button class="export-btn utils-btn utils-outline" type="button"
+                              :class="{ 'preview-on': previewingSharedId === it.id }"
+                              @click="doPreviewSharedSound(it)">{{ previewingSharedId === it.id ? '停止' : '试听' }}</button>
+                      <button class="export-btn utils-btn" type="button"
+                              :class="removeConfirmId === it.id ? 'utils-danger' : 'utils-outline'"
+                              :title="removeConfirmId === it.id ? '再点一次确认删除（3 秒后自动取消）' : '从共享音效库删掉这一段；各槽位上挂的这段也一并失效'"
+                              @click="doRemoveSharedSound(it)">{{ removeConfirmId === it.id ? '确认删' : '删' }}</button>
+                    </span>
+                  </SoundRow>
+                </div>
+                <!-- 展开后的槽位勾选：每个槽位一个小 chip，点一下加入 / 再点移出（即 setSharedRoles）。
+                     按压 / 释放是「音色」的两段（要配合音色=自定义才响）；另外四类是独立提醒音，
+                     两组间用 .shs-roles-gap 拉开一点 -->
+                <div v-if="soundRowOpen === it.id" class="shs-ops">
+                  <template v-for="r in SOUND_ROLES" :key="r">
+                    <span v-if="r === ALERT_SOUND_ROLES[0]" class="shs-roles-gap" />
+                    <button class="role-chip utils-btn" type="button"
+                            :class="it.roles.indexOf(r) >= 0 ? 'utils-primary' : 'utils-outline'"
+                            :disabled="sharedSoundBusy"
+                            :title="ALERT_SOUND_WHEN[r] || ''"
+                            @click="toggleSharedRole(it, r, it.roles.indexOf(r) < 0)">{{ SOUND_ROLE_LABEL[r] }}</button>
+                  </template>
+                </div>
+              </div>
+            </div>
+            <p v-if="!sharedSoundInstalledShown.length" class="hint">没有符合条件的已下载段。</p>
+          </template>
+          <p v-else class="hint">共享音效库暂时是空的 —— 卡头按钮若显示「下载剩余 N 段」，点它把音效拉回来。</p>
+
+          <div class="fold" v-if="sharedSoundPendingItems.length">
+            <button class="link-btn utils-btn utils-secondary" type="button"
+                    @click="sharedSoundPendingOpen = !sharedSoundPendingOpen">
+              未下载 {{ sharedSoundPendingItems.length }} 段<span class="fold-caret">{{ sharedSoundPendingOpen ? '▾' : '▸' }}</span>
+            </button>
+            <template v-if="sharedSoundPendingOpen">
+              <div class="shs-row" v-for="it in sharedSoundPendingItems" :key="'shs-' + it.id">
+                <div class="shs-main">
+                  <SoundRow :name="it.name" :size="fmtBytes(it.size)" />
+                </div>
+                <div class="shs-ops">
+                  <!-- 措辞带上「这一段」：卡头还有一个「下载剩余 N 段」（逐段串行下完），
+                       两个按钮的量级差 40 倍，都写「下载」会让人以为点了就是整包 -->
+                  <button class="export-btn utils-btn utils-primary" type="button"
+                          :disabled="sharedSoundBusy" @click="doDownloadSharedSound(it)">下载这一段</button>
+                </div>
+              </div>
+            </template>
+          </div>
+        </div>
+        <!-- 下载源：与形象下载源共用同一个前缀配置（宿主那边各自回落内置），所以一个输入框管两处 -->
+        <label class="field row">
+          <span class="label">音效下载源 <em>（留空用内置加速源，失败自动直连 GitHub）</em></span>
+          <input type="text" :maxlength="SKIN_PACK_PREFIX_MAX" spellcheck="false" autocomplete="off"
+                 placeholder="https://ghfast.top/"
+                 :value="cfg.skinPackSrc"
+                 @change="emit('patch', { skinPackSrc: ($event.target as HTMLInputElement).value })" />
+        </label>
+      </template>
+      <p v-else-if="!sharedSoundQuery" class="hint">共享音效清单未拉到时这里为空，展开本卡会自动重拉一次。</p>
+
       <!-- 使用说明默认折叠：原先四行小字常驻卡尾，把六个槽位压到下面去了。
            摘要只报「能干什么」，不重复上方每行状态（那些行里已经写着「已导入 / 未导入（静音）」） -->
       <div class="fold">
@@ -1424,300 +1735,14 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds, expand
           {{ soundHelpOpen ? '收起音效使用说明' : '音效使用说明' }}
         </button>
         <div v-if="soundHelpOpen" class="guide">
-          <p class="hint">每槽位一段，再导入 = 替换；想加更多，用「从共享库添加…」挂共享段，一起随机播放。</p>
+          <p class="hint">每槽位一段手导，再导入 = 替换；想加更多，用槽位头的「从共享库添加…」挂共享段，一起随机播放。</p>
+          <p class="hint">共享库的段来自上游 QQ 群分享、不随插件包分发，改为按需从 GitHub 直链下载；下载后默认不参加任何槽位（不打扰），点开行勾选想让它响的槽位即可。</p>
+          <p class="hint">加入播放后它<strong>不会顶掉</strong>你手导的那段：挂件每次触发会在「手导的那段 + 挂到本槽位的共享段」里<strong>随机选一段</strong>。一段能同时挂多个槽位，一个槽位也能同时挂多段。</p>
           <p class="hint">提醒音留空 = 静音；播放跟随「挂件外观」的音效开关与音量。</p>
           <p class="hint">支持 mp3 / wav / ogg，导入时可拖选片段试听（最长 10 秒），存为单声道 WAV。</p>
         </div>
       </div>
       <p v-if="soundFlash.msg" class="msg" :class="msgCls(soundFlash)">{{ soundFlash.msg }}</p>
-      </template>
-    </section>
-
-    <!-- [资源 → 下载素材] 内置资源：随插件附带、不可删，只作对照（选哪个在「挂件外观」）。
-         纯查阅用，默认收起，避免与「导入的…」三张卡一起铺满一屏 -->
-    <div v-if="showSection('download')" class="assets-section">下载素材</div>
-    <section v-if="cardOn('assets', 'assetsBuiltin')" class="card" data-search="assetsBuiltin">
-      <!-- 卡头与「导入的形象 / 共享形象 / 共享音效」同款：fold-title 折叠 + 右侧主操作 + 收起态摘要。
-           本卡定位特殊（随包附带、只作对照），但折叠交互没必要另起一套 —— 原先的
-           link-btn（文案在「内置资源与下载源 / 收起内置资源与下载源」间跳）缺折叠箭头，
-           和下面几张卡的 ▸/▾ 范式也对不上。 -->
-      <div class="card-head">
-        <button class="fold-title" type="button" @click="emit('toggle-builtin-fold', !builtinFold)">
-          <span class="fold-caret">{{ builtinFold ? '▾' : '▸' }}</span>
-          内置资源与下载源
-        </button>
-        <div class="head-actions">
-          <!-- 主操作 = 把可下载的那批形象拉回来（目前 1 张）。与共享形象卡同款措辞与禁用条件 -->
-          <button v-if="skinPackSkins.length" class="export-btn utils-btn utils-primary" type="button"
-                  :disabled="skinPackBusy || skinPackAllInstalled"
-                  @click="doDownloadSkinPacks()">
-            {{ skinPackBusy ? '正在下载…'
-              : skinPackAllInstalled ? '已全部下载'
-                : skinPackInstalledAny ? `下载剩余 ${skinPackSkins.length - skinPackInstalledCount} 张（约 ${fmtBytes(skinPackRemainBytes)}）`
-                    : (skinPackSkins.length === 1 ? `下载（约 ${fmtBytes(skinPackBytes)}）`
-                       : `下载全部 ${skinPackSkins.length} 张（约 ${fmtBytes(skinPackBytes)}）`) }}
-          </button>
-        </div>
-      </div>
-      <p v-if="!builtinFold" class="hint">
-        随包形象 {{ builtinSkins.length }} 张 · 可下载 {{ skinPackSkins.length }} 张 · 音色 {{ BUILTIN_SOUND_SETS.length }} 组。
-        随插件附带、不可删除，列出只作对照。
-      </p>
-      <template v-if="builtinFold">
-        <p class="hint">随插件附带、不可删除，列在这里只作对照；换形象 / 音色请到「挂件外观」。</p>
-        <p v-if="skinInUseMissing" class="msg err">
-          你正在使用的形象「{{ missingSkinName }}」随新版移出了插件包，挂件暂用默认形象显示。
-          点下方它的缩略图即可下载找回（也可整体「下载全部」）。
-        </p>
-        <p class="group-title">内置形象 <em>（随包 {{ builtinSkins.length }} 张 · 可下载 {{ skinPackSkins.length }} 张，共约 {{ fmtBytes(skinPackBytes) }}；当前：{{ cfg.skin === 'custom' ? '自定义' : cfg.skin }}）</em></p>
-        <div class="skin-grid">
-          <div v-for="s in builtinSkins" :key="'b-' + s" class="skin-cell" :class="{ active: cfg.skin === s }">
-            <div class="skin-box">
-              <img class="skin-cell-img" :src="builtinSkinUrl(s)" :alt="s" :title="s" />
-              <span class="skin-cell-tag">{{ s }}</span>
-            </div>
-          </div>
-          <!-- 可下载的那批（v1.8.0 起只剩 1 张）：未装灰底 + 下载角标（缩略图是设置页内嵌的，不下载也能看见长什么样）；
-               已装则与「导入的形象」共用一套展示（缩略图从画廊来），可选用 / 可删 -->
-          <div v-for="s in skinPackItems" :key="'p-' + s.id" class="skin-cell"
-               :class="{ active: cfg.skin === s.id, 'is-remote': !skinPackInstalled[s.id] }">
-            <div class="skin-box">
-              <button class="skin-cell-pick" type="button"
-                      :title="skinPackInstalled[s.id] ? `${skinPackLabel(s.id)}（已下载，点选用）`
-                        : `${skinPackLabel(s.id)}（未下载，点一下下载，下完自动切到这张）`"
-                      @click="doSkinPackCell(s.id)">
-                <img class="skin-cell-img" :src="skinPackThumb(s.id)" :alt="skinPackLabel(s.id)" />
-              </button>
-              <!-- 角标写「下载」：v1.8.0 起这批只剩 1 张，「下载全部」显得莫名其妙 -->
-              <span v-if="!skinPackInstalled[s.id]" class="skin-cell-badge">下载</span>
-              <!-- 名字与警示标签二选一：两个都贴 bottom:0，同时渲染会叠在一起看不清。
-                   「正在使用 · 未下载」本身已含「是哪张」的信息（它只可能出现在 cfg.skin 那张上） -->
-              <span v-if="skinInUseMissing && s.id === cfg.skin" class="skin-cell-tag warn">正在使用 · 未下载</span>
-              <span v-else class="skin-cell-tag">{{ skinPackLabel(s.id) }}</span>
-              <span v-if="skinPackInstalled[s.id]" class="skin-cell-ops">
-                <button class="skin-op danger" type="button" title="从本地删除这张（可重新下载）"
-                        @click.stop="doRemoveSkin(s.id)">删</button>
-              </span>
-            </div>
-          </div>
-        </div>
-        <!-- 「下载」主按钮已上移到卡头（.head-actions），与共享形象 / 共享音效同款，
-             卡内不再重复一个一模一样的按钮 -->
-        <DownloadBox v-if="dlProgress && dlProgress.pack === 'skins'"
-                     :progress="dlProgress" :percent="dlPercent" :amount="dlAmountText" />
-        <p class="hint">
-          <strong>一次操作下载的是整包</strong>：形象打包在同一个 Release 文件里，没有按张分片，所以无论点缩略图还是点上面按钮，
-          都会把未下载的那几张一起下回来（已下载的自动跳过，不重复占体积），下完自动切到你点的那张。
-          已下载的缩略图悬停可「删」单张，删了能重新下载。下载回来的形象存本地、不占导入配额（「导入的形象」最多 20 张另算）。
-        </p>
-        <!-- 下载源：留空即内置候选链（ghfast.top 加速 → 直连 github.com 兜底）。
-             自填须是 http(s) 绝对 URL 前缀，宿主会归一化（非法串回空并回落内置），末尾 '/' 可省略 -->
-        <label class="field row">
-          <span class="label">形象下载源 <em>（留空用内置：ghfast.top，失败自动直连 github.com）</em></span>
-          <input type="text" :maxlength="SKIN_PACK_PREFIX_MAX" spellcheck="false" autocomplete="off"
-                 placeholder="https://ghfast.top/"
-                 :value="cfg.skinPackSrc"
-                 @change="emit('patch', { skinPackSrc: ($event.target as HTMLInputElement).value })" />
-        </label>
-        <p v-if="skinPackFlash.msg" class="msg" :class="msgCls(skinPackFlash)">{{ skinPackFlash.msg }}</p>
-        <p class="group-title">内置音色 <em>（两组，在「挂件外观 → 音色」里选；提醒音没有内置回落）</em></p>
-        <div class="field row" v-for="g in BUILTIN_SOUND_SETS" :key="g.key">
-          <span class="label">{{ g.label }}</span>
-          <span class="sound-file">按压 {{ g.press }} · 释放 {{ g.release }}</span>
-          <button class="export-btn utils-btn utils-outline" type="button" @click="doPreviewBuiltin(g.press)">试听按压</button>
-          <button class="export-btn utils-btn utils-outline" type="button" @click="doPreviewBuiltin(g.release)">试听释放</button>
-        </div>
-        <p class="hint">
-          内置音色是插件包里的文件，不占本地数据目录空间，也不会被「清除素材」删掉。
-        </p>
-        <p v-if="builtinFlash.msg" class="msg" :class="msgCls(builtinFlash)">{{ builtinFlash.msg }}</p>
-      </template>
-    </section>
-
-    <!-- [资源] 共享角色：上游 QQ 群素材（36 张），v1.9.0 起按需单张下载（走 raw 直链，不再整包）。
-         点缩略图 = 下这一张；顶上按钮 = 逐张串行把未下载的补齐 -->
-    <section v-if="cardOn('assets', 'assetsSharedSkins')" class="card" data-search="assetsSharedSkins">
-      <div class="card-head">
-        <button class="fold-title" type="button" @click="galleryFolds.sharedSkins = !galleryFolds.sharedSkins">
-          <span class="fold-caret">{{ galleryOpen('sharedSkins') ? '▾' : '▸' }}</span>
-          共享形象
-        </button>
-        <div class="head-actions">
-          <!-- v-if 兜住「清单还没拉到」的空窗：这时 count / totalBytes 都是 0，
-               按钮会显示成「下载全部 0 张（约 0 KB）」。空窗一过（watch 补拉）就正常 -->
-          <button v-if="sharedSkinItems.length" class="export-btn utils-btn utils-primary" type="button"
-                  :disabled="sharedSkinBusy || sharedSkinAllInstalled"
-                  @click="doDownloadSharedSkins()">
-            {{ sharedSkinBusy ? '正在下载…'
-              : sharedSkinAllInstalled ? '已全部下载'
-                : sharedSkinInstalledCount ? `下载剩余 ${sharedSkinItems.length - sharedSkinInstalledCount} 张（约 ${fmtBytes(sharedSkinRemainBytes)}）`
-                  : `下载全部 ${sharedSkinItems.length} 张（约 ${fmtBytes(sharedSkinTotalBytes)}）` }}
-          </button>
-        </div>
-      </div>
-      <p v-if="!galleryOpen('sharedSkins')" class="hint">
-        共 {{ sharedSkinItems.length }} 张，已下载 {{ sharedSkinInstalledCount }} 张。
-      </p>
-      <template v-if="galleryOpen('sharedSkins')">
-      <DownloadBox v-if="dlProgress && dlProgress.pack === 'shared-skins'"
-                   :progress="dlProgress" :percent="dlPercent" :amount="dlAmountText" />
-      <div class="skin-grid">
-        <div v-for="s in sharedSkinItems" :key="'sh-' + s.id" class="skin-cell"
-             :class="{ active: cfg.skin === s.id, 'is-remote': !sharedSkinInstalled[s.id] }">
-          <div class="skin-box">
-            <button class="skin-cell-pick" type="button"
-                    :title="sharedSkinInstalled[s.id] ? `${sharedSkinNames[s.id] || s.id}（已下载，点选用）`
-                      : `${sharedSkinNames[s.id] || s.id}（未下载，点一下下载这张，下完自动切到这张）`"
-                    @click="doSharedSkinCell(s.id)">
-              <img v-if="!thumbBroken['sh-' + s.id]" class="skin-cell-img" :src="sharedSkinThumb(s.id)"
-                   :alt="sharedSkinNames[s.id] || s.id" @error="onThumbError('sh-' + s.id)" />
-              <span v-else class="skin-cell-broken">预览加载失败</span>
-            </button>
-            <!-- 单张点击只下这一张，但 40MB 整包时代留下的「下载全部」措辞要改成「下载」 -->
-            <span v-if="!sharedSkinInstalled[s.id]" class="skin-cell-badge">下载</span>
-            <span class="skin-cell-tag">{{ sharedSkinNames[s.id] || s.id }}</span>
-            <span v-if="sharedSkinInstalled[s.id]" class="skin-cell-ops">
-              <button class="skin-op danger" type="button" title="从本地删除这张（可重新下载）"
-                      @click.stop="doRemoveSkin(s.id)">删</button>
-            </span>
-          </div>
-        </div>
-      </div>
-      <p v-if="!sharedSkinItems.length" class="hint">暂无可下载的共享角色。</p>
-      <p class="hint">
-        这些角色来自上游 QQ 群分享，<strong>不随插件包分发</strong>，改为按需从 GitHub 直链下载。
-        <strong>点缩略图只下载这一张</strong>（约 1~2MB），下完自动切到这张；
-        点上方的按钮会把还没下载的<strong>逐张</strong>下回来（已下载的自动跳过）。
-        已下载的可悬停「删」单张，删了能重新下载；下载回来的角色存本地，不占「导入的形象」的 20 张配额。
-      </p>
-      <p v-if="sharedSkinFlash.msg" class="msg" :class="msgCls(sharedSkinFlash)">{{ sharedSkinFlash.msg }}</p>
-      </template>
-    </section>
-
-    <!-- [资源] 共享音效库：与共享角色同一批上游素材（45 段），落 sounds 的 shared 槽位。
-         它本身就是「可参与播放」的段 —— 每段自带一组 roles（参加哪些实播槽位的播放），
-         下载后默认不挂到任何槽位（不打扰），用户在行内的槽位按钮上勾选要参加哪几个。 -->
-    <section v-if="cardOn('assets', 'assetsSharedSounds')" class="card" data-search="assetsSharedSounds">
-      <div class="card-head">
-        <button class="fold-title" type="button" @click="galleryFolds.sharedSounds = !galleryFolds.sharedSounds">
-          <span class="fold-caret">{{ galleryOpen('sharedSounds') ? '▾' : '▸' }}</span>
-          共享音效
-        </button>
-        <div class="head-actions">
-          <!-- 同「共享形象」：清单未拉到时先不渲染，免得出现「下载全部 0 段（约 0 KB）」 -->
-          <button v-if="sharedSoundItems.length" class="export-btn utils-btn utils-primary" type="button"
-                  :disabled="sharedSoundBusy || sharedSoundAllInstalled"
-                  @click="doDownloadSharedSounds()">
-            {{ sharedSoundBusy ? '正在下载…'
-              : sharedSoundAllInstalled ? '已全部下载'
-                : sharedSoundInstalledCount ? `下载剩余 ${sharedSoundItems.length - sharedSoundInstalledCount} 段（约 ${fmtBytes(sharedSoundRemainBytes)}）`
-                  : `下载全部 ${sharedSoundItems.length} 段（约 ${fmtBytes(sharedSoundTotalBytes)}）` }}
-          </button>
-        </div>
-      </div>
-      <p v-if="!galleryOpen('sharedSounds')" class="hint">
-        共 {{ sharedSoundItems.length }} 段，已下载 {{ sharedSoundInstalledCount }} 段。
-      </p>
-      <template v-if="galleryOpen('sharedSounds')">
-      <DownloadBox v-if="dlProgress && dlProgress.pack === 'shared-sounds'"
-                   :progress="dlProgress" :percent="dlPercent" :amount="dlAmountText" />
-      <!-- 列表按「是否已下载」分两组：两组的控件数量差 3 个（未下载行没有试听/槽位勾选/删），
-           混排会让整列文件名的右边界在两种行之间来回跳，45 行看下来就是锯齿。
-           分组后同组内控件结构一致，列能对齐；未下载的那组默认收进 .fold 里，
-           免得 45 行未下载项把「已下载」这半截推到屏外。 -->
-      <div class="shs-list">
-        <template v-if="sharedSoundInstalledItems.length">
-          <p class="group-title">已下载 <em>（{{ sharedSoundInstalledItems.length }} 段，勾选槽位即参加播放 / 可试听 / 可删）</em></p>
-          <!-- 45 行铺开时找一段要滚很久；搜索 + 三档筛选把「已下载」这半截收窄。
-               筛选只作用于本组（未下载组是逐段补下载用的，筛它没意义） -->
-          <div class="shs-filter">
-            <input type="text" spellcheck="false" autocomplete="off"
-                   placeholder="按音效名过滤…"
-                   :value="sharedSoundQuery"
-                   @input="sharedSoundQuery = ($event.target as HTMLInputElement).value" />
-            <button class="role-chip utils-btn" type="button"
-                    :class="sharedSoundFilter === 'all' ? 'utils-primary' : 'utils-outline'"
-                    @click="sharedSoundFilter = 'all'">全部</button>
-            <button class="role-chip utils-btn" type="button"
-                    :class="sharedSoundFilter === 'pinned' ? 'utils-primary' : 'utils-outline'"
-                    @click="sharedSoundFilter = 'pinned'">已参加播放</button>
-            <button class="role-chip utils-btn" type="button"
-                    :class="sharedSoundFilter === 'unpinned' ? 'utils-primary' : 'utils-outline'"
-                    @click="sharedSoundFilter = 'unpinned'">一段都没挂</button>
-          </div>
-          <!-- 已下载段列表：限高内滚。45 段铺开会让整张卡长到几十屏，
-               滚完「已下载」早就忘了上面还有什么 —— 卡高度收敛成固定值（约 6 行），
-               剩余内容交给内部滚动条，卡外的页面长度因此可预期。
-               搜索 / 筛选行留在滚动区外，过滤时不用先滚回顶部 -->
-          <div class="shs-scroll">
-            <div class="shs-row" v-for="it in sharedSoundInstalledShown" :key="'shs-' + it.id">
-              <!-- 主线：文件名 + 体积 + 试听 / 删 归到同一行。
-                   45 行时纵向空间是稀缺资源 —— 早先把「试听 / 删」并进下面的 chip 行，
-                   6 个 chip 一撑满，「试听 / 删」就被挤到第三行，每段白占 3 行。
-                   现在动作跟文件名同排（右端对齐），chip 单独占一行 -->
-              <div class="shs-main">
-                <SoundRow :name="it.name" :size="fmtBytes(it.size)">
-                  <span class="seg-ops">
-                    <button class="export-btn utils-btn utils-outline" type="button"
-                            :class="{ 'preview-on': previewingSharedId === it.id }"
-                            @click="doPreviewSharedSound(it)">{{ previewingSharedId === it.id ? '停止' : '试听' }}</button>
-                    <button class="export-btn utils-btn" type="button"
-                            :class="removeConfirmId === it.id ? 'utils-danger' : 'utils-outline'"
-                            :title="removeConfirmId === it.id ? '再点一次确认删除（3 秒后自动取消）' : '从共享音效库删掉这一段；各槽位上挂的这段也一并失效'"
-                            @click="doRemoveSharedSound(it)">{{ removeConfirmId === it.id ? '确认删' : '删' }}</button>
-                  </span>
-                </SoundRow>
-              </div>
-              <!-- 副线：槽位勾选。每个槽位一个小 chip，点一下加入 / 再点移出（即 setSharedRoles）——
-                   取代了旧的「先选槽位再点选用」（那套是另存一份拷贝，一个槽位只能有一段）。
-                   「参加播放：」标签与 chip 同排换行，窄卡片里 chip 换行后仍贴着标签列 -->
-              <div class="shs-ops">
-                <!-- 按压 / 释放是「音色」的两段（要配合音色=自定义才响）；另外四类是独立提醒音。
-                     两组间用 .shs-roles-gap 拉开一点，让用户看出这层区别 -->
-                <template v-for="r in SOUND_ROLES" :key="r">
-                  <span v-if="r === ALERT_SOUND_ROLES[0]" class="shs-roles-gap" />
-                  <button class="role-chip utils-btn" type="button"
-                          :class="it.roles.indexOf(r) >= 0 ? 'utils-primary' : 'utils-outline'"
-                          :disabled="sharedSoundBusy"
-                          :title="ALERT_SOUND_WHEN[r] || ''"
-                          @click="toggleSharedRole(it, r, it.roles.indexOf(r) < 0)">{{ SOUND_ROLE_LABEL[r] }}</button>
-                </template>
-              </div>
-            </div>
-          </div>
-          <p v-if="!sharedSoundInstalledShown.length" class="hint">没有符合条件的已下载段。</p>
-        </template>
-        <p v-else class="hint">共享音效库暂时是空的 —— 上方按钮若显示「下载全部 N 段」，点它把音效拉回来。</p>
-
-        <div class="fold" v-if="sharedSoundPendingItems.length">
-          <button class="link-btn utils-btn utils-secondary" type="button"
-                  @click="sharedSoundPendingOpen = !sharedSoundPendingOpen">
-            未下载 {{ sharedSoundPendingItems.length }} 段<span class="fold-caret">{{ sharedSoundPendingOpen ? '▾' : '▸' }}</span>
-          </button>
-          <template v-if="sharedSoundPendingOpen">
-            <div class="shs-row" v-for="it in sharedSoundPendingItems" :key="'shs-' + it.id">
-              <div class="shs-main">
-                <SoundRow :name="it.name" :size="fmtBytes(it.size)" />
-              </div>
-              <div class="shs-ops">
-                <!-- 措辞带上「这一段」：顶部还有一个「下载剩余 N 段」（逐段串行下完），
-                     两个按钮的量级差 40 倍，都写「下载」会让人以为点了就是整包 -->
-                <button class="export-btn utils-btn utils-primary" type="button"
-                        :disabled="sharedSoundBusy" @click="doDownloadSharedSound(it)">下载这一段</button>
-              </div>
-            </div>
-          </template>
-        </div>
-      </div>
-      <p class="hint">
-        这些音效来自上游 QQ 群分享，<strong>不随插件包分发</strong>，改为按需从 GitHub 直链下载。
-        <strong>「下载这一段」只拉当前这一条</strong>；卡头的按钮是把还没下载的<strong>逐段</strong>串行下回来。
-        下载后这段就进了共享音效库，<strong>默认不参加任何槽位的播放</strong>（不打扰）——
-        在上面的行里点亮想让它响的槽位即可，一段能同时挂在多个槽位，一个槽位也能同时挂多段。
-        <br>加入播放后，它<strong>不会顶掉</strong>「导入的音效」卡里你手导的那段：挂件每次触发会在「导入的那段 + 挂到本槽位的共享段」里<strong>随机选一段</strong>播放。
-        点「删」删掉这段，它从所有挂过的槽位上一起消失。
-      </p>
-      <p v-if="sharedSoundFlash.msg" class="msg" :class="msgCls(sharedSoundFlash)">{{ sharedSoundFlash.msg }}</p>
       </template>
     </section>
   </div>
@@ -1985,6 +2010,30 @@ input[type='checkbox'] {
   font-size: 11px;
   color: var(--fg-faint);
 }
+/* 「形象」卡内的两段分区：「我的形象」（已落盘）与「可下载形象」（上游有、没下来）。
+   合并三卡后这一张卡同时含三段网格（我的 + 随包内置 + 共享角色），
+   给段标题加一条上面线与分组语义，用户扫一眼就知道每段是什么、彼此不连成一片。
+   上段紧跟卡头，不留上边距 + 不画线（否则卡头下凭空多一道线） */
+.skin-group-title {
+  margin-top: 18px;
+}
+.skin-group-title:first-of-type {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
+}
+/* 下段里的两个子分组（随包内置 / 共享角色）比段标题再低一级：
+   不画上边框（同属「可下载形象」这一段的内部细分），只用更小的字号与更浅的颜色区分 */
+.skin-sub-title {
+  margin: 12px 0 6px;
+  font-size: 12px;
+  color: var(--fg-dim);
+}
+.skin-sub-title em {
+  font-style: normal;
+  font-size: 11px;
+  color: var(--fg-faint);
+}
 
 /* ===== 「导入的音效」：六个槽位各成一个块 =====
    块 = 槽位头（角色名 + 概况 + 导入/替换按钮）+ 该槽位那一段（最多一段）的明细。
@@ -2154,16 +2203,33 @@ input[type='checkbox'] {
   align-items: center;
   flex-wrap: wrap;
   gap: 6px;
-  margin-top: 4px;
+  /* 与上行文件名错开一格：chip 是这一行「展开出来的」子级，缩进让人一眼看出从属 */
+  margin-top: 6px;
+  padding-left: 16px;
 }
-/* 「参加播放：」标签不再单独占位：塞进 chip 行首，用 ::before 省一层 DOM，
-   且 chip 换行时首行仍以它为起点（flex 换行不会把它挤到第二行） */
-.shs-ops::before {
-  content: '参加播放：';
+/* 行头「参加 N 个槽位」开关：点它展开 / 收起这一行的槽位 chip。
+   常态只是一个很淡的小标记，不抢文件名；展开后箭头朝下、文字转强调色 */
+.shs-row-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
   flex: 0 0 auto;
-  font-size: 12px;
+  padding: 1px 4px;
+  border: none;
+  background: transparent;
+  font-size: 11px;
   color: var(--fg-faint);
-  align-self: center;
+  cursor: pointer;
+}
+.shs-row-toggle:hover {
+  color: var(--accent);
+}
+.shs-row-caret {
+  font-size: 10px;
+  line-height: 1;
+}
+.shs-row-roles {
+  white-space: nowrap;
 }
 /* 槽位 chip：一段共享音效「参加哪些槽位的播放」。点亮 = utils-primary（已参加），
    熄灭 = utils-outline（未参加）。比旧的下拉更直观 —— 一眼看出这段参与了哪几个槽位，

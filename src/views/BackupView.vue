@@ -141,6 +141,11 @@ function backupCancelPick() {
   backupFlash.msg = ''
   try { props.services.backupCancel?.() } catch (err) {}
 }
+
+// 卡级折叠：本卡正文很长（一段安全说明 + 两个导出勾选 + 导出/导入按钮 + 导入预览区），
+// 日常只在「导出/导入」时才展开；默认展开但可收起，收起后标题栏摘要播报是否有待恢复的预览
+const cardFold = reactive({ open: true })
+const cardSummary = computed(() => backupPreview.value ? '已读取备份，待恢复' : '导出 / 导入 JSON 备份')
 </script>
 
 <template>
@@ -149,7 +154,13 @@ function backupCancelPick() {
        即 desc 承诺是卡、实际是别人卡里的折叠。提升为独立卡，三者对齐；也更好找。
        根元素即 .card：父级 v-if 控显隐，data-search 供搜索滚动锚点定位。 -->
   <section class="card" data-search="backup">
-    <h2>备份与恢复</h2>
+    <div class="card-head">
+      <h2 class="card-toggle" @click="cardFold.open = !cardFold.open">
+        <span class="caret">{{ cardFold.open ? '▾' : '▸' }}</span>备份与恢复
+        <span v-if="!cardFold.open" class="card-sum">{{ cardSummary }}</span>
+      </h2>
+    </div>
+    <template v-if="cardFold.open">
     <p class="hint">把「挂件设置 / 账本 / 窗口位置 / 计时 / 节假日表」打包成一个 JSON 文件；<strong>不含</strong> dsh 开发者配置与已导入的形象 / 音效素材（这几类可用「资源」页的素材包单独导出）。<strong>凭据默认不导出</strong>，勾选「包含凭据」后必须设密码，凭据（API Key / 平台 Token / SMTP 密码）会用 scrypt + AES-256-GCM 加密后才写入文件（文件里没有明文）。<strong>按压气泡</strong>的文字与开关随「挂件设置」一起备份，自定义配图默认不导出，勾选「包含气泡图素材」才会一并打包。<strong>安全提示：</strong>密码不会保存到任何地方，忘记就无法解密（其余项仍可正常恢复）；备份文件本身含你的设置与用量记录，请妥善保管。</p>
     <label class="field row check">
       <span class="label">包含凭据 <em>（需设密码，加密后写入）</em></span>
@@ -187,6 +198,7 @@ function backupCancelPick() {
       </div>
     </div>
     <p v-if="backupFlash.msg" class="msg" :class="msgCls(backupFlash)">{{ backupFlash.msg }}</p>
+    </template>
   </section>
 </template>
 
