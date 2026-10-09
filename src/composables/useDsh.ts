@@ -43,7 +43,9 @@ export function useDsh(opts: {
   DEFAULT_DSH_PORT: number
   useFlash: () => Flash
   usePolling: (fn: () => void, ms: number, immediate?: boolean) => { start: () => void; stop: () => void }
-  devStatsLoaded: Record<string, boolean>
+  // 各开发者卡的「读过时间戳」（0 = 没读过）。父级 App.vue 维护，这里只读不写 ——
+  // 判真即「读过」（P5 起改为时间戳，语义仍是「本会话读过没有」）
+  devStatsLoaded: Record<string, number>
 }) {
   const { services, cfg, patchCfg, activeTab, DEFAULT_DSH_PORT, useFlash, usePolling, devStatsLoaded } = opts
 
@@ -2169,6 +2171,13 @@ const DSH_MARKET_TAIL_LINES = 12
 // pnpm 构建拦截的引导信息：github / tarball 来源靠 prepare 脚本构建，pnpm 默认拦截，
 // 失败时 dsh 会给出那把带 commit hash 的 allowBuilds key。这里存下来让用户照着写一遍再重试
 const dshMarketAllowBuilds = ref<{ spec: string; name: string; key: string; file: string } | null>(null)
+// 「值得原样再试一次」的失败（P3）。宿主按 pnpm 输出分类后回传 retryable，只有三类**瞬时**成因
+// 才为真：网络抖动 / 拉取超时 / workspace 存在时的 root-add。落成独立 ref 而不是复用 allowBuilds：
+// 两者的出路**相反** —— allowBuilds 要用户去改配置再点，retryable 是「什么都不用改，再点一次」，
+// 混在一起会出现「既让你重试又让你改白名单」的自相矛盾指引。
+// ⚠️ 只存「提示态」，不存命令本身：重试必须**重跑 dryRun**（见 dshMarketRetryNow），
+//    不能拿旧 plan 直接 confirm —— 失败可能已改盘（如 root-add 被 pnpm 部分写盘），旧单据会过期。
+const dshMarketRetry = ref<{ name: string; code: string } | null>(null)
 
 // 更新检查结果：键是 spec（目录条目的 install spec，全目录唯一），值是判定结果。
 // ⚠️ 为什么按 spec 而不是 npm 名做键：目录近半数条目 npm 为 null，只有 spec 一定存在；
@@ -2458,6 +2467,8 @@ function dshMarketPreviewInstallExact(p: DshMarketPlugin, force = false) {
   dshMarketBusy.value = true
   dshMarketFlash.msg = ''
   dshMarketFlash.err = false
+  // 同 dshMarketPreviewInstall：重跑 dryRun 即换了条命令，旧的重试提示作废
+  dshMarketRetry.value = null
   Promise.resolve(services.dshMarketInstall?.({
     profile: dshPatchProfile,
     spec: p.spec,
@@ -3240,6 +3251,8 @@ function dshMarketPreviewInstall(p: DshMarketPlugin, force = false) {
   dshMarketBusy.value = true
   dshMarketFlash.msg = ''
   dshMarketFlash.err = false
+  // 重新生成单据 = 换了条命令，上一轮的「可重试」提示跟着作废（同 dshMarketConfirm 的理由）
+  dshMarketRetry.value = null
   // ⚠️ 必须把目录条目的 version 传下去：宿主只靠 profile/package.json 判「装没装」，
   //    而声明范围 `^1.48.0` 是**容得下** `1.49.0` 的 —— 不传版本，已装的包永远被判成
   //    「无需重复安装」，用户看着目录有新版本却点不动（真实 bug）。宿主拿到 version 才会比实装版本。
@@ -3316,6 +3329,30 @@ function dshMarketForcePlan() {
   return dshMarketPreviewInstall(p, true)
 }
 
+// 「重试一次」—— 只对宿主判为**瞬时失败**的那几类出现（P3）。
+//
+// ⚠️ 为什么是重跑 dryRun 而不是直接 `dshMarketConfirm()`：失败可能已经部分改盘
+//    （root-add 被 pnpm 拦下前 profile/package.json 未必一字节没动），旧 plan 的
+//    「将要执行什么」就过期了。重跑 dryRun 拿到的才是当前磁盘状态下的正确单据 ——
+//    既让用户再看一眼要做什么，也让宿主那两道闸（兼容性、供应链）重新过一遍。
+// ⚠️ 不做自动重试：自动重试已经在宿主侧（runPnpmWithCompat）做过一次了。这里再自动一次
+//    就成了「失败 → 静默重试 → 又失败 → 再静默重试」，用户只看到转圈更久，还是不知道要不要改配置。
+//    把最后这一次交给用户点，是刻意的 —— 重试按钮旁边会同时显示「是什么原因、要不要改配置」。
+function dshMarketRetryNow() {
+  if (dshMarketBusy.value) return
+  const p = dshMarketPlanPlugin()
+  if (!p) {
+    // 与 dshMarketForcePlan 同口径：列表被重筛过就明说，不能静默 return
+    dshMarketFlash.err = true
+    dshMarketFlash.msg = '找不到这条目录条目（列表可能已被筛选/重载改过），请退出市场重新进入后再试。'
+    return
+  }
+  // 精确安装（用户查到的那一版）必须带回 targetVersion，否则会从「装 v1.65.1」悄悄变成
+  // 「按目录重装」—— 与 dshMarketForcePlan 同一处坑，这里刻意用同样的分派判据
+  if (dshMarketPlan.value?.exact) return dshMarketPreviewInstallExact(p, !!dshMarketPlan.value?.hostForced)
+  return dshMarketPreviewInstall(p, !!dshMarketPlan.value?.hostForced)
+}
+
 // 第一段：dryRun（停用 / 卸载）。remove=false 写 patch 的 disabled 行（包留在磁盘），
 // remove=true 才真的从 profile 里删包 —— 两者是同一条链路的不同分支，所以走同一个入口、
 // 由 remove 区分，避免两套并行逻辑漂移。
@@ -3337,6 +3374,7 @@ function dshMarketPreviewUninstall(p: DshMarketPlugin, remove: boolean) {
   dshMarketBusy.value = true
   dshMarketFlash.msg = ''
   dshMarketFlash.err = false
+  dshMarketRetry.value = null
   Promise.resolve(services.dshMarketUninstall?.({ profile: dshPatchProfile, spec: p.spec, npm: p.npm, name: p.name, remove, dryRun: true }))
     .then((r) => {
       if (!r) {
@@ -3373,6 +3411,8 @@ function dshMarketConfirm() {
   dshMarketPending.value = plan.npm
   dshMarketFlash.msg = ''
   dshMarketFlash.err = false
+  // 一动手就把上一轮的「可重试」提示收掉：它属于**上一条**命令，留着会让人以为这次也不行
+  dshMarketRetry.value = null
   // 安装与更新都走 spec（github/tarball 条目没有 npm 名）；卸载走 npm 键名（宿主自己也会反查兜底）。
   // ⚠️ 更新必须用 plan.spec：plan.npm 在 update 分支里存的也是 spec（目录给的安装原话），
   //    但显式读 spec 才不会在日后改动里被误会成「npm 包名」
@@ -3454,8 +3494,20 @@ function dshMarketConfirm() {
           dshMarketAllowBuilds.value = { spec: plan.npm, name: plan.name, key: ab.key, file: ab.file }
           dshMarketFlash.msg += ' 这属于 pnpm 的构建拦截（不是安装失败）—— 见下方指引。'
         }
+        // ⚠️ 「可重试」与「要改配置」互斥（P3）：allowBuilds 是「必须先去改 pnpm 白名单」，
+        //    给了重试按钮反而误导（重试一百次也还是一样的构建拦截）。宿主侧 allowBuilds 命中时
+        //    retryable 本就有意义不明之处（分类器此时命中的是 unparseable-build-key，retryable=false），
+        //    这里再加一道 `!ab` 保险，确保两个指引不会同时在屏幕上出现。
+        // ⚠️ 宿主不兼容（hostForced 那条路的失败）也不给重试：它失败在「dsh 加载插件」这一步，
+        //    不是 pnpm 的瞬时抖动，重试注定同样失败，出路是升 DSH 或回滚快照。
+        const resR = r as DshMarketInstallResult
+        if (resR.retryable === true && !ab && !resR.hostIncompatible) {
+          dshMarketRetry.value = { name: plan.name || plan.npm, code: String(resR.failureCode || '') }
+        }
         return
       }
+      // 成功即清空上一轮的「可重试」提示，否则它会留在屏幕上，让用户以为这次也失败了
+      dshMarketRetry.value = null
       dshMarketAllowBuilds.value = null
       // 三种成功的说法要分清，否则用户不知道「卸载」到底删没删包。
       // ⚠️ 装/卸返回的是两种不同结果类型（version 只有装那边有、id 只有禁用那边有），
@@ -3823,6 +3875,8 @@ function dshMarketPinText(p: DshMarketPlugin) {
     dshMarketPreviewInstallExact,
     dshMarketPreviewUninstall,
     dshMarketRefreshStatus,
+    dshMarketRetry,
+    dshMarketRetryNow,
     dshMarketRevealed,
     dshMarketSort,
     dshMarketSortDesc,

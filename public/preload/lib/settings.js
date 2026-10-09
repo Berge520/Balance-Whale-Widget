@@ -61,7 +61,8 @@ const { parsePatch, applyToggle, applyBatchDisable } = require('./dsh-patch')
 const dshIsolate = require('./dsh-isolate')
 const dshMarket = require('./dsh-market')
 const dshHostCompat = require('./dsh-host-compat')
-const { readTextSafe } = require('./util')
+const pnpmCompat = require('./pnpm-compat')
+const { readTextSafe, writeFileAtomicSync } = require('./util')
 const holidays = require('./holidays')
 
 // 镜像测速超时：只打元数据（几百字节），8s 足够；等不到就说明该源当下不可用
@@ -137,10 +138,17 @@ function toggleDshPatchItem(opts) {
 
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true })
-    fs.writeFileSync(file, res.text, 'utf8')
   } catch (err) {
-    logErr('[whale][dsh-patch] 写 patch 文件失败', id + ': ' + ((err && err.message) || err))
+    logErr('[whale][dsh-patch] 建 patch 目录失败', id + ': ' + ((err && err.message) || err))
     return { ok: false, error: '写入失败：' + ((err && err.message) || err) }
+  }
+  // ⚠️ 原子写（2026-10-09）：这是**用户手写的 dsh 配置文件**（cordis.patch.yml）。
+  //    非原子写时进程被杀会留下半份 YAML，而 dsh 对读不懂的 patch 只往 stderr 打一行、
+  //    退出码 0 —— 用户会看到「插件莫名不加载」而毫无线索。半写比不写更糟
+  const w = writeFileAtomicSync(file, res.text, 'utf8')
+  if (!w.ok) {
+    logErr('[whale][dsh-patch] 写 patch 文件失败', id + ': ' + w.error)
+    return { ok: false, error: '写入失败：' + w.error }
   }
 
   // V2 的教训落地：写完**回读磁盘**确认那条 id 真的以期望形态出现了。
@@ -868,12 +876,29 @@ function updateAfterCompat(o, ctx) {
     logErr('[whale][dsh-market] 快照失败，已中止更新', snap.error || '')
     return Promise.resolve({ ok: false, error: '建快照失败，已中止更新：' + (snap.error || '未知错误') })
   }
-  return dsh.installPluginPkg(profile, spec).then((r) => {
+  return runPnpmWithCompat(profile, (extra) => dsh.installPluginPkg(profile, spec, extra)).then((res) => {
+    const r = res.r
     if (!r.ok) {
-      logErr('[whale][dsh-market] 更新失败', spec + ' 退出码 ' + r.code + ' ' + (r.err || ''))
+      logErr('[whale][dsh-market] 更新失败', spec + ' 退出码 ' + r.code + ' ' + (r.err || '') + (res.cls.code ? ' [' + res.cls.code + ']' : ''))
       const build = o.needsBuild === true ? parseAllowBuilds(r.out || '') : null
       // 需构建被拦时重试前必须先改 allowBuilds，原样重试必然再失败；其余 pnpm 失败多为网络/锁文件，可重试
-      return { ok: false, spec: spec, name: label, error: '更新失败（退出码 ' + r.code + '）：详见「日志」卡', tail: tailLines(r.out || r.err || ''), retryable: !build, snapshot: snap.dirName, allowBuilds: build }
+      // ⚠️ retryable 口径（P2）：build 或「分类明确说不可重试」时给 false —— 过去一律 !build，
+      //    结果 release-age / lockfile / 认不出的失败都给了「重试」按钮，点一次白等一次
+      const retryable = !build && (res.cls.code ? res.cls.retryable : true)
+      const why = compatText(res.cls)
+      return {
+        ok: false,
+        spec: spec,
+        name: label,
+        error: '更新失败（退出码 ' + r.code + '）' + (res.retried ? '（已自动重试一次）' : '')
+          + (why ? '：' + why : '：详见「日志」卡'),
+        tail: tailLines(r.out || r.err || ''),
+        retryable: retryable,
+        failureCode: res.cls.code || '',
+        autoRetried: res.retried === true,
+        snapshot: snap.dirName,
+        allowBuilds: build,
+      }
     }
     const after = dsh.installedDeps(profile)
     const hit = dshMarket.matchInstalledBySpec(after, spec) || (npm ? dshMarket.matchDepByNpm(after, npm) : null)
@@ -1035,6 +1060,74 @@ function tailLines(text, maxLines) {
   const lines = s.split(/\r?\n/)
   if (lines.length <= max) return s
   return '（省略前面 ' + (lines.length - max) + ' 行）\n' + lines.slice(-max).join('\n')
+}
+
+// ── pnpm 失败分类 + 窄口径一次性重试（P2，见 lib/pnpm-compat.js）──
+//
+// ⚠️ 为什么要把「分类结论」带进安装/更新的返回体：三个调用点（安装 / 更新 / 卸载）过去只回
+//    「退出码 N + 详见日志」，用户得自己去日志里认 `ERR_PNPM_*`。分类之后，界面能直接说清
+//    「是什么原因、下一步做什么」，这才是这次改动的全部目的。
+//
+// ⚠️ 自动重试的边界（重要，别扩）：
+//    · 只重试 pnpm-compat 白名单里的两类（网络抖动 / 超时），外加「workspace 已存在时的 root-add」；
+//    · **绝不**自动放行 release-age（上游也明确拒绝）、**绝不**自动写 allowBuilds / 改白名单 / 改 registry 超时；
+//    · **绝不**用 `install --no-frozen-lockfile` 之类的全量 install 当补救（30 分钟硬超时会把界面钉死）；
+//    · 只重试**一次** —— 第二次还失败就如实报错，不把它变成无限重试把界面卡住。
+//    重试前的「是否真的有 pnpm-workspace.yaml」必须**读盘**确认：无条件补 `-w` 会撞
+//    ERR_PNPM_NOT_A_WORKSPACE（没有 workspace 时 `-w` 反而让 pnpm 报错）。
+// ⚠️ 定位口径必须与 blockedByPolicy / dsh 的 profileDir 一致（都走 dshHome → profiles/<p>）。
+//    这里**不用 dsh.profileDir**：它没在 dsh.js 的 module.exports 里导出，经 Proxy 取到的是
+//    undefined，调用会抛 TypeError 被 catch 吃成 false —— 表现为「root-add 的 -w 补参永不触发」
+//    这种静默失效。dshBackup.dshHome() 已导出且与 dsh 内部同一口径。
+function hasPnpmWorkspace(profile) {
+  try {
+    const home = dshBackup.dshHome()
+    if (!home) return false
+    const dir = path.join(home, 'profiles', String(profile || 'web'))
+    return fs.existsSync(path.join(dir, 'pnpm-workspace.yaml')) || fs.existsSync(path.join(dir, 'pnpm-workspace.yml'))
+  } catch (err) {
+    return false
+  }
+}
+
+// 跑一次插件操作，认不出 / 不值得重试时原样返回；值得时**带修正参数重试一次**。
+//
+// run 的签名：run(extraArgs) → Promise<{ code, ok, out, err }>。
+//   extraArgs 是「这次重试额外要加的参数」，首跑传 []；重试时由本函数按码给出：
+//     · root-add 且 workspace 存在 → ['-w']
+//     · 网络抖动 / 超时 → []（同 argv 重试，靠 pnpm 自身重连即可）
+//
+// 返回 { r, cls, retried }：
+//   r     —— 最终那次 run() 的结果（首跑成功就是首跑那次的）
+//   cls   —— 最终结果的分类（成功时为 { code: null, retryable: false, ... }）
+//   retried —— 是否真的发生了第二次调用（界面据此可显示「已自动重试」）
+function runPnpmWithCompat(profile, run) {
+  return run([]).then((first) => {
+    if (first && first.ok) return { r: first, cls: pnpmCompat.classifyPnpmFailure('', 0), retried: false }
+    const cls = pnpmCompat.classifyPnpmFailure((first && (first.out || first.err)) || '', first && first.code)
+    const canRetry = pnpmCompat.shouldAutoRetryOnce(cls, { hasWorkspaceFile: hasPnpmWorkspace(profile) })
+    if (!canRetry) return { r: first, cls: cls, retried: false }
+    const extra = cls.code === 'root-add' ? ['-w'] : []
+    // ⚠️ 重试前留痕：用户在看「正在安装…」时，日志里要能看出「这是第二次」，
+    //    否则两次 pnpm 输出连着打会让人以为是同一次刷了两遍
+    log('[whale][dsh-market] pnpm 失败（' + cls.code + '），按分类自动重试一次')
+    return run(extra).then((second) => {
+      const cls2 = second && second.ok
+        ? pnpmCompat.classifyPnpmFailure('', 0)
+        : pnpmCompat.classifyPnpmFailure((second && (second.out || second.err)) || '', second && second.code)
+      return { r: second, cls: cls2, retried: true }
+    })
+  })
+}
+
+// 把分类结论拼成给用户看的一段话。认不出时返 ''（调用方回落到原来的「详见日志」文案）。
+function compatText(cls) {
+  const c = cls && typeof cls === 'object' ? cls : {}
+  if (!c.code) return ''
+  const parts = []
+  if (c.reason) parts.push(c.reason)
+  if (c.hint) parts.push('建议：' + c.hint)
+  return parts.join('\n')
 }
 
 // 从 dsh / pnpm 的失败输出里把 allowBuilds 引导信息抠出来。
@@ -1267,20 +1360,27 @@ function installWrite(o, ctx) {
     const h = dshMarket.matchInstalledBySpec(before, spec) || (npm ? dshMarket.matchDepByNpm(before, npm) : null)
     return realizedOf(profile, h, spec) || (h && h.depVersion) || ''
   })()
-  return dsh.installPluginPkg(profile, runSpec).then((r) => {
+  return runPnpmWithCompat(profile, (extra) => dsh.installPluginPkg(profile, runSpec, extra)).then((res) => {
+    const r = res.r
     if (!r.ok) {
-      logErr('[whale][dsh-market] 安装失败', runSpec + ' 退出码 ' + r.code + ' ' + (r.err || ''))
+      logErr('[whale][dsh-market] 安装失败', runSpec + ' 退出码 ' + r.code + ' ' + (r.err || '') + (res.cls.code ? ' [' + res.cls.code + ']' : ''))
       // 「需构建」这一档把 dsh / pnpm 的 allowBuilds 原文交给界面 —— 用户照着写一遍
       // 再点一次即可，不必自己翻日志找那把带 commit hash 的 key
       const build = needsBuild ? parseAllowBuilds(r.out || '') : null
+      // ⚠️ retryable 口径（P2）：同更新链路，见那边注释。认不出的失败不给重试按钮（没证据说重试有用）
+      const retryable = !build && (res.cls.code ? res.cls.retryable : true)
+      const why = compatText(res.cls)
       return {
         ok: false,
         spec: spec,
         name: label,
-        error: '安装失败（退出码 ' + r.code + '）：详见「日志」卡',
+        error: '安装失败（退出码 ' + r.code + '）' + (res.retried ? '（已自动重试一次）' : '')
+          + (why ? '：' + why : '：详见「日志」卡'),
         tail: tailLines(r.out || r.err || ''),
         // 需构建被拦时先改 allowBuilds 才能重试成功，原样重试必然再失败
-        retryable: !build,
+        retryable: retryable,
+        failureCode: res.cls.code || '',
+        autoRetried: res.retried === true,
         snapshot: snap.dirName,
         allowBuilds: build,
       }
@@ -1409,14 +1509,21 @@ function marketUninstall(opts) {
       logErr('[whale][dsh-market] 快照失败，已中止卸载', snap.error || '')
       return Promise.resolve({ ok: false, error: '建快照失败，已中止卸载：' + (snap.error || '未知错误') })
     }
-    return dsh.uninstallPluginPkg(profile, npm).then((r) => {
+    return runPnpmWithCompat(profile, (extra) => dsh.uninstallPluginPkg(profile, npm, extra)).then((res) => {
+      const r = res.r
       if (!r.ok) {
-        logErr('[whale][dsh-market] 卸载失败', npm + ' 退出码 ' + r.code + ' ' + (r.err || ''))
+        logErr('[whale][dsh-market] 卸载失败', npm + ' 退出码 ' + r.code + ' ' + (r.err || '') + (res.cls.code ? ' [' + res.cls.code + ']' : ''))
+        const why = compatText(res.cls)
         return {
           ok: false,
-          error: '卸载失败（退出码 ' + r.code + '）：详见「日志」卡',
+          error: '卸载失败（退出码 ' + r.code + '）' + (res.retried ? '（已自动重试一次）' : '')
+            + (why ? '：' + why : '：详见「日志」卡'),
           tail: tailLines(r.out || r.err || ''),
-          retryable: true,
+          // ⚠️ 卸载的 retryable 用分类结论（P2 前恒为 true）：锁类失败仍可重试，但「认不出」
+          //    的失败不给重试按钮 —— 与安装/更新口径统一
+          retryable: res.cls.code ? res.cls.retryable : true,
+          failureCode: res.cls.code || '',
+          autoRetried: res.retried === true,
           snapshot: snap.dirName,
         }
       }
@@ -2063,6 +2170,12 @@ module.exports = {
   // 那把 key 带 commit hash、安装前拿不到，只能从失败输出里抠 —— 抠错会引导用户写错 key
   parseAllowBuilds(text) {
     return parseAllowBuilds(text)
+  },
+  // pnpm 失败的分类（纯函数，单测直接喂 pnpm 真实报错原文 + 退出码，见 lib/pnpm-compat.js）：
+  // 界面拿它把「安装失败（退出码 1）」翻译成「是什么原因 + 下一步做什么」，
+  // 并据此决定要不要给重试按钮（安装/更新/卸载的返回体已带 failureCode / autoRetried）
+  classifyPnpmFailure(text, exitCode) {
+    return pnpmCompat.classifyPnpmFailure(text, exitCode)
   },
   // 版本降级判定（纯函数，单测直接喂 from/to 版本号）：
   // 与 blockedByPolicy 是相反方向的两个静默失败，判错方向会让用户看到「已更新 v1.48.0 → v1.40.0」

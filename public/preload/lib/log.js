@@ -26,6 +26,17 @@
  * 重复日志抑制（P2）：同一处代码（level + 归一化后的消息）在短时间内反复失败会刷出上千行几乎相同的
  * 记录，既撑爆体积又淹没其它线索。故对相同键在 SUPPRESS_WINDOW 内只写首条，窗口过去后
  * 再补一行「（上次同键又重复 N 次，已折叠）」。这样「业务失败必须留痕」与「不刷爆日志」不再冲突。
+ *
+ * 日志脱敏（P4，2026-10-09）：日志是要被用户**直接发给我们**的（%TEMP%\whale-debug.log），
+ * 里面免不了带上家目录绝对路径（含 Windows 用户名）与各式凭据 —— dsh 装着 pnpm / 各种 registry，
+ * 失败输出里出现 token、Bearer 头是常态。所以落盘前统一过一遍 sanitize：
+ *   · 家目录折叠成 ~（去掉用户名，同时保留「是哪台机器/哪个位置」的可读性）；
+ *   · 控制字符剔除（\n 等）—— 否则一条消息里夹的换行会把日志**伪造成多行**，
+ *     读日志时无法分辨哪行是插件真写的（日志注入）；
+ *   · 常见凭据形态掩码（sk- / gh?_ / npm_ / Bearer / authorization|token|apikey|password）。
+ * 顺序必须在「归一化抑制键」之前：反过来的话，同一处失败会因为 token 每次不同而算作不同键，
+ * 抑制直接失效（等于把 P2 的折叠机制废掉）。这也正是 sanitize 放在 write 里、而不是放在
+ * log/logErr 里的原因 —— write 是唯一落盘出口，console 不受影响（本机调试要看得见原样）。
  */
 const DEV = true
 
@@ -101,6 +112,47 @@ function stringify(a) {
   try { return JSON.stringify(a) } catch (err) { return String(a) }
 }
 
+// 家目录前缀，用于把绝对路径折叠成 ~。取进程启动时的值即可（运行中不会变）。
+// 只算一次：homedir() 每次都碰环境变量，日志是高频路径。
+const HOME_DIR = (function () {
+  try { return require('os').homedir() || '' } catch (err) { return '' }
+})()
+
+// 把一行文本里的敏感内容抹掉。**只作用于落盘**，控制台不受影响（本机调试要看得见原样）。
+// 五类掩码刻意写得「宁可漏杀不可错杀」：
+//   · 只匹配有固定前缀/字段名的形态（sk- / gh?_ / npm_ / Bearer / 键名+分隔符），
+//     不用「像密码的长随机串」这种揣测式规则 —— 那会把正常输出（hash、版本号）也吃掉；
+//   · 长度下限（{8,} / {16,}）避免把 `sk-` 开头的普通单词误伤。
+// ⚠️ 家目录替换必须**双向匹配** Windows 的 `\` 与 POSIX 的 `/`：本项目跑在 Windows，
+//    path.join 产出的是反斜杠，但日志里也可能出现用户手敲的 / 形式路径，只替一种必然漏
+function sanitize(text) {
+  if (typeof text !== 'string' || text === '') return text
+  let out = text
+  try {
+    if (HOME_DIR) {
+      const variants = [HOME_DIR, HOME_DIR.replace(/\\/g, '/')]
+      for (let i = 0; i < variants.length; i++) {
+        const v = variants[i]
+        if (v && out.indexOf(v) >= 0) out = out.split(v).join('~')
+      }
+    }
+  } catch (err) {}
+  return out
+    // 控制字符（含 \n \r \t）剔除：一条消息里夹的换行会把日志伪造成多行 ——
+    // 读日志时无法分辨哪行是插件真写的（日志注入）。放在掩码之前，先规整成单行更好读。
+    // ⚠️ 这里用逐字符码点判断、不用正则字符类：`[\u0000-\u001f]` 会触发 eslint 的
+    //    no-control-regex（默认配置把控制字符类视为易错写法），逐字符扫既避开 lint 又等价
+    .replace(/[\s\S]/g, (ch) => {
+      const c = ch.charCodeAt(0)
+      return c <= 0x1f || c === 0x7f ? ' ' : ch
+    })
+    .replace(/sk-[A-Za-z0-9_-]{8,}/g, 'sk-***')
+    .replace(/gh[pousr]_[A-Za-z0-9]{16,}/g, 'gh*_***')
+    .replace(/npm_[A-Za-z0-9]{16,}/g, 'npm_***')
+    .replace(/bearer\s+\S+/gi, 'Bearer ***')
+    .replace(/(authorization|token|apikey|api-key|password)(["':=\s]+)\S+/gi, '$1$2***')
+}
+
 // 重复抑制表：key（level + 归一化后的消息）→ { at: 本窗口起点时间戳, count: 本窗口已折叠条数,
 // pendingRepeat: 上一窗口折叠的条数（待下一次放行时补一行计数后清零） }。
 // 只对**日志行**生效，控制台照样每条都打 —— 调试时能看见完整序列，落盘才需要收敛。
@@ -154,7 +206,11 @@ function write(level, args) {
   try {
     const parts = []
     for (let i = 0; i < args.length; i++) parts.push(stringify(args[i]))
-    const joined = parts.join(' ')
+    // ⚠️ 顺序固定：stringify → sanitize → suppressKey → 落盘。
+    //    sanitize 必须在归一化抑制键**之前** —— 否则同一处失败会因为 token / 路径每次不同
+    //    而被算成不同键，抑制失效（等于废掉 P2）。反过来把它挪到 isSuppressed 之后，
+    //    首条会带着未脱敏的原文参与建键，仍然漏
+    const joined = sanitize(parts.join(' '))
     const now = Date.now()
     if (isSuppressed(level, joined, now)) return
     // 上一窗口折叠过同键 → 在当前这条之前补一行计数，时间戳用本次，
@@ -179,4 +235,4 @@ function write(level, args) {
 function log() { write('LOG', Array.prototype.slice.call(arguments)) }
 function logErr() { write('ERR', Array.prototype.slice.call(arguments)) }
 
-module.exports = { DEV, LOG_FILE, log, logErr }
+module.exports = { DEV, LOG_FILE, log, logErr, sanitize }

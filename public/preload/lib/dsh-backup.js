@@ -27,7 +27,7 @@ const fs = require('fs')
 const path = require('path')
 const crypto = require('crypto')
 const { log, logErr } = require('./log')
-const { homeDir, readTextSafe } = require('./util')
+const { homeDir, readTextSafe, writeFileAtomicSync } = require('./util')
 // 只读配置（取保留份数）。store 不 require 本模块，无循环引用
 const { readConfig } = require('./store')
 
@@ -131,10 +131,11 @@ function writeMeta(dirName, meta) {
     try { fs.rmSync(metaPath(dirName), { force: true }) } catch (_) { /* 删不掉也没关系，读回来仍是「无标记」 */ }
     return m
   }
-  try {
-    fs.writeFileSync(metaPath(dirName), JSON.stringify(m, null, 2), 'utf8')
-  } catch (err) {
-    logErr('[whale][dsh-backup] 写快照标记失败', dirName + ': ' + errMsg(err))
+  // ⚠️ 原子写（2026-10-09）：非原子写时进程被杀会留下半份 meta.json，
+  //    读回来是 null → 列表把这份快照当成「没有标记」，用户设的名字 / knownGood 静默丢失
+  const w = writeFileAtomicSync(metaPath(dirName), JSON.stringify(m, null, 2), 'utf8')
+  if (!w.ok) {
+    logErr('[whale][dsh-backup] 写快照标记失败', dirName + ': ' + w.error)
     return null
   }
   return m
@@ -251,11 +252,12 @@ function createSnapshot(opts) {
     dshHome: dshHome(),
     files: files,
   }
-  try {
-    fs.writeFileSync(path.join(dir, MANIFEST_NAME), JSON.stringify(manifest, null, 2), 'utf8')
-  } catch (err) {
-    logErr('[whale][dsh-backup] 写 manifest 失败', errMsg(err))
-    return { ok: false, error: '写快照清单失败：' + errMsg(err) }
+  // ⚠️ 原子写（2026-10-09）：manifest 是这份快照的**唯一索引**（files / rel / sha256 全在里面）。
+  //    半写 → 下一轮 listSnapshots 解析不出 → 这份快照凭空从列表消失，intact 校验也全废
+  const mw = writeFileAtomicSync(path.join(dir, MANIFEST_NAME), JSON.stringify(manifest, null, 2), 'utf8')
+  if (!mw.ok) {
+    logErr('[whale][dsh-backup] 写 manifest 失败', mw.error)
+    return { ok: false, error: '写快照清单失败：' + mw.error }
   }
 
   log('[whale][dsh-backup] 已建快照', { dirName: dirName, files: files.length, missing: missing })
@@ -410,7 +412,11 @@ function restoreSnapshot(opts) {
       // 确保父目录在（profile 目录可能被用户删过；整文件覆盖的语义不该包含「创建目录树」，
       // 但目录都不在了还原必然失败，不如直接建好）
       fs.mkdirSync(path.dirname(p.abs), { recursive: true })
-      fs.writeFileSync(p.abs, p.text, 'utf8')
+      // ⚠️ 原子写（2026-10-09）：还原时非原子写，进程被杀会留下半份配置文件 ——
+      //    而这里写的正是 cordis.patch.yml / package.json，半写等于把用户配置弄坏，
+      //    比「没还原」更糟（下面那段逆序回滚也救不回来，因为它自己也得先能读到文件）
+      const w = writeFileAtomicSync(p.abs, p.text, 'utf8')
+      if (!w.ok) throw new Error(w.error)
       undo.push({ abs: p.abs, prev: prev })
       written.push(p.rel)
     } catch (err) {

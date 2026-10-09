@@ -232,6 +232,28 @@
   }
   .dshwv-group-head:hover { background: rgba(47,87,214,.08); color: #1b2a5e; }
   .dshwv-group-arrow { width: 11px; font-size: 9px; opacity: .6; }
+  /* 吸顶分组头（P6，2026-10-09）：面板（.dshwv-menu）是 overflow-y:auto，
+     展开「模型」这种长组后往下滚，滚到一半就看不见自己还在哪一组里 —— 要回头点一下
+     折起来得先滚回顶。故让**已展开**的组的标题吸在面板顶端。
+     三个边界都要照顾到，否则吸顶会表现成「标题浮在别人的行上、还漏底」：
+       1. 只给展开的组开 sticky：折叠组的头就一行，吸它没意义，反而会叠在下面组的内容上方；
+       2. 吸住的标题必须**不透明**：默认头是 background:none，吸顶后下方内容会从标题底下透出来。
+          用与面板同源的近白底（不是纯白 —— 面板本身是 rgba(252,253,255,.96) + 毛玻璃，
+          纯白会突兀），再叠一层高光强调「这行是钉住的」；
+       3. top 取负的面板 padding-top（8px）：sticky 的 top 相对**padding box**内边缘定位，
+          面板 padding 8px 10px 时，若写 top:0，标题会停在「内容区顶到内边距下沿」的位置，
+          内边距那 8px 里会漏出后面滚过来的内容。负值把它顶回面板真正的上边缘。
+     桌面的 Chrome/Electron 均支持 sticky；不支持时退化为普通标题，无副作用。
+     ⚠️ 别把 head 挪进 .dshwv-group-body：那里 overflow:hidden（0fr↔1fr 折叠动画全靠它），
+        而 overflow:hidden 的祖先会劫持 sticky 的滚动容器，吸顶直接失效 */
+  .dshwv-group-open > .dshwv-group-head {
+    position: sticky;
+    top: -8px;
+    z-index: 1;
+    background: rgba(247,249,255,.97);
+    -webkit-backdrop-filter: blur(14px) saturate(1.6);
+    backdrop-filter: blur(14px) saturate(1.6);
+  }
   /* 组体高度过渡：grid-template-rows 0fr↔1fr 可以直接对 auto 内容做动画，
      不必先测量像素高度；外层 overflow:hidden 才能让内层被压扁时真的裁掉。
      grid 里只放一个子项（.dshwv-group-inner）是这招的前提 —— 见 floating-page.js 的 menuGroup()。
@@ -433,6 +455,8 @@
   html.dark .dshwv-group { border-top-color: rgba(255,255,255,.1); }
   html.dark .dshwv-group-head { color: #8d9cc9; }
   html.dark .dshwv-group-head:hover { background: rgba(138,164,230,.12); color: #c9d6f2; }
+  /* 吸顶头的不透明底也跟深色走（与 .dshwv-menu 同源的暗底），否则深色下吸顶会出现一条亮白横带 */
+  html.dark .dshwv-group-open > .dshwv-group-head { background: rgba(28,32,48,.97); }
   html.dark .dshwv-menu-foot { border-top-color: rgba(255,255,255,.1); }
   /* 主按钮/警示按钮本身是实色底白字，深浅色下都成立，不用覆写 */
   html.dark .dshwv-menu-link { border-color: rgba(138,164,230,.3); background: rgba(138,164,230,.12); color: #a7bdf0; }

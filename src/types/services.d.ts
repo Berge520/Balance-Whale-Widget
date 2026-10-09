@@ -963,6 +963,13 @@ export interface DshMarketInstallResult {
   // 同一件事能不能靠「原样重试」解决。age 类要等时间；白名单类要改配置；构建类要先放行脚本。
   // 界面据此决定是给「重试」按钮还是给「去改配置」引导，避免让用户白点
   retryable?: boolean
+  // pnpm 失败的分类码（见 preload/lib/pnpm-compat.js），认不出时为空串。
+  // ⚠️ 与 staleReason 不是一回事：那条说的是「退出码 0 但版本没动」，这条说的是「进程真的失败了」。
+  //    界面可据此把「安装失败（退出码 1）」翻译成具体原因（网络抖动 / 锁被占 / 太新被拦…）
+  failureCode?: string
+  // 这次失败之前**已经按分类自动重试过一次**（只发生在网络抖动 / 超时 / 补 -w 的 root-add）。
+  // 界面据此在结果卡上说明「已自动重试一次」，免得用户以为宿主什么都没做
+  autoRetried?: boolean
   // 「pnpm 报告成功，但实装版本**低于**目标」（RESOLVED_VERSION_MISMATCH 语义）。
   // ⚠️ 高于目标**不算** mismatch —— 镜像抢先发版是好结果，别报成失败
   mismatch?: boolean
@@ -2089,6 +2096,10 @@ export interface WhaleServices {
   dshHostCompatCheck(opts?: { entries?: { name?: string; spec?: string; npm?: string }[]; packages?: string[]; registry?: string }): Promise<DshHostCompatCheckResult>
   // 当前宿主的 DSH 版本（与诊断卡同源）。空串 = 读不到，界面据此说「无法判定」而不是「兼容」
   dshHostVersion(): string
+  // pnpm 失败的分类（纯函数，见 preload/lib/pnpm-compat.js）。
+  // 把 pnpm 的报错原文 + 退出码翻译成 { code, retryable, reason, hint }；认不出时 code 为空串。
+  // ⚠️ 归类**只用于解释与提示**，绝不用于自动改用户配置（尤其不放行 release-age 供应链策略）
+  classifyPnpmFailure(text: string, exitCode?: number): { code: string; retryable: boolean; reason: string; hint: string }
   exportUsageCsv(days?: number): UsageCsvResult
   importUsageCsv(): UsageCsvImportResult
   // 按项清除本地数据：true 的项才会被清除。

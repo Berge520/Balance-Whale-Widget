@@ -144,6 +144,66 @@ function readJsonSafe(file) {
   } catch (_) { return null }
 }
 
+// ── 文件写入 ──
+// 原子写：同目录临时文件 → 写 → fsync → rename 覆盖目标。**失败时目标文件保持原样**。
+//
+// ⚠️ 为什么必须原子（2026-10-09）：本项目的三类写点都怕半写 ——
+//   · dsh-backup 的 meta.json / manifest.json：半写 → 下一轮 listSnapshots 解析不出，
+//     快照列表整体异常；
+//   · settings.js 写 dsh 的 cordis.patch.yml：半写 = **用户的配置文件损坏**，
+//     而 dsh 对读不懂的 patch 只往 stderr 打一行、退出码 0，不报错；
+//   · dsh.js 的清单回滚：半写等于「回滚到一半」，配置比回滚前更坏。
+//
+// ⚠️ 三个实现要点，缺一个都不算原子（抄 dsh-export 的旧写法会漏掉前两点）：
+//   1. 临时文件必须与目标**同目录** —— rename 跨卷会 EXDEV 失败；
+//   2. 落盘前 fsync —— 只 rename 不 fsync 时，崩溃后目标可能是**空壳**
+//      （目录项已指向新 inode，数据仍在页缓存里没落盘）；
+//   3. 临时文件名要**进程内唯一** —— 只拼 pid 时同一进程并发两次写会互撞，
+//      先写的被后写的截断。用 pid + 单调递增序号即可（无需随机数）。
+//
+// 失败路径必须清掉临时文件：否则 dsh-backup 目录里会积一堆
+// `meta.json.<pid>.<n>.tmp`，还会被 listSnapshots 的目录扫描看到。
+//
+// 返回 { ok, error }；**不抛异常**，与 readTextSafe 同款口径（本模块不 require log，留痕在调用方）。
+let atomicSeq = 0
+// 临时文件名的构造**单独抽成一个函数并导出**：原子写把「写目标文件」换成了
+// 「写临时文件 + rename」，于是**直接替换 fs.writeFileSync 的故障注入失效了**
+// （测试再也拦不到主写，只会看到「成功」的假绿）。留这个接缝，测故障路径时替换它即可
+// —— 比照 fs 内部成员构造可预测的失败靠谱得多。默认实现就是本文件要用的那条路径。
+//
+// ⚠️ 调用点必须走 `module.exports.atomicTmpPath(...)` 这个**间接层**，不能裸调本函数，
+//    也不能走 `exports.`：本文件末尾是 `module.exports = {...}` **整体替换** ——
+//    整体替换后模块内的 `exports` 仍指向被丢弃的旧对象，写 `exports.x` 在运行时拿到
+//    undefined（实测报错 "exports.atomicTmpPath is not a function"）。而裸调又绑死在
+//    定义时那个函数上，测试替换导出属性对它无效。改从 module.exports 上按调用时取一次：
+//    导出对象是可变的，测试替换 `require('util').atomicTmpPath` 就真的改到主写的行为。
+function atomicTmpPath(file) {
+  return String(file) + '.' + process.pid + '.' + (atomicSeq++) + '.tmp'
+}
+function writeFileAtomicSync(file, data, encoding) {
+  const target = String(file || '')
+  if (!target) return { ok: false, error: 'no-path' }
+  const enc = encoding || 'utf8'
+  let tmp = ''
+  let fd = -1
+  try {
+    // 从 module.exports 取（函数声明已被提升，此时导出对象已填好）—— 见上方注释
+    tmp = module.exports.atomicTmpPath(target)
+    fd = fs.openSync(tmp, 'w')
+    fs.writeFileSync(fd, data, enc)
+    // fsync 必须在 close 之前，且要和 rename 一起构成「要么全有要么全无」
+    try { fs.fsyncSync(fd) } catch (_) { /* 部分文件系统/Node 版本上 fsync 不可用，不致命 */ }
+    fs.closeSync(fd)
+    fd = -1
+    fs.renameSync(tmp, target)
+    return { ok: true, error: '' }
+  } catch (err) {
+    if (fd >= 0) { try { fs.closeSync(fd) } catch (_) {} }
+    if (tmp) { try { fs.unlinkSync(tmp) } catch (_) {} }
+    return { ok: false, error: String((err && err.message) || err || 'unknown') }
+  }
+}
+
 // ── 目录遍历 ──
 // 递归列出文件，返回**绝对路径数组**
 //
@@ -200,6 +260,8 @@ function normalizePath(p) {
   return path.resolve(raw)
 }
 
+// atomicTmpPath 保持原样导出：主写是**按调用时从 module.exports 取**，
+// 所以测试替换 `require('util').atomicTmpPath` 会紧接着影响下一次主写。
 module.exports = {
   num,
   dayKeyFromTs,
@@ -208,6 +270,8 @@ module.exports = {
   readTextSafe,
   readText,
   readJsonSafe,
+  writeFileAtomicSync,
+  atomicTmpPath,
   walkDir,
   normalizePath,
 }

@@ -614,11 +614,23 @@ function usePolling(fn: () => void, ms: number, immediate = false) {
 // 不看不读，避免每次进开发者 Tab 都无条件付一次扫描成本；展开后即读，也不用手动再点一下。
 // 收起时摘要只在「本会话已读过」之后才显示（否则露「点击展开查看」），保证折叠 = 不预读。
 const devFolds = reactive({ dshUsage: false, diagnose: false, dshDump: false, dshIsolate: false, dshMarket: false, dshExport: false })
-const devStatsLoaded = reactive({ dshUsage: false, diagnose: false, dshDump: false, dshIsolate: false, dshMarket: false, dshExport: false })
+// 读过的卡 → 读完那一刻的时间戳（0 = 没读过）。用时间戳而非布尔（P5，2026-10-09）：
+// 布尔是「本会话读过了」的永久态，而宿主侧的 dsh 数据是**会变的** —— 用户本页收起卡、
+// 去别处 dsh 装了插件 / 换了 profile，回来时折叠标题上的摘要还是旧数字，看着像插件没刷新。
+// 记时间戳后由 onWindowActive 判是否过期，过期就重读一次。
+const devStatsLoaded = reactive<Record<string, number>>({ dshUsage: 0, diagnose: 0, dshDump: 0, dshIsolate: 0, dshMarket: 0, dshExport: 0 })
+// 回到本窗口时，已读卡超过这个时长就重读。取 5 分钟：
+// 短于它的「切个 tab 又回来」不该重扫（宿主是同步扫文件，会话日志可能几十 MB）；
+// 长于它的（挂机办公一阵再回来）本地快照大概率已经变了。
+// ⚠️ 只用于「重读本地快照」这类廉价动作 —— 勾选联网的卡（dshMarket）不参与自动重读
+const DEV_STATS_STALE_MS = 5 * 60 * 1000
+function markDevCardLoaded(key: string) { devStatsLoaded[key] = Date.now() }
+
 function toggleDevCard(key: 'dshUsage' | 'diagnose' | 'dshDump' | 'dshIsolate' | 'dshMarket' | 'dshExport') {
   devFolds[key] = !devFolds[key]
-  if (!devFolds[key] || devStatsLoaded[key]) return
-  devStatsLoaded[key] = true
+  if (!devFolds[key]) return
+  if (devStatsLoaded[key]) { markDevCardLoaded(key); return } // 已读过且还开着：只把新鲜度续上，不重读
+  markDevCardLoaded(key)
   if (key === 'dshUsage') dshUsageRefresh()
   else if (key === 'dshDump') dshDumpRefresh()
   else if (key === 'dshExport') dshExportRefresh()
@@ -794,6 +806,8 @@ const {
   dshMarketPreviewInstallExact,
   dshMarketPreviewUninstall,
   dshMarketRefreshStatus,
+  dshMarketRetry,
+  dshMarketRetryNow,
   dshMarketRevealed,
   dshMarketSort,
   dshMarketSortDesc,
@@ -2410,8 +2424,26 @@ function onWindowActive() {
   refreshTodayModels() // 模型占比是联网结果，回到本页时也刷新一次
   reloadModels() // 挂件会定时刷余额，回到本页时把最新快照取回来
   // 只在开发者 Tab 轮询着 dsh 状态时才需要补 deep 探测（可能在挂件菜单里启停过）
-  if (activeTab.value === 'dev') dshStatus(true)
+  if (activeTab.value === 'dev') { dshStatus(true); refreshStaleDevCards() }
   taskbarSync() // 顺带同步任务栏显隐状态
+}
+
+// 回到本窗口时，把**已读过但已过期**的开发者卡重读一遍（P5，2026-10-09）。
+// 判据是「读过时间戳距今超过 DEV_STATS_STALE_MS」，只对**读本地快照**的卡生效。
+// ⚠️ dshMarket 刻意排除：它的「加载目录」是出站 HTTP，绝不能因为用户切回窗口就偷偷发请求 ——
+//    卡内本来就要求用户显式点按钮才抓（见 toggleDevCard 的注释），自动刷新会破坏这条约定。
+// ⚠️ 只重读**曾经读过**的卡（时间戳非 0）：没读过说明用户还没展开过，本就不该预读（折叠 = 不预读）。
+//    dshIsolate 重读时连 dshBackupRefresh 一起走，与 toggleDevCard 的配对一致（两张卡的摘要互相依赖）
+function refreshStaleDevCards() {
+  const now = Date.now()
+  const stale = (k: string) => devStatsLoaded[k] > 0 && now - devStatsLoaded[k] > DEV_STATS_STALE_MS
+  if (stale('dshUsage')) { markDevCardLoaded('dshUsage'); dshUsageRefresh() }
+  if (stale('dshDump')) { markDevCardLoaded('dshDump'); dshDumpRefresh() }
+  if (stale('dshExport')) { markDevCardLoaded('dshExport'); dshExportRefresh() }
+  if (stale('dshIsolate')) { markDevCardLoaded('dshIsolate'); dshIsolateRefresh(); dshBackupRefresh() }
+  // diagnoseRefresh 会顺带做一次宿主 deep 探测，开销比其余卡大（有 ping/端口探测），
+  // 所以只在 dsh 状态轮询已经在跑（开发者 Tab）时才补 —— 这也正是本函数只在该分支被调的原因
+  if (stale('diagnose')) { markDevCardLoaded('diagnose'); diagnoseRefresh() }
 }
 
 onMounted(() => {
@@ -3888,6 +3920,20 @@ onUnmounted(() => {
         <button class="secondary utils-btn utils-secondary" @click="dshRestartNow()">重启 dsh</button>
       </div>
       <p v-if="dshMarketFlash.msg" class="msg" :class="msgCls(dshMarketFlash)">{{ dshMarketFlash.msg }}</p>
+
+      <!-- 瞬时失败（网络抖动 / 拉取超时）：宿主已自动重试过一次仍失败，这里给用户一次手动再试。
+           ⚠️ 与下面的 allowBuilds 引导互斥（宿主侧已保证不会同时出现）—— 那条要用户改配置，
+               这条什么都别改，直接再点一次。两个指引同时在屏幕上会让人不知道该听谁的。 -->
+      <template v-if="dshMarketRetry">
+        <p class="hint">
+          这次失败像是<strong>瞬时问题</strong>（网络抖动或拉取超时），不是配置错误 —— 已自动重试过一次仍未成功。
+          稍等片刻直接再试一次通常就好了；无需改动任何配置。
+        </p>
+        <div class="btn-row">
+          <button class="utils-btn utils-primary" :disabled="dshMarketBusy" @click="dshMarketRetryNow()">{{ dshMarketBusy ? '处理中…' : '重试一次' }}</button>
+          <button class="secondary utils-btn utils-secondary" :disabled="dshMarketBusy" @click="dshMarketRetry = null">知道了</button>
+        </div>
+      </template>
 
       <!-- pnpm 构建拦截的引导（只在本卡出现过一次 allowBuilds 失败后显示）。
            ⚠️ 为什么不能自动帮用户写：那把 key 带 commit hash，只有在 dsh 报错时才出现；

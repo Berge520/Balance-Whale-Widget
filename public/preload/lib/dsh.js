@@ -18,7 +18,7 @@ const os = require('os')
 const { log, logErr } = require('./log')
 const { readConfig } = require('./store')
 const { K, NEWEST_VERSION, DSH_PORT_DEFAULT } = require('./constants')
-const { homeDir } = require('./util')
+const { homeDir, writeFileAtomicSync } = require('./util')
 const { getNotes } = require('./dsh-notes')
 
 const DSH_TAIL = 'web' // dsh 的 Web UI 子命令
@@ -925,7 +925,15 @@ function snapshotManifests(pkgDir) {
 function restoreManifests(snaps) {
   const restored = []
   for (const s of snaps || []) {
-    try { fs.writeFileSync(s.path, s.data); restored.push(s.name) } catch (err) { logErr('[whale][dsh] 恢复清单失败', s.name + '：' + ((err && err.message) || err)) }
+    try {
+      // ⚠️ 原子写（2026-10-09）：这里是安装/更新失败后的补偿回滚。非原子写时进程被杀会留下
+      //    半份 package.json —— 那是「回滚到一半」，比不回滚更糟：dsh 下次组装会按半份清单走。
+      // ⚠️ 仍不抛错：整个函数的契约是「已经出错了才跑」的补偿动作，
+      //    写失败只留痕、不升级成异常，否则会把主流程的原始报错顶掉（#662 的教训）。
+      const w = writeFileAtomicSync(s.path, s.data)
+      if (!w.ok) throw new Error(w.error)
+      restored.push(s.name)
+    } catch (err) { logErr('[whale][dsh] 恢复清单失败', s.name + '：' + ((err && err.message) || err)) }
   }
   return restored
 }
@@ -1845,7 +1853,7 @@ function pnpmArgs(dir) {
 // ⚠️ github/tgz 来源多一道 pnpm 的坎：这类插件靠 `prepare` 脚本在安装时构建，
 //    **pnpm 默认拦截构建脚本**，失败信息里会给出一把带 commit hash 的 allowBuilds key。
 //    installPluginPkg 只负责把原始输出**如实**回传，怎么解读由 settings.js / 界面决定。
-function installPluginPkg(profile, spec) {
+function installPluginPkg(profile, spec, extraArgs) {
   const pf = validProfile(profile)
   const s = validPkgSpec(spec)
   // ⚠️ 这两条早先是**静默返回**（不打日志），代价很实在：校验一失败，界面只显示
@@ -1863,12 +1871,16 @@ function installPluginPkg(profile, spec) {
     return Promise.resolve({ code: -1, ok: false, out: '', err: why })
   }
   const dir = profileDir(pf)
-  return runPnpm(['add'].concat(pnpmArgs(dir), [s]))
+  // extraArgs：settings.js 的一次性重试按失败分类追加的参数（如 root-add 补 `-w`）。
+  // ⚠️ 只接受字符串数组 —— 调用方（settings.js）是可信内部代码，但仍白名单过滤，
+  //    避免把 undefined/对象拼进 argv 让 pnpm 报一堆看不懂的用法错误
+  const extra = Array.isArray(extraArgs) ? extraArgs.filter((x) => typeof x === 'string' && x) : []
+  return runPnpm(['add'].concat(pnpmArgs(dir), extra, [s]))
 }
 // 从 profile 卸一个插件（pnpm remove --dir <profile> <pkg>）
 // ⚠️ 卸载仍只认**已装依赖的键名**（validPkgName），不用 spec：
 //    package.json 的 dependencies 键就是 pnpm 归一后的名字，用 spec 去 remove 反而匹配不上
-function uninstallPluginPkg(profile, pkg) {
+function uninstallPluginPkg(profile, pkg, extraArgs) {
   const pf = validProfile(profile)
   const p = validPkgName(pkg)
   // 与 installPluginPkg 同理：校验失败必须留痕，否则「详见日志」是空话
@@ -1883,7 +1895,8 @@ function uninstallPluginPkg(profile, pkg) {
     return Promise.resolve({ code: -1, ok: false, out: '', err: why })
   }
   const dir = profileDir(pf)
-  return runPnpm(['remove'].concat(pnpmArgs(dir), [p]))
+  const extra = Array.isArray(extraArgs) ? extraArgs.filter((x) => typeof x === 'string' && x) : []
+  return runPnpm(['remove'].concat(pnpmArgs(dir), extra, [p]))
 }
 
 // 版本列表落库缓存：重载插件后不用重新查询也能在下拉里选到具体版本

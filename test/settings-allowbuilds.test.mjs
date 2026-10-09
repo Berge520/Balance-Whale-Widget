@@ -491,7 +491,11 @@ test('marketUpdate：pnpm 非零退出且报「太新」时，尾部原文与可
     assert.equal(r.ok, false)
     // 关键报错在尾部，tail 必须把它带出来 —— 否则用户只能去日志里自己翻
     assert.match(String(r.tail), /too new/, '尾部原文要带上真正的失败原因')
-    assert.equal(r.retryable, true, '普通 pnpm 失败多为网络/锁文件，原样重试有意义')
+    // 这里 pnpm 是**非零退出**，所以走 install 失败分支，retryable 由分类器定：release-age 属
+    // 「改了配置才有戏」的一类，判 false（与下面的 blockedByPolicy 分支口径不同：那条是退出码 0
+    // 被挡、靠回读发现的，仍给 isAge=true 引导去等满期）。把两者混成一个真值会让 UI 既劝重试又劝改配置。
+    assert.equal(r.retryable, false, '太新属 release-age，分类器判 retryable=false，不该劝原样重试')
+    assert.equal(r.failureCode, 'release-age-violation', '失败码要带出去，UI 据此区分引导')
   } finally {
     dshMod.installPluginPkg = saved
   }
@@ -595,20 +599,25 @@ test('restoreSnapshot：主写失败时逆序回滚，磁盘保持还原前的�
   // 快照建好之后，把磁盘上的内容改成「新态」—— 还原会把主写指向快照里的旧内容
   fs.writeFileSync(f1, 'modified: 2\n')
 
-  const origWrite = fs.writeFileSync
-  fs.writeFileSync = (p, ...rest) => {
-    // 只打断主写（内容来自快照），放行回滚写（内容来自 prev 底稿）
-    if (String(p).endsWith('settings.yaml') && String(rest[0]).includes('known-good')) {
+  // ⚠️ 故障注入点必须落在**临时文件路径**上，不能替换 fs.writeFileSync：
+  //    原子写把「写目标文件」换成了「写临时文件 → rename」，拦 fs.writeFileSync 再也拦不到主写，
+  //    测试只会看到「成功」的假绿。util 为此留了 atomicTmpPath 接缝 —— 注意它必须**在调用时**
+  //    从 module.exports 取才干得住：早期版本裸调局部绑定，替换导出属性对它无效（实测 called=0、
+  //    主写照常成功），已修。这里只打断指向 settings.yaml 的那一次；回滚写的是 package.json，不误伤。
+  const utilMod = require('../public/preload/lib/util.js')
+  const origTmp = utilMod.atomicTmpPath
+  utilMod.atomicTmpPath = (file) => {
+    if (String(file).endsWith('settings.yaml')) {
       const e = new Error('ENOSPC: no space left on device')
       throw e
     }
-    return origWrite(p, ...rest)
+    return origTmp(file)
   }
   let r
   try {
     r = backup.restoreSnapshot({ dirName: snap.dirName })
   } finally {
-    fs.writeFileSync = origWrite
+    utilMod.atomicTmpPath = origTmp
   }
   assert.equal(r.ok, false, '写不进去就是失败')
   assert.match(String(r.error), /已回滚/, '失败文案要告诉用户已经回滚过了')

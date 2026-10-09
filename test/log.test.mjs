@@ -181,3 +181,77 @@ test('模块加载时不清空未过期的日志', () => {
   loadLog(dir)
   assert.match(readLog(dir), /recent stuff/)
 })
+
+// ── 11. sanitize：敏感凭据落盘前被掩码 ──
+//
+// ⚠️ 为什么单独的 sanitize 用例必须挑**几种不同形态**而不是只测一个 sk-：
+//    掩码规则是逐条正则，任何一条写错（漏了长度下限 / 分隔符集合不全 / 大小写没覆盖）
+//    都只在对应形态上暴露。日志是用户会主动贴给我们取证的东西，漏一个 token 就是真泄露。
+test('sanitize：sk- / gh_ / npm_ / Bearer / 键值对五类凭据都被掩码', () => {
+  const { sanitize } = loadLog(mkTmp())
+  assert.equal(sanitize('key=sk-abcdefghijklmn'), 'key=sk-***')
+  assert.equal(sanitize('ghp_0123456789abcdefghij'), 'gh*_***')
+  // ⚠️ 结果是 `token ***` 而不是 `token npm_***`：键值对规则比 `npm_` 规则更宽，先把整段值吃掉了。
+  //    掩码以**更宽的规则**为准——能到达终点的前提下，掩码覆盖得越多越安全（log.js 的 write() 里
+  //    注释也记了同一结论）。这里断言最终形态，别改回 `npm_***`。
+  assert.equal(sanitize('token npm_0123456789abcdefghij'), 'token ***')
+  // 同理：键值对规则把 `Bearer` 当成值的第一段也掩掉了 —— 连着 `Bearer` 一起变 `*** ***`。
+  //    纯 `Bearer xxx` 的形态由下面独立一条覆盖，用来单独验证 Bearer 规则本身生效。
+  assert.equal(sanitize('Authorization: Bearer eyJhbGciOiJIUzI1NiJ9'), 'Authorization: *** ***')
+  assert.equal(sanitize('Bearer eyJhbGciOiJIUzI1NiJ9'), 'Bearer ***')
+  // 键值对形态（含不同分隔符与大小写）
+  assert.equal(sanitize('apikey: secretvalue123'), 'apikey: ***')
+  assert.equal(sanitize('PASSWORD="hunter2"'), 'PASSWORD="***')
+  assert.equal(sanitize('token=abcdef'), 'token=***')
+})
+
+test('sanitize：长度不够的短串不误伤（宁可漏杀不可错杀）', () => {
+  const { sanitize } = loadLog(mkTmp())
+  // `sk-` 后不足 8 位：是普通词或版本号，不该被吃掉
+  assert.equal(sanitize('sk-short'), 'sk-short')
+  // `npm_` 后不足 16 位同理
+  assert.equal(sanitize('npm_abc'), 'npm_abc')
+})
+
+// ── 12. sanitize：控制字符剔除（防日志注入）──
+//
+// ⚠️ 一条消息里夹 `\n` 会把单条日志伪造成多行 —— 读日志时无法分辨哪行是插件真写的。
+//    这是「日志注入」：一个能控制输入的人（如插件名带换行）就能往日志里塞假行。
+//    控制字符必须**在写入前**被替换成空格，且不影响正常的多字节字符。
+test('sanitize：换行 / 回车 / 制表等控制字符被替换成空格（防伪造成多行）', () => {
+  const { sanitize } = loadLog(mkTmp())
+  assert.equal(sanitize('a\nb'), 'a b')
+  assert.equal(sanitize('a\r\nb'), 'a  b')
+  assert.equal(sanitize('a\tb'), 'a b')
+  // 0x7f（DEL）同样在剔除范围
+  assert.equal(sanitize('a\u007fb'), 'a b')
+  // 中文字符是多字节，码点远大于 0x1f，必须原样保留（别把「剔除控制字符」写成了「只留 ASCII」）
+  assert.equal(sanitize('中文消息'), '中文消息')
+})
+
+test('sanitize：正常文本与非字符串输入原样返回', () => {
+  const { sanitize } = loadLog(mkTmp())
+  assert.equal(sanitize('普通日志 without secrets'), '普通日志 without secrets')
+  // 空串与 null / undefined 直接返回，不该变成 'null' / 'undefined' 字符串
+  assert.equal(sanitize(''), '')
+  assert.equal(sanitize(null), null)
+  assert.equal(sanitize(undefined), undefined)
+})
+
+// ── 13. sanitize 与落盘链路的串接：写进去的就已经是脱敏后的 ──
+//
+// ⚠️ 单测 sanitize 通过 ≠ 落盘就脱敏了 —— 顺序若被改回「先落盘后 sanitize」，
+//    单测全绿但日志里照样是明文。这里从**磁盘文件**回读，钉死端到端效果。
+test('端到端：log() 落盘的凭据已被掩码，磁盘上看不到明文', () => {
+  const dir = mkTmp()
+  const { log } = loadLog(dir)
+  // 注意这条命中的是**键值对规则**（token=… 会把整段值吃掉，包括 sk- 前缀）——
+  // 多条规则都可能命中，掩码结果以更宽的那条为准，这里只钉「明文没了」这个结果
+  log('调用失败，token=sk-abcdefghijklmn 请检查')
+  const txt = readLog(dir)
+  assert.match(txt, /token=\*\*\*/)
+  assert.doesNotMatch(txt, /sk-abcdefghijklmn/, '磁盘上不能留明文 token')
+  // 单独出现（非键值对形态）时也要被 sk- 规则吃掉，不能只靠键值对兜底
+  log('裸 token 形式 sk-abcdefghijklmn 出现')
+  assert.doesNotMatch(readLog(dir), /sk-abcdefghijklmn/, '裸形态的 sk- 也必须被掩码')
+})
