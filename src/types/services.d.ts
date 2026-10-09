@@ -1097,6 +1097,8 @@ export interface ClearDataResult {
     skins: boolean
     // 自定义气泡图片（图片文件 + 元信息）
     bubbles: boolean
+    // 按压气泡（文案 / 队列 / 开关重置为默认 + 配图清除）
+    bubble: boolean
   }
   error?: string
 }
@@ -1689,6 +1691,9 @@ export interface BackupExportResult {
   canceled?: boolean
   path?: string
   withSecrets?: boolean
+  // 内嵌的气泡图张数（未勾选「包含气泡图素材」或一张都没读到时为 0）
+  bubbles?: number
+  bubblesBytes?: number
   exportedAt?: string
   error?: string
 }
@@ -1700,7 +1705,7 @@ export interface BackupPreviewResult {
   path?: string
   exportedAt?: string
   appVersion?: string
-  has?: { config: boolean; ledger: boolean; window: boolean; timer: boolean; secrets: boolean }
+  has?: { config: boolean; ledger: boolean; window: boolean; timer: boolean; holidays: boolean; bubbles: boolean; secrets: boolean }
   error?: string
 }
 
@@ -2086,8 +2091,9 @@ export interface WhaleServices {
   dshHostVersion(): string
   exportUsageCsv(days?: number): UsageCsvResult
   importUsageCsv(): UsageCsvImportResult
-  // 按项清除本地数据：true 的项才会被清除
-  clearAllData(opts?: { secrets?: boolean; config?: boolean; ledger?: boolean; window?: boolean; sounds?: boolean; skins?: boolean; bubbles?: boolean }): ClearDataResult
+  // 按项清除本地数据：true 的项才会被清除。
+  // bubble = 按压气泡「文案 + 配图」一起清（重置 config.bubble 并清 whale:bubbles），与 config 不互斥
+  clearAllData(opts?: { secrets?: boolean; config?: boolean; ledger?: boolean; window?: boolean; sounds?: boolean; skins?: boolean; bubbles?: boolean; bubble?: boolean }): ClearDataResult
   ensureWidget(): WidgetResult
   showWidget(): WidgetResult
   getWidgetError(): string | null
@@ -2175,12 +2181,12 @@ export interface WhaleServices {
   // 清除联网覆盖层，回到纯内置表
   holidayClear(): { ok: boolean }
   // —— 备份 / 恢复 ——
-  // 导出备份（secrets=true 时用 password 加密后才写入凭据）
-  backupExport(opts: { secrets?: boolean; password?: string }): BackupExportResult
+  // 导出备份（secrets=true 用 password 加密凭据；bubbles=true 把按压气泡配图 base64 内嵌进 JSON）
+  backupExport(opts: { secrets?: boolean; bubbles?: boolean; password?: string }): BackupExportResult
   // 选择备份文件并解析预览（不写任何数据）
   backupPick(): BackupPreviewResult
   // 按勾选项恢复（同名覆盖）
-  backupApply(opts: { config?: boolean; ledger?: boolean; window?: boolean; timer?: boolean; secrets?: boolean; password?: string }): BackupApplyResult
+  backupApply(opts: { config?: boolean; ledger?: boolean; window?: boolean; timer?: boolean; holidays?: boolean; bubbles?: boolean; secrets?: boolean; password?: string }): BackupApplyResult
   // 放弃本次选择
   backupCancel(): { ok: boolean }
   // —— 多厂商模型（余额 / 额度） ——

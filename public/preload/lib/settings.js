@@ -9,7 +9,7 @@ const {
   clampNum, readConfig, patchConfig, readSecrets, writeSecrets, readLedger, historyKeepDays,
   resetAnchorCache, mergeLedgerHistory, clearTimer, calibrateTodayUsage,
   defaultAnchor, writeAnchor, normModelId, normModel, sanitizeKey, dropModelState,
-  normBubble,
+  normBubble, defaultConfig,
 } = require('./store')
 const {
   fetchBalanceWith, fetchPlatformUsage, checkUpdate, resetBalanceCache,
@@ -403,6 +403,10 @@ function writeMarketCache(payload) {
       plugins: payload.plugins,
     })
   } catch (err) { logErr('[whale][dsh-market] 写目录缓存失败', (err && err.message) || '') }
+}
+// 清除市场目录缓存（「清除数据」用）：它是纯缓存 + 离线兜底，清了下次进市场会重新联网抓
+function clearMarketCache() {
+  try { utools.dbStorage.removeItem(K.dshMarket) } catch (err) { logErr('[whale][dsh-market] 清除目录缓存失败', (err && err.message) || '') }
 }
 
 // 抓目录：成功就更新离线兜底；失败时**降级返回上次的目录**（from:'cache'）而不是 ok:false
@@ -2942,8 +2946,17 @@ module.exports = {
     const r = mergeLedgerHistory(rows)
     return { ok: true, path: filePath, imported: r.imported, invalid: invalid, kept: r.kept, from: r.from, to: r.to }
   },
-  // 按项清除本地数据：opts = { secrets, config, ledger, window, sounds, skins, bubbles }，为 true 的项才会被清除。
-  // 「窗口」项同时含窗口锚点与更新缓存。卸载 uTools 插件不会删除这些数据，需要彻底清除时由设置页调用。
+  // 按项清除本地数据：opts = { secrets, config, ledger, window, sounds, skins, bubbles, bubble }，为 true 的项才会被清除。
+  // 各项覆盖的键（务必与新增存储键同步，否则会「清不干净」）：
+  //   config  = whale:config + whale:models + whale:timer + whale:cnHolidays（节假日覆盖层属于设置）
+  //   ledger  = whale:ledger + whale:codex + whale:dshUsage（用量类派生缓存与账本同源）
+  //   window  = whale:window + whale:update + dsh 版本/查询标记/说明正文/自动刷新偏好 + dsh 诊断/转储/市场目录缓存
+  //   secrets = whale:secrets（加密，含 API Key / 平台 Token / 模型密钥 / SMTP 凭据）
+  //   sounds/skins/bubbles = 对应元信息键 + 磁盘文件
+  //   bubble  = 按压气泡「文案 + 配图」两处的组合语义：重置 config.bubble / config.bubbleOn（文案、队列、开关）
+  //             + 清 whale:bubbles 磁盘配图。按压气泡数据天然分散在这里两处，用户要的是「整个功能回到默认」，
+  //             故单列一项；它与 config（清整个配置）并非互斥，两个都勾只是多做一次同样的重置，无副作用。
+  // 卸载 uTools 插件不会删除这些数据，需要彻底清除时由设置页调用。
   clearAllData(opts) {
     const o = opts && typeof opts === 'object' ? opts : {}
     const wasVisible = winAlive()
@@ -2953,8 +2966,17 @@ module.exports = {
       // 模型列表随配置一起没了，运行时快照（余额/额度）留着只会在下次同名重建时冒充新数据
       try { utools.dbStorage.removeItem(K.models) } catch (err) {}
       clearTimer() // 设置被重置，一并清掉已落库的计时状态
+      // 节假日联网覆盖层：它改的是峰谷计费判据（哪几天算节假日），属于「设置」的一部分；
+      // 不随设置清掉的话，用户以为自己回到了默认，实际峰谷时段仍按联网表走
+      try { holidays.clear() } catch (err) { logErr('[whale][settings] 清除节假日覆盖层失败', err && err.message) }
     }
-    if (o.ledger) { try { utools.dbStorage.removeItem(K.ledger) } catch (err) {} }
+    if (o.ledger) {
+      try { utools.dbStorage.removeItem(K.ledger) } catch (err) {}
+      // 用量类派生缓存与账本同源（Codex 会话统计 / dsh 用量），一并清掉才叫「清干净」：
+      // 只清账本会留下这两份按天聚合的缓存，重开后设置页仍显示旧用量，像是没清
+      try { codex.clearCodexCache() } catch (err) { logErr('[whale][settings] 清除 Codex 统计缓存失败', err && err.message) }
+      try { dshUsage.clearDshUsageCache() } catch (err) { logErr('[whale][settings] 清除 dsh 用量缓存失败', err && err.message) }
+    }
     // 自定义音效：音频文件（userData/whale-sounds）+ 元信息，独立于「挂件设置」
     if (o.sounds) {
       try { sounds.clearAll() } catch (err) { logErr('[whale][settings] 清除自定义音效失败', err && err.message) }
@@ -2985,6 +3007,17 @@ module.exports = {
       // 气泡图没有「当前用哪张」的概念，删光即自动回退内置 rua.webp，不必改配置
       try { bubbles.clearAll() } catch (err) { logErr('[whale][settings] 清除自定义气泡图失败', err && err.message) }
     }
+    // 按压气泡（文案 + 配图一起清）：重置 config.bubble / config.bubbleOn 到出厂默认 + 清磁盘配图。
+    // 用 patchConfig 的按字段写回（而非删整个 config）——用户勾的可能只是「按压气泡」，
+    // 不该顺手把挂件其他设置也清掉；config 项被勾时整份配置已重置，这里的写回等于写回默认值，不冲突。
+    if (o.bubble) {
+      try {
+        const dft = defaultConfig()
+        patchConfig({ bubble: dft.bubble, bubbleOn: dft.bubbleOn })
+        pushConfig()
+      } catch (err) { logErr('[whale][settings] 重置按压气泡文案失败', err && err.message) }
+      try { bubbles.clearAll() } catch (err) { logErr('[whale][settings] 清除按压气泡配图失败', err && err.message) }
+    }
     if (o.window) {
       try { utools.dbStorage.removeItem(K.win) } catch (err) {}
       try { utools.dbStorage.removeItem(K.update) } catch (err) {}
@@ -2996,6 +3029,11 @@ module.exports = {
       try { utools.dbStorage.removeItem(K.dshNotes) } catch (err) {}
       // 「自动刷新版本」是设置页侧的纯偏好（宿主不读它），与查询标记同进退清掉即可
       try { utools.dbStorage.removeItem(K.dshAutoRefreshVersions) } catch (err) {}
+      // dsh 诊断 / 配置转储 / 市场目录都是缓存：TTL 内会被复用，不清掉会看到旧结果
+      // （市场目录还兼「离线兜底」，不清则断网时仍按旧目录展示）
+      try { diagnostics.clearDshDiagnoseCache() } catch (err) { logErr('[whale][settings] 清除 dsh 诊断缓存失败', err && err.message) }
+      try { dshDump.clearDshDumpCache() } catch (err) { logErr('[whale][settings] 清除 dsh 转储缓存失败', err && err.message) }
+      clearMarketCache()
       resetAnchorCache()
     }
     resetBalanceCache()
@@ -3022,11 +3060,16 @@ module.exports = {
     if (o.bubbles) {
       try { sendToWidget('whale:bubbles', bubbles.getBubbleData()) } catch (err) { logErr('[whale][settings] 重置后推送气泡失败', err && err.message) }
     }
+    // 按压气泡：配图推空 + 配置推新（文案/开关回默认），否则挂件仍按旧文案冒泡、仍抽旧图
+    if (o.bubble) {
+      try { sendToWidget('whale:bubbles', bubbles.getBubbleData()) } catch (err) { logErr('[whale][settings] 重置后推送气泡失败', err && err.message) }
+      if (!o.config) pushConfig()
+    }
     return {
       ok: true,
       cleared: {
         secrets: !!o.secrets, config: !!o.config, ledger: !!o.ledger, window: !!o.window,
-        sounds: !!o.sounds, skins: !!o.skins, bubbles: !!o.bubbles,
+        sounds: !!o.sounds, skins: !!o.skins, bubbles: !!o.bubbles, bubble: !!o.bubble,
       },
     }
   },
@@ -3046,7 +3089,12 @@ module.exports = {
   // 按勾选项恢复（同名覆盖）；设置或窗口位置被恢复后重建挂件，让它立刻生效
   backupApply(opts) {
     const r = backup.applyBackup(opts)
-    const hit = r && r.applied && (r.applied.indexOf('config') >= 0 || r.applied.indexOf('window') >= 0)
+    const appliedList = (r && r.applied) || []
+    // 气泡图配图恢复后把新的一批推给挂件，否则它仍拿着恢复前的旧图随机抽
+    if (appliedList.indexOf('bubbles') >= 0) {
+      try { sendToWidget('whale:bubbles', bubbles.getBubbleData()) } catch (err) { logErr('[whale][settings] 恢复后推送气泡失败', err && err.message) }
+    }
+    const hit = appliedList.indexOf('config') >= 0 || appliedList.indexOf('window') >= 0
     if (hit) {
       resetBalanceCache()
       const wasVisible = winAlive()

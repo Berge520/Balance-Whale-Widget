@@ -250,8 +250,8 @@ const SEARCH_INDEX: Record<string, { label: string; tab: TabKey; keys: string }>
   models: { label: '模型与余额', tab: 'usage', keys: '模型 余额 提供商 厂商 刷新 api key 额度 主显示 密钥 凭据 token 名称 类型 币种 接口 地址 base url scale 认证 字段 路径 取值 倍数 重置 提醒 阈值' },
   window: { label: '挂件窗口', tab: 'window', keys: '窗口 显隐 位置 复位 透明度 穿透 吸附 翻转 避让 任务栏 间距 插件 滚动条 置顶 锁定 贴边 宽度' },
   help: { label: '使用帮助', tab: 'help', keys: '帮助 快捷键 使用说明 故障排查 日志 新手引导 异常 详情' },
-  privacy: { label: '清除数据', tab: 'data', keys: '清除 数据 隐私 重置 卸载 凭据 挂件 账本 窗口 素材' },
-  backup: { label: '备份与恢复', tab: 'data', keys: '备份 恢复 导出 导入 json 迁移 密码 加密 凭据' },
+  privacy: { label: '清除数据', tab: 'data', keys: '清除 数据 隐私 重置 卸载 凭据 挂件 账本 窗口 素材 按压 气泡 泡泡' },
+  backup: { label: '备份与恢复', tab: 'data', keys: '备份 恢复 导出 导入 json 迁移 密码 加密 凭据 气泡 泡泡 素材' },
   dshMain: { label: 'DeepSeek Harness（dsh）', tab: 'dev', keys: 'dsh harness 启动 重启 结束 更新 版本 端口 注册源 node 日志 状态 安装 目录 命令 地址 使用' },
   dshDiagnose: { label: 'dsh 环境诊断', tab: 'dev', keys: 'dsh 诊断 环境 检查 排障 patch 冲突 端口占用' },
   dshDump: { label: 'dsh 配置转储', tab: 'dev', keys: 'dsh 配置 转储 dump 分层 默认树 差异 概览' },
@@ -2152,19 +2152,20 @@ function copyWidgetError() {
 // 清除数据（勾选与二次确认）已内聚到 PrivacyView.vue，由它调用 services.clearAllData；
 // 这里只做「清除成功后的回显刷新」——要读父级全局状态（secrets / cfg / 账本 / 各素材卡片）。
 // picked 由组件按同一语义拆好：素材三项（sounds/skins/bubbles）同开关一起下发。
-function onDataCleared(picked: { secrets: boolean; config: boolean; ledger: boolean; window: boolean; sounds: boolean; skins: boolean; bubbles: boolean }) {
+function onDataCleared(picked: { secrets: boolean; config: boolean; ledger: boolean; window: boolean; sounds: boolean; skins: boolean; bubbles: boolean; bubble: boolean }) {
   if (picked.secrets) {
     secrets.apiKey = ''
     secrets.platformToken = ''
     secretsFlash.msg = ''
   }
-  // 清音效/形象可能改了音色与形象（自定义 → 内置），因此与清设置一样要重新套用配置
-  if (picked.config || picked.sounds || picked.skins) applyConfig(services.getConfig?.())
+  // 清音效/形象可能改了音色与形象（自定义 → 内置），因此与清设置一样要重新套用配置；
+  // 「按压气泡」重置了文案/开关（也在配置里），同样要重新套用
+  if (picked.config || picked.sounds || picked.skins || picked.bubble) applyConfig(services.getConfig?.())
   if (picked.ledger) usageHistory.value = []
   else refreshHistory()
   if (picked.sounds) refreshSounds() // 音效卡片（音色「自定义」）回显为「未导入」
   if (picked.skins) refreshSkin()   // 形象画廊回显为空（只剩「＋ 导入」）
-  if (picked.bubbles) refreshBubbles() // 气泡图网格回显为空
+  if (picked.bubbles || picked.bubble) refreshBubbles() // 气泡图网格回显为空（「按压气泡」也清了配图）
 }
 // —— 备份与恢复（「数据」页独立卡片）——
 // 导出 / 读取 / 勾选 / 恢复全部内聚到 BackupView.vue（由它调用 services.backup*）；

@@ -28,7 +28,7 @@ const require = createRequire(import.meta.url)
 const holidays = require('../public/preload/lib/holidays.js')
 const { K, CN_HOLIDAYS } = require('../public/preload/lib/constants.js')
 
-const { isHoliday, coveredYears, update, clear, status, SOURCES, SPAN, _resetCache } = holidays
+const { isHoliday, coveredYears, update, clear, status, snapshot, restore, SOURCES, SPAN, _resetCache } = holidays
 
 // 每个用例前后都清内存缓存 + 存储，避免相互串味
 function reset() {
@@ -207,6 +207,52 @@ test('status：有覆盖层时带出年份、总数与拉取时间', async () =>
   assert.ok(s.total >= 2)
   assert.ok(s.years.includes('2030'))
   assert.ok(s.fetchedAt > 0)
+})
+
+// ── snapshot / restore：备份与恢复用 ────────────────────────────────────────
+//
+// 这两个接口只服务于「备份 / 恢复」链路：snapshot 把覆盖层原样带出去，restore 把备份里的
+// 覆盖层写回。它们的坑都落在「形状校验」上 —— 备份文件可能来自旧版本或被手改过，脏数据
+// 一旦写进覆盖层，会静默污染峰谷判定，所以 restore 必须「校验不过就返回 false、不落盘」。
+
+test('snapshot：无覆盖层时返回 null（备份据此标注不含此项）', () => {
+  assert.equal(snapshot(), null)
+})
+
+test('snapshot：有覆盖层时原样带出存储里的载荷', () => {
+  const payload = { fetchedAt: 123, dates: ['2030-01-01', '2030-01-02'], years: ['2030'] }
+  store.set(K.cnHolidays, payload)
+  _resetCache()
+  assert.deepEqual(snapshot(), payload)
+})
+
+test('restore：合法载荷写回存储并立即可判（备份恢复要立刻生效）', () => {
+  const ok = restore({ fetchedAt: 456, dates: ['2031-01-01', '2030-12-31'] })
+  assert.equal(ok, true)
+  assert.equal(isHoliday('2031-01-01'), true, '恢复后拉到日子应立刻算节假日')
+  assert.equal(isHoliday('2030-12-31'), true)
+  // 落盘为规范化后的载荷：日期升序、年份去重升序
+  const raw = store.get(K.cnHolidays)
+  assert.deepEqual(raw.dates, ['2030-12-31', '2031-01-01'])
+  assert.deepEqual(raw.years, ['2030', '2031'])
+  assert.equal(raw.fetchedAt, 456)
+})
+
+test('restore：非法载荷返回 false 且不落盘（脏备份不能污染判定）', () => {
+  for (const bad of [null, undefined, {}, { dates: 'x' }, { dates: [] }, { dates: [123] }, { dates: ['not-a-date'] }]) {
+    store.clear()
+    _resetCache()
+    assert.equal(restore(bad), false, `非法载荷应被拒：${JSON.stringify(bad)}`)
+    assert.equal(store.has(K.cnHolidays), false, '拒绝时必须不写存储')
+    assert.equal(isHoliday('2031-01-01'), false, '拒绝后覆盖层不应被污染')
+  }
+})
+
+test('restore：混入非法日期时丢弃脏条目、只保留合法日期', () => {
+  const ok = restore({ fetchedAt: Date.now(), dates: ['2031-01-01', 'not-a-date', 42, '2031-01-02'] })
+  assert.equal(ok, true)
+  const raw = store.get(K.cnHolidays)
+  assert.deepEqual(raw.dates, ['2031-01-01', '2031-01-02'])
 })
 
 // ── 默认零网络：被动路径绝不触网 ────────────────────────────────────────────

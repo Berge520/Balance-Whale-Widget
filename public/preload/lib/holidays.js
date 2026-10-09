@@ -188,4 +188,41 @@ function status() {
 // 单测用：清掉内存缓存，强制重新读存储
 function _resetCache() { override = null }
 
-module.exports = { isHoliday, coveredYears, update, clear, status, SOURCES, SPAN, _resetCache }
+// ── 备份 / 恢复（供 lib/backup.js 调用）──
+// 导出：把覆盖层的原始载荷（落库那份结构）原样交出去；没有覆盖层时返回 null（备份里就不带这一项）
+function snapshot() {
+  try {
+    const raw = utools.dbStorage.getItem(K.cnHolidays)
+    if (!raw || typeof raw !== 'object' || !Array.isArray(raw.dates)) return null
+    return raw
+  } catch (err) { return null }
+}
+
+// 恢复：校验载荷结构后按原样写回，并刷新内存缓存。
+// 校验口径与 readOverride 一致（dates 必须为 YYYY-MM-DD 字符串数组），挡掉手改坏 / 跨版本的脏数据
+function restore(raw) {
+  if (!raw || typeof raw !== 'object' || !Array.isArray(raw.dates)) return false
+  const dates = []
+  for (const d of raw.dates) {
+    if (typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d)) dates.push(d)
+  }
+  if (!dates.length) return false
+  const sorted = dates.slice().sort()
+  const years = Array.from(new Set(sorted.map((d) => d.slice(0, 4)))).sort()
+  const payload = {
+    fetchedAt: Number(raw.fetchedAt) || Date.now(),
+    dates: sorted,
+    years: years,
+    sources: raw.sources && typeof raw.sources === 'object' ? raw.sources : {},
+  }
+  try {
+    utools.dbStorage.setItem(K.cnHolidays, payload)
+  } catch (err) {
+    logErr('[whale][holidays] 恢复覆盖层写存储失败', err && err.message)
+    return false
+  }
+  override = { fetchedAt: payload.fetchedAt, dates: new Set(sorted), years: new Set(years), sources: payload.sources }
+  return true
+}
+
+module.exports = { isHoliday, coveredYears, update, clear, status, snapshot, restore, SOURCES, SPAN, _resetCache }

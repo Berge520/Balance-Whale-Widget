@@ -11,7 +11,7 @@ const props = defineProps<{
   services: Partial<WhaleServices>
 }>()
 const emit = defineEmits<{
-  (e: 'cleared', picked: { secrets: boolean; config: boolean; ledger: boolean; window: boolean; sounds: boolean; skins: boolean; bubbles: boolean }): void
+  (e: 'cleared', picked: { secrets: boolean; config: boolean; ledger: boolean; window: boolean; sounds: boolean; skins: boolean; bubbles: boolean; bubble: boolean }): void
 }>()
 
 // 统一的消息态：msg=文案、err=是否错误态；模板用 msgCls(f) 生成 class。
@@ -21,10 +21,13 @@ function useFlash(): Flash { return reactive({ msg: '', err: false }) }
 function msgCls(f: Flash) { return { ok: !f.err, err: f.err } }
 
 const clearConfirm = ref(false)
-// 勾选的项才会被清除（凭据 / 设置 / 账本 / 窗口位置与更新缓存 / 导入的素材）
-// 「导入的素材」等同「资源」页的「清除全部素材」；一个勾选拆成 sounds/skins/bubbles 三项下发
-const clearItems = reactive({ secrets: true, config: true, ledger: true, window: true, assets: true })
-const anyClearItem = computed(() => clearItems.secrets || clearItems.config || clearItems.ledger || clearItems.window || clearItems.assets)
+// 勾选的项才会被清除（凭据 / 设置 / 账本 / 窗口位置与更新缓存 / 按压气泡 / 导入的素材）
+// 「导入的素材」等同「资源」页的「清除全部素材」；一个勾选拆成 sounds/skins/bubbles 三项下发。
+// 「按压气泡」单列一项：它的数据天然分散在两处（文案/队列/开关在「挂件设置」里，
+// 配图在 whale:bubbles），用户想「把按压气泡整个恢复默认」时不该被迫连挂件其他设置一起清，
+// 故给一个组合勾选，一次把文案 + 配图都清掉（host 侧 bubble=true 即做这两件事）
+const clearItems = reactive({ secrets: true, config: true, ledger: true, window: true, bubble: true, assets: true })
+const anyClearItem = computed(() => clearItems.secrets || clearItems.config || clearItems.ledger || clearItems.window || clearItems.bubble || clearItems.assets)
 // 二次确认时把「将清除哪些项」写清楚，避免误删
 const clearItemNames = computed(() => {
   const names: string[] = []
@@ -32,6 +35,7 @@ const clearItemNames = computed(() => {
   if (clearItems.config) names.push('挂件设置')
   if (clearItems.ledger) names.push('账本用量记录')
   if (clearItems.window) names.push('窗口位置与更新缓存')
+  if (clearItems.bubble) names.push('按压气泡（文案 + 配图）')
   if (clearItems.assets) names.push('导入的素材（形象 / 气泡图 / 音效）')
   return names.join('、')
 })
@@ -47,16 +51,20 @@ function clearSelectedData() {
     return
   }
   clearConfirm.value = false
-  const picked = { secrets: clearItems.secrets, config: clearItems.config, ledger: clearItems.ledger, window: clearItems.window, sounds: clearItems.assets, skins: clearItems.assets, bubbles: clearItems.assets }
+  const picked = { secrets: clearItems.secrets, config: clearItems.config, ledger: clearItems.ledger, window: clearItems.window, bubble: clearItems.bubble, sounds: clearItems.assets, skins: clearItems.assets, bubbles: clearItems.assets }
   try {
     const r = props.services.clearAllData?.(picked) || { ok: false }
     dataFlash.err = !(r && r.ok)
     if (r && r.ok) {
+      // 用量趋势的显示区间是纯前端偏好（localStorage，不进宿主存储），随账本一起清掉才叫「清干净」：
+      // 不清的话重开插件仍停在上次选的区间，看着像账本没清（实际数据没了，只是区间还被记着）
+      if (picked.ledger) { try { localStorage.removeItem('whale:usageRange') } catch (err) {} }
       const names: string[] = []
       if (picked.secrets) names.push('凭据')
       if (picked.config) names.push('挂件设置')
       if (picked.ledger) names.push('账本用量记录')
       if (picked.window) names.push('窗口位置与更新缓存')
+      if (picked.bubble) names.push('按压气泡')
       if (clearItems.assets) names.push('导入的素材')
       dataFlash.msg = `已清除：${names.join('、')}。`
         + (picked.config || picked.window ? '挂件已按默认配置重建。' : '')
@@ -84,16 +92,20 @@ function clearSelectedData() {
       <input type="checkbox" v-model="clearItems.secrets" @change="clearConfirm = false" />
     </label>
     <label class="field row check">
-      <span class="label">挂件设置 <em>（大小 / 音效 / 开关等，清除后按默认值重建挂件）</em></span>
+      <span class="label">挂件设置 <em>（大小 / 音效 / 开关等，清除后按默认值重建挂件；含节假日联网更新表）</em></span>
       <input type="checkbox" v-model="clearItems.config" @change="clearConfirm = false" />
     </label>
     <label class="field row check">
-      <span class="label">账本用量记录 <em>（今日已用与用量趋势）</em></span>
+      <span class="label">账本用量记录 <em>（今日已用与用量趋势；含 Codex / dsh 本地用量统计缓存）</em></span>
       <input type="checkbox" v-model="clearItems.ledger" @change="clearConfirm = false" />
     </label>
     <label class="field row check">
-      <span class="label">窗口位置与更新缓存 <em>（挂件回到默认位置）</em></span>
+      <span class="label">窗口位置与更新缓存 <em>（挂件回到默认位置；含 dsh 版本 / 诊断 / 转储 / 市场目录等缓存）</em></span>
       <input type="checkbox" v-model="clearItems.window" @change="clearConfirm = false" />
+    </label>
+    <label class="field row check">
+      <span class="label">按压气泡 <em>（自定义泡泡的文案与配图，清除后回到内置文案与内置图）</em></span>
+      <input type="checkbox" v-model="clearItems.bubble" @change="clearConfirm = false" />
     </label>
     <label class="field row check">
       <span class="label">导入的素材 <em>（形象 / 气泡图 / 音效文件，删后回退为内置；等同「资源」页的「清除全部素材」）</em></span>

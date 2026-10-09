@@ -22,18 +22,23 @@ function useFlash(): Flash { return reactive({ msg: '', err: false }) }
 function msgCls(f: Flash) { return { ok: !f.err, err: f.err } }
 
 const backupWithSecrets = ref(false)
+// 气泡图素材：与凭据一样默认不导出 —— 图片是二进制，base64 内嵌会让 JSON 备份膨胀到几十 MB；
+// 只想带走「设置 + 账本」的用户不该被拖累。勾了才把配图一起装进 JSON（见 backup.js）
+const backupWithBubbles = ref(false)
 const backupPassword = ref('')
 const backupBusy = ref(false)
 const backupFlash: Flash = useFlash()
 const backupConfirm = ref(false)
 const backupPreview = ref<BackupPreviewResult | null>(null)
-const backupPicks = reactive<Record<string, boolean>>({ config: true, ledger: true, window: true, timer: true, secrets: true })
+const backupPicks = reactive<Record<string, boolean>>({ config: true, ledger: true, window: true, timer: true, holidays: true, bubbles: true, secrets: true })
 const backupItems: Array<{ key: string; label: string; note: string }> = [
-  { key: 'config', label: '挂件设置', note: '（同名覆盖）' },
+  { key: 'config', label: '挂件设置', note: '（同名覆盖；含按压气泡的文案与开关）' },
   { key: 'ledger', label: '账本用量记录', note: '（同日覆盖，保留最近 30 天）' },
   { key: 'window', label: '窗口位置', note: '（恢复后挂件重建一次）' },
   { key: 'timer', label: '计时状态', note: '（重载插件后恢复）' },
-  { key: 'secrets', label: '凭据', note: '（用备份密码解密）' },
+  { key: 'holidays', label: '节假日表', note: '（联网更新的覆盖层，未更新过则无此项）' },
+  { key: 'bubbles', label: '气泡图素材', note: '（按压气泡导入的自定义配图；导出时勾选「包含气泡图素材」才带）' },
+  { key: 'secrets', label: '凭据', note: '（API Key / 平台 Token / SMTP 密码，用备份密码解密）' },
 ]
 const backupHas = (key: string) => !!backupPreview.value?.has?.[key as 'config']
 const backupAnyItem = computed(() => backupItems.some((it) => backupPicks[it.key] && backupHas(it.key)))
@@ -45,7 +50,7 @@ function backupExport() {
   backupFlash.msg = ''
   backupFlash.err = false
   try {
-    const r = props.services.backupExport?.({ secrets: backupWithSecrets.value, password: backupPassword.value })
+    const r = props.services.backupExport?.({ secrets: backupWithSecrets.value, bubbles: backupWithBubbles.value, password: backupPassword.value })
     if (!r || (!r.ok && !r.canceled)) {
       backupFlash.err = true
       backupFlash.msg = '导出失败：' + ((r && r.error) || '未知错误')
@@ -53,7 +58,10 @@ function backupExport() {
       backupFlash.msg = '已取消导出'
     } else {
       backupPassword.value = '' // 密码不留在内存/界面上
-      backupFlash.msg = '已导出备份：' + r.path + (r.withSecrets ? '（含加密凭据）' : '（不含凭据）')
+      const parts: string[] = []
+      parts.push(r.withSecrets ? '含加密凭据' : '不含凭据')
+      if (r.bubbles) parts.push('含 ' + r.bubbles + ' 张气泡图')
+      backupFlash.msg = '已导出备份：' + r.path + '（' + parts.join('，') + '）'
     }
   } catch (err: any) {
     backupFlash.err = true
@@ -101,7 +109,8 @@ function backupApply() {
   try {
     const r = props.services.backupApply?.({
       config: backupPicks.config, ledger: backupPicks.ledger, window: backupPicks.window,
-      timer: backupPicks.timer, secrets: backupPicks.secrets, password: backupPassword.value,
+      timer: backupPicks.timer, holidays: backupPicks.holidays, bubbles: backupPicks.bubbles,
+      secrets: backupPicks.secrets, password: backupPassword.value,
     })
     const applied = (r && r.applied) || []
     if (!r || !r.ok) {
@@ -141,10 +150,14 @@ function backupCancelPick() {
        根元素即 .card：父级 v-if 控显隐，data-search 供搜索滚动锚点定位。 -->
   <section class="card" data-search="backup">
     <h2>备份与恢复</h2>
-    <p class="hint">把「挂件设置 / 账本 / 窗口位置 / 计时」打包成一个 JSON 文件（不含 dsh 开发者配置与 Node 路径）；<strong>凭据默认不导出</strong>，勾选「包含凭据」后必须设密码，凭据会用 scrypt + AES-256-GCM 加密后才写入文件（文件里没有明文）。<strong>安全提示：</strong>密码不会保存到任何地方，忘记就无法解密（其余项仍可正常恢复）；备份文件本身含你的设置与用量记录，请妥善保管。</p>
+    <p class="hint">把「挂件设置 / 账本 / 窗口位置 / 计时 / 节假日表」打包成一个 JSON 文件；<strong>不含</strong> dsh 开发者配置与已导入的形象 / 音效素材（这几类可用「资源」页的素材包单独导出）。<strong>凭据默认不导出</strong>，勾选「包含凭据」后必须设密码，凭据（API Key / 平台 Token / SMTP 密码）会用 scrypt + AES-256-GCM 加密后才写入文件（文件里没有明文）。<strong>按压气泡</strong>的文字与开关随「挂件设置」一起备份，自定义配图默认不导出，勾选「包含气泡图素材」才会一并打包。<strong>安全提示：</strong>密码不会保存到任何地方，忘记就无法解密（其余项仍可正常恢复）；备份文件本身含你的设置与用量记录，请妥善保管。</p>
     <label class="field row check">
       <span class="label">包含凭据 <em>（需设密码，加密后写入）</em></span>
       <input type="checkbox" v-model="backupWithSecrets" @change="backupFlash.msg = ''" />
+    </label>
+    <label class="field row check">
+      <span class="label">包含气泡图素材 <em>（按压气泡的自定义配图，会明显增大文件体积）</em></span>
+      <input type="checkbox" v-model="backupWithBubbles" @change="backupFlash.msg = ''" />
     </label>
     <label v-if="backupWithSecrets" class="field row">
       <span class="label">备份密码</span>

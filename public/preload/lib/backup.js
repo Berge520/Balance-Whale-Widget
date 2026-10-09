@@ -2,9 +2,12 @@
  * 备份 / 恢复（CommonJS）。
  *
  *  - 导出：把「挂件设置 / 账本 / 窗口位置 / 计时」打包成一个 JSON 文件。
+ *  - 气泡图素材（whale:bubbles 的图片文件）：默认**不导出**（二进制会让 JSON 备份膨胀到几十 MB），
+ *    勾选后才以 base64 内嵌进 JSON —— 给「不想再单独导一次素材包」的用户一个一次带走的口子。
  *  - 凭据（API Key / 平台 Token）默认**不导出**；勾选后必须设密码，用 scrypt 派生密钥 + AES-256-GCM
  *    加密后才写入文件（文件里没有明文，密码不落盘，忘记密码就无法解密）。
  *  - 导入：先解析出预览（导出时间 / 插件版本 / 包含项），由设置页勾选要恢复的项，再按「同名覆盖」写入。
+ *    「按压气泡」的文案 / 队列在 config.bubble 里，跟着「挂件设置」一起进出；气泡图配图走本文件的 bubbles 项。
  */
 const fs = require('fs')
 const path = require('path')
@@ -16,6 +19,8 @@ const {
   readLedger, mergeLedgerHistory, readTimer, writeTimer,
   readAnchor, writeAnchor,
 } = require('./store')
+const holidays = require('./holidays')
+const bubbles = require('./bubbles')
 
 const KIND = 'balance-whale-widget-backup'
 const SCHEMA = 1
@@ -68,10 +73,11 @@ function stripDshKeys(cfg) {
 }
 
 // ── 导出 ──
-// opts = { secrets: boolean, password: string }
+// opts = { secrets: boolean, bubbles: boolean, password: string }
 function exportBackup(opts) {
   const o = opts && typeof opts === 'object' ? opts : {}
   const withSecrets = o.secrets === true
+  const withBubbles = o.bubbles === true
   const password = String(o.password || '')
   if (withSecrets && password.length < MIN_PWD) {
     return { ok: false, error: '导出凭据需要设密码（至少 ' + MIN_PWD + ' 位）' }
@@ -93,6 +99,28 @@ function exportBackup(opts) {
     window: readAnchor(),
     timer: readTimer(),
   }
+  // 节假日联网覆盖层：有才带（没更新过就不要往备份里塞一个空壳），无则 includes.holidays 为 false
+  const holidaysSnap = holidays.snapshot()
+  if (holidaysSnap) data.holidays = holidaysSnap
+  // 气泡图配图：可选带上（base64 内嵌 JSON）。一张都读不出来时按「没带」处理，不让备份里留个空数组
+  let bubbleCount = 0
+  let bubbleBytes = 0
+  if (withBubbles) {
+    const items = bubbles.exportItems()
+    const list = []
+    for (const it of items) {
+      if (!it.data || !it.data.length) continue
+      const thumb = it.thumb && it.thumb.length ? it.thumb.toString('base64') : ''
+      list.push({
+        name: String(it.name || ''), ext: String(it.ext || ''), at: Number(it.at) || 0,
+        data: it.data.toString('base64'), thumb: thumb,
+      })
+      bubbleCount++
+      bubbleBytes += it.data.length + (it.thumb ? it.thumb.length : 0)
+    }
+    if (list.length) data.bubbles = list
+    else bubbleCount = 0
+  }
   if (withSecrets) {
     try {
       data.secretsEnc = encryptSecrets(readSecrets(), password)
@@ -107,6 +135,8 @@ function exportBackup(opts) {
     exportedAt: new Date().toISOString(),
     includes: {
       config: true, ledger: true, window: true, timer: true,
+      holidays: !!holidaysSnap,
+      bubbles: bubbleCount,
       secrets: withSecrets ? 'encrypted' : 'none',
     },
     data,
@@ -116,8 +146,8 @@ function exportBackup(opts) {
   } catch (err) {
     return { ok: false, error: '写入备份文件失败：' + errMsg(err) }
   }
-  log('[whale][backup] 导出备份', { filePath, withSecrets })
-  return { ok: true, path: filePath, withSecrets, exportedAt: payload.exportedAt }
+  log('[whale][backup] 导出备份', { filePath, withSecrets, bubbles: bubbleCount })
+  return { ok: true, path: filePath, withSecrets, bubbles: bubbleCount, bubblesBytes: bubbleBytes, exportedAt: payload.exportedAt }
 }
 
 // ── 选择备份文件并解析出预览（不写任何数据）──
@@ -158,6 +188,8 @@ function pickBackup() {
       ledger: !!d.ledger && typeof d.ledger === 'object',
       window: !!d.window && typeof d.window === 'object',
       timer: !!d.timer && typeof d.timer === 'object',
+      holidays: !!d.holidays && typeof d.holidays === 'object' && Array.isArray(d.holidays.dates) && d.holidays.dates.length > 0,
+      bubbles: Array.isArray(d.bubbles) && d.bubbles.length > 0,
       secrets: !!(d.secretsEnc && typeof d.secretsEnc === 'object' && d.secretsEnc.data),
     },
   }
@@ -177,7 +209,7 @@ function validAnchor(a) {
 }
 
 // ── 恢复：按勾选项「同名覆盖」写入 ──
-// opts = { config, ledger, window, timer, secrets, password }
+// opts = { config, ledger, window, timer, holidays, bubbles, secrets, password }
 function applyBackup(opts) {
   const o = opts && typeof opts === 'object' ? opts : {}
   if (!pending) return { ok: false, error: '请先选择备份文件' }
@@ -238,6 +270,40 @@ function applyBackup(opts) {
       } catch (err) { fail('计时', errMsg(err)) }
     }
   }
+  if (want('holidays')) {
+    // 备份里没有、或结构不可用（dates 不是非空数组）→ skipped（等于「这份备份没带节假日表」）；
+    // 只有结构合法却写盘失败才记 error
+    const okShape = d.holidays && typeof d.holidays === 'object'
+      && Array.isArray(d.holidays.dates) && d.holidays.dates.length > 0
+    if (!okShape) skipped.push('holidays')
+    else if (holidays.restore(d.holidays)) applied.push('holidays')
+    else fail('节假日表')
+  }
+  if (want('bubbles')) {
+    // 气泡图配图：备份里没有 → skipped；有则「先清后写」——恢复的语义是「回到备份时的样子」，
+    // 若只做「补充」会与现有图混在一起，还可能撞上 8 张上限导致只恢复一半，反而更乱
+    const list = Array.isArray(d.bubbles) ? d.bubbles : []
+    if (!list.length) skipped.push('bubbles')
+    else {
+      try {
+        bubbles.clearAll()
+        let added = 0
+        let bad = 0
+        for (const it of list) {
+          const data = Buffer.from(String(it.data || ''), 'base64')
+          const thumb = Buffer.from(String(it.thumb || ''), 'base64')
+          const r = bubbles.importBuffer(
+            String(it.name || ''), String(it.ext || '').toLowerCase(),
+            data, thumb.length ? thumb : null, Number(it.at) || 0)
+          if (r && r.ok) added++
+          else bad++
+        }
+        if (added > 0) applied.push('bubbles')
+        else fail('气泡图素材', '备份里的图片均无法写入')
+        if (bad > 0) logErr('[whale][backup] 恢复气泡图有 ' + bad + ' 张失败（格式或体积不合法）')
+      } catch (err) { fail('气泡图素材', errMsg(err)) }
+    }
+  }
   if (want('secrets')) {
     if (!d.secretsEnc) skipped.push('secrets')
     else {
@@ -250,6 +316,10 @@ function applyBackup(opts) {
           // 多厂商模型的密钥槽位：老备份里没有这个字段，传 undefined 让 writeSecrets 沿用现值，
           // 否则一次「只恢复凭据」会把用户已保存的各模型密钥清空
           models: s.models === undefined ? undefined : s.models,
+          // SMTP 邮件凭据：导出时 readSecrets() 已把它一并加密写进备份，这里必须显式恢复，
+          // 否则 writeSecrets 见其为 undefined 会沿用现值 —— 换机恢复后邮件密码就丢了，
+          // 备份文件里那份加密凭据等于白存。老备份无此字段时传 undefined 沿用现值
+          notifyMail: s.notifyMail === undefined ? undefined : s.notifyMail,
         })
         applied.push('secrets')
       } catch (err) {

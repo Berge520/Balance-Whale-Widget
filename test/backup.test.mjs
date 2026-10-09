@@ -46,6 +46,7 @@ globalThis.utools = {
 
 const require = createRequire(import.meta.url)
 const backup = require('../public/preload/lib/backup.js')
+const bubbles = require('../public/preload/lib/bubbles.js')
 
 const { _encryptSecrets, _decryptSecrets, applyBackup, pickBackup, clearPending } = backup
 
@@ -182,9 +183,129 @@ test('applyBackup：凭据密码错时报错且不写任何东西（AES-GCM 拦�
   assert.equal(vault.has('whale:secrets'), false)
 })
 
+test('applyBackup：恢复凭据必须把 SMTP（notifyMail）一并写回，不能只恢复 API Key', () => {
+  // 导出时 readSecrets() 含 notifyMail，已加密进备份；若恢复时漏传，writeSecrets 会沿用现值，
+  // 换机恢复后邮件密码就丢了 —— 这正是此前存在、现已修复的 bug
+  const full = {
+    apiKey: 'sk-new', platformToken: 'tok-new', models: { moonshot: 'sk-m' },
+    notifyMail: { mailHost: 'smtp.qq.com', mailPort: 465, mailSecure: true, mailUser: 'a@qq.com', mailPass: 'auth-code' },
+  }
+  stage({ secretsEnc: _encryptSecrets(full, 'pw123456') })
+  const r = applyBackup({ secrets: true, password: 'pw123456' })
+  assert.equal(r.ok, true, r.error)
+  assert.deepEqual(r.applied, ['secrets'])
+  const saved = vault.get('whale:secrets')
+  assert.equal(saved.apiKey, 'sk-new')
+  assert.equal(saved.notifyMail.mailPass, 'auth-code')
+  assert.equal(saved.notifyMail.mailUser, 'a@qq.com')
+})
+
+test('applyBackup：老备份无 notifyMail 时沿用现值，不清空用户已存的 SMTP 密码', () => {
+  // 先放一份现值，模拟用户已有邮件配置
+  vault.set('whale:secrets', {
+    apiKey: 'old', platformToken: '', models: {},
+    notifyMail: { mailHost: 'h', mailPort: 465, mailSecure: true, mailUser: 'u', mailPass: 'keep-me' },
+  })
+  // 老备份只带 apiKey / platformToken（无 models、无 notifyMail）
+  stage({ secretsEnc: _encryptSecrets({ apiKey: 'sk-old', platformToken: '' }, 'pw123456') })
+  const r = applyBackup({ secrets: true, password: 'pw123456' })
+  assert.equal(r.ok, true, r.error)
+  const saved = vault.get('whale:secrets')
+  assert.equal(saved.apiKey, 'sk-old')
+  assert.equal(saved.notifyMail.mailPass, 'keep-me', '老备份缺 notifyMail 时必须沿用现值')
+})
+
+test('applyBackup：节假日表按校验后写回并进 applied；脏数据记 skipped 不报错', () => {
+  const good = { fetchedAt: 1700000000000, dates: ['2026-10-01', '2026-10-02'], years: ['2026'], sources: { 2026: 0 } }
+  stage({ holidays: good })
+  const r1 = applyBackup({ holidays: true })
+  assert.equal(r1.ok, true, r1.error)
+  assert.deepEqual(r1.applied, ['holidays'])
+  assert.deepEqual(store.get('whale:cnHolidays').dates, ['2026-10-01', '2026-10-02'])
+
+  // dates 不是非空数组 → 视为「这份备份没带节假日表」记 skipped，而非报错
+  stage({ holidays: { dates: [] } })
+  const r2 = applyBackup({ holidays: true })
+  assert.deepEqual(r2.applied, [])
+  assert.deepEqual(r2.skipped, ['holidays'])
+  assert.deepEqual(r2.errors, [])
+
+  // dates 有元素但全部非法（结构像、内容脏）→ restore 返回 false → 记 error（不假装恢复成功）
+  stage({ holidays: { dates: ['not-a-date'] } })
+  const r3 = applyBackup({ holidays: true })
+  assert.deepEqual(r3.applied, [])
+  assert.equal(r3.errors.length, 1)
+  assert.match(r3.errors[0], /节假日表/)
+})
+
 test('applyBackup：没选备份文件就直接拒绝', () => {
   clearPending()
   const r = applyBackup({ config: true })
   assert.equal(r.ok, false)
   assert.match(r.error, /请先选择备份文件/)
+})
+
+// ── 按压气泡的配图（whale:bubbles）：恢复是「先清后写」，语义 = 回到备份时的样子 ──
+// 按压气泡的数据分散两处：文案 / 队列 / 开关在 config.bubble（跟着 config 项进出），配图在
+// whale:bubbles（跟着 bubbles 项进出）。这里专测配图那条链路 —— 它是二进制，备份里以 base64
+// 内嵌，恢复时最容易出「只补一半」「撞 8 张上限」这类静默缺图。
+
+// 造一张最小的「合法」PNG 字节（内容不校验，只要非空且 <= 5MB）
+const PNG = Buffer.from('89504e470d0a1a0a0000000d49484452', 'hex')
+function seedBubble(name, times) {
+  for (let i = 0; i < (times || 1); i++) {
+    const r = bubbles.importBuffer(name, 'png', PNG, null, 0)
+    assert.equal(r.ok, true, '前置：写入气泡图应成功：' + r.error)
+  }
+}
+
+test('applyBackup：气泡图「先清后写」，恢复到与备份一致（不残留旧图）', () => {
+  bubbles.clearAll()
+  seedBubble('old.png', 3) // 现有 3 张旧图
+  const before = bubbles.exportItems()
+  assert.equal(before.length, 3, '前置：应有 3 张旧图')
+
+  // 备份里只有 1 张（base64 内嵌）
+  stage({
+    bubbles: [{ name: 'new.png', ext: 'png', at: 123, data: PNG.toString('base64'), thumb: '' }],
+  })
+  const r = applyBackup({ bubbles: true })
+  assert.equal(r.ok, true, r.error)
+  assert.deepEqual(r.applied, ['bubbles'])
+  const after = bubbles.exportItems()
+  assert.equal(after.length, 1, '恢复语义是「回到备份时的样子」，旧图必须被清掉')
+  assert.equal(after[0].name, 'new.png')
+  assert.equal(after[0].at, 123, '导入时间应沿用备份里的值')
+})
+
+test('applyBackup：气泡图备份里没有该键 → 记 skipped，不动现有图', () => {
+  bubbles.clearAll()
+  seedBubble('keep.png', 2)
+  stage({ config: { scale: 1.5 } })
+  const r = applyBackup({ bubbles: true })
+  assert.deepEqual(r.applied, [])
+  assert.deepEqual(r.skipped, ['bubbles'])
+  assert.deepEqual(r.errors, [])
+  assert.equal(bubbles.exportItems().length, 2, '备份没带配图时不该清掉现有图')
+})
+
+test('applyBackup：气泡图数据全坏 → 记 error，不假报成功', () => {
+  bubbles.clearAll()
+  stage({ bubbles: [{ name: 'bad.xyz', ext: 'xyz', at: 0, data: PNG.toString('base64') }] })
+  const r = applyBackup({ bubbles: true })
+  assert.equal(r.ok, false)
+  assert.deepEqual(r.applied, [])
+  assert.equal(r.errors.length, 1)
+  assert.match(r.errors[0], /气泡图/)
+})
+
+test('pickBackup：has.bubbles 只在备份确实带图时为 true', () => {
+  stage({ bubbles: [{ name: 'a.png', ext: 'png', at: 0, data: PNG.toString('base64') }] })
+  assert.equal(pickBackup().has.bubbles, true, '带图 → has.bubbles = true')
+
+  stage({ bubbles: [] })
+  assert.equal(pickBackup().has.bubbles, false, '空数组 → false')
+
+  stage({ config: { scale: 1 } })
+  assert.equal(pickBackup().has.bubbles, false, '没有该键 → false')
 })
