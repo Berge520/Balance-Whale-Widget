@@ -1,5 +1,7 @@
 <script lang="ts" setup>
 import { computed, reactive, ref, watch } from 'vue'
+import { msgCls, useFlash, type Flash } from '../composables/useFlash'
+import UsageChart from '../components/UsageChart.vue'
 import type { LedgerDetailDay, LedgerDetailEntry, ModelUsageRow, WhaleServices } from '../types/services'
 
 // 「用量与账本」整卡：用量口径 / 趋势图 / 本月汇总 / 账本明细 / 额度 / 今日模型占比 / 校准，
@@ -28,6 +30,8 @@ const props = defineProps<{
   usageCurrency: string
   // 金额格式化（跨卡共享，父级唯一来源）
   fmtMoney: (v: number) => string
+  // 时间戳 → 'HH:mm'（跨卡共享，父级唯一来源；与宿主 util.hhmm 同口径）
+  hhmm: (ts: number) => string
   // 输入法组字守卫（跨卡共享，父级唯一来源）
   isImeComposing: (e: Event | undefined) => boolean
   // 历史保留上下限与默认值（父级 HISTORY_KEEP）
@@ -52,10 +56,7 @@ const emit = defineEmits<{
   (e: 'remove-price-model', i: number): void
 }>()
 
-// 统一的消息态：与父级 App.vue 里的同名工具保持同一定义（内联一份，免父子透传 4 行工具）
-type Flash = { msg: string; err: boolean }
-function useFlash(): Flash { return reactive({ msg: '', err: false }) }
-function msgCls(f: Flash) { return { ok: !f.err, err: f.err } }
+// 统一的消息态（Flash）：定义收口在 composables/useFlash.ts，各卡不再各持一份。
 
 // 单价模型行的删除确认：删错一条要手抄三组价格回来，代价高 —— 与模型卡的删除同款，
 // 点「删」先把那一行切成确认条，点「确认删除」才真删、点「取消」退回（同一时刻只开一行）。
@@ -79,9 +80,11 @@ function loadUsageRange(): UsageRange {
   return 7
 }
 const usageRange = ref<UsageRange>(loadUsageRange())
-function setUsageRange(r: UsageRange) {
-  usageRange.value = r
-  try { localStorage.setItem(USAGE_RANGE_KEY, String(r)) } catch (err) {}
+// 组件 @update:range 给来的是宽泛的 number，这里收窄回本卡的白名单档位
+function setUsageRange(r: number) {
+  const v = ((USAGE_RANGES as readonly number[]).includes(r) ? r : usageRange.value) as UsageRange
+  usageRange.value = v
+  try { localStorage.setItem(USAGE_RANGE_KEY, String(v)) } catch (err) {}
 }
 // 保留天数之外的区间不显示（保留 35 天时点「180 天」只会看到一小段柱子，容易以为数据丢了）
 const usageRangeTabs = computed(() => USAGE_RANGES.filter((r) => r <= props.cfg.historyKeepDays))
@@ -106,20 +109,24 @@ const calibrateFlash: Flash = useFlash()
 const adjustTimeText = computed(() => {
   const t = Date.parse(lastAdjustAt.value)
   if (!isFinite(t)) return ''
-  const d = new Date(t)
-  const p2 = (n: number) => String(n).padStart(2, '0')
-  return p2(d.getHours()) + ':' + p2(d.getMinutes())
+  return props.hhmm(t)
 })
 // v-model.number 清空输入框时值为 ''（未输入时为 null），两种都视为未填
 const calibrateInputEmpty = computed(() =>
   calibrateInput.value === null || (calibrateInput.value as unknown) === '')
-// 图表实际渲染的区间（尾部 usageRange 天）
+// —— 用量趋势：交给 UsageChart 组件渲染 ——
+// 本卡原先手写了一份柱状图（丢纵轴刻度、区间档位只有 5 档且与组件阈值不同），
+// 现改用与「会话统计卡」共用的 UsageChart。图表只认 { date, tokens }，
+// 本卡的用量字段是 usage，故在适配层做一次映射 —— 组件本身保持字段无关，
+// 不为迁就本卡改它的契约（那样两个父卡的差异又会被塞回组件里，等于换处重复）。
 const chartDays = computed(() => props.usageHistory.slice(-usageRange.value))
 const historyMax = computed(() => {
   let m = 0
   for (const d of chartDays.value) if (d.usage > m) m = d.usage
   return m
 })
+// 图表数据：字段名 usage → tokens（UsageChart 契约）
+const chartData = computed(() => chartDays.value.map((d) => ({ date: d.date, tokens: d.usage })))
 // 本月汇总：从 31 天里筛出本月日期。日均按「本月已过天数」摊（含今天），
 // 否则月初会被整月的空白天数摊薄成一个没意义的小数
 const monthStats = computed(() => {
@@ -153,8 +160,22 @@ const labelEvery = computed(() => Math.max(1, Math.round(usageRange.value / 6)))
 function dayLabel(date: string) {
   return date.slice(5).replace('-', '/')
 }
-function barHeight(u: number) {
-  return historyMax.value > 0 ? Math.max(3, Math.round((u / historyMax.value) * 100)) : 0
+// 柱高百分比：金额最大值做满格，空数组或全 0 返回 '0%' —— 组件靠返回值判 hasBars
+// 决定出图还是显示空态（会话统计卡那边原判据是 >= 1 token，金额常小于 1，
+// 故本卡用「> 0」：有量就出图，否则会把有量的小额日子误判成无）。
+function barHeight(u?: number) {
+  const v = Number(u) || 0
+  if (historyMax.value <= 0) return '0%'
+  return Math.max(3, Math.round((v / historyMax.value) * 100)) + '%'
+}
+// 柱顶数值：本卡是金额口径，走父级 fmtMoney（组件默认是 token 缩写，会显示错）
+function valFmt(v?: number) {
+  return props.fmtMoney(Number(v) || 0)
+}
+// 花费格式化：组件 fmtCost 会以可选参数调用（showCost=false 时不会被调），
+// 父级 fmtMoney 只收 number，套一层把 undefined 归一成 0
+function costFmt(v?: number) {
+  return props.fmtMoney(Number(v) || 0)
 }
 // 导出账本用量为 CSV（宿主弹系统保存框；用户取消时静默）
 function exportUsageCsv() {
@@ -259,9 +280,7 @@ function adjustSumOf(d: LedgerDetailDay) {
 function entryTime(e: LedgerDetailEntry) {
   const t = Date.parse(e.at)
   if (!isFinite(t)) return ''
-  const d = new Date(t)
-  const p2 = (n: number) => String(n).padStart(2, '0')
-  return `${p2(d.getHours())}:${p2(d.getMinutes())}`
+  return props.hhmm(t)
 }
 function entryText(e: LedgerDetailEntry) {
   if (e.kind === 'calibrate') return `手动校准：${props.fmtMoney(e.from || 0)} → ${props.fmtMoney(e.to || 0)}`
@@ -277,9 +296,7 @@ const MODEL_COLORS = ['#5b7fd4', '#7fb0e8', '#57c2b0', '#e0a45c', '#b185d8', '#e
 const modelsSum = computed(() => todayModels.value.reduce((a, r) => a + (Number(r.amount) || 0), 0))
 const modelsTimeText = computed(() => {
   if (!modelsAt.value) return ''
-  const d = new Date(modelsAt.value)
-  const p2 = (n: number) => String(n).padStart(2, '0')
-  return `${p2(d.getHours())}:${p2(d.getMinutes())}`
+  return props.hhmm(modelsAt.value)
 })
 // 模型显示名：平台用量接口回的是模型 id（如 deepseek-v4-flash），原样铺在占比条上不好读。
 // 只做「友好标注」，不合并数据、不改金额；原始 id 放 title 里悬浮可见。
@@ -386,8 +403,9 @@ defineExpose({ applyHistory, refreshTodayModels, refreshDetail })
         <span v-if="!cardFold.open" class="card-sum">{{ cardSummary }}</span>
       </h2>
       <div class="head-actions">
-        <!-- 区间切换：同一组按钮在下方 UsageChart 组件里还有一份（那才是主入口，
-             本行是卡片头部就近快捷）。样式走 main.css 的 utils 基类，与组件内那份一致。 -->
+        <!-- 区间切换：本卡把它放在卡片头部（挨着导入/导出，就近快捷），
+             故下方 UsageChart 传 show-range-tabs=false 关掉组件自带的那份，同卡只有一处切换器。
+             样式走 main.css 的 utils 基类。 -->
         <div class="range-tabs">
           <button v-for="r in usageRangeTabs" :key="r" class="range-tab utils-btn"
                   :class="usageRange === r ? 'utils-primary' : 'utils-secondary'" @click="setUsageRange(r)">{{ r }} 天</button>
@@ -513,17 +531,28 @@ defineExpose({ applyHistory, refreshTodayModels, refreshDetail })
       </div>
     </div>
 
-    <div v-if="historyMax > 0" class="chart"
-         :class="{ 'chart-dense': usageRange >= 14, 'chart-ultra': usageRange >= 90 }">
-      <div v-for="(d, i) in chartDays" :key="d.date" class="bar-col">
-        <div class="bar-val">{{ d.usage > 0 && usageRange <= 14 ? fmtMoney(d.usage) : '' }}</div>
-        <div class="bar-track">
-          <div class="bar" :style="{ height: barHeight(d.usage) + '%' }"></div>
-        </div>
-        <div class="bar-day">{{ i % labelEvery === 0 ? dayLabel(d.date) : '' }}</div>
-      </div>
-    </div>
-    <p v-else class="hint">暂无用量记录（挂件运行并记账后自动显示）。</p>
+    <!-- 趋势图：与「会话统计卡」共用 UsageChart 组件（区间切换器是它的主入口；
+          卡片头部另有一份就近快捷按钮，见 .head-actions）。
+          本卡口径：超密档阈值 90（组件默认 30）、柱顶显示金额（valFmt=fmtMoney）、
+          空态文案带账本口气、不渲染「各模型用量」折叠（showModels=false —— 模型占比
+          是另一套「今日模型占比」块，口径不同，不重复出）。 -->
+    <UsageChart
+      :range="usageRange"
+      :ranges="usageRangeTabs"
+      :days="chartData"
+      :label-every="labelEvery"
+      :bar-height="barHeight"
+      :day-label="dayLabel"
+      :models="[]"
+      turns-label="次"
+      :show-cost="false"
+      :show-models="false"
+      :show-range-tabs="false"
+      :fmt-cost="costFmt"
+      :ultra-threshold="90"
+      :val-fmt="valFmt"
+      empty-text="暂无用量记录（挂件运行并记账后自动显示）。"
+      @update:range="setUsageRange" />
     <!-- 「累计已用」是账本的滚动累计（quotaUsed + 今天），不受历史保留期裁剪影响，故与上方区间无关 -->
     <p v-if="historyMax > 0 || cumUsed > 0" class="hint month-sum">
       本月累计 <strong>{{ fmtMoney(monthStats.total) }}</strong>
@@ -640,11 +669,9 @@ defineExpose({ applyHistory, refreshTodayModels, refreshDetail })
 /* 设计令牌来自 main.css 的 :root。通用控件样式已由 main.css 统一提供（全局唯一来源），
    本组件只留自身特有的控件样式。utils 档位配色与 .link-btn
    基类也已在 main.css，此处不再留副本。
-   ★ 趋势柱状图那套（.chart / .bar-* / .chart-dense / .chart-ultra）必须带进来：
-     原先它们只写在 UsageChart.vue 的 scoped 块里，而本卡的趋势图是 App.vue 内联 markup、
-     带的是 App 的哈希，规则整段失效 —— 症状是柱子完全不出（.bar-track 的 height:90px 没生效）。
-     随本卡抽成独立组件后在这里补齐，正好修掉这个既有 bug。
-     阈值按本卡口径：dense ≥14、ultra ≥90（UsageChart 组件内是 14 / 30，与本卡不同）。 */
+   趋势柱状图那套（.chart / .bar-* / .chart-axis / .grid-line / .chart-dense / .chart-ultra）
+   也已在 main.css 作**唯一来源** —— 不再各文件各抄一份，超密档阈值差异由
+   UsageChart 的 ultraThreshold prop 表达（本卡传 90）。 */
 
 .head-actions {
   display: flex;
@@ -666,44 +693,9 @@ defineExpose({ applyHistory, refreshTodayModels, refreshDetail })
   border-color: var(--accent);
 }
 
-input[type='text'],
-select {
-  width: 100%;
-  box-sizing: border-box;
-  padding: 7px 9px;
-  font-size: 13px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--input-bg);
-  color: var(--fg);
-}
-select option {
-  background: var(--input-bg);
-  color: var(--fg);
-}
-input[type='text']:focus,
-select:focus,
-.num:focus {
-  outline: none;
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(83, 107, 169, 0.18);
-}
+/* 输入框 / 下拉 / 数值框的表单控件基类已上提 main.css（全局唯一来源），
+   此处不再留副本。 */
 
-.num {
-  width: 56px;
-  padding: 5px 6px;
-  font-size: 13px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: transparent;
-  color: inherit;
-}
-.num-text {
-  width: 44px;
-  text-align: right;
-  font-size: 13px;
-  color: var(--fg-dim);
-}
 .group-title {
   margin: 18px 0 6px;
   padding-top: 12px;
@@ -847,62 +839,6 @@ select:focus,
 }
 .calibrate-input {
   width: 110px;
-}
-/* 趋势柱状图（取自 UsageChart.vue，阈值按本卡口径） */
-.chart {
-  display: flex;
-  align-items: flex-end;
-  gap: 8px;
-  padding-top: 6px;
-}
-.bar-col {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
-  min-width: 0;
-}
-.bar-val {
-  font-size: 10px;
-  color: var(--fg-dim);
-  white-space: nowrap;
-  height: 14px;
-}
-.bar-track {
-  width: 100%;
-  height: 90px;
-  display: flex;
-  align-items: flex-end;
-  background: var(--track);
-  border-radius: 6px;
-  overflow: hidden;
-}
-.bar {
-  width: 100%;
-  background: linear-gradient(180deg, #6f8ad6, var(--accent));
-  border-radius: 6px 6px 0 0;
-  transition: height 0.3s ease;
-}
-.bar-day {
-  font-size: 10px;
-  color: var(--fg-faint);
-  white-space: nowrap;
-}
-.chart-dense {
-  gap: 3px;
-}
-.chart-dense .bar-day {
-  font-size: 9px;
-}
-.chart-dense .bar-track {
-  border-radius: 4px;
-}
-.chart-ultra {
-  gap: 1px;
-}
-.chart-ultra .bar-track {
-  border-radius: 2px;
 }
 /* 今日模型占比（令牌模式）：名称 / 条 / 百分比 / 金额四列对齐 */
 .model-share {

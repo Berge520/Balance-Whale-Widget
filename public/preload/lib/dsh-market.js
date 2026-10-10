@@ -54,6 +54,7 @@
  */
 const zlib = require('zlib')
 const { log, logErr } = require('./log')
+const { errMsg } = require('./util')
 
 // 官方目录（与 dsh-market 同源）
 const OFFICIAL_URL = 'https://awesome-dsh-plugin.com/plugins.json'
@@ -79,8 +80,6 @@ const MAX_BYTES = 16 * 1024 * 1024
 
 // ── 内存状态（重载插件即丢；持久化的那份由 settings.js 落 dbStorage）──
 let mem = { at: 0, key: '', data: null, validators: {} }
-
-function errMsg(err) { return String((err && err.message) || err || '未知错误') }
 
 // ── 纯函数：安装 spec 解析 ──
 

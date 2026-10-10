@@ -19,6 +19,7 @@
  */
 const { CN_HOLIDAYS, K } = require('./constants')
 const { log, logErr } = require('./log')
+const { errMsg } = require('./util')
 
 // 数据源：主源走 jsDelivr CDN，回退 GitHub Raw 与 ghproxy 加速（镜像多源，任一可用即可）。
 // 顺序参考 lib/dsh-notes.js 的 SOURCES：先用最稳的 CDN，再退到 GitHub 直连/加速。
@@ -111,7 +112,7 @@ async function fetchYearAllSources(year) {
     } catch (err) {
       lastErr = err
       // 回退属预期分支，用 log 不刷错误
-      log('[whale][holidays] ' + year + ' 源 #' + (i + 1) + ' 失败:', (err && err.message) || err)
+      log('[whale][holidays] ' + year + ' 源 #' + (i + 1) + ' 失败:', errMsg(err))
     }
   }
   throw new Error('所有源均不可用：' + ((lastErr && lastErr.message) || lastErr))
@@ -135,7 +136,7 @@ async function update(timeSec) {
       sources[y] = r.source
     } catch (err) {
       failed.push(y)
-      logErr('[whale][holidays] 拉取 ' + y + ' 年失败', (err && err.message) || err)
+      logErr('[whale][holidays] 拉取 ' + y + ' 年失败', errMsg(err))
     }
   }
   if (!collected.length) {

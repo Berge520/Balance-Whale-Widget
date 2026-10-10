@@ -18,7 +18,7 @@ const os = require('os')
 const { log, logErr } = require('./log')
 const { readConfig } = require('./store')
 const { K, NEWEST_VERSION, DSH_PORT_DEFAULT } = require('./constants')
-const { homeDir, writeFileAtomicSync } = require('./util')
+const { homeDir, writeFileAtomicSync, errMsg } = require('./util')
 const { getNotes } = require('./dsh-notes')
 
 const DSH_TAIL = 'web' // dsh 的 Web UI 子命令
@@ -109,11 +109,11 @@ function pushLog(text) {
     .replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '')
     .replace(/\x1b[@-Z\\-_]/g, '')
   const d = new Date()
-  const stamp = '[' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0') + ':' + String(d.getSeconds()).padStart(2, '0') + '] '
+  const prefix = '[' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0') + ':' + String(d.getSeconds()).padStart(2, '0') + '] '
   for (const p of cleaned.split('\n')) {
     const line = p.trimEnd()
     if (!line) continue
-    const one = stamp + (line.length > 400 ? line.slice(0, 400) + '…' : line)
+    const one = prefix + (line.length > 400 ? line.slice(0, 400) + '…' : line)
     state.log.push(one)
   }
   if (state.log.length > LOG_MAX) state.log.splice(0, state.log.length - LOG_MAX)
@@ -471,10 +471,10 @@ function elevateInstall(npmExe, args, onDone) {
   }
   const q = (s) => "'" + String(s).replace(/'/g, "''") + "'"
   const cq = (s) => '"' + String(s) + '"'
-  const stamp = 'whale-elev-' + process.pid + '-' + Date.now()
-  const bat = path.join(os.tmpdir(), stamp + '.cmd')
-  const vbs = path.join(os.tmpdir(), stamp + '.vbs')
-  const outFile = path.join(os.tmpdir(), stamp + '.log')
+  const fileTag = 'whale-elev-' + process.pid + '-' + Date.now()
+  const bat = path.join(os.tmpdir(), fileTag + '.cmd')
+  const vbs = path.join(os.tmpdir(), fileTag + '.vbs')
+  const outFile = path.join(os.tmpdir(), fileTag + '.log')
   let ps = ''
   try {
     fs.writeFileSync(bat, '@echo off\r\n' + [npmExe].concat(args).map(cq).join(' ')
@@ -489,7 +489,7 @@ function elevateInstall(npmExe, args, onDone) {
     ps = '$p = Start-Process -FilePath "wscript.exe" -ArgumentList ' + q(vbs)
       + ' -Verb RunAs -Wait -PassThru; exit $p.ExitCode'
   } catch (err) {
-    pushLog('提权安装未成功（无法创建临时脚本）：' + ((err && err.message) || err))
+    pushLog('提权安装未成功（无法创建临时脚本）：' + errMsg(err))
     if (onDone) onDone(err, { code: 0, canceled: false })
     return
   }
@@ -878,7 +878,7 @@ function removeInstalled() {
     fs.rmSync(dir, { recursive: true, force: true })
     pushLog('已删除插件目录里的 dsh（将重新下载）：' + dir)
   } catch (err) {
-    pushLog('删除插件目录失败（文件被占用？）：' + ((err && err.message) || err))
+    pushLog('删除插件目录失败（文件被占用？）：' + errMsg(err))
   }
   state.installed = ''
   return true
@@ -933,7 +933,7 @@ function restoreManifests(snaps) {
       const w = writeFileAtomicSync(s.path, s.data)
       if (!w.ok) throw new Error(w.error)
       restored.push(s.name)
-    } catch (err) { logErr('[whale][dsh] 恢复清单失败', s.name + '：' + ((err && err.message) || err)) }
+    } catch (err) { logErr('[whale][dsh] 恢复清单失败', s.name + '：' + errMsg(err)) }
   }
   return restored
 }
@@ -1220,7 +1220,7 @@ function start() {
   setCmd(exe + ' ' + args.join(' '))
   let child = null
   try { child = spawnCmd(exe, args, node) } catch (err) {
-    state.error = '启动失败：' + ((err && err.message) || err)
+    state.error = '启动失败：' + errMsg(err)
     pushLog(state.error)
     return snapshot()
   }
@@ -1234,7 +1234,7 @@ function start() {
   watchReady()
   bindOutput(child)
   child.on('error', (err) => {
-    state.error = '启动失败：' + ((err && err.message) || err)
+    state.error = '启动失败：' + errMsg(err)
     pushLog(state.error)
     logErr('[whale][dsh] 启动失败', err && err.message)
     if (state.child === child) { state.child = null; state.pid = 0; state.runVersion = ''; state.runPort = 0 }
@@ -1298,12 +1298,12 @@ function stop(done) {
   clearReady()
   const onKillErr = (err) => {
     if (!err) return
-    pushLog('结束命令返回错误：' + ((err && err.code !== undefined) ? err.code : (err && err.message) || err))
+    pushLog('结束命令返回错误：' + ((err && err.code !== undefined) ? err.code : errMsg(err)))
     // 进程可能已经自己退了 —— 那种情况 exit 事件会清状态并广播；确实没退掉才解除 stopping 报错，
     // 否则界面会永远停在「正在结束…」
     if (state.child === child) {
       state.stopping = false
-      state.error = '结束失败：' + ((err && err.message) || err) + '（可重试，或以管理员身份运行 uTools）'
+      state.error = '结束失败：' + errMsg(err) + '（可重试，或以管理员身份运行 uTools）'
       broadcast()
     }
   }
@@ -1316,7 +1316,7 @@ function stop(done) {
   } catch (err) {
     logErr('[whale][dsh] 结束失败', err && err.message)
     state.stopping = false
-    state.error = '结束失败：' + ((err && err.message) || err)
+    state.error = '结束失败：' + errMsg(err)
     broadcast()
   }
   if (done) done(snapshot())
@@ -1482,7 +1482,7 @@ function installDsh(done, busyKind) {
   let child = null
   try { child = spawnCmd(node.npm, args, node) } catch (err) {
     state.busy = ''
-    state.error = '安装失败：' + ((err && err.message) || err)
+    state.error = '安装失败：' + errMsg(err)
     pushLog(state.error)
     broadcast()
     return snapshot()
@@ -1530,7 +1530,7 @@ function installDsh(done, busyKind) {
     // spawn 失败同样是「装了一半」：一并回滚清单，别留幽灵依赖
     const restored = restoreManifests(manifestSnaps)
     if (restored.length) pushLog('已回滚清单到安装前：' + restored.join('、'))
-    state.error = '安装失败：' + ((err && err.message) || err)
+    state.error = '安装失败：' + errMsg(err)
     pushLog(state.error)
     broadcast()
   })
@@ -1945,14 +1945,14 @@ function listVersions() {
   let child = null
   try { child = spawnCmd(exe, args, node) } catch (err) {
     state.busy = ''
-    state.error = '查询版本失败：' + ((err && err.message) || err)
+    state.error = '查询版本失败：' + errMsg(err)
     pushLog(state.error)
     return snapshot()
   }
   try { child.stdout && child.stdout.on('data', (d) => { out += String(d) }) } catch (err) {}
   bindOutput(child)
   child.on('error', (err) => {
-    state.busy = ''; state.error = '查询版本失败：' + ((err && err.message) || err); pushLog(state.error)
+    state.busy = ''; state.error = '查询版本失败：' + errMsg(err); pushLog(state.error)
     broadcast()
   })
   child.on('exit', (code) => {
@@ -2069,7 +2069,7 @@ function loadNotes(force) {
     })
     .catch((err) => {
       state.notesBusy = false
-      logErr('[whale][dsh] 取版本说明失败', (err && err.message) || err)
+      logErr('[whale][dsh] 取版本说明失败', errMsg(err))
       n.at = Date.now()
       n.data = { ok: false, installed: installed, target: target, resolvedTarget: resolvedTarget, reason: (err && err.message) || String(err) }
       broadcast()
@@ -2121,7 +2121,7 @@ function removePluginDsh() {
     fs.rmSync(dir, { recursive: true, force: true })
     pushLog('已删除插件目录里的 dsh：' + dir)
   } catch (err) {
-    state.error = '删除失败（文件被占用？）：' + ((err && err.message) || err)
+    state.error = '删除失败（文件被占用？）：' + errMsg(err)
     pushLog(state.error)
   }
   state.installed = ''
@@ -2156,7 +2156,7 @@ function cleanNpxCaches() {
         n++
         pushLog('已删除 ' + dir)
       } catch (err) {
-        pushLog('删除失败（可能正被 npx 使用）：' + dir + ' —— ' + ((err && err.message) || err))
+        pushLog('删除失败（可能正被 npx 使用）：' + dir + ' —— ' + errMsg(err))
       }
     }
   }

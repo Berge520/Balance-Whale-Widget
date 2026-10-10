@@ -1,5 +1,6 @@
 <script lang="ts" setup>
 import { computed, reactive, ref, watch } from 'vue'
+import { msgCls, type Flash } from '../composables/useFlash'
 import type { HolidayStatus, SkinGallery, SkinMeta, SoundMeta, SoundRole, WhaleServices } from '../types/services'
 
 // 「挂件外观」整卡：大小 / 形象 / 深浅色 / 气泡与文案 / 音效，从设置页 App.vue 抽出。
@@ -76,9 +77,7 @@ const randomPoolNote = computed(() => (props.cfg.randomIncludeBuiltin === false
 // 这里据此把该开关置灰并给提示，避免用户以为是开关坏了（报时改在按压气泡里加「报时」模块）
 const bubbleModelOn = computed(() => props.cfg.bubble?.on === true)
 
-// 统一的消息态：与父级 App.vue 里的同名工具保持同一定义（内联一份，免父子透传 4 行工具）
-type Flash = { msg: string; err: boolean }
-function msgCls(f: Flash) { return { ok: !f.err, err: f.err } }
+// 统一的消息态（Flash）：定义收口在 composables/useFlash.ts，各卡不再各持一份。
 
 // 两个折叠组（气泡与文案 / 音效）：仅本卡消费，随卡搬入。
 // 默认收起：这两组都是「配置一次后很少再动」的低频项（气泡配色 / 峰谷文案 / 节假日表 /
@@ -134,7 +133,7 @@ async function onHolidayUpdate() {
       holidayFlash.value = { msg: (r && r.error) || '更新失败，请检查网络后重试', err: true }
     }
   } catch (err: any) {
-    holidayFlash.value = { msg: '更新失败：' + String((err && err.message) || err), err: true }
+    holidayFlash.value = { msg: '更新失败：' + String((err && err.message) || err || '未知错误'), err: true }
   } finally {
     holidayBusy.value = false
     refreshHoliday()
@@ -400,28 +399,8 @@ const holidayNote = computed(() => {
   margin: 6px 0 0;
 }
 
-select {
-  width: 100%;
-  box-sizing: border-box;
-  padding: 7px 9px;
-  font-size: 13px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--input-bg);
-  color: var(--fg);
-}
-/* 下拉展开后的选项：必须显式给出背景与文字色。
-   否则深色模式下选项文字（浅色）会落在系统浅色弹层上，完全看不清。 */
-select option {
-  background: var(--input-bg);
-  color: var(--fg);
-}
-select:focus,
-.num:focus {
-  outline: none;
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(83, 107, 169, 0.18);
-}
+/* 下拉 / 数值框 / 复选框的表单控件基类已上提 main.css（全局唯一来源），
+   此处不再留副本。 */
 
 .range {
   flex: 1;
@@ -455,26 +434,6 @@ select:focus,
 }
 .range-ticks i.on {
   background: var(--accent);
-}
-.num {
-  width: 56px;
-  padding: 5px 6px;
-  font-size: 13px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: transparent;
-  color: inherit;
-}
-.num-text {
-  width: 44px;
-  text-align: right;
-  font-size: 13px;
-  color: var(--fg-dim);
-}
-input[type='checkbox'] {
-  width: 16px;
-  height: 16px;
-  accent-color: var(--accent);
 }
 /* 随机按钮：补 hover 提亮（尺寸与描边档配色来自 main.css 的 utils 基类） */
 .export-btn {

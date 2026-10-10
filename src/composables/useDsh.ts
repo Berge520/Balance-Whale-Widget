@@ -31,9 +31,7 @@ import type {
   DshUsageResult,
   WhaleServices,
 } from '../types/services'
-
-// 瞬时回执：与 App.vue 的 Flash 同构（不 import，避免设置页与本模块互相依赖类型文件）
-type Flash = { msg: string; err: boolean }
+import { type Flash } from './useFlash'
 
 export function useDsh(opts: {
   services: Partial<WhaleServices>

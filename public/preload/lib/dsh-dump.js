@@ -16,6 +16,7 @@
  */
 const { logErr } = require('./log')
 const { K } = require('./constants')
+const { errMsg } = require('./util')
 const { decodeOut, spawnCmd, activeDsh, resolveNode } = require('./dsh')
 
 // 短命进程，8s 足够；再长说明环境有问题，继续等只会让用户盯着转圈（§4.3）
@@ -402,7 +403,7 @@ function run(args, cb, timeoutMs) {
     child = spawnCmd(node.node, [act.entry].concat(args), node)
   } catch (err) {
     logErr('[whale][dsh-dump] 启动失败', (err && err.message) || '')
-    return finish(new Error('启动 dsh 失败：' + ((err && err.message) || err)), '')
+    return finish(new Error('启动 dsh 失败：' + errMsg(err)), '')
   }
   // stdout 进正文、stderr 单独留一份（修 B7）：
   // 早先两路都往同一个 out 里拼，而成功路径 `finish(null, out)` 把 stderr 当成正常输出——
@@ -430,7 +431,7 @@ function run(args, cb, timeoutMs) {
     // 监听器也一直挂着（close 之后可能又被 error 叫一次）。
     // 现在先 kill 再 finish：finish 有 done 闸门，晚到的 close/error/超时都会被挡掉。
     try { if (child) child.kill() } catch (e) {}
-    finish(new Error('dump 进程错误：' + ((err && err.message) || err)), '')
+    finish(new Error('dump 进程错误：' + errMsg(err)), '')
   }
   const onData = (d) => { collect(d) }
   const onErrData = (d) => { collectErr(d) }
@@ -464,7 +465,7 @@ function dumpDefault(profile, cb) { run(['--profile', String(profile || 'web'), 
 // 这件事必须和「装了但 dump 失败」分开说：前者要引导用户去「dsh」卡片装一次，
 // 后者才该说重试；而 UI 拿不到 stdout，判据只能落在 run 给的这条错误文案上
 function isNotInstalled(err) {
-  const m = String((err && err.message) || err || '')
+  const m = errMsg(err, '')
   return m.indexOf('未找到可用的 dsh') >= 0 || m.indexOf('未找到 Node.js') >= 0
 }
 

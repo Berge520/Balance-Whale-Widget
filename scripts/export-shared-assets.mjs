@@ -88,6 +88,6 @@ function run() {
 try {
   run()
 } catch (err) {
-  console.error('[export-shared-assets] 失败：' + ((err && err.message) || err))
+  console.error('[export-shared-assets] 失败：' + ((err && err.message) || err || '未知错误'))
   process.exit(1)
 }

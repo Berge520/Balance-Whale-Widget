@@ -33,6 +33,23 @@ const props = defineProps<{
   // 早先这里硬编码过一份 `¥` + toFixed，等于给非人民币金额也贴了 ¥ 符号，
   // 正是「抽组件顺手抄一份」造出来的劣化复制。showCost 为 false 时该 prop 不会被调用。
   fmtCost: (v?: number) => string
+  // 「超密」档的 range 阈值：≥ 此值才挂 .chart-ultra（收窄柱间距）。
+  // 两个父卡的口径不同（会话统计卡 token 量级小、30 天就很密 → 30；
+  // 用量卡按金额记、柱子少但要用更紧的间距 → 90），差异由 prop 表达，不各留一份样式。
+  // 默认 30 保持会话统计卡原行为，不传即可。
+  ultraThreshold?: number
+  // 柱顶数值的格式化函数。dsh / Codex 显示 token（K/M 缩写，见 fmtTokens）；
+  // 用量卡显示金额（fmtMoney）。**父组件传什么就显示什么**，
+  // 组件内不再写死 fmtTokens —— 否则用量卡会显示 token 缩写而不是金额。
+  valFmt?: (v?: number) => string
+  // 无用量记录时的提示文案。三张卡的措辞略不同，默认沿用会话统计卡那句。
+  emptyText?: string
+  // 是否渲染「各模型用量」折叠块。dsh / Codex 卡要（默认 true）；
+  // 用量卡的模型占比是另一套「今日模型占比」块（数据口径不同），不重复出这一块，传 false。
+  showModels?: boolean
+  // 是否渲染组件自带的区间切换器（默认 true）。
+  // 用量卡把切换器放进了卡片头部（挨着导入/导出，就近快捷），故传 false 避免同卡两处重复。
+  showRangeTabs?: boolean
 }>()
 
 const emit = defineEmits<{ (e: 'update:range', v: number): void }>()
@@ -64,13 +81,15 @@ const dayMax = computed(() => {
 })
 // 三条参考线（1/2、1/4、满格）。只给「满格」和「半格」写刻度文字：
 // 31 根柱子、90px 高的图里塞四个数字会挤成一片，两条足以读出量级。
+// 刻度文字与柱顶同口径（valText：父卡可传 valFmt），否则同一张图上纵轴用 token 缩写、
+// 柱顶用金额，会自相矛盾（本图新加纵轴时踩过这个坑：金额卡纵轴曾写死 fmtTokens）。
 const gridLines = computed(() => {
   if (!dayMax.value) return []
   return [1, 0.5, 0.25].map((f) => ({
     key: f,
     bottom: f * 100 + '%',
     // 只有满格与半格标数值，1/4 线纯装饰
-    label: f === 1 || f === 0.5 ? fmtTokens(dayMax.value * f) : '',
+    label: f === 1 || f === 0.5 ? valText(dayMax.value * f) : '',
   }))
 })
 // 各模型展示条数上限。排行榜之外的尾巴（真实账本里常有一串只调用过一两次的模型）
@@ -78,6 +97,13 @@ const gridLines = computed(() => {
 const MODELS_MAX = 8
 const modelsShown = computed(() => props.models.slice(0, MODELS_MAX))
 const modelsHidden = computed(() => Math.max(0, props.models.length - modelsShown.value.length))
+
+// 「超密」档阈值：父组件不传时保持默认 30
+const ultraAt = computed(() => props.ultraThreshold ?? 30)
+// 柱顶数值格：父组件传了 valFmt 就用它（用量卡传 fmtMoney），否则用组件内 fmtTokens
+const valText = (v?: number) => (props.valFmt ? props.valFmt(v) : fmtTokens(v))
+// 空态提示：父组件不传时沿用原话
+const emptyMsg = computed(() => props.emptyText ?? `近 ${props.range} 天没有用量记录。`)
 
 // 占比条按「最大模型」为满格，而不是按总量占比 —— 排行榜里第一名贴满、
 // 其余按与第一名的倍数收窄，比全部挤在 0–30% 的一小段里更容易分辨。
@@ -94,7 +120,7 @@ function modelBarWidth(tokens?: number) {
 </script>
 
 <template>
-  <div class="range-tabs-row">
+  <div v-if="props.showRangeTabs !== false" class="range-tabs-row">
     <div class="range-tabs">
       <button
         v-for="r in props.ranges"
@@ -114,9 +140,9 @@ function modelBarWidth(tokens?: number) {
     </div>
     <div class="chart-plot">
       <span v-for="g in gridLines" :key="g.key" class="grid-line" :style="{ bottom: 'calc(' + g.bottom + ' + var(--day-row))' }"></span>
-      <div class="chart" :class="{ 'chart-dense': props.range >= 14, 'chart-ultra': props.range >= 30 }">
+      <div class="chart" :class="{ 'chart-dense': props.range >= 14, 'chart-ultra': props.range >= ultraAt }">
         <div v-for="(d, i) in props.days" :key="d.date" class="bar-col">
-          <div class="bar-val">{{ (d.tokens || 0) > 0 && (props.labelEvery === 1 || i % props.labelEvery === 0) ? fmtTokens(d.tokens) : '' }}</div>
+          <div class="bar-val">{{ (d.tokens || 0) > 0 && (props.labelEvery === 1 || i % props.labelEvery === 0) ? valText(d.tokens) : '' }}</div>
           <div class="bar-track">
             <div class="bar" :style="{ height: props.barHeight(d.tokens) }"></div>
           </div>
@@ -125,9 +151,9 @@ function modelBarWidth(tokens?: number) {
       </div>
     </div>
   </div>
-  <p v-else class="hint">近 {{ props.range }} 天没有用量记录。</p>
+  <p v-else class="hint">{{ emptyMsg }}</p>
 
-  <div class="fold">
+  <div v-if="props.showModels !== false" class="fold">
     <button class="link-btn utils-btn utils-secondary" @click="modelsOpen = !modelsOpen">{{ modelsOpen ? '收起各模型用量' : '各模型用量' }}</button>
     <div v-if="modelsOpen" class="guide">
       <!-- 模型行原先是一条长长的 .field：名字靠左、后面紧跟「4.2M tokens · 73 次调用 · 输出 26K · ¥ 0.00」
@@ -171,122 +197,12 @@ function modelBarWidth(tokens?: number) {
 }
 
 /* ===== 柱状趋势图 =====
-   **这些规则原先写在 App.vue 的 scoped 块里，整段失效，柱子因此完全不出图。**
-   App.vue 也是 <style scoped>，编译成 `.chart[data-v-App哈希]`；而 scoped 属性只加在
-   「模板里直接写的元素」上，本组件渲染的 .chart / .bar-col / .bar-track 位于子组件内部，
-   只带 UsageChart 自己的哈希，永远匹配不上 —— 最要命的是 .bar-track 的 height: 90px 没生效，
-   轨道高度 0，里面 height: xx% 的柱子自然全被压成 0 高（有数值、有日期、就是没柱形）。
-   样式必须与渲染它的组件同处一个 scoped 块。 */
-/* 纵轴刻度列：宽度固定，避免刻度文字长短变化时把绘图区推得左右抖。
-   height 必须等于 .bar-track 的 90px —— 刻度是按「相对轨道的百分比」定位的，
-   若这里高度取的是整列（含日期行），刻度会整体错位。padding-top 对应 track 上方的
-   .bar-val(14px) + gap(4px)，让两条轴从同一水平线起算。 */
-.chart-axis {
-  position: relative;
-  flex: 0 0 34px;
-  height: 90px;
-  padding-top: 18px;
-  box-sizing: content-box;
-}
-.axis-label {
-  position: absolute;
-  right: 0;
-  /* translateY(50%) 让文字中心压在参考线上，而不是底边贴线 */
-  transform: translateY(50%);
-  font-size: 9px;
-  color: var(--fg-faint);
-  white-space: nowrap;
-}
-.chart-plot {
-  position: relative;
-  flex: 1;
-  min-width: 0;
-}
-/* 水平参考线铺在柱子背后，只作读数量的背景刻度。
-   关键：网格线的 bottom 基准是整个绘图区，而「0 刻度」不是绘图区底边 ——
-   下面还有 .bar-day 那一行（10px 字 × 默认行高 ≈ 15px）。直接 bottom: 0 会让参考线
-   整体下沉到日期行上、与柱子对不上。所以 bottom 用 calc(百分比 + 日期行高) 一起算，
-   行高抽成 --day-row：14/30 天档 .chart-dense 把日期字号压到 9px，行高跟着变小，同步换值。
-   不用 margin-bottom 顶替：绝对定位元素上 margin 与百分比 bottom 的叠加语义容易踩坑，
-   直接写进 calc 里最直白。
-   变量挂在 .chart-wrap（两侧刻度列与绘图区的共同父级）而不是 .chart-plot：
-   .chart-axis 在 plot 之外，定义在 plot 上它取不到，刻度会全部掉到容器底边。 */
-.chart-wrap {
-  /* --day-row 见下方 .grid-line 注释：日期行高，供网格线/刻度把 0 刻度垫高一行 */
-  --day-row: 15px;
-  display: flex;
-  gap: 6px;
-  padding-top: 6px;
-}
-.chart-wrap:has(.chart-dense) {
-  --day-row: 14px;
-}
-.grid-line {
-  position: absolute;
-  left: 0;
-  right: 0;
-  height: 1px;
-  background: var(--line);
-  z-index: 0;
-  /* bottom 的具体值由内联 style 给（calc 里带 --day-row），此处不设 */
-}
-.chart {
-  display: flex;
-  align-items: flex-end;
-  gap: 8px;
-  padding-top: 6px;
-}
-.bar-col {
-  flex: 1;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 4px;
-  min-width: 0;
-}
-.bar-val {
-  font-size: 10px;
-  color: var(--fg-dim);
-  white-space: nowrap;
-  height: 14px;
-}
-.bar-track {
-  width: 100%;
-  height: 90px;
-  display: flex;
-  align-items: flex-end;
-  background: var(--track);
-  border-radius: 6px;
-  overflow: hidden;
-}
-.bar {
-  width: 100%;
-  background: linear-gradient(180deg, #6f8ad6, var(--accent));
-  border-radius: 6px 6px 0 0;
-  transition: height 0.3s ease;
-}
-.bar-day {
-  font-size: 10px;
-  color: var(--fg-faint);
-  white-space: nowrap;
-}
-/* 14 / 30 天：柱子变窄，间距与日期字号一起收，否则会糊成一片 */
-.chart-dense {
-  gap: 3px;
-}
-.chart-dense .bar-day {
-  font-size: 9px;
-}
-.chart-dense .bar-track {
-  border-radius: 4px;
-}
-/* 30 天：柱子更密，间距再收一档，否则空隙会吃掉大半个图宽（卡片内容宽只有 524px） */
-.chart-ultra {
-  gap: 1px;
-}
-.chart-ultra .bar-track {
-  border-radius: 2px;
-}
+   .chart / .bar-* / .chart-axis / .grid-line / .chart-wrap / .chart-dense / .chart-ultra
+   这一整套已上提 main.css 作**唯一来源**（原先 UsageChart.vue 与 UsageView.vue 各抄一份，
+   同款规则再往前还曾在 App.vue scoped 里因哈希不匹配而整段失效）。
+   这里不再留副本 —— 唯一实质差异「超密档阈值」已由 ultraThreshold prop 表达。
+   注意：本组件渲染的元素带的是**本组件**的哈希，main.css 是全局块不带哈希，故能正常命中；
+   反之，父组件 scoped 里再写一份也匹配不到本组件渲染的元素，这正是历史上柱子不出图的原因。 */
 
 /* ===== 各模型用量排行榜 =====
    四列定宽：名字 / 总量 / 次·输出 / 花费，

@@ -291,3 +291,46 @@ test('normalizePath 收敛为绝对路径；空值返回空串，不做 realpath
   const p = path.join(root, 'a', '..', 'b')
   assert.equal(util.normalizePath(p), path.join(root, 'b'))
 })
+
+// ── errMsg ──
+test('errMsg 收敛各种错误形态：Error 取 message，字符串原样，空值回默认文案', () => {
+  assert.equal(util.errMsg(new Error('boom')), 'boom')
+  assert.equal(util.errMsg('plain string'), 'plain string')
+  // 无 message 的对象：走「原值」分支，仍产出字符串（不会变成 [object Object]）
+  assert.equal(util.errMsg({ code: 'E1' }), '[object Object]')
+  assert.equal(util.errMsg(null), '未知错误')
+  assert.equal(util.errMsg(undefined), '未知错误')
+  assert.equal(util.errMsg(''), '未知错误')
+  // 自定义 fallback
+  assert.equal(util.errMsg(null, '读失败'), '读失败')
+  // Error 带空 message：|| 链落到 String(err) = 'Error'（与 7 份原拷贝行为一致，
+  // 不会走到 fallback）—— 钉住这个真实口径，别想当然以为是 fallback
+  assert.equal(util.errMsg(new Error(''), '兜底'), 'Error')
+})
+
+// ── sha256 ──
+test('sha256 对 Buffer / 字符串给出一致的已知摘要（字节版）', () => {
+  // 已知向量：sha256('abc') = ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+  const expectAbc = 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad'
+  assert.equal(util.sha256('abc'), expectAbc)
+  assert.equal(util.sha256(Buffer.from('abc')), expectAbc)
+  // 空输入也有确定摘要
+  assert.equal(util.sha256(''), 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855')
+})
+
+// ── stamp ──
+test('stamp 三种精度互不串味：min / sec / day（含日期级分隔符为 -）', () => {
+  const ts = new Date(2026, 8, 22, 21, 42, 43).getTime() // 2026-09-22 21:42:43 本地
+  assert.equal(util.stamp(ts), '20260922-2142')          // 默认 min
+  assert.equal(util.stamp(ts, 'min'), '20260922-2142')
+  assert.equal(util.stamp(ts, 'sec'), '20260922-214243')
+  assert.equal(util.stamp(ts, 'day'), '2026-09-22')      // 走 dayKeyFromTs，分隔符是 -
+})
+
+// ── hhmm ──
+test('hhmm 输出本地 HH:mm，单位数补零', () => {
+  const ts = new Date(2026, 8, 22, 9, 5, 0).getTime()
+  assert.equal(util.hhmm(ts), '09:05')
+  const midnight = new Date(2026, 8, 22, 0, 0, 0).getTime()
+  assert.equal(util.hhmm(midnight), '00:00')
+})

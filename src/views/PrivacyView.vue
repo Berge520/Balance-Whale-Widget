@@ -1,5 +1,6 @@
 <script lang="ts" setup>
 import { computed, reactive, ref } from 'vue'
+import { msgCls, useFlash, type Flash } from '../composables/useFlash'
 import type { WhaleServices } from '../types/services'
 
 // 「数据与隐私」按项清除整卡：勾选项与二次确认都内聚在本组件，从设置页 App.vue 抽出。
@@ -14,11 +15,8 @@ const emit = defineEmits<{
   (e: 'cleared', picked: { secrets: boolean; config: boolean; ledger: boolean; window: boolean; sounds: boolean; skins: boolean; bubbles: boolean; bubble: boolean }): void
 }>()
 
-// 统一的消息态：msg=文案、err=是否错误态；模板用 msgCls(f) 生成 class。
-// 与父级 App.vue 里的同名工具保持同一定义（原为全页共享，这里内联一份，免得父子透传）
-type Flash = { msg: string; err: boolean }
-function useFlash(): Flash { return reactive({ msg: '', err: false }) }
-function msgCls(f: Flash) { return { ok: !f.err, err: f.err } }
+// 统一的消息态（Flash）：msg=文案、err=是否错误态；模板用 msgCls(f) 生成 class。
+// 定义收口在 composables/useFlash.ts。
 
 const clearConfirm = ref(false)
 // 勾选的项才会被清除（凭据 / 设置 / 账本 / 窗口位置与更新缓存 / 按压气泡 / 导入的素材）
@@ -141,11 +139,6 @@ function clearSelectedData() {
 /* 设计令牌（--fg / --accent / --line / --ok / --err 等）来自 main.css 的 :root。
    通用控件样式（.card / .field / .label / .msg / .hint 等）已由 main.css 统一提供
    （全局唯一来源），本组件只留自身特有的控件样式。
-   .btn-row 骨架与 utils 档位配色也已在 main.css，此处不再留副本。 */
-
-input[type='checkbox'] {
-  width: 16px;
-  height: 16px;
-  accent-color: var(--accent);
-}
+   .btn-row 骨架与 utils 档位配色也已在 main.css，此处不再留副本。
+   通用复选框尺寸与配色亦已上提 main.css（全局唯一来源）。 */
 </style>

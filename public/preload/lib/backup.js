@@ -14,6 +14,7 @@ const path = require('path')
 const crypto = require('crypto')
 const { log, logErr } = require('./log')
 const { PLUGIN_VERSION } = require('./constants')
+const { errMsg, stamp } = require('./util')
 const {
   readConfig, writeConfig, readSecrets, writeSecrets,
   readLedger, mergeLedgerHistory, readTimer, writeTimer,
@@ -29,8 +30,6 @@ const MIN_PWD = 6
 const SCRYPT = { N: 16384, r: 8, p: 1 }
 
 let pending = null // 已解析、等待确认写入的备份（避免重复读文件）
-
-function errMsg(err) { return String((err && err.message) || err || '未知错误') }
 
 // ── 凭据加解密（scrypt + AES-256-GCM，带认证标签，改一位就解不开）──
 function encryptSecrets(obj, password) {
@@ -54,12 +53,6 @@ function decryptSecrets(blob, password) {
   d.setAuthTag(Buffer.from(blob.tag, 'base64'))
   const out = Buffer.concat([d.update(Buffer.from(blob.data, 'base64')), d.final()])
   return JSON.parse(out.toString('utf8'))
-}
-
-function stamp() {
-  const d = new Date()
-  const p2 = (n) => String(n).padStart(2, '0')
-  return d.getFullYear() + p2(d.getMonth() + 1) + p2(d.getDate()) + '-' + p2(d.getHours()) + p2(d.getMinutes())
 }
 
 // dsh 相关配置里含机器相关的路径（Node 目录 / 版本），备份不带，

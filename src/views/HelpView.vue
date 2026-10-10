@@ -1,5 +1,6 @@
 <script lang="ts" setup>
 import { reactive } from 'vue'
+import { msgCls, useFlash, type Flash } from '../composables/useFlash'
 import type { WhaleServices } from '../types/services'
 
 // 「使用帮助」整卡：全局快捷键说明 / 新手引导重开入口 / 使用说明折叠 / 挂件故障排查
@@ -28,11 +29,7 @@ const emit = defineEmits<{
   (e: 'copy-widget-error'): void
 }>()
 
-// 统一的消息态：msg=文案、err=是否错误态；与父级 App.vue 里的同名工具保持同一定义
-// （原为全页共享，这里内联一份，免得一个 4 行的 class 工具也要父子透传）
-type Flash = { msg: string; err: boolean }
-function useFlash(): Flash { return reactive({ msg: '', err: false }) }
-function msgCls(f: Flash) { return { ok: !f.err, err: f.err } }
+// 统一的消息态（Flash）：定义收口在 composables/useFlash.ts，各卡不再各持一份。
 
 // 使用说明 / 故障排查的折叠态（默认收起，点标题才展开）
 const widgetFolds = reactive({ help: false, trouble: false })
@@ -130,28 +127,9 @@ function openLogFile() {
 <style scoped>
 /* 设计令牌（--fg / --accent / --line / --ok / --err 等）全部来自 main.css 的 :root。
    通用控件样式已由 main.css 统一提供（全局唯一来源），本组件只留自身特有的控件样式。
-   .btn-row 骨架、.link-btn 与 utils 档位配色也已在 main.css，此处不再留副本。 */
+   .btn-row 骨架、.link-btn 与 utils 档位配色也已在 main.css，此处不再留副本。
+   .guide / .guide-use / .guide > .link-btn:first-child 一并上提 main.css（全局唯一来源）。 */
 
-.guide {
-  margin-top: 10px;
-  padding: 10px 12px;
-  border-radius: 8px;
-  border: 1px solid var(--line);
-  background: var(--input-bg);
-  font-size: 12px;
-  line-height: 1.6;
-}
-.guide-use {
-  margin: 0;
-  color: var(--fg);
-}
-.guide-use + .guide-use {
-  margin-top: 6px;
-}
-/* 折叠面板里的首个标题紧贴顶部，不额外留白 */
-.guide > .link-btn:first-child {
-  margin-top: 0;
-}
 .err-block {
   margin-top: 10px;
 }

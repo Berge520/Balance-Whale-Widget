@@ -33,13 +33,13 @@
  * 是两条独立链路（出入口不同、用户交互不同）。共用的只有容器格式本身，解析逻辑刻意各写一份：
  * assets.js 那份要保留 raw 供设置页预览勾选，这里则直接落盘，硬合并反而要多绕一层。
  */
-const crypto = require('crypto')
 const {
   SKIN_PACK_URL, SKIN_PACK_ORIGIN, SKIN_PACK_DEFAULT_PREFIX, SKIN_PACK_RAW_MAIN,
   SKIN_PACK_RAW_ITEM_BASE,
   SKIN_PACK_SHA256, SKIN_PACK_TIMEOUT_MS, SKIN_PACK_MAX_BYTES, SKIN_PACK_SKINS,
 } = require('./constants')
 const { log, logErr } = require('./log')
+const { errMsg, sha256 } = require('./util')
 const skins = require('./skins')
 const dlp = require('./download-progress')
 
@@ -50,12 +50,6 @@ const HEAD_BYTES = MAGIC.length + 4
 // 内存状态：进行中的下载（防重复点击，也让设置页能显示「正在下」）。
 // 只存内存 —— 重载插件即中断，符合预期（下载是一次性的短操作）。
 let running = false
-
-function errMsg(err) { return String((err && err.message) || err || '未知错误') }
-
-function sha256(buf) {
-  return crypto.createHash('sha256').update(buf).digest('hex')
-}
 
 // 可下载形象清单 + 已装状态：设置页资源页据此渲染「哪些能下、哪些已下」。
 // 返回 { ok, items: [{ id, size, installed }], url, totalSize } —— 不含缩略图

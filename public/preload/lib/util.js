@@ -9,12 +9,13 @@
  *   1. 禁止 require('./log')      —— log.js 依赖 utools，require 即触碰宿主
  *   2. 禁止 require('utools')     —— 本模块必须能在纯 Node 下加载
  *   3. 禁止 require('./constants') —— PLUGIN_VERSION 由构建脚本写入，引入会形成耦合
- * 只允许 Node 内置模块（fs / path / os）。
+ * 只允许 Node 内置模块（fs / path / os / crypto）。
  * 自检手段：`node --test test/util.test.mjs` 必须**不挂任何 utools 桩**即可通过。
  */
 const fs = require('fs')
 const os = require('os')
 const path = require('path')
+const crypto = require('crypto')
 
 // ── 数值 ──
 // 任何读进来的数都可能是 undefined / null / 'abc'，统一收敛成有限数值
@@ -200,7 +201,7 @@ function writeFileAtomicSync(file, data, encoding) {
   } catch (err) {
     if (fd >= 0) { try { fs.closeSync(fd) } catch (_) {} }
     if (tmp) { try { fs.unlinkSync(tmp) } catch (_) {} }
-    return { ok: false, error: String((err && err.message) || err || 'unknown') }
+    return { ok: false, error: errMsg(err, 'unknown') }
   }
 }
 
@@ -260,10 +261,58 @@ function normalizePath(p) {
   return path.resolve(raw)
 }
 
+// ── 错误消息 ──
+// 把各种形态的错误收敛成**可读的一行文案**，供日志 / 悬浮窗 / 设置页提示统一使用。
+//
+// ⚠️ 口径必须与项目里已有的 7 份本地拷贝（backup / assets / assets-packs / dsh-backup /
+// dsh-market / dsh-export / skin-packs）逐字一致：err → err.message → 原值 → '未知错误'。
+// 早先这 7 份 + 上百处内联 `(err && err.message) || err` 各自实现，出错文案在
+// 「未知错误 / [object Object] / 空串」之间漂移，用户看不懂。提取到此处收口。
+function errMsg(err, fallback) {
+  return String((err && err.message) || err || (fallback === undefined ? '未知错误' : fallback))
+}
+
+// ── 哈希 ──
+// ⚠️ 只做**字节版**（Buffer / 字符串按 utf8 交给 crypto）。
+// dsh-backup 那份是**文本版**（内部先 String(text) 再算），语义不同，**保留在调用方**，
+// 由它把 String(text) 之后的结果传进来 —— 不在这里加文本分支，否则同一个 sha256
+// 出现两种行为，出问题时更难定位（备份去重会静默失准）。
+function sha256(buf) {
+  return crypto.createHash('sha256').update(buf).digest('hex')
+}
+
+// ── 时间戳 ──
+// 文件名用的紧凑时间戳，**三种精度**必须用参数区分（历史上分别是三份本地实现）：
+//   'min'（默认）→ 20260922-2142     资产 / 备份 / 导出
+//   'sec'        → 20260922-214243   快照（同一分钟内多次操作要能区分）
+//   'day'        → 2026-09-22        仅日期，分隔符是 '-'（走 dayKeyFromTs 口径）
+function stamp(ts, precision) {
+  const d = ts === undefined ? new Date() : new Date(Number(ts))
+  const p2 = (n) => String(n).padStart(2, '0')
+  if (precision === 'day') return dayKeyFromTs(d.getTime())
+  const ymd = d.getFullYear() + p2(d.getMonth() + 1) + p2(d.getDate())
+  const hm = p2(d.getHours()) + p2(d.getMinutes())
+  return precision === 'sec' ? ymd + '-' + hm + p2(d.getSeconds()) : ymd + '-' + hm
+}
+
+// ── 时间展示 ──
+// 时间戳 → 'HH:mm'（本地时区）。设置页多处「条目/刷新时间」列都手写过 p2 拼装，
+// 统一到这里。注意：只负责 HH:mm 这一段，调用方若要拼更长的格式（如 'M-D HH:mm'）
+// 自行在两侧拼接，不要指望本函数带上日期。
+function hhmm(ts) {
+  const d = new Date(Number(ts))
+  const p2 = (n) => String(n).padStart(2, '0')
+  return p2(d.getHours()) + ':' + p2(d.getMinutes())
+}
+
 // atomicTmpPath 保持原样导出：主写是**按调用时从 module.exports 取**，
 // 所以测试替换 `require('util').atomicTmpPath` 会紧接着影响下一次主写。
 module.exports = {
   num,
+  errMsg,
+  sha256,
+  stamp,
+  hhmm,
   dayKeyFromTs,
   dayAdd,
   homeDir,

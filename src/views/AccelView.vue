@@ -1,5 +1,6 @@
 <script lang="ts" setup>
-import { computed, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, onUnmounted, ref, watch } from 'vue'
+import { msgCls, useFlash, type Flash } from '../composables/useFlash'
 import type { GhAccelOpLog, GhAccelTrace, GhAccelVerifyResult, WhaleServices } from '../types/services'
 
 // GitHub 加速（hosts 方案）整块功能：状态 / 开关 / IP 表 / 连接检测 / 操作日志。
@@ -19,14 +20,7 @@ const emit = defineEmits<{
   (e: 'patch', p: Record<string, any>): void
 }>()
 
-// 统一的消息态：msg=文案、err=是否错误态；模板用 msgCls(f) 生成 class。
-// 原为 App.vue 里全页共享的工具函数，这里按同一定义内联一份，
-// 免得让子组件为了一个 4 行的 class 工具去依赖父级
-type Flash = { msg: string; err: boolean }
-function useFlash(): Flash { return reactive({ msg: '', err: false }) }
-function msgCls(f: Flash) {
-  return { ok: !f.err, err: f.err }
-}
+// 统一的消息态（Flash）：定义收口在 composables/useFlash.ts，各卡不再各持一份。
 
 // —— GitHub 加速（hosts 方案）：状态 / 开关 / IP 表 / 检测连接 ——
 const ghAccelFlash: Flash = useFlash()

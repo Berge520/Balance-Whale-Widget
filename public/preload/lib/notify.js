@@ -14,6 +14,7 @@
 const net = require('net')
 const tls = require('tls')
 const { logErr } = require('./log')
+const { errMsg } = require('./util')
 const { K } = require('./constants')
 
 // 单测注入点：SmtpClient 正常只碰 net/tls，但 feed() 这类「纯解析」逻辑不该为了可测
@@ -318,7 +319,7 @@ function sendMail(cfg, subject, body) {
       .catch((err) => {
         clearTimeout(guard)
         client.destroy()
-        resolve({ ok: false, error: String((err && err.message) || err) })
+        resolve({ ok: false, error: errMsg(err) })
       })
   })
 }

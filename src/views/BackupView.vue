@@ -1,5 +1,6 @@
 <script lang="ts" setup>
 import { computed, reactive, ref } from 'vue'
+import { msgCls, useFlash, type Flash } from '../composables/useFlash'
 import type { BackupPreviewResult, WhaleServices } from '../types/services'
 
 // 备份与恢复整卡：状态 / 交互（导出、选择文件、勾选恢复项、恢复）全部内聚在本组件，
@@ -14,12 +15,8 @@ const emit = defineEmits<{
   (e: 'applied', applied: string[]): void
 }>()
 
-// 统一的消息态：msg=文案、err=是否错误态；模板用 msgCls(f) 生成 class。
-// 与父级 App.vue 里的同名工具保持同一定义（原为全页共享，这里内联一份，
-// 免得一个 4 行的 class 工具也要父子透传）
-type Flash = { msg: string; err: boolean }
-function useFlash(): Flash { return reactive({ msg: '', err: false }) }
-function msgCls(f: Flash) { return { ok: !f.err, err: f.err } }
+// 统一的消息态（Flash）：msg=文案、err=是否错误态；模板用 msgCls(f) 生成 class。
+// 定义收口在 composables/useFlash.ts，各卡不再各持一份。
 
 const backupWithSecrets = ref(false)
 // 气泡图素材：与凭据一样默认不导出 —— 图片是二进制，base64 内嵌会让 JSON 备份膨胀到几十 MB；
@@ -206,34 +203,6 @@ const cardSummary = computed(() => backupPreview.value ? '已读取备份，待�
 /* 设计令牌（--fg / --accent / --line / --ok / --err 等）全部来自 main.css 的 :root。
    通用控件样式（.card / .field / .label / .msg / .hint / .guide-use 等）已由 main.css
    统一提供（全局唯一来源），本组件只留自身特有的控件样式。
-   .btn-row 骨架与 utils 档位配色也已在 main.css，此处不再留副本。 */
-
-input[type='password'] {
-  width: 100%;
-  box-sizing: border-box;
-  padding: 7px 9px;
-  font-size: 13px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--input-bg);
-  color: var(--fg);
-}
-input[type='password']:focus {
-  outline: none;
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(83, 107, 169, 0.18);
-}
-input[type='checkbox'] {
-  width: 16px;
-  height: 16px;
-  accent-color: var(--accent);
-}
-
-.guide-use {
-  margin: 0;
-  color: var(--fg);
-}
-.guide-use + .guide-use {
-  margin-top: 6px;
-}
+   .btn-row 骨架与 utils 档位配色也已在 main.css，此处不再留副本。
+   输入框 / 复选框的表单控件基类亦已上提 main.css（全局唯一来源）。 */
 </style>

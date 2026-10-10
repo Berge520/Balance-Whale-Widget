@@ -4,6 +4,7 @@
 const { MIN_SCALE, MAX_SCALE, BASE_MIN, BASE_CAP, BASE_MAX, WIN_PAD, WIDGET_AUTOSHOW_MS, K } = require('./constants')
 const { execFileSync } = require('child_process')
 const { log, logErr } = require('./log')
+const { errMsg } = require('./util')
 const { clampNum, readConfig, readAnchor, writeAnchor, defaultAnchor, readTimer } = require('./store')
 const { getCachedBalance, getModelsPayload } = require('./api')
 const { getSoundData } = require('./sounds')
@@ -650,7 +651,7 @@ function createWidget(focusable) {
     // 因此这里不能用 win.webContents.on('did-fail-load') 等；错误只能靠创建回调与 try/catch。
   } catch (err) {
     if (!created) { win = null }
-    setWidgetError('createBrowserWindow 抛出异常: ' + ((err && err.message) || err))
+    setWidgetError('createBrowserWindow 抛出异常: ' + errMsg(err))
   }
   return win
 }

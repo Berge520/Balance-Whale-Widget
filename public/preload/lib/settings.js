@@ -62,7 +62,7 @@ const dshIsolate = require('./dsh-isolate')
 const dshMarket = require('./dsh-market')
 const dshHostCompat = require('./dsh-host-compat')
 const pnpmCompat = require('./pnpm-compat')
-const { readTextSafe, writeFileAtomicSync } = require('./util')
+const { readTextSafe, writeFileAtomicSync, errMsg } = require('./util')
 const holidays = require('./holidays')
 
 // 镜像测速超时：只打元数据（几百字节），8s 足够；等不到就说明该源当下不可用
@@ -139,8 +139,8 @@ function toggleDshPatchItem(opts) {
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true })
   } catch (err) {
-    logErr('[whale][dsh-patch] 建 patch 目录失败', id + ': ' + ((err && err.message) || err))
-    return { ok: false, error: '写入失败：' + ((err && err.message) || err) }
+    logErr('[whale][dsh-patch] 建 patch 目录失败', id + ': ' + errMsg(err))
+    return { ok: false, error: '写入失败：' + errMsg(err) }
   }
   // ⚠️ 原子写（2026-10-09）：这是**用户手写的 dsh 配置文件**（cordis.patch.yml）。
   //    非原子写时进程被杀会留下半份 YAML，而 dsh 对读不懂的 patch 只往 stderr 打一行、
@@ -329,7 +329,7 @@ function isolateDshPlugins(opts) {
     fs.writeFileSync(file, res.text, 'utf8')
   } catch (err) {
     logErr('[whale][dsh-isolate] 写 patch 文件失败', (err && err.message) || '')
-    return { ok: false, error: '写入失败：' + ((err && err.message) || err) }
+    return { ok: false, error: '写入失败：' + errMsg(err) }
   }
 
   // V2 的教训：写完回读磁盘，逐条确认真的成了 disabled —— 批量写更不能只信「没抛错」
@@ -378,7 +378,7 @@ function listDshBackups() {
     }
   } catch (err) {
     logErr('[whale][dsh-backup] 列快照失败', (err && err.message) || '')
-    return { ok: false, error: '读取快照列表失败：' + ((err && err.message) || err), snapshots: [] }
+    return { ok: false, error: '读取快照列表失败：' + errMsg(err), snapshots: [] }
   }
 }
 
@@ -452,7 +452,7 @@ function marketCatalog(opts) {
     })
     .catch((err) => {
       logErr('[whale][dsh-market] 目录加载异常', (err && err.message) || '')
-      return { ok: false, error: '目录加载异常：' + ((err && err.message) || err), plugins: [], categories: {} }
+      return { ok: false, error: '目录加载异常：' + errMsg(err), plugins: [], categories: {} }
     })
 }
 
@@ -1758,7 +1758,7 @@ function runGhAccelOp(title, run, verdict) {
     })
     .catch((err) => {
       logErr('[whale][ghaccel] ' + title + '异常', err && err.message)
-      hosts.opEnd(op, 'fail', String((err && err.message) || err))
+      hosts.opEnd(op, 'fail', errMsg(err))
       throw err
     })
 }
@@ -2202,7 +2202,7 @@ module.exports = {
       return dshBackup.restoreSnapshot(o)
     } catch (err) {
       logErr('[whale][dsh-backup] 还原失败', (err && err.message) || '')
-      return { ok: false, error: '还原失败：' + ((err && err.message) || err) }
+      return { ok: false, error: '还原失败：' + errMsg(err) }
     }
   },
   dshBackupRemove(dirName) {
@@ -2210,7 +2210,7 @@ module.exports = {
       return dshBackup.removeSnapshot(dirName)
     } catch (err) {
       logErr('[whale][dsh-backup] 删除快照失败', (err && err.message) || '')
-      return { ok: false, error: '删除失败：' + ((err && err.message) || err) }
+      return { ok: false, error: '删除失败：' + errMsg(err) }
     }
   },
   // 手动建快照（界面上的「立即备份」）。o.name 可给个名字（E4），给了就是「手动命名的备份」→ 不受轮转
@@ -2220,7 +2220,7 @@ module.exports = {
       return dshBackup.createSnapshot({ profile: String(o.profile || 'web'), reason: 'manual', name: o.name })
     } catch (err) {
       logErr('[whale][dsh-backup] 建快照失败', (err && err.message) || '')
-      return { ok: false, error: '备份失败：' + ((err && err.message) || err) }
+      return { ok: false, error: '备份失败：' + errMsg(err) }
     }
   },
   // 标记 / 命名（E4）：只改 meta.json，不碰快照内容
@@ -2230,7 +2230,7 @@ module.exports = {
       return dshBackup.setMeta(o)
     } catch (err) {
       logErr('[whale][dsh-backup] 更新快照标记失败', (err && err.message) || '')
-      return { ok: false, error: '更新标记失败：' + ((err && err.message) || err) }
+      return { ok: false, error: '更新标记失败：' + errMsg(err) }
     }
   },
   // 按保留份数清理一次（E4：调小保留份数后手动触发，不必等下次建快照）
@@ -2249,7 +2249,7 @@ module.exports = {
       return { ok: true, keep: keep, removed: dshBackup.pruneSnapshots({ keep: keep }) }
     } catch (err) {
       logErr('[whale][dsh-backup] 清理快照失败', (err && err.message) || '')
-      return { ok: false, error: '清理失败：' + ((err && err.message) || err) }
+      return { ok: false, error: '清理失败：' + errMsg(err) }
     }
   },
   // 改保留份数（E4）：写进配置，**不立即删**（删除等用户点「清理」或下次建快照）。
@@ -2264,7 +2264,7 @@ module.exports = {
       return { ok: true, keep: typeof cfg.dshBackupKeep === 'number' ? cfg.dshBackupKeep : v }
     } catch (err) {
       logErr('[whale][dsh-backup] 保存保留份数失败', (err && err.message) || '')
-      return { ok: false, error: '保存失败：' + ((err && err.message) || err) }
+      return { ok: false, error: '保存失败：' + errMsg(err) }
     }
   },
   // ──────────────────────────────────────────────
@@ -2293,7 +2293,7 @@ module.exports = {
       base = dshExport.previewExport({ includeCred: o.includeCred === true, skipModules: o.skipModules !== false })
     } catch (err) {
       logErr('[whale][dsh-export] 预检失败', (err && err.message) || '')
-      return { ok: false, error: '预检失败：' + ((err && err.message) || err) }
+      return { ok: false, error: '预检失败：' + errMsg(err) }
     }
     // 探测失败（拿不到端口信息）时不写 running 字段 —— 界面据此显示「无法确认」而不是
     // 谎报「没在跑」。宁可少一句提示，也不能让用户以为可以放心导
@@ -2355,7 +2355,7 @@ module.exports = {
           filters: [{ name: 'Zip 压缩包', extensions: ['zip'] }],
         })
       } catch (err) {
-        return { ok: false, error: '无法打开保存对话框：' + ((err && err.message) || err) }
+        return { ok: false, error: '无法打开保存对话框：' + errMsg(err) }
       }
       if (!outPath) return { ok: false, canceled: true, error: '' }
     }
@@ -2365,7 +2365,7 @@ module.exports = {
       return dshExport.exportAll({ outPath: outPath, includeCred: includeCred, skipModules: o.skipModules !== false })
     } catch (err) {
       logErr('[whale][dsh-export] 导出失败', (err && err.message) || '')
-      return { ok: false, error: '导出失败：' + ((err && err.message) || err) }
+      return { ok: false, error: '导出失败：' + errMsg(err) }
     }
   },
   // 在文件管理器里定位导出包（导出成功后让用户一眼找到它）
@@ -2377,7 +2377,7 @@ module.exports = {
       return { ok: true }
     } catch (err) {
       logErr('[whale][dsh-export] 打开所在文件夹失败', (err && err.message) || '')
-      return { ok: false, error: '打开失败：' + ((err && err.message) || err) }
+      return { ok: false, error: '打开失败：' + errMsg(err) }
     }
   },
   // 选择 Node.js 安装目录并校验（目录里必须有 node 可执行文件）
@@ -2391,7 +2391,7 @@ module.exports = {
       })
     } catch (err) {
       logErr('[whale][dsh] 打开 Node 目录选择框失败', (err && err.message) || '')
-      return { ok: false, error: '无法打开目录选择框：' + ((err && err.message) || err) }
+      return { ok: false, error: '无法打开目录选择框：' + errMsg(err) }
     }
     const dir = Array.isArray(picked) ? picked[0] : picked
     if (!dir) return { ok: false, canceled: true }
@@ -3028,7 +3028,7 @@ module.exports = {
       })
     } catch (err) {
       logErr('[whale][csv] 打开保存框失败', err && err.message)
-      return { ok: false, error: '无法打开保存对话框：' + ((err && err.message) || err) }
+      return { ok: false, error: '无法打开保存对话框：' + errMsg(err) }
     }
     if (!filePath) return { ok: false, canceled: true }
     try {
@@ -3036,7 +3036,7 @@ module.exports = {
       return { ok: true, path: filePath }
     } catch (err) {
       logErr('[whale][csv] 写入失败', filePath, err && err.message)
-      return { ok: false, error: '写入文件失败：' + ((err && err.message) || err) }
+      return { ok: false, error: '写入文件失败：' + errMsg(err) }
     }
   },
   // 导入用量 CSV（与导出格式一致：日期,用量[,币种]）：弹系统打开框 → 解析 → 合并进账本历史。
@@ -3052,7 +3052,7 @@ module.exports = {
       })
     } catch (err) {
       logErr('[whale][csv] 打开选择框失败', err && err.message)
-      return { ok: false, error: '无法打开文件选择框：' + ((err && err.message) || err) }
+      return { ok: false, error: '无法打开文件选择框：' + errMsg(err) }
     }
     const filePath = Array.isArray(picked) ? picked[0] : picked
     if (!filePath) return { ok: false, canceled: true }
@@ -3061,7 +3061,7 @@ module.exports = {
       text = fs.readFileSync(filePath, 'utf8')
     } catch (err) {
       logErr('[whale][csv] 读取失败', filePath, err && err.message)
-      return { ok: false, error: '读取文件失败：' + ((err && err.message) || err) }
+      return { ok: false, error: '读取文件失败：' + errMsg(err) }
     }
     const { rows, invalid } = parseUsageCsv(text)
     if (!rows.length) {

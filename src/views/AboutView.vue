@@ -87,13 +87,10 @@ function marketSearch() {
 /* 设计令牌（--fg / --accent / --line / --ok / --err 等）全部来自 main.css 的 :root。
    通用控件样式（.card / .field / .label / .msg / .hint / .guide 等）已由 main.css
    统一提供（全局唯一来源），本组件只留自身特有的控件样式（如 .ver）。
-   .btn-row 骨架与 utils 档位配色也已在 main.css，此处不再留副本。 */
+   .btn-row 骨架与 utils 档位配色也已在 main.css，此处不再留副本。
+   .guide 一并上提 main.css。
+   通用复选框尺寸与配色亦已上提 main.css（全局唯一来源）。 */
 
-input[type='checkbox'] {
-  width: 16px;
-  height: 16px;
-  accent-color: var(--accent);
-}
 .ver {
   font-size: 13px;
   color: var(--fg-dim);
@@ -105,15 +102,5 @@ input[type='checkbox'] {
 .msg.clickable {
   cursor: pointer;
   text-decoration: underline;
-}
-
-.guide {
-  margin-top: 10px;
-  padding: 10px 12px;
-  border-radius: 8px;
-  border: 1px solid var(--line);
-  background: var(--input-bg);
-  font-size: 12px;
-  line-height: 1.6;
 }
 </style>

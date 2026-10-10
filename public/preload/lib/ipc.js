@@ -3,6 +3,7 @@
  */
 const { ipcRenderer } = require('electron')
 const { log, logErr } = require('./log')
+const { errMsg } = require('./util')
 const { getBalance, refreshModels, getModelsPayload } = require('./api')
 const { readConfig, patchConfig, writeAnchor, writeTimer, clearTimer } = require('./store')
 const { notify } = require('./notify')
@@ -349,7 +350,7 @@ function registerIpc() {
         else reply(dsh.snapshot())
       } catch (err) {
         logErr('[whale][ipc] dsh 操作失败', action, err && err.message)
-        reply(Object.assign(dsh.snapshot(), { error: String((err && err.message) || err) }))
+        reply(Object.assign(dsh.snapshot(), { error: errMsg(err) }))
       }
     }
     try {

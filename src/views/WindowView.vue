@@ -1,5 +1,6 @@
 <script lang="ts" setup>
 import { ref, watch } from 'vue'
+import { msgCls, type Flash } from '../composables/useFlash'
 import type { WhaleServices } from '../types/services'
 
 // 「挂件窗口」整卡：进入模式 / 显隐 / 置顶锁定 / 透明度 / 鼠标穿透 / 任务栏避让 /
@@ -30,10 +31,7 @@ const emit = defineEmits<{
   (e: 'add-hotkey', label: string): void
 }>()
 
-// 统一的消息态：msg=文案、err=是否错误态；与父级 App.vue 里的同名工具保持同一定义
-// （原为全页共享，这里内联一份，免得一个 4 行的 class 工具也要父子透传）
-type Flash = { msg: string; err: boolean }
-function msgCls(f: Flash) { return { ok: !f.err, err: f.err } }
+// 统一的消息态（Flash）：定义收口在 composables/useFlash.ts，各卡不再各持一份。
 
 // 吸附区宽度（可用区宽/高的百分比）上下限，同宿主 store.js 的 SNAP_RATIO_*
 const SNAP_RATIO_MIN = 1
@@ -195,28 +193,8 @@ function onOpacityCommit() {
    通用控件样式已由 main.css 统一提供（全局唯一来源），本组件只留自身特有的控件样式。
    .btn-row 骨架与 utils 档位配色也已在 main.css，此处不再留副本。 */
 
-select {
-  width: 100%;
-  box-sizing: border-box;
-  padding: 7px 9px;
-  font-size: 13px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--input-bg);
-  color: var(--fg);
-}
-/* 下拉展开后的选项：必须显式给出背景与文字色。
-   否则深色模式下选项文字（浅色）会落在系统浅色弹层上，完全看不清。 */
-select option {
-  background: var(--input-bg);
-  color: var(--fg);
-}
-select:focus,
-.num:focus {
-  outline: none;
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(83, 107, 169, 0.18);
-}
+/* 下拉 / 数值框 / 复选框的表单控件基类已上提 main.css（全局唯一来源），
+   此处不再留副本。 */
 
 .range {
   flex: 1;
@@ -228,21 +206,6 @@ select:focus,
   color: var(--fg-dim);
   min-width: 38px;
   text-align: right;
-}
-.num {
-  width: 56px;
-  padding: 5px 6px;
-  font-size: 13px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: transparent;
-  color: inherit;
-}
-.num-text {
-  width: 44px;
-  text-align: right;
-  font-size: 13px;
-  color: var(--fg-dim);
 }
 /* 贴边间距：一行四个数值（上/右/下/左） */
 .edge-row {
@@ -260,9 +223,5 @@ select:focus,
 .taskbar-hint {
   margin: 2px 0 12px;
 }
-input[type='checkbox'] {
-  width: 16px;
-  height: 16px;
-  accent-color: var(--accent);
-}
+/* 通用复选框尺寸与配色已上提 main.css（全局唯一来源）。 */
 </style>

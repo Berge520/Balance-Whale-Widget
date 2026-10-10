@@ -1,5 +1,6 @@
 <script lang="ts" setup>
-import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { msgCls, useFlashShow } from '../composables/useFlash'
 import type { AlertRole, SoundRole, WhaleMailSecrets, WhaleServices } from '../types/services'
 
 // 「提醒与通知」整卡：四类自动提醒（峰谷切换 / 低余额 / 今日预算 / 余额大幅波动）+
@@ -32,10 +33,7 @@ const emit = defineEmits<{
   (e: 'save-alerts', alerts: Record<string, string> | null): void
 }>()
 
-// 统一的消息态：与父级 App.vue 里的同名工具保持同一定义（内联一份，免父子透传 4 行工具）
-type Flash = { msg: string; err: boolean }
-function useFlash(): Flash { return reactive({ msg: '', err: false }) }
-function msgCls(f: Flash) { return { ok: !f.err, err: f.err } }
+// 统一的消息态（Flash）：定义收口在 composables/useFlash.ts，各卡不再各持一份。
 
 // —— 计时：时长三段输入 / 到点留言 / 「休息」档 ——
 // 配置里只存总秒数（timerSec），三段输入是它的展示形态；
@@ -130,15 +128,9 @@ const ALERT_FIELDS: Array<{ key: string; label: string; hint: string }> = [
   { key: 'passOn', label: '穿透开启', hint: '开启鼠标穿透时提醒（无占位符）' },
   { key: 'passOff', label: '穿透关闭', hint: '关闭鼠标穿透时提醒（无占位符）' },
 ]
-const alertFlash: Flash = useFlash()
+// 整份提醒文案的回执：3s 自动消失（本卡最长文案也短，无需 4s）
+const { flash: alertFlash, show: alertFlashShow, clear: alertFlashClear, stop: alertFlashStop } = useFlashShow(3000)
 const alertResetConfirm = ref(false)
-let alertFlashTimer: number | undefined
-function alertFlashShow(msg: string, err = false) {
-  alertFlash.msg = msg
-  alertFlash.err = err
-  if (alertFlashTimer) clearTimeout(alertFlashTimer)
-  alertFlashTimer = window.setTimeout(() => { alertFlash.msg = '' }, 3000)
-}
 // 保存：整份交给宿主清洗（去空白 / 丢空行 / 限长），再回读一次拿到清洗后的结果
 // （回填 + 落盘由父级 applyConfig 负责，本卡只把要保存的整份内容上抛）
 function saveAlerts() {
@@ -152,7 +144,7 @@ function saveAlerts() {
 function resetAlerts() {
   if (!alertResetConfirm.value) {
     alertResetConfirm.value = true
-    alertFlash.msg = ''
+    alertFlashClear()
     return
   }
   alertResetConfirm.value = false
@@ -198,7 +190,6 @@ const mail = reactive({
 })
 // 已保存过授权码时为 true：用于把密码框的 placeholder 提示成「留空 = 不修改」
 const mailPassSaved = ref(false)
-const mailFlash: Flash = useFlash()
 const mailTesting = ref(false)
 // SMTP 配置区的展开态。默认收起，点了按钮才展开（见 mailOpen）
 const mailFold = reactive({ open: false })
@@ -222,22 +213,9 @@ function mailPortOf(): number {
 }
 // 通知渠道自测（「通知方式」小节的「测试通知」按钮）：与邮件测试分开两个消息态，
 // 因为它同时覆盖系统通知渠道，消息文案也不同
-const notifyFlash: Flash = useFlash()
+const { flash: notifyFlash, show: notifyFlashShow, clear: notifyFlashClear, stop: notifyFlashStop } = useFlashShow(4000)
 const notifyTesting = ref(false)
-let notifyFlashTimer: number | undefined
-function notifyFlashShow(msg: string, err = false) {
-  notifyFlash.msg = msg
-  notifyFlash.err = err
-  if (notifyFlashTimer) clearTimeout(notifyFlashTimer)
-  notifyFlashTimer = window.setTimeout(() => { notifyFlash.msg = '' }, 4000)
-}
-let mailFlashTimer: number | undefined
-function mailFlashShow(msg: string, err = false) {
-  mailFlash.msg = msg
-  mailFlash.err = err
-  if (mailFlashTimer) clearTimeout(mailFlashTimer)
-  mailFlashTimer = window.setTimeout(() => { mailFlash.msg = '' }, 4000)
-}
+const { flash: mailFlash, show: mailFlashShow, clear: mailFlashClear, stop: mailFlashStop } = useFlashShow(4000)
 // 从宿主读回 SMTP 凭据：授权码不返明文，只回「有没有存过」的标记，
 // 所以密码框留空提交时后端会沿用旧值（见 saveMailSecrets）。
 // 入参是「SMTP 凭据本体」（**两种来源形状必须一致**）：
@@ -261,7 +239,7 @@ function toggleMailFold() {
   mailFold.open = !mailFold.open
 }
 function saveMailSettings() {
-  mailFlash.msg = ''
+  mailFlashClear()
   try {
     // 非敏感字段（发件人 / 收件人 / 显示名 / 主题前缀）已改为输入即 emit('patch') 实时落盘，
     // 这里不再重复 emit —— 早先靠 @change（失焦）才落盘，用户敲完直接点「保存」时
@@ -282,7 +260,7 @@ function saveMailSettings() {
 async function testNotify() {
   if (notifyTesting.value) return
   notifyTesting.value = true
-  notifyFlash.msg = ''
+  notifyFlashClear()
   try {
     const r = await props.services.testNotify?.()
     if (r && r.ok) {
@@ -306,7 +284,7 @@ async function testNotify() {
 async function testMail() {
   if (mailTesting.value) return
   mailTesting.value = true
-  mailFlash.msg = ''
+  mailFlashClear()
   try {
     const r = await props.services.sendTestMail?.({
       mailHost: mail.mailHost.trim(),
@@ -355,6 +333,8 @@ function loadMailSecrets() {
 // notifyViewRef 还是 null，那次调用是空转 —— 于是服务器/端口/账号全部回填不出来，
 // 用户看到的就是「已保存配置没正确显示」。改成本卡自持后，无论从哪个 Tab 进入都能读回
 onMounted(loadMailSecrets)
+// 离开即清掉三条回执的定时器，避免组件销毁后回调写到已卸载的 reactive 上
+onUnmounted(() => { alertFlashStop(); mailFlashStop(); notifyFlashStop() })
 defineExpose({ syncAlertsBaseline, loadMailSecrets, syncTimerHms })
 
 // timerSec 变化（备份恢复 / 挂件菜单推送）时刷新三段展示；本地 commitTimerHms 已自行 sync，
@@ -678,49 +658,9 @@ watch(() => props.cfg.timerSec, syncTimerHms)
   border-color: var(--accent);
 }
 
-input[type='password'],
-input:not([type]),
-input[type='text'],
-select {
-  width: 100%;
-  box-sizing: border-box;
-  padding: 7px 9px;
-  font-size: 13px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--input-bg);
-  color: var(--fg);
-}
-select option {
-  background: var(--input-bg);
-  color: var(--fg);
-}
-input[type='password']:focus,
-input:not([type]):focus,
-input[type='text']:focus,
-select:focus,
-.num:focus,
-.time:focus {
-  outline: none;
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(83, 107, 169, 0.18);
-}
+/* 输入框 / 下拉 / 数值框 / 复选框的表单控件基类已上提 main.css（全局唯一来源），
+   此处不再留副本；仅保留本卡专用的 .time。 */
 
-.num {
-  width: 56px;
-  padding: 5px 6px;
-  font-size: 13px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: transparent;
-  color: inherit;
-}
-.num-text {
-  width: 44px;
-  text-align: right;
-  font-size: 13px;
-  color: var(--fg-dim);
-}
 /* 免打扰起止时刻（HH:MM） */
 .time {
   width: 96px;
@@ -768,17 +708,9 @@ select:focus,
   background: var(--input-bg);
   color: var(--fg);
 }
-/* 折叠组 / 说明面板 / SMTP 摘要（app.css 的 .fold / .guide / .mail-summary / .ok-tag） */
+/* 折叠组 / 说明面板 / SMTP 摘要（app.css 的 .fold / .mail-summary / .ok-tag）；
+   .guide 已上提 main.css（全局唯一来源）。 */
 
-.guide {
-  margin-top: 10px;
-  padding: 10px 12px;
-  border-radius: 8px;
-  border: 1px solid var(--line);
-  background: var(--input-bg);
-  font-size: 12px;
-  line-height: 1.6;
-}
 .mail-summary {
   display: flex;
   align-items: center;

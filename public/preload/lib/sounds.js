@@ -13,6 +13,7 @@ const path = require('path')
 const os = require('os')
 const { K } = require('./constants')
 const { logErr } = require('./log')
+const { errMsg } = require('./util')
 
 // Chromium 可直接解码的音频格式；flac/m4a 也支持但对话框里主要引导 mp3/wav/ogg
 const OK_EXT = ['mp3', 'wav', 'ogg', 'm4a', 'flac']
@@ -171,7 +172,7 @@ function saveOne(role, name, ext, buf, opts) {
     fs.writeFileSync(path.join(dir, item.file), buf)
   } catch (err) {
     logErr('[whale][sounds] 写入音效失败', role, err && err.message)
-    return { ok: false, error: '保存音效失败：' + ((err && err.message) || err) }
+    return { ok: false, error: '保存音效失败：' + errMsg(err) }
   }
   if (o.append) {
     // 素材库：只删被同名顶掉的那一个（若换了文件名）
@@ -209,7 +210,7 @@ function pickAudioFile(title) {
     })
   } catch (err) {
     logErr('[whale][sounds] 打开选择框失败', err && err.message)
-    return { error: '无法打开文件选择框：' + ((err && err.message) || err) }
+    return { error: '无法打开文件选择框：' + errMsg(err) }
   }
   const filePath = Array.isArray(picked) ? picked[0] : picked
   if (!filePath) return { canceled: true }
@@ -217,7 +218,7 @@ function pickAudioFile(title) {
   if (OK_EXT.indexOf(ext) < 0) return { error: '只支持 ' + OK_EXT.join(' / ') + ' 格式' }
   let stat = null
   try { stat = fs.statSync(filePath) } catch (err) {
-    return { error: '读取文件失败：' + ((err && err.message) || err) }
+    return { error: '读取文件失败：' + errMsg(err) }
   }
   if (!stat.isFile()) return { error: '请选择一个音频文件' }
   if (stat.size > MAX_BYTES) return { error: '文件过大（限 5MB），建议 1 秒左右的短音效' }
@@ -233,7 +234,7 @@ function importSound(role) {
   let buf = null
   try { buf = fs.readFileSync(picked.filePath) } catch (err) {
     logErr('[whale][sounds] 读取失败', picked.filePath, err && err.message)
-    return { ok: false, error: '读取文件失败：' + ((err && err.message) || err) }
+    return { ok: false, error: '读取文件失败：' + errMsg(err) }
   }
   return saveOne(role, path.basename(picked.filePath), picked.ext, buf)
 }
@@ -247,7 +248,7 @@ function pickSoundFile() {
   let buf = null
   try { buf = fs.readFileSync(picked.filePath) } catch (err) {
     logErr('[whale][sounds] 读取失败', picked.filePath, err && err.message)
-    return { ok: false, error: '读取文件失败：' + ((err && err.message) || err) }
+    return { ok: false, error: '读取文件失败：' + errMsg(err) }
   }
   const mime = MIME[picked.ext] || 'audio/mpeg'
   return {

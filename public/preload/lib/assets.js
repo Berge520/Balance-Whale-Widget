@@ -15,6 +15,7 @@ const fs = require('fs')
 const path = require('path')
 const { PLUGIN_VERSION } = require('./constants')
 const { log, logErr } = require('./log')
+const { errMsg, stamp } = require('./util')
 const skins = require('./skins')
 const sounds = require('./sounds')
 const bubbles = require('./bubbles')
@@ -26,14 +27,6 @@ const EXT = 'whaleassets'
 const HEAD_BYTES = MAGIC.length + 4
 
 let pending = null // 已解析、等待确认写入的素材包（避免重复读文件）
-
-function errMsg(err) { return String((err && err.message) || err || '未知错误') }
-
-function stamp() {
-  const d = new Date()
-  const p2 = (n) => String(n).padStart(2, '0')
-  return d.getFullYear() + p2(d.getMonth() + 1) + p2(d.getDate()) + '-' + p2(d.getHours()) + p2(d.getMinutes())
-}
 
 // ── 导出 ──
 function exportAssets() {

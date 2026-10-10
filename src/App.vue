@@ -5,6 +5,7 @@ import SkinCropper from './components/SkinCropper.vue'
 import SoundTrimmer from './components/SoundTrimmer.vue'
 import FirstRunGuide from './components/FirstRunGuide.vue'
 import UsageChart from './components/UsageChart.vue'
+import { msgCls, useFlash, type Flash } from './composables/useFlash'
 // 卡片「全文」索引：scripts/gen-search-index.mjs 在构建期从模板提取每张卡的可见文本
 // （h2 卡头 + label 字段名），搜索第三档兜底用。模板改了没重新生成会被 prebuild 拦下
 import { CARD_TEXT } from './search-index.gen'
@@ -406,10 +407,8 @@ function onUiModeChange(mode: string) {
   applyUtoolsDark()
   patchCfg({ uiMode: cfg.uiMode })
 }
-// 统一的消息态：msg=文案、err=是否错误态；模板用 msgCls(f) 生成 class（合并原先 11 组 msg/err ref）
-type Flash = { msg: string; err: boolean }
-function useFlash(): Flash { return reactive({ msg: '', err: false }) }
-function msgCls(f: Flash) { return { ok: !f.err, err: f.err } }
+// 统一的消息态（Flash）：定义收口在 composables/useFlash.ts（合并原先 11 组 msg/err ref）。
+// 本文件既自己用，也把 useFlash 注入 useDsh 供 dsh 各卡共用，故仍需 import 进来。
 const secretsFlash: Flash = useFlash()
 // 首次运行引导弹层的独立回执（不能与 secretsFlash 共用：两个入口同时开着时消息会串）
 const guideFlash: Flash = useFlash()
@@ -952,6 +951,13 @@ const usageCurrency = ref('CNY')
 function fmtMoney(v: number) {
   const num = Number(v) || 0
   return usageCurrency.value === 'CNY' ? '¥ ' + num.toFixed(2) : num.toFixed(2) + ' ' + usageCurrency.value
+}
+// 时间戳 → 'HH:mm'（与宿主 util.hhmm 同口径）。用量卡多处「条目 / 校准时间」列共用，
+// 留在父级作单一来源按 props 下传，避免各 view 各写一份补零拼装。
+function hhmm(ts: number): string {
+  const d = new Date(ts)
+  const p2 = (n: number) => String(n).padStart(2, '0')
+  return p2(d.getHours()) + ':' + p2(d.getMinutes())
 }
 // 用量趋势：令牌模式下挂件刷新后今日总量会写入账本，
 // 因此导入后、切用量模式、以及本窗口重新获得焦点时都要重新拉一次趋势。
@@ -2688,7 +2694,7 @@ onUnmounted(() => {
     <UsageView v-if="cardOn('usage', 'usage')" ref="usageViewRef"
                :cfg="cfg" :services="services"
                :usage-history="usageHistory" :usage-currency="usageCurrency"
-               :fmt-money="fmtMoney" :is-ime-composing="isImeComposing"
+               :fmt-money="fmtMoney" :hhmm="hhmm" :is-ime-composing="isImeComposing"
                :history-keep="HISTORY_KEEP" :price-model-max="PRICE_MODEL_MAX"
                :token-price-default="TOKEN_PRICE_DEFAULT"
                @patch="patchCfg" @usage-mode-change="onUsageModeChange"
@@ -4645,49 +4651,12 @@ h1 {
 /* 勾选行（.field.check）：标签独占剩余宽度，复选框固定靠右不被挤出卡片。
    这类标签的 <em> 补充说明最长（如 dsh 的三条），是横向溢出的主要来源 */
 
-input[type='password'],
-/* 裸文本输入框：属性选择器匹配的是「显式属性」，不带 type 的 input 会漏掉，掉成浏览器默认外观 */
-input:not([type]),
-input[type='text'],
-select {
-  width: 100%;
-  box-sizing: border-box;
-  padding: 7px 9px;
-  font-size: 13px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--input-bg);
-  color: var(--fg);
-}
-/* 下拉展开后的选项：必须显式给出背景与文字色。
-   否则深色模式下选项文字（浅色）会落在系统浅色弹层上，完全看不清。 */
-select option {
-  background: var(--input-bg);
-  color: var(--fg);
-}
-input[type='password']:focus,
-input:not([type]):focus,
-input[type='text']:focus,
-select:focus,
-.num:focus,
-.time:focus {
-  outline: none;
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(83, 107, 169, 0.18);
-}
+/* 输入框 / 下拉 / 数值框 / 复选框的表单控件基类已上提 main.css（全局唯一来源），
+   此处不再留副本。 */
 
 .range {
   flex: 1;
   accent-color: var(--accent);
-}
-.num {
-  width: 56px;
-  padding: 5px 6px;
-  font-size: 13px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: transparent;
-  color: inherit;
 }
 .ver {
   font-size: 13px;
@@ -5698,11 +5667,7 @@ select:focus,
 .mkt-src-btns {
   margin-top: 2px;
 }
-input[type='checkbox'] {
-  width: 16px;
-  height: 16px;
-  accent-color: var(--accent);
-}
+/* 通用复选框尺寸与配色已上提 main.css（全局唯一来源）。 */
 /* .btn-row 骨架（flex + gap + margin-top + flex-wrap + 按钮等分）与 utils 档位配色
    都已收进 main.css 作单一来源，这里不再留副本。
 
@@ -5899,26 +5864,8 @@ input[type='checkbox'] {
 .field + .link-btn {
   margin-top: -4px;
 }
-.guide {
-  margin-top: 10px;
-  padding: 10px 12px;
-  border-radius: 8px;
-  border: 1px solid var(--line);
-  background: var(--input-bg);
-  font-size: 12px;
-  line-height: 1.6;
-}
-.guide-use {
-  margin: 0;
-  color: var(--fg);
-}
-.guide-use + .guide-use {
-  margin-top: 6px;
-}
-/* 折叠面板里的首个标题紧贴顶部，不额外留白 */
-.guide > .link-btn:first-child {
-  margin-top: 0;
-}
+/* .guide / .guide-use / .guide > .link-btn:first-child / .guide code / .guide a
+   已上提 main.css（全局唯一来源），此处不再留副本。 */
 /* 嵌套说明（折叠面板内的教程）：比外层 .guide 再退一层，靠左侧色条区分层级，
    否则两层同色边框叠在一起会糊成一块 */
 .guide2 {
@@ -5957,20 +5904,6 @@ input[type='checkbox'] {
 .guide-meta {
   margin: 6px 0 0;
   color: var(--fg-dim);
-}
-.guide code {
-  padding: 1px 4px;
-  border-radius: 4px;
-  background: rgba(127, 127, 127, 0.18);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 11px;
-  word-break: break-all;
-}
-.guide a {
-  color: var(--accent);
-  text-decoration: underline;
-  text-underline-offset: 2px;
-  cursor: pointer;
 }
 /* 需要用户动手的提示（如「dsh 正在运行」）：只用颜色提级，不换图标不换字号 ——
    这类提示是「建议」不是「错误」，做成红色警告框会与真失败（.msg.err）混淆 */

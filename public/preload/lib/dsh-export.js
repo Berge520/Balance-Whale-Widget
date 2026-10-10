@@ -30,7 +30,7 @@
 const fs = require('fs')
 const path = require('path')
 const { log, logErr } = require('./log')
-const { homeDir } = require('./util')
+const { homeDir, errMsg, stamp } = require('./util')
 
 // 包内清单文件名。放在包根，用户解开就能看到这份 zip 是从哪来的、备了什么
 const MANIFEST_NAME = 'whale-dsh-export.json'
@@ -63,8 +63,6 @@ const MAX_FILE_BYTES = 100 * 1024 * 1024
 // 条目总数上限（20 万）。防「用户把某个巨型目录软链进 $DSH_HOME」这类意外
 const MAX_ENTRIES = 200000
 
-function errMsg(err) { return String((err && err.message) || err || '未知错误') }
-
 // ── 路径 ──
 // 与 dsh-backup.js / diagnostics.js 同一口径：env 优先 + 回退 ~/.dsh，都要实际存在
 function dshHome() {
@@ -73,10 +71,7 @@ function dshHome() {
 
 // 时间戳（包名用）：20260924-2143
 function stampOf(d) {
-  const t = d instanceof Date ? d : new Date()
-  const p2 = (n) => String(n).padStart(2, '0')
-  return String(t.getFullYear()) + p2(t.getMonth() + 1) + p2(t.getDate())
-    + '-' + p2(t.getHours()) + p2(t.getMinutes())
+  return stamp(d instanceof Date ? d.getTime() : undefined)  // 默认 'min'
 }
 
 // ── 遍历 ──

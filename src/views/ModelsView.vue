@@ -1,5 +1,6 @@
 <script lang="ts" setup>
 import { computed, reactive, ref } from 'vue'
+import { msgCls, useFlash, type Flash } from '../composables/useFlash'
 import type { WhaleModel, WhaleModelRow, WhaleModelTemplate, WhaleServices } from '../types/services'
 
 // 多厂商模型卡（余额 / 额度 / Codex 本地会话）。
@@ -29,10 +30,7 @@ const emit = defineEmits<{
   (e: 'update:mainId', id: string): void
 }>()
 
-// 统一的消息态：与父级 App.vue 里的同名工具保持同一定义（内联一份，免父子透传 4 行工具）
-type Flash = { msg: string; err: boolean }
-function useFlash(): Flash { return reactive({ msg: '', err: false }) }
-function msgCls(f: Flash) { return { ok: !f.err, err: f.err } }
+// 统一的消息态（Flash）：定义收口在 composables/useFlash.ts，各卡不再各持一份。
 
 const modelsFlash: Flash = useFlash()
 // 正在测试的模型 id（'' = 空闲）：防连点，也让按钮能显示「测试中…」

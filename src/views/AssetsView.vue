@@ -11,6 +11,7 @@
 // 不直接改写 cfg / 不直接落盘（导入形象、导入音效的两个裁剪弹层归父级所有）。
 // ============================================================================
 import { computed, onMounted, onUnmounted, reactive, ref, watch, nextTick } from 'vue'
+import { msgCls, useFlash, type Flash } from '../composables/useFlash'
 import SoundRow from '../components/SoundRow.vue'
 import DownloadBox from '../components/DownloadBox.vue'
 import type {
@@ -19,11 +20,7 @@ import type {
   SoundMeta, SoundRole, AlertRole, WhaleServices,
 } from '../types/services'
 
-// 统一的消息态：msg 为空表示不显示
-type Flash = { msg: string; err: boolean }
-function msgCls(f: { err: boolean }) {
-  return f.err ? 'msg err' : 'msg ok'
-}
+// 统一的消息态（Flash）：定义收口在 composables/useFlash.ts，各卡不再各持一份。
 
 const props = defineProps<{
   cfg: any
@@ -305,6 +302,15 @@ function galleryOpen(key: 'skins' | 'sounds') {
   // 与折叠态无关，只是「搜索时一律铺开」。
   return props.searchActive || galleryFolds[key]
 }
+// 「可下载形象 / 可下载音效」两段各自的折叠态（卡级折叠之下的第二层）。
+// 默认收起：这两段是「上游有、按需下载」的长列表（36 张缩略图 / 45 段清单），
+// 日常挑图 / 配槽位用的是上段（我的形象 / 我的音效），下段只在真要补下载时才展开。
+// **不参与搜索强制展开** —— 全站搜索锚点挂在卡上（data-search），段内没有独立锚点，
+// 若这里也跟 galleryOpen 一样被搜索顶开，「默认收起」就等于白设，且搜索任意形象关键词都会铺开 36 张。
+const dlFolds = reactive({ skins: false, sounds: false })
+// 下载类动作（卡头「下载剩余 N 张 / 段」、单张点缩略图、新手引导「去挑形象」）会往这两段里
+// 写进度 / 亮 flash，所以触发前先把对应段展开 —— 否则用户点了下载却看不见任何反馈（进度藏在收起段里）。
+function openDl(key: 'skins' | 'sounds') { dlFolds[key] = true }
 // 分区小标题：命中 2 张以上才显示，搜索只命中单卡时不出现分隔线（纯噪音）。
 // 合并后「形象」「音效」两张卡都横跨「我的素材」与「下载素材」两区（上段是本机的、下段是可下载的），
 // 按各自的主增量统一归到「下载素材」组。
@@ -314,7 +320,7 @@ function showSection(group: 'mine' | 'download') {
   const keys = group === 'mine' ? MINE_CARDS : DOWNLOAD_CARDS
   return keys.filter((k) => props.cardOn('assets', k)).length >= 2
 }
-const assetsFlash: Flash = reactive({ msg: '', err: false })
+const assetsFlash: Flash = useFlash()
 const dataDirs = ref<{ skins: string; sounds: string; bubbles: string } | null>(null)
 const dataDirsOpen = ref(false)
 function toggleDataDirs() {
@@ -614,7 +620,7 @@ async function skinPackThumbDataUrl(id: string): Promise<string> {
 
 const skinPackList = ref<SkinPackList | null>(null)
 const skinPackBusy = ref(false)
-const skinPackFlash: Flash = reactive({ msg: '', err: false })
+const skinPackFlash: Flash = useFlash()
 const skinPackInstalled = computed<Record<string, boolean>>(() => {
   const out: Record<string, boolean> = {}
   for (const it of (skinPackList.value?.items || [])) out[it.id] = it.installed === true
@@ -647,6 +653,7 @@ watch(skinInUseMissing, (v) => {
   if (v && !builtinFoldAutoOpened.value) {
     builtinFoldAutoOpened.value = true
     galleryFolds.skins = true
+    openDl('skins') // 「找回缺失形象」的入口就在「可下载形象」段里，收起时提示等于没有
   }
 }, { immediate: true })
 function refreshSkinPacks() {
@@ -714,7 +721,7 @@ function sharedSkinThumb(id: string) {
 // backfillMissingThumbs 也要用它补老数据缺的缩略图，父级唯一来源，这里用 prop 收。
 const sharedSkinList = ref<SharedSkinList | null>(null)
 const sharedSkinBusy = ref(false)
-const sharedSkinFlash: Flash = reactive({ msg: '', err: false })
+const sharedSkinFlash: Flash = useFlash()
 const sharedSkinInstalled = computed<Record<string, boolean>>(() => {
   const out: Record<string, boolean> = {}
   for (const it of (sharedSkinList.value?.items || [])) out[it.id] = it.installed === true
@@ -791,7 +798,7 @@ function doSharedSkinCell(id: string) {
     sharedSkinFlash.err = false
     doUseSkin(id)
   }).catch((err) => {
-    sharedSkinFlash.msg = String((err && err.message) || err || '下载失败')
+    sharedSkinFlash.msg = String((err && err.message) || err || '未知错误')
     sharedSkinFlash.err = true
   }).finally(() => {
     sharedSkinBusy.value = false
@@ -815,12 +822,14 @@ const skinAnyBusy = computed(() => skinPackBusy.value || sharedSkinBusy.value)
 // 两批各自的 flash 与进度条分别亮，用户看得到此刻在补哪一批。
 async function doDownloadAllSkins() {
   if (skinAnyBusy.value) return
+  openDl('skins') // 进度条与 flash 都在「可下载形象」段内，收起时用户看不到下载feedback
   if (sharedSkinItems.value.some((it) => !it.installed)) await doDownloadSharedSkins()
   if (skinPackItems.value.some((it) => !it.installed)) await doDownloadSkinPacks()
 }
 // 新手引导「去挑形象」：父级把 browseSkinsTick +1，这里展开「形象」卡。
 // 与 builtinFoldAutoOpened 同理 —— 折叠态是本组件私有，父级只能靠这种一次性指令驱动。
-watch(() => props.browseSkinsTick, () => { galleryFolds.skins = true })
+// 「可下载形象」段也一并展开：引导的落点是「挑一张形象」，「我的形象」为空时能挑的恰恰在下载段里。
+watch(() => props.browseSkinsTick, () => { galleryFolds.skins = true; openDl('skins') })
 
 // —— 音效卡内「可下载音效」段的状态 ——
 // 合并后整张卡只有一个消息槽（卡片底部的 soundFlash，来自 props）与一个忙碌位。
@@ -884,6 +893,7 @@ const soundRowOpen = ref('')
 // 不与「从共享库添加…」抢同一处面板。
 function doDownloadAllSounds() {
   if (sharedSoundBusy.value) return
+  openDl('sounds') // 逐段下载的进度条 / flash 都在「可下载音效」段内，收起时看不到反馈
   void doDownloadSharedSounds()
 }
 function refreshSharedSounds() {
@@ -1383,9 +1393,20 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
 
       <!-- 下段：可下载形象。内置（随包 1 张）与共享（上游 QQ 群 36 张）分两小组列出 ——
            两者的下载链路不同（整包 Release / 单张 raw 直链），但都是「点缩略图即下这一张」，
-           故并排呈现、各带自己的进度条与说明；下段整体只在有可下载项时出现 -->
+           故并排呈现、各带自己的进度条与说明；下段整体只在有可下载项时出现。
+           标题即本段折叠开关（默认收起，见 dlFolds 注释）：收起态仍报「N / M 已下载」，
+           一眼能看出有没有待补的；真要挑 / 下载再点开，不必让 36 张缩略图常驻屏上 -->
       <template v-if="remoteSkinCount">
-        <p class="group-title skin-group-title">可下载形象 <em>（点缩略图即可下载那一张，下完自动切到它；{{ remoteSkinInstalledCount }} / {{ remoteSkinCount }} 已下载）</em></p>
+        <button class="group-title skin-group-title dl-title" type="button"
+                :title="dlFolds.skins ? '收起下载区' : '展开下载区，看上游还有哪些形象可下'"
+                :aria-expanded="dlFolds.skins"
+                @click="dlFolds.skins = !dlFolds.skins">
+          <span class="dl-caret">{{ dlFolds.skins ? '▾' : '▸' }}</span>
+          可下载形象 <em>（点缩略图即可下载那一张，下完自动切到它；{{ remoteSkinInstalledCount }} / {{ remoteSkinCount }} 已下载）</em>
+          <span class="dl-action">{{ dlFolds.skins ? '收起' : '展开' }}</span>
+        </button>
+        <template v-if="dlFolds.skins">
+        <div class="dl-body">
         <DownloadBox v-if="dlProgress && dlProgress.pack === 'skins'"
                      :progress="dlProgress" :percent="dlPercent" :amount="dlAmountText" />
         <DownloadBox v-if="dlProgress && dlProgress.pack === 'shared-skins'"
@@ -1461,6 +1482,8 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
         </p>
         <p v-if="skinPackFlash.msg" class="msg" :class="msgCls(skinPackFlash)">{{ skinPackFlash.msg }}</p>
         <p v-if="sharedSkinFlash.msg" class="msg" :class="msgCls(sharedSkinFlash)">{{ sharedSkinFlash.msg }}</p>
+        </div>
+        </template>
       </template>
       <p v-else-if="!skinGallery.items.length" class="hint">
         暂无形象：点「导入图片…」加一张，支持 png / jpg / webp / gif / apng（动图不裁剪，保留动画）。
@@ -1643,9 +1666,20 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
 
       <!-- 下段：可下载音效。与共享角色同一批上游素材（45 段），落 sounds 的 shared 槽位。
            每段自带一组 roles（参加哪些实播槽位的播放），下载后默认不挂任何槽位（不打扰），
-           用户在行内展开的槽位 chip 上勾选要参加哪几个。 -->
+           用户在行内展开的槽位 chip 上勾选要参加哪几个。
+           标题即本段折叠开关（默认收起，见 dlFolds 注释）：45 段清单太长，收起态仍报
+           「N / M 已下载」，日常配槽位用上段（我的音效），要补下载再点开 -->
       <template v-if="sharedSoundItems.length">
-        <p class="group-title skin-group-title">可下载音效 <em>（上游分享、不随插件包分发；{{ sharedSoundInstalledCount }} / {{ sharedSoundItems.length }} 已下载，点行展开可勾选参加哪些槽位）</em></p>
+        <button class="group-title skin-group-title dl-title" type="button"
+                :title="dlFolds.sounds ? '收起下载区' : '展开下载区，看共享音效库还有哪些段可下'"
+                :aria-expanded="dlFolds.sounds"
+                @click="dlFolds.sounds = !dlFolds.sounds">
+          <span class="dl-caret">{{ dlFolds.sounds ? '▾' : '▸' }}</span>
+          可下载音效 <em>（上游分享、不随插件包分发；{{ sharedSoundInstalledCount }} / {{ sharedSoundItems.length }} 已下载，点行展开可勾选参加哪些槽位）</em>
+          <span class="dl-action">{{ dlFolds.sounds ? '收起' : '展开' }}</span>
+        </button>
+        <template v-if="dlFolds.sounds">
+        <div class="dl-body">
         <DownloadBox v-if="dlProgress && dlProgress.pack === 'shared-sounds'"
                      :progress="dlProgress" :percent="dlPercent" :amount="dlAmountText" />
         <!-- 列表按「是否已下载」分两组：两组的控件不同（未下载行没有试听 / 槽位勾选 / 删），
@@ -1744,6 +1778,8 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
                  :value="cfg.skinPackSrc"
                  @change="emit('patch', { skinPackSrc: ($event.target as HTMLInputElement).value })" />
         </label>
+        </div>
+        </template>
       </template>
       <p v-else-if="!sharedSoundQuery" class="hint">共享音效清单未拉到时这里为空，展开本卡会自动重拉一次。</p>
 
@@ -1929,26 +1965,8 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
   border-color: var(--accent);
 }
 
-input[type='text'] {
-  width: 100%;
-  box-sizing: border-box;
-  padding: 7px 9px;
-  font-size: 13px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--input-bg);
-  color: var(--fg);
-}
-input[type='text']:focus {
-  outline: none;
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px rgba(83, 107, 169, 0.18);
-}
-input[type='checkbox'] {
-  width: 16px;
-  height: 16px;
-  accent-color: var(--accent);
-}
+/* 输入框 / 复选框的表单控件基类已上提 main.css（全局唯一来源），
+   此处不再留副本。 */
 
 /* 有失败项时可点，直接去插件市场更新 */
 .msg.clickable {
@@ -1959,26 +1977,8 @@ input[type='checkbox'] {
 .field + .link-btn {
   margin-top: -4px;
 }
-.guide {
-  margin-top: 10px;
-  padding: 10px 12px;
-  border-radius: 8px;
-  border: 1px solid var(--line);
-  background: var(--input-bg);
-  font-size: 12px;
-  line-height: 1.6;
-}
-.guide-use {
-  margin: 0;
-  color: var(--fg);
-}
-.guide-use + .guide-use {
-  margin-top: 6px;
-}
-/* 折叠面板里的首个标题紧贴顶部，不额外留白 */
-.guide > .link-btn:first-child {
-  margin-top: 0;
-}
+/* .guide / .guide-use / .guide > .link-btn:first-child / .guide code / .guide a
+   已上提 main.css（全局唯一来源），此处不再留副本。 */
 /* 「数据目录」里展示的落盘路径：等宽、可截断，长路径不把按钮挤出去 */
 .dir-path {
   flex: 1 1 auto;
@@ -2000,20 +2000,6 @@ input[type='checkbox'] {
 .link-btn.inline {
   margin-top: 0;
   font-size: 12px;
-}
-.guide code {
-  padding: 1px 4px;
-  border-radius: 4px;
-  background: rgba(127, 127, 127, 0.18);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 11px;
-  word-break: break-all;
-}
-.guide a {
-  color: var(--accent);
-  text-decoration: underline;
-  text-underline-offset: 2px;
-  cursor: pointer;
 }
 /* 卡片内的分组小标题（如素材包卡的「导出 / 导入」）：用上边框把小节和上一组字段隔开，
    避免看起来还是一串平铺的字段 */
@@ -2040,6 +2026,78 @@ input[type='checkbox'] {
   margin-top: 0;
   padding-top: 0;
   border-top: none;
+}
+/* 「可下载形象 / 可下载音效」两段的标题现在可点（段级折叠，默认收起）。
+   首版只做了「hover 变字色 + 一个同色小三角」，首用者根本看不出这行能点（反馈：看不清能不能展开）。
+   三处加强可发现性，但仍让它读起来是**段标题**而不是一颗大按钮：
+   1) 箭头做成描边胶囊（.dl-caret），用主题强调色 —— 明显是个控件，不是装饰字符；
+   2) 行尾补一个动作词「展开 / 收起」（.dl-action），最直白、零学习成本；
+   3) 整行 hover 铺一层淡底 + 描边，明确「这一整行都能点」，而不只是文字变色。
+   展开态再给下面内容一条左侧淡竖线，视觉上归到本段名下（见 .dl-body）。 */
+.dl-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  margin: 18px 0 6px;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: none;
+  font: inherit;
+  font-size: 13px;
+  color: var(--fg-dim);
+  text-align: left;
+  cursor: pointer;
+  transition: background .15s, border-color .15s, color .15s;
+}
+.dl-title:hover {
+  color: var(--fg);
+  background: var(--accent-weak);
+  border-color: var(--line);
+}
+.dl-title:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+/* 描述性的 em（「…已下载」）会很长，让它占满剩余宽度，把动作词挤到行尾 */
+.dl-title > em {
+  flex: 1;
+  min-width: 0;
+}
+/* 箭头胶囊：静态时就带描边与强调色，不靠 hover 才显形 */
+.dl-caret {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--accent-weak);
+  color: var(--accent);
+  font-size: 11px;
+  line-height: 1;
+}
+/* 行尾动作词：hover 时与标题同色，平时比 em 稍显眼一点，起「这里是开关」的提示作用 */
+.dl-action {
+  flex: none;
+  padding: 1px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--accent);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.dl-title:hover .dl-action {
+  border-color: var(--accent);
+}
+/* 展开后的段内容：左侧一条淡竖线与标题对齐，读起来是「这一段的内容」 */
+.dl-body {
+  margin-left: 9px;
+  padding-left: 11px;
+  border-left: 2px solid var(--line);
 }
 /* 下段里的两个子分组（随包内置 / 共享角色）比段标题再低一级：
    不画上边框（同属「可下载形象」这一段的内部细分），只用更小的字号与更浅的颜色区分 */

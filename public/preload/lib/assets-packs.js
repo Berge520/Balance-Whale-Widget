@@ -20,22 +20,19 @@
  * jsDelivr CDN → 用户自填前缀 → 内置默认前缀（ghfast.top）→ raw 直连，逐个试、任一源取到合法字节即停。
  * 顺序按实测速度排（jsDelivr 比 raw 直连快约 8 倍且能拿下最大单张，见 sourceChain 注释）。
  */
-const crypto = require('crypto')
 const {
   SHARED_RAW_BASE, SHARED_CDN_BASE, SHARED_PACK_DEFAULT_PREFIX,
   SHARED_SKIN_PACK_SKINS, SHARED_SOUND_LIB,
   SHARED_PACK_TIMEOUT_MS, SHARED_PACK_MAX_BYTES,
 } = require('./constants')
 const { log, logErr } = require('./log')
+const { errMsg, sha256 } = require('./util')
 const skins = require('./skins')
 const sounds = require('./sounds')
 const dlp = require('./download-progress')
 
 // 内存状态：进行中的下载（防重复点击，也让设置页能显示「正在下」）。重载插件即中断。
 let running = false
-
-function errMsg(err) { return String((err && err.message) || err || '未知错误') }
-function sha256(buf) { return crypto.createHash('sha256').update(buf).digest('hex') }
 
 // 已有共享形象 id（从画廊里带 builtin 标记的项取）
 function installedSkinIds() {

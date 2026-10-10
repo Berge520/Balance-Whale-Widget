@@ -167,6 +167,122 @@ button.utils-outline:hover:not(:disabled) {
   color: var(--fg-dim);
 }
 
+/* ===== 柱状趋势图：全页统一（单一来源）=====
+   同一套 .chart / .bar-* / .chart-dense / .chart-ultra 曾被抄成三份：
+   UsageChart.vue 一份、UsageView.vue 一份（当时注释自称「取自 UsageChart.vue」），
+   原先还曾在 App.vue scoped 里一份（那段带 App 的哈希，渲染这些元素的却是子组件，
+   规则静默失效、柱子全不出图 —— 正是「scoped 匹配不上子组件」的经典现场）。
+   三份内容近乎逐字相同，唯一实质差异是「超密」档阈值（UsageChart 组件用 30、用量卡用 90），
+   而这个差异本该由组件 prop 表达、不是复制一份样式的理由。
+   所以上提到这里作唯一来源：尺寸/配色只此一处，列宽等布局微调留在各自 scoped。
+   ⚠️ --day-row（日期行高）也定义在这里：网格线与纵轴刻度都用它把「0 刻度」
+      垫高一行再定位，dense 档字号变小、行高跟着换 —— 与下面 .chart-dense 同处一块，
+      改字号时一眼能看到要一起改，不会再漂移。 */
+.chart-wrap {
+  --day-row: 15px;
+  display: flex;
+  gap: 6px;
+  padding-top: 6px;
+}
+.chart-wrap:has(.chart-dense) {
+  --day-row: 14px;
+}
+/* 纵轴刻度列：宽度随刻度文字自适应（min-width 兜住 token 缩写那档的 34px）。
+   早期写死 flex:0 0 34px，对 token 缩写（3.2K，约 18px）够用；但金额卡刻度是
+   「¥ 1234.00」这类长串，写死宽度会让 nowrap 的刻度从右侧向左溢出、压住绘图区柱子。
+   改成 auto + min-width：短刻度仍按 34px 对齐，长刻度才撑开，各档之间不会来回抖。
+   height 与 .bar-track 的 90px 对齐 —— 刻度按「相对轨道的百分比」定位，
+   取整列高度（含日期行）会整体错位；padding-top 对应 track 上方的 .bar-val(14px) + gap(4px)。 */
+.chart-axis {
+  position: relative;
+  flex: 0 0 auto;
+  min-width: 34px;
+  height: 90px;
+  padding-top: 18px;
+  box-sizing: content-box;
+}
+.axis-label {
+  position: absolute;
+  right: 0;
+  transform: translateY(50%);
+  font-size: 9px;
+  color: var(--fg-faint);
+  white-space: nowrap;
+}
+.chart-plot {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+/* 水平参考线铺在柱子背后，只作读数量的背景刻度。bottom 由内联 style 给（calc 里带 --day-row），
+   因为 0 刻度不是绘图区底边 —— 下面还有 .bar-day 那一行。 */
+.grid-line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: var(--line);
+  z-index: 0;
+}
+.chart {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding-top: 6px;
+}
+.bar-col {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.bar-val {
+  font-size: 10px;
+  color: var(--fg-dim);
+  white-space: nowrap;
+  height: 14px;
+}
+.bar-track {
+  width: 100%;
+  height: 90px;
+  display: flex;
+  align-items: flex-end;
+  background: var(--track);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.bar {
+  width: 100%;
+  background: linear-gradient(180deg, #6f8ad6, var(--accent));
+  border-radius: 6px 6px 0 0;
+  transition: height 0.3s ease;
+}
+.bar-day {
+  font-size: 10px;
+  color: var(--fg-faint);
+  white-space: nowrap;
+}
+/* 14 / 30 天：柱子变窄，间距与日期字号一起收，否则会糊成一片。
+   注意：.chart-ultra 在 UsageChart 组件里由 range >= ultraThreshold 决定挂不挂，
+   ultraThreshold 由父组件给（用量卡 90、会话统计卡 30），故这里只放样式、不写阈值。 */
+.chart-dense {
+  gap: 3px;
+}
+.chart-dense .bar-day {
+  font-size: 9px;
+}
+.chart-dense .bar-track {
+  border-radius: 4px;
+}
+.chart-ultra {
+  gap: 1px;
+}
+.chart-ultra .bar-track {
+  border-radius: 2px;
+}
+
 /* ===== 文字链按钮：全页统一（单一来源）=====
    .link-btn 原本只在 App.vue scoped 里定义，AccelView / UsageChart / FirstRunGuide
    里的同名类在各自模板上是死类 —— 它们还各写了一份「补丁」试图盖它，全在跟一个
@@ -347,10 +463,12 @@ html.dark ::-webkit-scrollbar-thumb:active {
   animation: whale-search-flash 0.9s ease-out 1;
 }
 
-/* ===== 跨卡片共用的六个基类：全局唯一来源 =====
+/* ===== 跨卡片共用的基类：全局唯一来源 =====
    .card / .card h2 / .field / .field.row select / .label / .field.check .label /
    .field:not(.row) .label / .label em / .hint / .hint a / .msg / .fold / .fold > .link-btn /
-   .fold + .fold —— 这些类被 App.vue 与十余个子组件各自复制过一份（多时 13 份逐字相同），
+   .fold + .fold / .guide / .guide-use / .guide > .link-btn:first-child / .guide code / .guide a /
+   input 与 select 的表单控件基类 / select option / 焦点态 / .num / .num-text / 通用复选框
+   —— 这些类被 App.vue 与十余个子组件各自复制过一份（多时 13 份逐字相同），
    是「观感漂移」的根因：改一处不可能改全。上提到这里，`main.css` 由 main.js 直接 import、
    是全局非 scoped 样式，对所有组件一次性生效。
 
@@ -473,6 +591,73 @@ html.dark ::-webkit-scrollbar-thumb:active {
   color: var(--fg-faint);
   font-size: 11px;
 }
+/* ===== 表单控件基类：全页唯一来源 =====
+   输入框 / 下拉 / 数值框 / 复选框。原先 App.vue 与 Notify / Usage / Look / Backup /
+   Assets / Window / Privacy / About / Bubble 各写一份**逐字相同**的 scoped 副本；
+   而 ModelsView（模型与余额卡）拆分出去后**一份都没有** —— 跨组件哈希匹配不上 App.vue 的
+   scoped 规则，于是那张卡的输入框全掉成浏览器默认控件（这就是「添加模型表单太丑」的根因）。
+   上提到这里后：所有 .vue 一次性获得同一套控件外观，新卡也不必再补副本。
+
+   ⚠️ 与顶部「含局部主题变量的规则别放全局」的警告不冲突：这里只用 :root / html.dark 的全局令牌。
+
+   ⚠️ 有意保留的例外，不要顺手统一：
+   · FirstRunGuide.vue 的 input[type='password']：引导页刻意更松（padding 8px 10px），
+     且带 fallback 色值，属引导页专属排版。
+   · NotifyView 的 .time：免打扰时刻专用的窄框（96px），只此一处用。
+   · App.vue 的 .iso-item input[type='checkbox'] / AccelView 的 .gh-accel input[type='checkbox']：
+     尺寸与对齐随各自容器布局，不是通用复选框。 */
+input[type='password'],
+/* 裸文本输入框：属性选择器匹配的是「显式属性」，不带 type 的 input 会漏掉，掉成浏览器默认外观 */
+input:not([type]),
+input[type='text'],
+select {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 7px 9px;
+  font-size: 13px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--input-bg);
+  color: var(--fg);
+}
+/* 下拉展开后的选项：必须显式给出背景与文字色。
+   否则深色模式下选项文字（浅色）会落在系统浅色弹层上，完全看不清。 */
+select option {
+  background: var(--input-bg);
+  color: var(--fg);
+}
+input[type='password']:focus,
+input:not([type]):focus,
+input[type='text']:focus,
+select:focus,
+.num:focus,
+.time:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(83, 107, 169, 0.18);
+}
+/* 行内数值框（贴边间距 / 阈值 / 倍数等）：窄、透明底，与同行的 .num-text 单位对齐 */
+.num {
+  width: 56px;
+  padding: 5px 6px;
+  font-size: 13px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+}
+.num-text {
+  width: 44px;
+  text-align: right;
+  font-size: 13px;
+  color: var(--fg-dim);
+}
+/* 通用复选框：略放大 + 主题色勾选（.field.check 行里的开关） */
+input[type='checkbox'] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent);
+}
 .hint {
   margin: 10px 0 0;
   font-size: 12px;
@@ -504,4 +689,46 @@ html.dark ::-webkit-scrollbar-thumb:active {
 .fold + .fold {
   padding-top: 12px;
   border-top: 1px solid var(--line);
+}
+
+/* 折叠面板正文（.fold / 教程面板里的说明块）：带底色的卡片式说明容器。
+   .guide 系列原先被 6 个组件（App / Notify / Codex / About / Help / Assets）逐字复制，
+   与上方 .fold 同属「折叠展开」这一类，一并上提为全局唯一来源。
+   ⚠️ 有意保留的局部变体，不要合并：FirstRunGuide.vue 的 .guide-use/.guide-meta/
+   .guide-note/.guide-steps（引导页用 --accent 淡底、间距更松）、AccelView.vue 的
+   .gh-accel .guide（子卡内退一层）、App.vue 的 .guide2/.guide-steps/.guide-note/
+   .guide-meta（嵌套说明的第二层级）。 */
+.guide {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--input-bg);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.guide-use {
+  margin: 0;
+  color: var(--fg);
+}
+.guide-use + .guide-use {
+  margin-top: 6px;
+}
+/* 折叠面板里的首个标题紧贴顶部，不额外留白 */
+.guide > .link-btn:first-child {
+  margin-top: 0;
+}
+.guide code {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: rgba(127, 127, 127, 0.18);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  word-break: break-all;
+}
+.guide a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
 }

@@ -14,6 +14,7 @@ const path = require('path')
 const os = require('os')
 const { K } = require('./constants')
 const { logErr } = require('./log')
+const { errMsg } = require('./util')
 
 // Chromium 能直接渲染的位图格式（不要 SVG：外部 SVG 可带脚本，且挂件是本地页面，没必要开这个口子）
 // apng 的 MIME 与签名都是 image/png，Chromium 原生播放动画
@@ -169,7 +170,7 @@ function pickImage(title) {
     })
   } catch (err) {
     logErr('[whale][skins] 打开选择框失败', err && err.message)
-    return { error: '无法打开文件选择框：' + ((err && err.message) || err) }
+    return { error: '无法打开文件选择框：' + errMsg(err) }
   }
   const filePath = Array.isArray(picked) ? picked[0] : picked
   if (!filePath) return { canceled: true }
@@ -177,7 +178,7 @@ function pickImage(title) {
   if (OK_EXT.indexOf(ext) < 0) return { error: '只支持 ' + OK_EXT.join(' / ') + ' 格式' }
   let stat = null
   try { stat = fs.statSync(filePath) } catch (err) {
-    return { error: '读取文件失败：' + ((err && err.message) || err) }
+    return { error: '读取文件失败：' + errMsg(err) }
   }
   if (!stat.isFile()) return { error: '请选择一张图片' }
   if (stat.size > MAX_BYTES) return { error: '文件过大（限 5MB），建议方形透明底 PNG' }
@@ -226,7 +227,7 @@ function addItem(name, ext, write, thumb, opts) {
     if (exist) {
       try { write(o.id) } catch (err) {
         logErr('[whale][skins] 覆盖形象失败', o.id, err && err.message)
-        return { ok: false, error: '保存图片失败：' + ((err && err.message) || err) }
+        return { ok: false, error: '保存图片失败：' + errMsg(err) }
       }
       writeThumb(o.id, thumb)
       // 重复下载官方图时补正元信息：名字从 id 短哈希升成中文原名（旧记录），或补上 builtin 标记
@@ -250,7 +251,7 @@ function addItem(name, ext, write, thumb, opts) {
     write(id)
   } catch (err) {
     logErr('[whale][skins] 写入形象失败', err && err.message)
-    return { ok: false, error: '保存图片失败：' + ((err && err.message) || err) }
+    return { ok: false, error: '保存图片失败：' + errMsg(err) }
   }
   writeThumb(id, thumb)
   const safeName = String(name || ('形象.' + ext)).slice(0, 120)
@@ -290,7 +291,7 @@ function pickImageFile() {
   let buf = null
   try { buf = fs.readFileSync(picked.filePath) } catch (err) {
     logErr('[whale][skins] 读取失败', picked.filePath, err && err.message)
-    return { ok: false, error: '读取文件失败：' + ((err && err.message) || err) }
+    return { ok: false, error: '读取文件失败：' + errMsg(err) }
   }
   const mime = MIME[picked.ext] || 'image/png'
   return {

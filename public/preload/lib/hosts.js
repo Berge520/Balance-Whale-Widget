@@ -25,6 +25,7 @@ const https = require('https')
 const { log, logErr } = require('./log')
 const { GH_DOMAINS, GH520_HOSTS_URL } = require('./constants')
 const { normIps, patchConfig, readConfig } = require('./store')
+const { errMsg } = require('./util')
 // psExe 只在提权写 hosts 时（运行时）用得到；顶层 require 会把整片 dsh 一族压进本模块的
 // 求值阶段。改成惰性取用，避免 hosts.js 一被加载就连带解析 300KB+。
 let dshMod = null
@@ -363,7 +364,7 @@ async function probeConnectivity(op) {
     opStep(op, 'HEAD 请求 https://github.com', 'done', 'HTTP ' + res.status + '，耗时 ' + (Date.now() - t0) + 'ms')
     return { ok: true, ms: Date.now() - t0, status: res.status }
   } catch (err) {
-    const msg = String((err && err.message) || err)
+    const msg = errMsg(err)
     opStep(op, 'HEAD 请求 https://github.com', 'fail', msg)
     return { ok: false, ms: Date.now() - t0, error: msg }
   }
@@ -518,7 +519,7 @@ async function refreshIps(current, op, srcOrder, order, customSources) {
           }
           return { url: url, found: found, total: total }
         } catch (err) {
-          const e = String((err && err.message) || err)
+          const e = errMsg(err)
           logErr('[whale][ghaccel] 拉取源失败', url, e)
           return { url: url, err: e }
         } finally {
@@ -758,7 +759,7 @@ async function applyHostsBlock(action, ips, op) {
     } catch (err) {
       logErr('[whale][ghaccel] 计算新 hosts 内容失败', err && err.message)
       opStep(op, '计算新的 hosts 内容', 'fail', (err && err.message) || String(err))
-      resolve({ ok: false, canceled: false, error: '处理 hosts 内容失败：' + ((err && err.message) || err) })
+      resolve({ ok: false, canceled: false, error: '处理 hosts 内容失败：' + errMsg(err) })
       return
     }
     opStep(op, '计算新的 hosts 内容', 'done', action === 'enable' ? '在原文件最前插入标记块（' + ips.length + ' 条域名）' : '移除标记块')
@@ -769,10 +770,10 @@ async function applyHostsBlock(action, ips, op) {
       return
     }
     opStep(op, '弹出 UAC 提权写 hosts', 'running', '需在系统弹窗点「是」')
-    const stamp = 'whale-ghaccel-' + process.pid + '-' + Date.now()
-    const scriptPath = path.join(os.tmpdir(), stamp + '.ps1')
-    const srcPath = path.join(os.tmpdir(), stamp + '.hosts')
-    const resultPath = path.join(os.tmpdir(), stamp + '.result')
+    const fileTag = 'whale-ghaccel-' + process.pid + '-' + Date.now()
+    const scriptPath = path.join(os.tmpdir(), fileTag + '.ps1')
+    const srcPath = path.join(os.tmpdir(), fileTag + '.hosts')
+    const resultPath = path.join(os.tmpdir(), fileTag + '.result')
     const cleanup = () => {
       for (const p of [scriptPath, srcPath, resultPath]) fs.rm(p, { force: true }, () => {})
     }
@@ -785,7 +786,7 @@ async function applyHostsBlock(action, ips, op) {
     } catch (err) {
       logErr('[whale][ghaccel] 写临时文件失败', err && err.message)
       cleanup()
-      resolve({ ok: false, canceled: false, error: '无法创建临时文件：' + ((err && err.message) || err) })
+      resolve({ ok: false, canceled: false, error: '无法创建临时文件：' + errMsg(err) })
       return
     }
     // -Verb RunAs 触发 UAC；-Wait 等提权进程结束，-PassThru 才能拿到退出码
@@ -1028,7 +1029,7 @@ async function dohResolveDomain(domain) {
         })
         // 单个 resolver 失败不影响其它入口（它们仍可能给结果），但原因要留痕
         .catch((err) => {
-          const why = String((err && err.message) || err)
+          const why = errMsg(err)
           const reason = /timeout|abort/i.test(why) ? '超时 ' + DOH_TIMEOUT_MS / 1000 + 's' : why
           fails.push({ name: dohName(base), reason: reason })
           logErr('[whale][ghaccel] DoH 入口失败', dohName(base), domain, reason)

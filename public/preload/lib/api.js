@@ -11,6 +11,7 @@ const {
   MODEL_FETCH_TIMEOUT_MS, MODEL_STALE_MS, MODEL_MONEY_PREFIX, MODEL_TEMPLATES,
 } = require('./constants')
 const { logErr } = require('./log')
+const { errMsg } = require('./util')
 const {
   readSecrets, sanitizeKey, recordLedgerUsage, keyFingerprint, readConfig, setTodayUsage,
   claimDailyNotice, readModelState, writeModelState, todayKey, alertFor, alertOneLine,
@@ -647,7 +648,7 @@ function checkUpdate(force) {
       ok: false,
       at: now,
       current: PLUGIN_VERSION,
-      error: String((err && err.message) || err),
+      error: errMsg(err),
     }))
     .finally(() => { updateInFlight = null })
   return updateInFlight
@@ -813,7 +814,7 @@ function getBalance(force) {
     .catch((err) => ({
       ok: false,
       code: 'ERROR',
-      error: '余额服务异常: ' + String((err && err.message) || err).slice(0, 200),
+      error: '余额服务异常: ' + errMsg(err).slice(0, 200),
     }))
     .finally(() => { balanceInFlight = null })
   return balanceInFlight

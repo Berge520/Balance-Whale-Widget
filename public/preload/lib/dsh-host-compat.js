@@ -17,6 +17,7 @@
  *    里也用得上，且不会因为直连 npmjs 在部分网络下超时被判成「不兼容」。
  */
 const { logErr } = require('./log')
+const { errMsg } = require('./util')
 
 // manifest 事实的内存 TTL。npm manifest 的声明极少变，24h 足够且能挡住翻页反复拉
 const FACTS_TTL_MS = 24 * 60 * 60 * 1000
@@ -217,7 +218,7 @@ async function fetchFacts(name, opts) {
     outageUntil = 0
     return facts
   } catch (err) {
-    const why = String((err && err.message) || err || '未知错误')
+    const why = errMsg(err)
     logErr('[whale][dsh-host-compat] 拉 manifest 失败', name + ': ' + why)
     failures.set(name, Date.now() + FAILURE_COOLDOWN_MS)
     return FETCH_FAILED

@@ -12,12 +12,29 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import os from 'node:os'
+import path from 'node:path'
+import fs from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import skinPacks from '../public/preload/lib/skin-packs.js'
 import constants from '../public/preload/lib/constants.js'
 
 const { _parsePack: parsePack, listSkinPacks, downloadSkinPacks } = skinPacks
 const { SKIN_PACK_SKINS, SKIN_PACK_SHA256 } = constants
+
+// ── utools 桩：单张下载成功分支会真正落盘（skins.installBuiltin），需要内存 dbStorage ──
+// skins / log 两模块都在**函数调用期**才访问 utools（顶层只 require），所以这份桩在 import
+// 之后再设也来得及 —— 覆盖整包失败分支的既有用例照常跑（它们不落盘）。
+const _store = new Map()
+const _TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'whale-skinpacks-test-'))
+globalThis.utools = {
+  getPath: () => _TMP,
+  dbStorage: {
+    getItem: (k) => (_store.has(k) ? _store.get(k) : null),
+    setItem: (k, v) => { _store.set(k, v) },
+    removeItem: (k) => { _store.delete(k) },
+  },
+}
 
 const PACK_PATH = fileURLToPath(new URL('../public/whale-pack/skins-pack.whaleassets', import.meta.url))
 const PACK_MANIFEST_PATH = fileURLToPath(new URL('../public/whale-pack/manifest.json', import.meta.url))
@@ -424,4 +441,177 @@ test('downloadSkinPacks：全部源失败时报错串起各源标签，便于用
   assert.match(r.error, /自定义加速源/)
   assert.match(r.error, /默认加速 ghfast\.top/)
   assert.match(r.error, /直连 github\.com/)
+})
+
+// ── 单张下载（downloadSkinPackItem / itemSourceChain / itemLabelOf，v1.9.0 起）──────
+// 与整包链路**不同**：整包走 Release 上的 .whaleassets 容器（一次拿全 + 整体 sha256），
+// 这里走 public/whale-pack/src/ 下的单张原图 raw 直链（只下这一张）。候选链更短、
+// 只做单张 sha256 校验。这几条是「点某张缩略图只下这张」的入口，出错面是
+// 「未知 id 发请求」「已装还重下」「校验没生效」这类不显眼的问题，逐条钉住。
+
+const { _itemSourceChain: itemSourceChain, _itemLabelOf: itemLabelOf, downloadSkinPackItem } = skinPacks
+const { SKIN_PACK_RAW_ITEM_BASE } = constants
+const { default: skins } = await import('../public/preload/lib/skins.js')
+
+// 单张原图的真源 URL：<raw item 基址><file>（file 来自 constants 清单，如 DSniang02.webp）
+const itemOriginOf = (meta) => SKIN_PACK_RAW_ITEM_BASE + meta.file
+
+// 造一个「按 URL 返回字节 / 状态码」的 fetch 桩，并记录请求过的 URL（与 assets-packs 同款）
+function fetchStub(byUrl) {
+  const calls = []
+  const impl = async (url) => {
+    calls.push(url)
+    const hit = byUrl[url]
+    if (hit === undefined || hit === null) return { ok: false, status: 404, statusText: 'Not Found' }
+    if (typeof hit === 'number') return { ok: false, status: hit, statusText: 'HTTP ' + hit }
+    return {
+      ok: true, status: 200, statusText: 'OK',
+      headers: { get: (k) => (String(k).toLowerCase() === 'content-length' ? String(hit.length) : null) },
+      body: streamRes([hit], hit.length).body,
+    }
+  }
+  return { impl, calls }
+}
+
+const sha = async (b) => (await import('node:crypto')).createHash('sha256').update(b).digest('hex')
+
+test('itemSourceChain：无自填时是「默认前缀 → 真源直连」两条，末位是直连', () => {
+  const origin = itemOriginOf(SKIN_PACK_SKINS[0])
+  const chain = itemSourceChain('', origin)
+  assert.deepEqual(chain, [SKIN_PACK_DEFAULT_PREFIX + origin, origin])
+  assert.equal(chain[chain.length - 1], origin, '末位应是真源直连，保证加速前缀挂了还能拿到')
+})
+
+test('itemSourceChain：自填前缀排在最前，后面仍有默认前缀与直连两条兜底', () => {
+  const origin = itemOriginOf(SKIN_PACK_SKINS[0])
+  const chain = itemSourceChain('https://my-proxy.example/', origin)
+  assert.deepEqual(chain, [
+    'https://my-proxy.example/' + origin,
+    SKIN_PACK_DEFAULT_PREFIX + origin,
+    origin,
+  ])
+})
+
+test('itemSourceChain：自填与内置前缀相同时去重（不重复打同一个源）', () => {
+  const origin = itemOriginOf(SKIN_PACK_SKINS[0])
+  const chain = itemSourceChain(SKIN_PACK_DEFAULT_PREFIX, origin)
+  assert.deepEqual(chain, [SKIN_PACK_DEFAULT_PREFIX + origin, origin])
+})
+
+test('itemSourceChain：空白 / 非字符串的自填被忽略，仍回落到内置链', () => {
+  const origin = itemOriginOf(SKIN_PACK_SKINS[0])
+  const expect = [SKIN_PACK_DEFAULT_PREFIX + origin, origin]
+  for (const bad of ['   ', undefined, null, 42, {}]) {
+    assert.deepEqual(itemSourceChain(bad, origin), expect)
+  }
+})
+
+test('itemLabelOf：直连标成 raw 直连，默认前缀标成加速，其余标成自定义', () => {
+  const origin = itemOriginOf(SKIN_PACK_SKINS[0])
+  assert.equal(itemLabelOf(origin, origin), '直连 raw.githubusercontent.com')
+  assert.equal(itemLabelOf(SKIN_PACK_DEFAULT_PREFIX + origin, origin), '默认加速 ghfast.top')
+  assert.equal(itemLabelOf('https://my-proxy.example/' + origin, origin), '自定义加速源')
+})
+
+test('downloadSkinPackItem：未知 id 直接拒绝，不发请求', async () => {
+  let called = false
+  const impl = async () => { called = true; return { ok: false, status: 404 } }
+  const r = await downloadSkinPackItem('no-such-item', { fetchImpl: impl })
+  assert.equal(r.ok, false)
+  assert.match(r.error, /没有这个内置形象/)
+  assert.equal(called, false, '未知 id 不应发起网络请求')
+})
+
+test('downloadSkinPackItem：已装的走 skipped、不重下（回归：已装判断）', async () => {
+  const meta = SKIN_PACK_SKINS[0]
+  const seeded = skins.installBuiltin(meta.id, 'webp', Buffer.alloc(Number(meta.size) || 8, 1), '')
+  assert.ok(seeded && seeded.ok, '预置已装形象失败：' + ((seeded && seeded.error) || ''))
+
+  let called = false
+  const impl = async () => { called = true; return { ok: false, status: 404 } }
+  const r = await downloadSkinPackItem(meta.id, { fetchImpl: impl })
+  assert.equal(r.ok, true)
+  assert.equal(r.skipped, true, '已装应走 skipped 分支')
+  assert.equal(called, false, '已装不应发起网络请求')
+})
+
+test('downloadSkinPackItem：单张成功后落进 skins 的 builtin 槽位', async () => {
+  const meta = SKIN_PACK_SKINS[0]
+  const origin = itemOriginOf(meta)
+  const bytes = Buffer.alloc(Number(meta.size) || 8, 3)
+  // 生产代码拿清单的 sha256 逐张校验，桩字节必须对得上才能走到成功分支 ——
+  // 临时改写清单项摘要，用完立刻还原（单测专用，不动仓库常量文件）
+  const saved = meta.sha256
+  meta.sha256 = await sha(bytes)
+  // 上一条「已装跳过」用例已把本 id 装进画廊，这里先清掉，确保走真实下载分支
+  skins.removeSkin(meta.id)
+  try {
+    const { impl } = fetchStub({ [SKIN_PACK_DEFAULT_PREFIX + origin]: bytes })
+    const r = await downloadSkinPackItem(meta.id, { fetchImpl: impl, prefix: '' })
+    assert.equal(r.ok, true, r.error)
+    assert.equal(r.id, meta.id)
+    assert.equal(r.bytes, bytes.length)
+    assert.ok(r.source, '应回报命中的源 URL')
+    assert.ok(skins.builtinIds().indexOf(meta.id) >= 0, '应标记为已装（builtinIds）')
+  } finally {
+    meta.sha256 = saved
+  }
+})
+
+test('downloadSkinPackItem：opts.thumb 会随下载一起落盘（否则画廊只能回落读原图）', async () => {
+  const meta = SKIN_PACK_SKINS[0]
+  const origin = itemOriginOf(meta)
+  const bytes = Buffer.alloc(Number(meta.size) || 8, 6)
+  const saved = meta.sha256
+  meta.sha256 = await sha(bytes)
+  const WEBP = Buffer.from('524946460000000057454250', 'hex')
+  const thumb = 'data:image/webp;base64,' + WEBP.toString('base64')
+  // 先清掉本 id（上一条用例可能已装），确保走真实下载分支
+  skins.removeSkin(meta.id)
+  try {
+    const { impl } = fetchStub({ [SKIN_PACK_DEFAULT_PREFIX + origin]: bytes })
+    const r = await downloadSkinPackItem(meta.id, { fetchImpl: impl, prefix: '', thumb: thumb })
+    assert.equal(r.ok, true, r.error)
+    const item = skins.listSkins().items.find((x) => x.id === meta.id)
+    assert.match(item.thumb, /^data:image\/webp;base64,/, '缩略图必须在下载时就落盘')
+  } finally {
+    meta.sha256 = saved
+  }
+})
+
+test('downloadSkinPackItem：首源校验失败顺延下一个，命中直连后成功', async () => {
+  const meta = SKIN_PACK_SKINS[0]
+  const origin = itemOriginOf(meta)
+  const good = Buffer.alloc(Number(meta.size) || 8, 5)
+  const badFromPrefix = Buffer.alloc(good.length, 9) // 同长不同内容 → 校验必败
+  const saved = meta.sha256
+  meta.sha256 = await sha(good)
+  skins.removeSkin(meta.id)
+  try {
+    const { impl, calls } = fetchStub({
+      [SKIN_PACK_DEFAULT_PREFIX + origin]: badFromPrefix,
+      [origin]: good,
+    })
+    const r = await downloadSkinPackItem(meta.id, { fetchImpl: impl, prefix: '' })
+    assert.equal(r.ok, true, r.error)
+    assert.equal(r.source, origin, '应命中真源直连（默认前缀校验失败后顺延）')
+    assert.equal(calls.length, 2, '应依次试 默认前缀 → 直连')
+    assert.equal(calls[0], SKIN_PACK_DEFAULT_PREFIX + origin, '首个请求应是默认加速前缀')
+  } finally {
+    meta.sha256 = saved
+  }
+})
+
+test('downloadSkinPackItem：所有源失败时报错串起各源标签，且不落盘', async () => {
+  const meta = SKIN_PACK_SKINS[0]
+  skins.removeSkin(meta.id)
+  const { impl, calls } = fetchStub({}) // 全部 404
+  const r = await downloadSkinPackItem(meta.id, { fetchImpl: impl, prefix: 'https://dead.example/' })
+  assert.equal(r.ok, false)
+  assert.match(r.error, /所有下载源都失败/)
+  assert.match(r.error, /自定义加速源/)
+  assert.match(r.error, /默认加速 ghfast\.top/)
+  assert.match(r.error, /直连 raw\.githubusercontent\.com/)
+  assert.equal(calls.length, 3, '自填 → 默认前缀 → 直连，三条都试过')
+  assert.equal(skins.builtinIds().indexOf(meta.id), -1, '全失败不应落盘')
 })

@@ -18,6 +18,7 @@ const path = require('path')
 const os = require('os')
 const { K } = require('./constants')
 const { logErr } = require('./log')
+const { errMsg } = require('./util')
 
 // Chromium 能直接渲染的位图格式（不要 SVG：外部 SVG 可带脚本，且挂件是本地页面，没必要开这个口子）
 // apng 的 MIME 与签名都是 image/png，Chromium 原生播放动画
@@ -101,7 +102,7 @@ function pickBubbleFile() {
     })
   } catch (err) {
     logErr('[whale][bubbles] 打开选择框失败', err && err.message)
-    return { ok: false, error: '无法打开文件选择框：' + ((err && err.message) || err) }
+    return { ok: false, error: '无法打开文件选择框：' + errMsg(err) }
   }
   const filePath = Array.isArray(picked) ? picked[0] : picked
   if (!filePath) return { ok: false, canceled: true }
@@ -109,14 +110,14 @@ function pickBubbleFile() {
   if (OK_EXT.indexOf(ext) < 0) return { ok: false, error: '只支持 ' + OK_EXT.join(' / ') + ' 格式' }
   let stat = null
   try { stat = fs.statSync(filePath) } catch (err) {
-    return { ok: false, error: '读取文件失败：' + ((err && err.message) || err) }
+    return { ok: false, error: '读取文件失败：' + errMsg(err) }
   }
   if (!stat.isFile()) return { ok: false, error: '请选择一张图片' }
   if (stat.size > MAX_BYTES) return { ok: false, error: '文件过大（限 5MB）' }
   let buf = null
   try { buf = fs.readFileSync(filePath) } catch (err) {
     logErr('[whale][bubbles] 读取失败', filePath, err && err.message)
-    return { ok: false, error: '读取文件失败：' + ((err && err.message) || err) }
+    return { ok: false, error: '读取文件失败：' + errMsg(err) }
   }
   // 只回 data URL、不落盘：设置页要先用它生成缩略图，确认后才由 importBubbleFromData 写盘
   return {
@@ -155,7 +156,7 @@ function addItem(name, ext, write, thumb) {
     write(id)
   } catch (err) {
     logErr('[whale][bubbles] 写入气泡图失败', err && err.message)
-    return { ok: false, error: '保存图片失败：' + ((err && err.message) || err) }
+    return { ok: false, error: '保存图片失败：' + errMsg(err) }
   }
   writeThumb(id, thumb)
   const safeName = String(name || ('气泡图.' + ext)).slice(0, 120)

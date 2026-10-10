@@ -1,5 +1,6 @@
 <script lang="ts" setup>
 import { computed, reactive, ref, watch } from 'vue'
+import { msgCls, useFlash, type Flash } from '../composables/useFlash'
 import type { CodexSummaryResult, CodexWindows, WhaleServices } from '../types/services'
 import UsageChart from '../components/UsageChart.vue'
 
@@ -31,11 +32,7 @@ const emit = defineEmits<{
   (e: 'windows', has: boolean): void
 }>()
 
-// 统一的消息态：msg=文案、err=是否错误态；与父级 App.vue 里的同名工具保持同一定义
-// （原为全页共享，这里内联一份，免得一个 4 行的 class 工具也要父子透传）
-type Flash = { msg: string; err: boolean }
-function useFlash(): Flash { return reactive({ msg: '', err: false }) }
-function msgCls(f: Flash) { return { ok: !f.err, err: f.err } }
+// 统一的消息态（Flash）：定义收口在 composables/useFlash.ts，各卡不再各持一份。
 
 // 整卡折叠：宿主是同步扫文件（会话日志可能几十 MB），默认收起、首次展开才读，
 // 避免每次进开发者 Tab 都无条件付一次扫描成本。
@@ -324,29 +321,5 @@ function codexClearCache() {
     grid-template-columns: repeat(2, 1fr);
   }
 }
-.guide {
-  margin-top: 10px;
-  padding: 10px 12px;
-  border-radius: 8px;
-  border: 1px solid var(--line);
-  background: var(--input-bg);
-  font-size: 12px;
-  line-height: 1.6;
-}
-.guide-use {
-  margin: 0;
-  color: var(--fg);
-}
-.guide-use + .guide-use {
-  margin-top: 6px;
-}
-.guide code {
-  padding: 1px 4px;
-  border-radius: 4px;
-  background: rgba(127, 127, 127, 0.18);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 11px;
-  word-break: break-all;
-}
-
+/* .guide / .guide-use / .guide code 已上提 main.css（全局唯一来源）。 */
 </style>

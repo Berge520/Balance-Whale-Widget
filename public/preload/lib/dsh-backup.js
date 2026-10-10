@@ -25,9 +25,8 @@
  */
 const fs = require('fs')
 const path = require('path')
-const crypto = require('crypto')
 const { log, logErr } = require('./log')
-const { homeDir, readTextSafe, writeFileAtomicSync } = require('./util')
+const { homeDir, readTextSafe, writeFileAtomicSync, errMsg, stamp, sha256: sha256Bytes } = require('./util')
 // 只读配置（取保留份数）。store 不 require 本模块，无循环引用
 const { readConfig } = require('./store')
 
@@ -54,8 +53,6 @@ const SCHEMA = 1
 const PROFILE_FILES = ['cordis.patch.yml', 'package.json']
 const HOME_FILES = ['settings.yaml']
 
-function errMsg(err) { return String((err && err.message) || err || '未知错误') }
-
 // ── 路径 ──
 
 // $DSH_HOME 定位（与 diagnostics.js / dsh-dump.js 同一口径：env 优先 + 回退 ~/.dsh，都要实际存在）
@@ -70,10 +67,7 @@ function backupRoot() {
 
 // 时间戳目录名：20260922-214243（可排序，同年月日的按字典序 = 按时间序）
 function stampOf(d) {
-  const t = d instanceof Date ? d : new Date()
-  const p2 = (n) => String(n).padStart(2, '0')
-  return String(t.getFullYear()) + p2(t.getMonth() + 1) + p2(t.getDate())
-    + '-' + p2(t.getHours()) + p2(t.getMinutes()) + p2(t.getSeconds())
+  return stamp(d instanceof Date ? d.getTime() : undefined, 'sec')
 }
 
 // 本次要备的**绝对路径清单**（含尚不存在的 —— 存在性由调用处判断）
@@ -92,8 +86,10 @@ function targetFiles(profile) {
   return out
 }
 
+// 文本版校验：调用方传进来的是文件正文，先 String() 再按 utf8 取字节。
+// 与 util.sha256 的字节版区别只在这里的 String() 包装 —— 必须保留，否则哈希值变、快照去重失准。
 function sha256(text) {
-  return crypto.createHash('sha256').update(String(text), 'utf8').digest('hex')
+  return sha256Bytes(String(text))
 }
 
 // ── 元信息（命名 / known-good 标记）──

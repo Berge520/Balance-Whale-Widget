@@ -7,6 +7,7 @@ const {
   NEWEST_VERSION, DSH_PORT_DEFAULT, SKIN_PACK_PREFIX_MAX,
 } = require('./constants')
 const { logErr } = require('./log')
+const { errMsg } = require('./util')
 
 // GitHub 加速 IP 表归一化：domain 去空白转小写限长、ip 必须是合法 IPv4，非法条目丢弃。
 // 传 null/非数组 = 空表（不再内置 IP 快照：没有拿得到新鲜 IP 的途径时，宁可不写 hosts 也不写一批
@@ -1618,7 +1619,7 @@ function calibrateTodayUsage(amount) {
   led.calibrateLog = pruneDetailLog(led.calibrateLog)
   try { utools.dbStorage.setItem(K.ledger, led) } catch (err) {
     logErr('[whale][ledger] 校准写账本失败', err && err.message)
-    return { ok: false, error: '校准写入失败：' + ((err && err.message) || err) }
+    return { ok: false, error: '校准写入失败：' + errMsg(err) }
   }
   return { ok: true, from: from, to: to, todayAdjust: led.todayAdjust || 0 }
 }

@@ -1,5 +1,6 @@
 <script lang="ts" setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { msgCls, useFlash } from '../composables/useFlash'
 import { cloneBubbleItems, isChoiceStep, setStepModules, stepLabel, stepModules } from '../composables/useBubble'
 import BubbleQueueEditor from '../components/BubbleQueueEditor.vue'
 import BubbleModPanel from '../components/BubbleModPanel.vue'
@@ -29,9 +30,8 @@ const emit = defineEmits<{
   (e: 'patch', p: Record<string, any>): void
 }>()
 
-type Flash = { msg: string; err: boolean }
-const flash = reactive<Flash>({ msg: '', err: false })
-function msgCls(f: Flash) { return { ok: !f.err, err: f.err } }
+// 统一的消息态（Flash）：定义收口在 composables/useFlash.ts，各卡不再各持一份。
+const flash = useFlash()
 
 // —— 显示用派生值 ——
 // items 恒为数组（宿主归一化保证），这里再兜一层，避免旧配置 / 手工改库导致渲染期 undefined
@@ -119,8 +119,8 @@ onBeforeUnmount(() => {
 // 载荷必须与配置脱钩（挂件那边会存引用），故走 cloneBubbleItems 深拷贝
 const previewing = ref(false)
 // 编辑器折叠态（队列 + 模块库两层长列表）：纯展示态、不给父级，故留组件内部。
-// 默认展开 —— 本卡主要功能就是编辑器，折起来只服务「只想看 / 改开关」的人
-const editorCollapsed = ref(false)
+// 默认折叠 —— 编辑器很长，进来先看到开关与说明，要用再点「展开编辑器」
+const editorCollapsed = ref(true)
 // 整卡折叠：本卡与「挂件外观」同属外观 Tab，且编辑器折起来后仍占一整屏，
 // 故再给一层卡级折叠（沿 dsh 卡的 .card-toggle 范式），默认展开、可收起。
 // 收起态摘要播报「开关 + 步骤数」，不让人以为折起来就把配置藏没了
@@ -319,7 +319,7 @@ onMounted(() => {
          点「编辑内容」开的是泡内容面板（W2）—— 面板本身是居中弹层（见 BubbleModPanel 文件头），
          位置与这个插槽无关；保留具名插槽只是为了把面板挂在队列编辑器之下（组件树清晰、状态同居）。
          可折叠：编辑器带队列 + 模块库两层长列表，看开关 / 文案的人不必每次都滚过它。
-         折叠按钮用 .fold + .link-btn 的既有范式（本卡原来没有折叠，故此处的「收起」默认展开） -->
+         折叠按钮用 .fold + .link-btn 的既有范式；默认折叠，点「展开编辑器」才铺开 -->
     <div class="fold">
       <button class="link-btn utils-btn utils-secondary" type="button" @click="editorCollapsed = !editorCollapsed">
         {{ editorCollapsed ? '展开编辑器（队列与模块）' : '收起编辑器' }}
@@ -364,13 +364,7 @@ onMounted(() => {
 
 <style scoped>
 /* 设计令牌来自 main.css 的 :root；.card / .field / .label / .hint / .msg / .btn-row / utils 档位
-   是设置页跨卡共用的基类（各自 scoped，故这里补齐本组件用到的部分）。 */
-
-input[type='checkbox'] {
-  width: 16px;
-  height: 16px;
-  accent-color: var(--accent);
-}
+   是设置页跨卡共用的基类；通用复选框尺寸与配色也已上提 main.css（全局唯一来源）。 */
 
 /* 队列编辑器（BubbleQueueEditor）自带样式；本卡只留外壳与开关类 */
 </style>

@@ -31,6 +31,7 @@
 const { cmpVer } = require('./dsh-market')
 const { log, logErr } = require('./log')
 const { K } = require('./constants')
+const { errMsg } = require('./util')
 
 // 「a 是否晚于 b」。有发布时间就按时间比，否则退回 semver（cmpVer）。
 // times 形如 { '0.1.7-rc.2': 1758... }，由 dsh.js 从 npm 的 time 字段解析后传进来；
@@ -83,7 +84,7 @@ function loadCached() {
     return out
   } catch (err) {
     // 读失败只当没缓存（等价于首次取），不影响本次取说明
-    logErr('[whale][dsh-notes] 读说明缓存失败', (err && err.message) || err)
+    logErr('[whale][dsh-notes] 读说明缓存失败', errMsg(err))
     return new Map()
   }
 }
@@ -101,7 +102,7 @@ function saveCached(map) {
     for (const [v, md] of map) items[v] = md
     utools.dbStorage.setItem(K.dshNotes, { version: 1, at: Date.now(), items: items })
   } catch (err) {
-    logErr('[whale][dsh-notes] 写说明缓存失败', (err && err.message) || err)
+    logErr('[whale][dsh-notes] 写说明缓存失败', errMsg(err))
   }
 }
 
@@ -381,7 +382,7 @@ async function load() {
     } catch (err) {
       lastErr = err
       // 回退属预期分支，用 log 而非 logErr：不该把「主源抖了一下」刷成错误，淹掉真问题
-      log('[whale][dsh-notes] 源 #' + (i + 1) + ' 失败:', (err && err.message) || err)
+      log('[whale][dsh-notes] 源 #' + (i + 1) + ' 失败:', errMsg(err))
     }
   }
   logErr('[whale][dsh-notes] 取 release 说明失败（所有源均不可用）', (lastErr && lastErr.message) || lastErr)
