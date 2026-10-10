@@ -1146,9 +1146,12 @@ E3 落地后用户实测反馈：「共 204 个候选（已截断，只列出前
   - **余额并成第 5 个指标格**：原先「dsh-usage 抓到的余额」单独占一行 `.field`，标签长（9 个字）而 `.label` 有 `min-width: 72px`，在窄卡里把值挤到换行 —— 实测渲染成「`¥ 59.54 ·` 换行 `2026/9/23 10:21:47`」，金额被日期劈成两截。现并进 `.stat-grid`，同时把 `fmtDshBalance()` 拆成 `fmtDshBalanceAmount()`（`¥59.54`）与 `fmtDshBalanceAt()`（`9/23 10:21`）分别放价值行与副行。**`.stat-grid` 列数用 `repeat(auto-fit, minmax(88px, 1fr))` 而非写死** —— 余额格是 `v-if` 的（dsh-usage 没抓到余额时不存在），写死列数会让 4 格时右侧空一列。
   - **各模型用量行改排行榜（`.m-row`，在 UsageChart.vue 自己的 scoped 块里）**：原先是 `.field.row` + 一整串 `.ver`（`4.2M tokens · 73 次调用 · 输出 26K · ¥ 0.00`），右缘随内容长短浮动，读第 3 项要逐行找位置。改为 grid 四列（名字 / 总量 / 次·输出 / 花费），名字过长截断（`title` 存完整名）、列右对齐；每行下方压一条 `.m-bar` 占比细条，按**相对最大模型**（非总量占比）取宽 —— 第一名贴满、其余按与第一名的倍数收窄，比全部挤在 0–30% 里更容易分辨。`showCost: false`（Codex 侧）时用 `:not(:has(.m-cost))` 收掉末列。**条数上限 `MODELS_MAX = 8`**，真实账本里有一串只调用过一两次的模型，末尾提示「另有 N 个模型用量过少，未列出」而不是静默丢弃。
   - **踩坑：`<style scoped>` 的样式救不了子组件渲染的元素（本次实际翻车点）**。`.m-*` 最初写在 App.vue 的 scoped 块里，构建产物中规则**存在且语法正确**（编译成 `.m-row[data-v-0822b1e8]`），但界面完全没生效 —— scoped 的 `data-v-xxx` 属性只加在「模板里直接写的元素」上，模型行由 `UsageChart.vue` 渲染、位于子组件内部，只带 **UsageChart 的** `data-v-6d091fcc`，永远匹配不上 App 的那条选择器。症状极具迷惑性：规则查得到、类名没拼错、选择器看着也对，就是没反应。**结论：样式必须与渲染它的组件放在同一个 scoped 块里**；确实要跨组件时必须用 `:deep()` 或全局块。核查方式：在 `dist/assets/*.css` 里 grep 类名，看方括号里跟的是哪个哈希，再在 JS 里 grep 该哈希确认归属。
+  - **（㉑ 补注）跨组件共用的样式优先落全局块，而不是「在每个组件里各写一份 scoped」**：上面这条结论的「同一个 scoped 块」只解决了「匹配得上」，没解决「重复」—— 同一组规则在两三个组件的 scoped 里各抄一份，仍是改一处漏一处。**判据：跨组件逐字重复的尺寸/配色 → 上提 `src/main.css` 全局块；只作用于单一组件的布局 → 留在该组件的 scoped 块**（第七批的 utils 基类、㉑ 的柱状图整段都是这个判据的落点）。
   - **档位切换器（`.range-tab`）改等分宽度**：`7 天 / 14 天 / 30 天` 内容宽差 12px，贴内容排会让三个按钮宽窄不一。加 `flex: 1 1 0` 等分。
 
 **第五批（柱状图不出柱 + 加纵轴参考线）**
+
+> **⚠️ 本批 1160 行「13 个选择器全部命中 `data-v-458f7017`（UsageChart）」的记载已被第 ㉑ 段推翻**：柱状图整套（`.chart-*` / `.bar-*` / `.grid-line` / `.axis-label` / `.chart-wrap` / `.chart-dense` / `.chart-ultra`）已上提 `src/main.css` 全局块作唯一来源，产物里不带任何 `data-v-` 哈希。正文保留作历史记录。
 
 - **柱状图整段不出柱 —— 与上一条同源的第二次翻车（同一个坑的第二次踩）**：`.chart` / `.bar-col` / `.bar-track` / `.bar` / `.bar-day` / `.chart-dense` / `.chart-ultra` 也全部错写在 App.vue 的 scoped 块里，匹配不上 `UsageChart.vue` 渲染的元素。**症状比模型行那次更隐蔽**：模型行是「样式没生效、掉回纯文本」，一眼能看出不对；这次界面上**有数值、有日期、有横轴，只是柱子高度为 0**，看起来像「数据全是 0」或「柱高算法写错」，实际是 `.bar-track` 的 `height: 90px` 没生效 → 轨道高 0 → 里面 `height: xx%` 的柱子全被压成 0。整段移进 `UsageChart.vue` 的 scoped 块。**这条坑值得单列一行的原因**：它不报错、不警告，产物 CSS 里规则齐全，只靠读代码看不出来 —— 必须去 `dist/assets/*.css` 对哈希。
 - **数据切片方向写反（`slice(-N)` → `slice(0, N)`）**：`days31` 是**新→旧**（`days31[0]` 是今天，宿主按 `dayAdd(today, -i)` 递减生成），取最近 N 天必须 `slice(0, N)`。原先 `dshUsageDays` / `codexDays` 都写的 `slice(-N)`，取到的是 31 天里**最旧的** N 天 —— 「7 天档」实际画的是 30~24 天前那一周，日期从 9-22 一路排到 8-28（跨 26 天），今日数据完全不出图。**同一个错误在两处**（`dsh-usage.js` 的注释里还写着「设置页按 7/14/30 档位取尾部渲染」，正是这个错误认知的源头），故两处一并修掉并写清索引方向。
@@ -1338,6 +1341,31 @@ E3 落地后用户实测反馈：「共 204 个候选（已截断，只列出前
 - **check-shared 新钉「配置存储键 K.config」**：预涂脚本拿不到 constants，键名只能是裸字面量，`K.config` 改名会让预涂静默读空（不报错但首帧主题错），故进门禁。constants 侧就地抠 `config: '...'`（K 是冒号形态，`jsString` 的 `= '...'` 口径用不上）；index.html 侧抠 `dbStorage.getItem('...')`。
 - **刻意不做**：预涂不落完整 uiMode 三态合成之外的东西（设置页 body 级背景闪烁靠 main.css 的 html.dark 即时生效，无需再加内联样式）；悬浮窗不加同款预涂（无延迟问题，见上）。
 - **验证**：四关全绿（含 check-shared 新增钉子）。纯前端 + 构建门禁改动，`src/` 与 `index.html` 走 Vite 重建；无 preload 改动，无需重载插件。
+
+
+**㉑ 代码复用收敛：util 扩容 / useFlash 抽取 / 柱状图与用量卡共用 UsageChart（2026-10-10）**
+
+用户要求「提升代码复用率、完善、从用户体验出发」，方案分 P0 若干项落地，本段只记影响归属与对外口径的结论（内部纯重构不逐条列）：
+
+- **柱状图 CSS 上提 `main.css` 作唯一来源（推翻第五批的组件内 scoped 方案）**：`.chart-wrap`（含 `--day-row` 定义）/ `.chart-axis` / `.axis-label` / `.chart-plot` / `.grid-line` / `.chart` / `.bar-col` / `.bar-val` / `.bar-track` / `.bar` / `.bar-day` / `.chart-dense` / `.chart-ultra` 整段移入 `src/main.css` 的「柱状趋势图」节。原方案在 `UsageChart.vue` 与 `UsageView.vue` 各留一份逐字副本（注释自称「取自 UsageChart.vue」），改一处必漏一处；再往前还曾在 `App.vue` scoped 里因哈希不匹配整段静默失效（第五批 1153 行，柱子不出图的根因）。**上提后 `UsageChart.vue` 的 scoped 块不再保留这份副本，只留指向 main.css 的说明注释**。`main.css` 是全局块、不带 `data-v-`，而本组件渲染的元素天然带本组件哈希 —— 全局规则命中不受 scoped 限制，故无第五批那类静默失效风险。
+  - **`.m-*`（各模型用量排行榜）与 `.range-tab*` 仍留在 `UsageChart.vue` 的 scoped 块**：这两组是纯布局（grid 列宽 / `flex: 1 1 0` 等分），非跨卡共用的「长什么样」类规则，且尺寸配色已走 utils 基类。**判据与第七批豁免白名单一致：只上提「跨组件逐字重复的尺寸/配色」，布局随渲染它的组件走。**
+- **`.chart-axis` 宽度改自适应**：原 `flex: 0 0 34px` 写死，对 token 缩写（`3.2K`，约 18px）够用；但本轮用量卡接进来后纵轴刻度是金额（`¥ 1234.00` 这类长串），写死宽度会让 `nowrap` 的刻度自右向左溢出、压住绘图区柱子。改为 `flex: 0 0 auto; min-width: 34px` —— 短刻度仍按 34px 对齐，长刻度才撑开，各档之间不来回抖。
+- **纵轴刻度与柱顶统一走 `valText`**：`gridLines` 的 `label` 原写死 `fmtTokens`，而柱顶走可覆写的 `valText`（父卡可经 `valFmt` 传入金额格式化）。两者不一致会让同一张图出现「纵轴 token 缩写、柱顶金额」的自相矛盾（本轮实际引入，已修）。现刻度改走 `valText(dayMax * f)`，与柱顶同口径。
+- **`UsageChart` 新增 5 个 props 以承接用量卡**：`ultraThreshold`（「超密」档阈值，卡片默认 30，用量卡传 90 —— 该差异原先是「两份样式」的唯一实质理由，现由 prop 表达）/ `valFmt`（柱值与纵轴刻度的格式化，缺省 `fmtTokens`）/ `emptyText`（空态文案）/ `showModels` / `showRangeTabs`（用量卡自带账本明细与档位，故两者传 `false`）。**dsh 用量统计卡与 Codex 会话统计卡均不传这 5 个 prop，走默认值 = 原行为**，无回归。
+- **`util.js` 扩容四个纯函数**：`errMsg(err, fallback)` / `sha256(buf)`（字节版）/ `stamp(ts, precision)`（`'min'` 默认 / `'sec'` / `'day'`）/ `hhmm(ts)`，全仓替换内联副本并补单测。**`dsh-backup.js` 的 `sha256` 保留文本版语义**（内部转 `Buffer.from(String(text))` 后调字节版），因其输入恒为字符串。`pricing.js` 的 `p2`（北京时间 UTC 分解）与 `store.js` 的 `todayKey`（本地时区日键）**刻意不改** —— 语义与 `stamp` 不同，强换会引入时区错误。
+- **`src/composables/useFlash.ts` 抽取**：统一各 view 的「瞬时提示」状态（`useFlash` / `msgCls` / `useFlashShow`），替换 10 处内联副本。
+- **验证**：lint / typecheck / `node --test` **897 pass / 1 skip** / build 全绿。涉及 `public/preload/lib/util.js` 及全仓引用，需在 uTools 里重载插件后生效。
+
+**㉑·P1 设置页跨卡片工具函数收编 `src/utils/format.ts`（2026-10-10）**
+
+P0（上段）收敛的是宿主侧 `util.js` 与渲染侧样式；P1 收敛的是**设置页各卡片之间**逐字重复的纯函数 —— 这些同名同体的实现原先散在 `App.vue` / `AssetsView.vue` / `CodexView.vue` / `UsageView.vue` / `useDsh.ts`，一处改了另一处不改就漂移（柱状图 min 已实际分叉成 2/2/3）。**新建 `src/utils/format.ts`（`src/utils/` 目录本就不存在，本轮新建）**，收入五个无响应式依赖的纯函数：`fmtBytes(n)` / `assetSize(m)` / `sharedSkinThumb(id)` / `fetchAsDataUrl(url)` / `barHeightOf(days, tokens, min = 2)`。
+
+- **A1 `fmtBytes` + `assetSize`**：App.vue 与 AssetsView.vue 各删一份本地实现改为引用。`assetSize` 的参数签名取 **`{ size?: number } | null | undefined` 超集**（App 侧原是 `| null`，AssetsView 侧原是 `| null | undefined`，取宽的那份不影响调用方）。
+- **A2 `sharedSkinThumb`**：App / AssetsView 两处本地副本收编。**`skinPackThumb`（`./whale-pack/thumbs/<id>.webp`）路径不同，保留在 AssetsView 本地**，二者不可混并。
+- **A4 `fetchAsDataUrl(url)`**：把「fetch → arrayBuffer → base64 data URL」这段（App 的 `sharedSkinThumbDataUrl`、AssetsView 的 `skinPackThumbDataUrl` 逐字相同的 try/catch 体）收成一处。两个调用方各自保留 `return fetchAsDataUrl(<自己的缩略图路径>)` 一行 —— 路径取址仍归属各自卡片（一处 `resources/thumbs/`、一处 `whale-pack/thumbs/`）。
+- **A3 `barHeightOf(days, tokens, min)`**：三处「柱高百分比」收编 —— CodexView 的 `codexBarHeight`、useDsh 的 `dshUsageBarHeight` 传 `min = 2`，UsageView 的 `barHeight` 传 `min = 3`。**保留 2/2/3 差异并参数化**：token 口径与金额口径的最小可见柱高历史不同，金额更小更易被压没，故多留 1%。
+- **B2 `p2` 自重复合并**：`App.vue` 内 `lastTestText` 与 `hhmm` 各自声明的 `const p2 = (n) => String(n).padStart(2, '0')` 合并成模块级一处。
+- **验证**：lint / typecheck / `node --test` **897 pass / 1 skip** / build 全绿（纯渲染侧重构、无新增用例）。仅 `src/` 改动，不涉及 preload，无需重载插件即可见效果。
 
 
 ---

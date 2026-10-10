@@ -1,6 +1,7 @@
 <script lang="ts" setup>
 import { computed, reactive, ref, watch } from 'vue'
 import { msgCls, useFlash, type Flash } from '../composables/useFlash'
+import { barHeightOf } from '../utils/format'
 import type { CodexSummaryResult, CodexWindows, WhaleServices } from '../types/services'
 import UsageChart from '../components/UsageChart.vue'
 
@@ -64,12 +65,9 @@ const codexModels = computed(() => {
 })
 // 柱高百分比：最大值为满格（100%），最小留 2% 让「有量但极少」也看得见。
 // 最大值就地算：这份 days 已按档位切好、最多 31 个元素；共用组件拿不到这里的 computed，
-// 只能靠这个函数（见 UsageChart.vue 的 hasBars）。
+// 只能靠这个函数（见 UsageChart.vue 的 hasBars）。实现收在 utils/format.ts 的 barHeightOf。
 function codexBarHeight(tokens?: number) {
-  let max = 0
-  for (const d of codexDays.value) max = Math.max(max, Number(d.tokens) || 0)
-  if (!max) return '0%'
-  return Math.max(2, Math.round(((Number(tokens) || 0) / max) * 100)) + '%'
+  return barHeightOf(codexDays.value, tokens, 2)
 }
 // 订阅窗口是账号级状态，与本地 token 统计各自独立，单独一行展示
 const codexWindows = computed(() => (codex.value && codex.value.windows) || null)

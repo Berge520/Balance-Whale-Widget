@@ -6,6 +6,7 @@ import SoundTrimmer from './components/SoundTrimmer.vue'
 import FirstRunGuide from './components/FirstRunGuide.vue'
 import UsageChart from './components/UsageChart.vue'
 import { msgCls, useFlash, type Flash } from './composables/useFlash'
+import { assetSize, fetchAsDataUrl, sharedSkinThumb } from './utils/format'
 // 卡片「全文」索引：scripts/gen-search-index.mjs 在构建期从模板提取每张卡的可见文本
 // （h2 卡头 + label 字段名），搜索第三档兜底用。模板改了没重新生成会被 prebuild 拦下
 import { CARD_TEXT } from './search-index.gen'
@@ -420,10 +421,11 @@ const guideReopen = ref(false)
 const testing = ref(false)
 const testResults = ref<Array<{ label: string; ok: boolean; msg: string }>>([])
 const lastTestAt = ref(0)
+// 两位补零（如 9 → '09'）。父级多处拼时间戳（连测时间 / hhmm 等），收成一处不重复声明。
+const p2 = (n: number) => String(n).padStart(2, '0')
 const lastTestText = computed(() => {
   if (!lastTestAt.value) return ''
   const d = new Date(lastTestAt.value)
-  const p2 = (n: number) => String(n).padStart(2, '0')
   return `${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`
 })
 
@@ -956,7 +958,6 @@ function fmtMoney(v: number) {
 // 留在父级作单一来源按 props 下传，避免各 view 各写一份补零拼装。
 function hhmm(ts: number): string {
   const d = new Date(ts)
-  const p2 = (n: number) => String(n).padStart(2, '0')
   return p2(d.getHours()) + ':' + p2(d.getMinutes())
 }
 // 用量趋势：令牌模式下挂件刷新后今日总量会写入账本，
@@ -1807,16 +1808,7 @@ const hasAssets = computed(() => !!skinMeta.value || bubbleItems.value.length > 
 const skinUnused = computed(() => !!skinMeta.value && cfg.skin !== 'custom')
 const soundUnused = computed(() => (soundsMeta.value.press.length > 0 || soundsMeta.value.release.length > 0)
   && (!cfg.soundOn || cfg.soundSet !== 'custom'))
-// 体积展示：元信息里的 size 由宿主读取时派生，文件缺失为 0
-function fmtBytes(n: number) {
-  const v = Number(n) || 0
-  if (v <= 0) return '0 KB'
-  return v < 1024 * 1024 ? Math.max(1, Math.round(v / 1024)) + ' KB' : (v / 1024 / 1024).toFixed(1) + ' MB'
-}
-function assetSize(m: { size?: number } | null) {
-  const n = Number(m && m.size) || 0
-  return n > 0 ? fmtBytes(n) : '体积未知'
-}
+// 体积展示（fmtBytes / assetSize）已收进 utils/format.ts，此处直接引用
 // 全部清除：形象 + 气泡图 + 六段音效（与「数据与隐私」里的按项清除同源，但只清素材、不动其它数据）。
 // 清完把形象/音色从「自定义」回退为内置，避免停在「自定义」却无素材可用。
 //
@@ -1887,28 +1879,12 @@ const browseSkinsTick = ref(0)
 // —— 共享素材（角色图 36 张 + 音效库 45 个，上游 QQ 群素材，挂 Release 按需下） ——
 // v1.9.0 起与「可下载的内置形象」同一套单张下载：点缩略图只下这一张（走 raw 直链），
 // 顶上按钮才逐张串行补齐。不再有「点任意一张 = 下整包」的语义。
-function sharedSkinThumb(id: string) {
-  return './resources/thumbs/' + encodeURIComponent(id) + '.webp'
-}
-// 把打包好的缩略图（resources/thumbs/<id>.webp，几 KB）读成 data URL 交给宿主落盘。
-// 为什么必须由设置页给：宿主（preload）定位不到插件目录 —— 它只有 utools.getPath('userData')，
+// 缩略图路径（sharedSkinThumb）与「读成 data URL」（fetchAsDataUrl）已收进 utils/format.ts。
+// 为什么必须由设置页给宿主 data URL：宿主（preload）定位不到插件目录 —— 它只有 utools.getPath('userData')，
 // 而相对路径 './resources/...' 只有渲染进程能解析。不给的话下载回来的共享角色没有缩略图，
 // 画廊只能回落读原图（0.9~2.7MB 一张），很快耗光 listSkins 的 8MB 回落预算，后面全显示「无预览」。
-// 读失败（资源缺失 / 不是有效图片）一律返回 ''：宁可这张暂时没缩略图（回落原图仍能显示），
-// 也不能因为读图失败把整张角色图的下载带崩。
-async function sharedSkinThumbDataUrl(id: string): Promise<string> {
-  try {
-    const res = await fetch(sharedSkinThumb(id))
-    if (!res.ok) return ''
-    const buf = await res.arrayBuffer()
-    if (!buf.byteLength) return ''
-    let bin = ''
-    const bytes = new Uint8Array(buf)
-    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i])
-    return 'data:image/webp;base64,' + btoa(bin)
-  } catch (err) {
-    return ''
-  }
+function sharedSkinThumbDataUrl(id: string) {
+  return fetchAsDataUrl(sharedSkinThumb(id))
 }
 
 // —— 共享音效库（45 个，与共享角色同一个包来源，但落 sounds 的 shared 槽位） ——

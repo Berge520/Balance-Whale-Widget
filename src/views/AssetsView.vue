@@ -12,6 +12,7 @@
 // ============================================================================
 import { computed, onMounted, onUnmounted, reactive, ref, watch, nextTick } from 'vue'
 import { msgCls, useFlash, type Flash } from '../composables/useFlash'
+import { assetSize, fetchAsDataUrl, fmtBytes, sharedSkinThumb } from '../utils/format'
 import SoundRow from '../components/SoundRow.vue'
 import DownloadBox from '../components/DownloadBox.vue'
 import type {
@@ -105,12 +106,7 @@ const services = computed(() => props.services)
 // 音效相关的几个操作函数（applySharedRoles / 下载 / 删除 / 试听）都要写它，起个短名省得处处 props.
 const soundFlash = props.soundFlash
 
-// —— 通用小工具（与父级同源，避免各处重复实现） ——
-function fmtBytes(n: number) {
-  const v = Number(n) || 0
-  if (v <= 0) return '0 KB'
-  return v < 1024 * 1024 ? Math.max(1, Math.round(v / 1024)) + ' KB' : (v / 1024 / 1024).toFixed(1) + ' MB'
-}
+// —— 通用小工具（fmtBytes 等与父级同源，已收进 utils/format.ts，此处直接引用） ——
 const SOUND_ROLES: SoundRole[] = ['press', 'release', 'low', 'budget', 'peak', 'pass']
 const ALERT_SOUND_ROLES: AlertRole[] = ['low', 'budget', 'peak', 'pass']
 const SOUND_ROLE_LABEL: Record<SoundRole, string> = {
@@ -243,10 +239,7 @@ const assetTotalBytes = computed(() => {
   for (const r of SOUND_ROLES) for (const it of (props.soundsMeta[r] || [])) n += Number(it.size) || 0
   return n
 })
-function assetSize(m: { size?: number } | null | undefined) {
-  const n = Number(m && m.size) || 0
-  return n > 0 ? fmtBytes(n) : '体积未知'
-}
+// assetSize：素材体积文案，已收进 utils/format.ts（此处直接引用）
 function pad2(n: number) {
   return n < 10 ? '0' + n : '' + n
 }
@@ -600,22 +593,11 @@ function skinPackThumb(id: string) {
   return './whale-pack/thumbs/' + encodeURIComponent(id) + '.webp'
 }
 // 把打包好的「随包内置」缩略图（whale-pack/thumbs/<id>.webp）读成 data URL 交给宿主落盘。
-// 与父级 sharedSkinThumbDataUrl 同款（宿主定位不到插件目录，缩略图必须由渲染进程给）：
-// 下载内置形象时若不带缩略图，画廊只能回落读原图（MB 级），很快耗尽回落预算变「无预览」。
-// 读失败一律回 ''：宁可这张暂时没缩略图，也不能因为读图失败把下载带崩。
-async function skinPackThumbDataUrl(id: string): Promise<string> {
-  try {
-    const res = await fetch(skinPackThumb(id))
-    if (!res.ok) return ''
-    const buf = await res.arrayBuffer()
-    if (!buf.byteLength) return ''
-    let bin = ''
-    const bytes = new Uint8Array(buf)
-    for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i])
-    return 'data:image/webp;base64,' + btoa(bin)
-  } catch (err) {
-    return ''
-  }
+// 与父级 sharedSkinThumbDataUrl 同源（同走 utils/format.ts 的 fetchAsDataUrl）：
+// 宿主定位不到插件目录，缩略图必须由渲染进程给；下载内置形象时若不带缩略图，
+// 画廊只能回落读原图（MB 级），很快耗尽回落预算变「无预览」。
+function skinPackThumbDataUrl(id: string) {
+  return fetchAsDataUrl(skinPackThumb(id))
 }
 
 const skinPackList = ref<SkinPackList | null>(null)
@@ -714,9 +696,7 @@ async function doSkinPackCell(id: string) {
 }
 
 // —— 共享角色 ——
-function sharedSkinThumb(id: string) {
-  return './resources/thumbs/' + encodeURIComponent(id) + '.webp'
-}
+// sharedSkinThumb 与父级同源，已收进 utils/format.ts（此处直接引用）
 // sharedSkinThumbDataUrl（读打包缩略图转 data URL）留在父级：LookView 域的
 // backfillMissingThumbs 也要用它补老数据缺的缩略图，父级唯一来源，这里用 prop 收。
 const sharedSkinList = ref<SharedSkinList | null>(null)

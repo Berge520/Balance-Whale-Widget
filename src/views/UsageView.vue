@@ -1,6 +1,7 @@
 <script lang="ts" setup>
 import { computed, reactive, ref, watch } from 'vue'
 import { msgCls, useFlash, type Flash } from '../composables/useFlash'
+import { barHeightOf } from '../utils/format'
 import UsageChart from '../components/UsageChart.vue'
 import type { LedgerDetailDay, LedgerDetailEntry, ModelUsageRow, WhaleServices } from '../types/services'
 
@@ -163,10 +164,10 @@ function dayLabel(date: string) {
 // 柱高百分比：金额最大值做满格，空数组或全 0 返回 '0%' —— 组件靠返回值判 hasBars
 // 决定出图还是显示空态（会话统计卡那边原判据是 >= 1 token，金额常小于 1，
 // 故本卡用「> 0」：有量就出图，否则会把有量的小额日子误判成无）。
+// 最小值用 3（token 口径的两卡是 2）：金额更小更易被压没，多留一点更稳。
+// 实现收在 utils/format.ts 的 barHeightOf，传本卡切好的 chartDays（字段已映射为 tokens）。
 function barHeight(u?: number) {
-  const v = Number(u) || 0
-  if (historyMax.value <= 0) return '0%'
-  return Math.max(3, Math.round((v / historyMax.value) * 100)) + '%'
+  return barHeightOf(chartData.value, u, 3)
 }
 // 柱顶数值：本卡是金额口径，走父级 fmtMoney（组件默认是 token 缩写，会显示错）
 function valFmt(v?: number) {

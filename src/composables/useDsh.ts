@@ -32,6 +32,7 @@ import type {
   WhaleServices,
 } from '../types/services'
 import { type Flash } from './useFlash'
+import { barHeightOf } from '../utils/format'
 
 export function useDsh(opts: {
   services: Partial<WhaleServices>
@@ -979,11 +980,9 @@ const dshUsageSourceText = computed(() => {
 // 柱高百分比：最大值为满格（100%），最小留 2% 让「有量但极少」也看得见。
 // 最大值就地算：这份 days 已经按档位切好，元素最多 31 个，不值得为它单开一个 computed，
 // 而且共用组件拿不到这里的 computed，只能靠这个函数（见 UsageChart.vue 的 hasBars）。
+// 实现收在 utils/format.ts 的 barHeightOf。
 function dshUsageBarHeight(tokens?: number) {
-  let max = 0
-  for (const d of dshUsageDays.value) max = Math.max(max, Number(d.tokens) || 0)
-  if (!max) return '0%'
-  return Math.max(2, Math.round(((Number(tokens) || 0) / max) * 100)) + '%'
+  return barHeightOf(dshUsageDays.value, tokens, 2)
 }
 // 花费按账本原币种显示；极小金额多留几位小数，免得非零却显示成 0.00
 function fmtDshCost(v?: number) {
