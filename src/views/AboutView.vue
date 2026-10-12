@@ -27,8 +27,11 @@ const emit = defineEmits<{
   (e: 'check-update', force: boolean): void
 }>()
 
-// 反馈入口是软性内容，与版本信息不同性质，收进折叠
-const aboutFolds = reactive({ feedback: true })
+// 卡级折叠：与提醒 / 隐私 / 备份三卡统一为「默认收起、可展开」。本卡正文含版本信息 / 更新按钮 /
+// 结果行 / 反馈折叠，日常只在「查更新」时才展开，收起后只留标题与版本摘要
+const cardFold = reactive({ open: false })
+// 反馈入口是软性内容，与版本信息不同性质，收进折叠。默认折叠（展开态为 false）
+const aboutFolds = reactive({ feedback: false })
 
 function openHomepage() {
   props.services.openExternal?.('https://github.com/Berge520/Balance-Whale-Widget')
@@ -49,7 +52,13 @@ function marketSearch() {
 
 <template>
   <section class="card" data-search="about">
-    <h2>关于与更新</h2>
+    <div class="card-head">
+      <h2 class="card-toggle" @click="cardFold.open = !cardFold.open">
+        <span class="caret">{{ cardFold.open ? '▾' : '▸' }}</span>关于与更新
+        <span v-if="!cardFold.open" class="card-sum">v{{ appVersion }}</span>
+      </h2>
+    </div>
+    <template v-if="cardFold.open">
     <!-- 上游要求衍生版必须标注「个人衍生版」：既避免被误认成官方版，也说明售后归属 -->
     <p class="hint">本插件是 <strong>个人衍生版</strong>，移植自 <a href="#" @click.prevent="emit('doc', 'https://github.com/MeteorNOX/DeepSeek-Balance-Whale-Widget')">MeteorNOX/DeepSeek-Balance-Whale-Widget</a>（MIT License）。<strong>非官方版本，与 DeepSeek、uTools 官方均无关联</strong>，无官方支持与售后 —— 上游作者不对本衍生版负责，问题请走下方反馈入口。</p>
     <label class="field row check">
@@ -76,10 +85,11 @@ function marketSearch() {
       <button class="link-btn utils-btn utils-secondary" @click="aboutFolds.feedback = !aboutFolds.feedback">
         {{ aboutFolds.feedback ? '收起反馈与建议' : '反馈与建议' }}
       </button>
-      <div v-if="aboutFolds.feedback" class="guide">
+      <div v-show="aboutFolds.feedback" class="guide">
         <p class="hint">用得还顺手吗？想要的新功能、碰到的 bug，或者只是想吐槽两句，都欢迎告诉鲸鱼娘～可以去 <a href="#" @click.prevent="emit('doc', 'https://www.u-tools.cn/plugins/detail/%E5%B0%8F%E9%B2%B8%E9%B1%BC%E4%BD%99%E9%A2%9D%E6%8C%82%E4%BB%B6/')">插件市场详情页</a> 的「留言」区，也可以在 <a href="#" @click.prevent="emit('doc', 'https://github.com/Berge520/Balance-Whale-Widget/issues')">GitHub Issues</a> 里提，每条我都会认真看完，顺手给个五星好评就更开心啦 (๑•̀ㅂ•́)و✧</p>
       </div>
     </div>
+    </template>
   </section>
 </template>
 

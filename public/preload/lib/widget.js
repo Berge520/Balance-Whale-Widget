@@ -170,16 +170,26 @@ function liveTaskbarPopped(info, edge, thickness) {
   return onTaskbar || now - tbLastEdge <= TB_HIDE_DELAY
 }
 
-function sameDisplay(a, b) {
-  if (a.id != null && b.id != null) return a.id === b.id
-  return a.bounds.x === b.bounds.x && a.bounds.y === b.bounds.y
-}
-
-// 主屏任务栏的基本情况：
+// 任务栏基本情况：
 //  常显 → workArea 已有内缩：edge/thickness 就是内缩量，popped 恒为 true（一直占位）
 //  自动隐藏 → workArea 内缩为 0，方向/厚度读注册表，此刻是否弹出看光标
-function taskbarBase() {
-  const info = displayInfo()
+//
+// ⚠️ 自动隐藏的那条分支**只对主屏成立**，别拿去判断副屏：
+//   · 注册表 StuckRects3 只描述主屏任务栏，副屏那根（Win11 随设置出现在各屏，
+//     「在所有显示器上显示任务栏」才出现）在注册表里根本没有对应记录；
+//   · 光标弹出判据也不可分屏 —— getCursorScreenPoint 给的是全虚拟桌面坐标，
+//     只能靠 bounds 判断落在哪块屏，本身没问题，但拿主屏的 edge/thickness
+//     去套副屏，厚度/方向都可能不对；
+//   · 真要靠注册表管副屏，得按「显示器序号 ↔ StuckRects<N>」对号入座，
+//     而 pairing 既不可靠、Win11 上还常常只有一条 StuckRects3，绕不过去。
+//   所以副屏一律按「workArea 内缩」判断（见 taskbarBase 的 insets 分支）。
+//   代价：副屏任务栏若设成自动隐藏，其收起时不再让位、弹出时也不避让；
+//   但它只要常显，workArea 内缩照旧生效 —— 这比原来「把主屏的任务栏当成副屏的」安全得多。
+//
+// infoIn：可选，调用方已按锚点取好「目标显示器」时传入。不传则取主屏，
+//   保持「主屏」这一默认语义（taskbarState / syncTaskbarWatch 等就靠它）。
+function taskbarBase(infoIn) {
+  const info = infoIn || displayInfo()
   const b = info.bounds
   const wa = info.wa
   const insets = {
@@ -210,6 +220,7 @@ function taskbarBase() {
 // 任务栏「当前」状态（供设置页展示）：visible = 正在占位（常显 / 自动隐藏已弹出）/ hidden = 已自动收起
 // 自动隐藏的情形下「已收起」只在最后一次贴边满 TB_MIN_SHOW 之后才成立 —— 光标离开并不能证明它收了，
 // 只能等；看不到它从何判断，见 liveTaskbarPopped 的注释。设置页每 2s 取一次，会看到这个状态稍晚翻转
+// 无参 = 看**主屏**任务栏（设置页展示的就是主屏那一根）。副屏任务栏见 taskbarBase 的注释。
 function taskbarState() {
   const tb = taskbarBase()
   if (!tb.edge) return { state: 'none', edge: '', thickness: 0 }
@@ -219,6 +230,7 @@ function taskbarState() {
 // 实际可用于摆放挂件的区域 = 系统工作区（常显任务栏已被排除）+ 四边「贴边间距」。
 // 自动隐藏的任务栏 workArea 不会跟着变，所以它此刻正弹出时，这里自己按注册表厚度让位；
 // 收起时不让位（挂件可以贴满边）。「自动避让任务栏」关掉则不跟随。
+// 判定只针对**挂件所在那块屏**（见下方 taskbarBase(info)）。
 // cfgIn：可选，调用方已读过配置时传入，避免重复读存储（读存储在 uTools 里是同步的）
 function usableArea(x, y, cfgIn) {
   const cfg = cfgIn || readConfig()
@@ -231,8 +243,13 @@ function usableArea(x, y, cfgIn) {
     left: Math.max(0, Number(cfg.edgeLeft) || 0),
   }
   if (cfg.avoidTaskbar !== false) {
-    const tb = taskbarBase()
-    if (tb.edge && tb.autoHide && tb.popped && sameDisplay(info, tb.info)) {
+    // 只看挂件所在的这块屏（info 来自上面按锚点的 displayInfo）。
+    // ⚠️ 这里必须传 info，不能再让 taskbarBase 默认取主屏 —— 原实现拿主屏的
+    // taskbarBase() 去比 sameDisplay(info, tb.info)，挂件在副屏时这句恒为 false，
+    // 于是副屏任务栏无论常显还是自动隐藏弹出都拿不到让位量：表现就是挂件被拖到
+    // 副屏最下沿时卡住 / 回弹，「无法移到屏幕最下面」（副屏 + 隐藏任务栏 才暴露）。
+    const tb = taskbarBase(info)
+    if (tb.edge && tb.autoHide && tb.popped) {
       m[tb.edge] = Math.max(m[tb.edge], tb.thickness)
     }
   }
@@ -271,8 +288,9 @@ function repositionFromAnchor() {
 
 // ── 任务栏 / 显示器变化监听 ──
 // 每 250ms 采样一次「显示器 + 可用区 + 任务栏此刻是否弹出」，有变化就按锚点重摆。
-// 任务栏那条边用 taskbarBase()（自动隐藏时看光标），可用区/显示器变化则覆盖改分辨率、
-// 改缩放、换屏这些情况。「自动避让任务栏」关掉或挂件不存在时不轮询。
+// 任务栏那条边用 taskbarBase(info)（自动隐藏时看光标，且只看挂件所在那块屏），
+// 可用区/显示器变化则覆盖改分辨率、改缩放、换屏这些情况。
+// 「自动避让任务栏」关掉或挂件不存在时不轮询。
 const WATCH_MS = 250
 let watchTimer = null
 let watchSig = ''
@@ -295,7 +313,9 @@ function watchTick() {
     const x = isFinite(pos[0]) ? pos[0] : 0
     const y = isFinite(pos[1]) ? pos[1] : 0
     const info = displayInfo(x + s / 2, y + s / 2)
-    const tb = taskbarBase()
+    // 传 info 而不是让 taskbarBase 取主屏：挂件在副屏时，主屏任务栏的弹出状态
+    // 与挂件的可用区无关，拿它当签名会误触发重摆（副屏上任务栏纹丝不动却跟着抖）。
+    const tb = taskbarBase(info)
     const sig = [info.id, info.bounds.x, info.bounds.y, info.bounds.width, info.bounds.height,
       info.wa.x, info.wa.y, info.wa.width, info.wa.height, tb.edge, tb.popped ? 1 : 0].join(',')
     // 窗口位置 ≠ 上次吸附落点 → 要么用户正在拖拽，要么拖完还没吸附（drag-end 会摆一次并刷新基准）

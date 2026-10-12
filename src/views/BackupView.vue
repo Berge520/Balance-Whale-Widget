@@ -140,8 +140,9 @@ function backupCancelPick() {
 }
 
 // 卡级折叠：本卡正文很长（一段安全说明 + 两个导出勾选 + 导出/导入按钮 + 导入预览区），
-// 日常只在「导出/导入」时才展开；默认展开但可收起，收起后标题栏摘要播报是否有待恢复的预览
-const cardFold = reactive({ open: true })
+// 日常只在「导出/导入」时才展开；与提醒 / 隐私 / 关于三卡统一为「默认收起、可展开」，
+// 收起后只留标题栏摘要（是否已读取备份待恢复）
+const cardFold = reactive({ open: false })
 const cardSummary = computed(() => backupPreview.value ? '已读取备份，待恢复' : '导出 / 导入 JSON 备份')
 </script>
 

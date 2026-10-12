@@ -281,13 +281,14 @@ const unusedCount = computed(() => unusedSkinIds.value.length + unusedSoundRoles
 
 // —— 折叠 / 目录 / 素材包 ——
 const assetsFold = reactive({ open: false })
-// 「形象」与「音效」两张合并卡都默认收起：一展开就是三块网格 / 六个槽位加 45 段清单，一次铺满整屏。
-// 默认收起时只留一行「共 N 张 · 另有 M 张可下载」/「已导入 n / 6 个槽位」，
-// 用户扫一眼就知道有没有待下载的，需要挑 / 下载再点开（一个折叠换整页清爽）。
-// 合并前「音效」的折叠态在父级（assetFolds.sounds），合并后与形象统一收进这里 ——
-// 两张卡都是「私有折叠 + 搜索命中强制展开」的同一套，父级不必再持一份副本。
-const galleryFolds = reactive({ skins: false, sounds: false })
-function galleryOpen(key: 'skins' | 'sounds') {
+// 「资源概览 / 形象 / 音效 / 气泡图」四张卡都默认收起：一展开就是一行汇总的详解 + 三块网格 /
+// 六个槽位加 45 段清单 / 一屏气泡图，一次铺满整屏。默认收起时各自只留一行概览
+// （「共 N 张 · 另有 M 张可下载」/「已导入 n / 6 个槽位」/「已有 N 张」/「形象 N 张 · 合计 X」），
+// 用户扫一眼就知道有多少、有没有待下载的，需要挑 / 下载 / 打包再点开（一个折叠换整页清爽）。
+// 合并前「音效」的折叠态在父级（assetFolds.sounds），合并后与其余统一收进这里 ——
+// 四张卡都是「私有折叠 + 搜索命中强制展开」的同一套，父级不必再持一份副本。
+const galleryFolds = reactive({ overview: false, skins: false, sounds: false, bubbles: false })
+function galleryOpen(key: 'overview' | 'skins' | 'sounds' | 'bubbles') {
   // 搜索态下强制展开：命中的卡如果还收着，用户搜到了却看不到内容（还以为没搜到）。
   // 与折叠态无关，只是「搜索时一律铺开」。
   return props.searchActive || galleryFolds[key]
@@ -1102,7 +1103,12 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
     <div v-if="showSection('mine')" class="assets-section">我的素材</div>
     <section v-if="cardOn('assets', 'assetsOverview')" class="card" data-search="assetsOverview">
       <div class="card-head">
-        <h2>资源概览</h2>
+        <!-- 整卡可折叠（默认收起）：与「形象」「音效」「气泡图」三张卡同一套「私有折叠 + 搜索命中强制展开」。
+             概览本身只有一行汇总（张数 / 体积），日常扫一眼就够，详细介绍与「数据目录 / 素材包」两个折叠都收起来 -->
+        <button class="fold-title" type="button" @click="galleryFolds.overview = !galleryFolds.overview">
+          <span class="fold-caret">{{ galleryOpen('overview') ? '▾' : '▸' }}</span>
+          资源概览
+        </button>
         <div class="head-actions">
           <button class="export-btn utils-btn utils-outline" type="button" :disabled="!unusedCount" @click="emit('clear-unused')">
             清除未使用{{ unusedCount ? `（${unusedCount}）` : '' }}
@@ -1110,6 +1116,11 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
           <button class="export-btn utils-btn utils-outline" type="button" :disabled="!hasAssets" @click="emit('clear-assets')">清除全部素材</button>
         </div>
       </div>
+      <!-- 收起态挂一行汇总：卡头的「清除未使用（N）」只报数量，这行把「共多少张 / 多大」补齐，不铺开也不丢信息 -->
+      <p v-if="!galleryOpen('overview')" class="hint">
+        形象 {{ skinGallery.items.length }} 张 · 气泡图 {{ bubbleItems.length }} 张 · 音效 {{ importedSoundCount }} 段 · 合计 {{ fmtBytes(assetTotalBytes) }}
+      </p>
+      <template v-if="galleryOpen('overview')">
       <label class="field row">
         <span class="label">导入素材</span>
         <span class="asset-meta">
@@ -1194,6 +1205,7 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
           <p v-if="assetsFlash.msg" class="msg" :class="msgCls(assetsFlash)">{{ assetsFlash.msg }}</p>
         </div>
       </div>
+      </template>
     </section>
 
     <!-- [资源] 形象：本机所有可用的形象统一在一张卡里管。三个来源（用户导入 / 随包内置 / 上游共享）
@@ -1472,11 +1484,21 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
          与形象不同 —— 没有「当前用哪张」（有图就随机抽，删光即回退内置动图），所以没有「使用中」标记与置顶 -->
     <section v-if="cardOn('assets', 'assetsBubbles')" class="card" data-search="assetsBubbles">
       <div class="card-head">
-        <h2>导入的气泡图</h2>
+        <!-- 整卡可折叠（默认收起）：与「形象」「音效」两张合并卡同一套「私有折叠 + 搜索命中强制展开」。
+             气泡图卡只有一屏图（最多 8 张）加导入按钮，日常点鲸鱼就会看到，不必常驻铺开 -->
+        <button class="fold-title" type="button" @click="galleryFolds.bubbles = !galleryFolds.bubbles">
+          <span class="fold-caret">{{ galleryOpen('bubbles') ? '▾' : '▸' }}</span>
+          导入的气泡图
+        </button>
         <div class="head-actions">
           <button class="export-btn utils-btn utils-outline" type="button" @click="doImportBubble()">导入图片…</button>
         </div>
       </div>
+      <p v-if="!galleryOpen('bubbles')" class="hint">
+        <template v-if="bubbleItems.length">已有 {{ bubbleItems.length }} 张，点小鲸鱼抽到「动图组」时随机显示一张；最多保留 8 张。</template>
+        <template v-else>还没有导入气泡图，点小鲸鱼时显示内置动图。</template>
+      </p>
+      <template v-if="galleryOpen('bubbles')">
       <div class="skin-grid">
         <div v-for="it in bubbleItems" :key="it.id" class="skin-cell"
              :class="{ broken: thumbBroken[it.id], noprev: !it.thumb && !thumbBroken[it.id] }">
@@ -1506,6 +1528,7 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
         还没有导入气泡图，点小鲸鱼时显示内置动图。点「导入图片…」加一张，支持 png / jpg / webp / gif / apng（动图不裁剪，保留动画）。
       </p>
       <p v-if="bubbleFlash.msg" class="msg" :class="msgCls(bubbleFlash)">{{ bubbleFlash.msg }}</p>
+      </template>
     </section>
 
     <!-- [资源] 音效：本机所有能响的音效统一在一张卡里管。两个来源（用户手导的六槽位 / 上游共享音效库 45 段）

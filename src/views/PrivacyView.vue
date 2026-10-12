@@ -39,9 +39,10 @@ const clearItemNames = computed(() => {
 })
 const dataFlash: Flash = useFlash()
 
-// 卡级折叠：本卡正文长（两段隐私说明 + 六个勾选项 + 清除按钮），收起后只留标题与摘要，
-// 让「数据」组的其它卡上浮。摘要播报当前勾选了几项，收起态也能看出「会不会清东西」
-const cardFold = reactive({ open: true })
+// 卡级折叠：本卡正文长（两段隐私说明 + 六个勾选项 + 清除按钮），与提醒 / 备份 / 关于三卡统一为
+// 「默认收起、可展开」，收起后只留标题与摘要，让「数据」组的其它卡上浮。
+// 摘要播报当前勾选了几项，收起态也能看出「会不会清东西」
+const cardFold = reactive({ open: false })
 const cardSummary = computed(() => {
   const n = [clearItems.secrets, clearItems.config, clearItems.ledger, clearItems.window, clearItems.bubble, clearItems.assets].filter(Boolean).length
   return `已勾选 ${n}/6 项`

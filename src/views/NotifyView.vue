@@ -152,6 +152,15 @@ function resetAlerts() {
   emit('save-alerts', null)
 }
 
+// 卡级折叠：本卡正文很长（四类自动提醒开关 + 计时 9 控件 + 通知渠道 / SMTP + 提醒文案 + 提醒音音量），
+// 日常只在「改提醒设置」时才逐段展开；与隐私 / 备份 / 关于三卡统一为「默认收起、可展开」，
+// 收起后只留标题与一行摘要，让「用量」组的其它卡上浮
+const cardFold = reactive({ open: false })
+// 收起态摘要：播报四类自动提醒各开了几个，收起也能看出「现在会收到哪些提醒」
+const cardSummary = computed(() => {
+  const on = [props.cfg.peakRemindOn, props.cfg.lowAlertOn, props.cfg.budgetOn, props.cfg.dropAlertOn].filter(Boolean).length
+  return on ? `已开启 ${on}/4 类自动提醒` : '四类自动提醒均未开启'
+})
 // 提醒文案折叠：与上面的开关同属「提醒」主题，收在「提醒与通知」卡里，不再单独占「外观」页一张卡
 const alertFolds = reactive({ open: false })
 // 提醒音音量折叠：4 条滑块默认全「跟随全局」，多数人一次都不会拖，却常驻铺满卡片尾部。
@@ -344,7 +353,13 @@ watch(() => props.cfg.timerSec, syncTimerHms)
 
 <template>
   <section class="card" data-search="notify">
-    <h2>提醒与通知</h2>
+    <div class="card-head">
+      <h2 class="card-toggle" @click="cardFold.open = !cardFold.open">
+        <span class="caret">{{ cardFold.open ? '▾' : '▸' }}</span>提醒与通知
+        <span v-if="!cardFold.open" class="card-sum">{{ cardSummary }}</span>
+      </h2>
+    </div>
+    <template v-if="cardFold.open">
 
     <label class="field row check">
       <span class="label">峰谷切换提醒 <em>（进入峰/谷时段时气泡提示，需开启思考气泡）</em></span>
@@ -636,6 +651,7 @@ watch(() => props.cfg.timerSec, syncTimerHms)
         </p>
       </div>
     </div>
+    </template>
   </section>
 </template>
 
