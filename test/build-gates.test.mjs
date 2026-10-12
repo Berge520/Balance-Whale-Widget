@@ -32,6 +32,7 @@ test('prebuild 同时挂上 sync-version 与 check-shared', () => {
   assert.match(prebuild, /scripts\/gen-search-index\.mjs\s+--check/, 'prebuild 少了 gen-search-index.mjs --check：搜索全文索引不再校验新鲜度')
   // 同理钉住 --fail：不带这个参数时孤儿 CSS 脚本只警告不拦截，闸门会静默退化
   assert.match(prebuild, /scripts\/check-orphan-css\.mjs\s+--fail/, 'prebuild 少了 check-orphan-css.mjs --fail：孤儿 CSS 不再拦截')
+  assert.match(prebuild, /scripts\/check-z-layers\.mjs\s+--fail/, 'prebuild 少了 check-z-layers.mjs --fail：悬浮窗 z-index 裸数字不再拦截')
 })
 
 test('prebuild 仍由 build 触发', () => {

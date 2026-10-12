@@ -10,6 +10,16 @@
   }
   :root {
     --whale-pad: 200px;
+    /* ===== 窗口 z-index 层段表 =====
+       悬浮窗内部各层的堆叠顺序集中在此，改层级只改这里；散在各规则里写裸数字极易撞车
+       （历史上菜单/动作条改版就要全文件翻一遍谁大谁小）。
+       取值口径：**只登记相对页面根的大层**（root/menu/actions），它们同处一个堆叠上下文、
+       必须严格有序；元素内部的局部小层叠（如菜单按钮、吸顶标题）有自己的堆叠上下文，
+       与窗口层无关，**不进本表**、保持就地字面量。
+       校验：scripts/check-z-layers.mjs（裸 z-index 必须来自本表，元素内层走 ALLOW 登记）。 */
+    --z-whale-root: 9999;      /* 挂件本体（含气泡），窗口内最底层 */
+    --z-whale-menu: 10000;     /* 右键菜单：盖住挂件与气泡 */
+    --z-whale-actions: 10001;  /* 到点动作条：高于菜单（到点那一刻它才是主角） */
   }
   /* ===== 滚动条 =====
      配色跟菜单深浅走：浅色一套在下面各规则里，深色一套在文件末尾的 html.dark 区块。
@@ -57,7 +67,7 @@
     pointer-events: none;
     user-select: none;
     -webkit-user-select: none;
-    z-index: 9999;
+    z-index: var(--z-whale-root);
     font-family: inherit;
     transition: transform .3s ease;
   }
@@ -159,7 +169,7 @@
     transform-origin: top right;
     transition: opacity .18s ease, transform .22s cubic-bezier(.34,1.56,.64,1);
     pointer-events: none;
-    z-index: 10000;
+    z-index: var(--z-whale-menu);
     box-shadow: 0 12px 32px rgba(19,32,74,.22), 0 2px 8px rgba(19,32,74,.12);
     color-scheme: light;
     font-size: 12px;
@@ -401,7 +411,7 @@
     opacity: 0; transform: translateY(-6px) scale(.96);
     transition: opacity .18s ease, transform .22s cubic-bezier(.34,1.56,.64,1);
     pointer-events: none;
-    z-index: 10001; /* 高于菜单：到点那一刻它才是主角 */
+    z-index: var(--z-whale-actions); /* 高于菜单：到点那一刻它才是主角 */
     color-scheme: light;
   }
   .dshwv-timer-actions.dshwv-actions-open { opacity: 1; transform: translateY(0) scale(1); pointer-events: auto; }
