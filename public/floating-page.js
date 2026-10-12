@@ -953,7 +953,7 @@
     else if (menuOpen) want = true;                        // 菜单开着：按钮必须常显（它是菜单锚点）
     else if (e && isFinite(e.clientX)) want = isWhaleHit(e) || isOverMenuBtn(e);
     else return;                                          // 没有可信坐标：不动（下次 pointermove 自会纠正）
-    menuBtn.classList.toggle('dshwv-menu-btn-visible', want);
+    try { menuBtn.classList.toggle('dshwv-menu-btn-visible', want); } catch (err) {}
   }
   // 用「最后一次已知的指针位置」重算（拖拽收尾 / 配置变更 / 穿透切换等无事件对象的场景）。
   // 指针可能正静止，不会有 pointermove 来纠正，所以这些场景必须显式重算一次。
@@ -964,7 +964,7 @@
   // 强制显示：点开菜单、穿透接管等「此刻正在与挂件交互」的场景。
   // 不能靠位置判定 —— 按钮压在鲸鱼轮廓顶边上沿，位置判定容易判成「不在鲸鱼上」而隐藏。
   function forceShowMenuBtn() {
-    menuBtn.classList.toggle('dshwv-menu-btn-visible', !!menuBtnEnabled);
+    try { menuBtn.classList.toggle('dshwv-menu-btn-visible', !!menuBtnEnabled); } catch (err) {}
   }
   // 指针离开整个窗口：收起按钮并交回穿透。必须有这条「窗口级」兜底 ——
   // 主判定由 pointermove 驱动，指针一旦移出窗口客户区就不再派发，按钮残留没人清理
@@ -981,13 +981,15 @@
     // 指针既然已离开窗口，按钮一律先收起，并作废悬停点 —— 之后若指针回来，
     // 下一次 pointermove 会重新写入 lastHoverPt 并恢复显示
     lastHoverPt = null;
-    menuBtn.classList.remove('dshwv-menu-btn-visible');
+    try { menuBtn.classList.remove('dshwv-menu-btn-visible'); } catch (err) {}
     // 拖拽中不动穿透与光标：窗口正被拖着走，指针必然短暂离开客户区，
     // 此刻 setIgnoreMouse(true) 会掐断后续 pointerup，拖拽就收不了尾
     if (drag && drag.active) return;
     passHoverActive = false;
-    passApplyIndicator();
-    setWidgetCursor('');
+    // 以下各步各自兜底：这是「窗口级」唯一兜底，任一步抛错都不能让后面的
+    // setIgnoreMouse(true) 被跳过 —— 否则指针移出后窗口一直不穿透，挡住下层应用
+    try { passApplyIndicator(); } catch (err) {}
+    try { setWidgetCursor(''); } catch (err) {}
     sendIgnoreMouse(true);
   }
   // 提醒气泡自动收起：remindSec = 0 表示常驻，等用户点掉（设置页可配）
@@ -3268,9 +3270,16 @@
   // 关键：绝不能在这里返回 true 兜底 —— 那等于「整个窗口（含四周 200px 透明留白）都是鲸鱼」，
   // 指针移出挂件后仍被判成「没离开」，菜单按钮于是不隐藏（历史 bug 的根源之一）。
   function isWhaleRectHit(e) {
-    var r = img.getBoundingClientRect();
-    if (!r || r.width <= 0 || r.height <= 0) return false;
-    return e.clientX >= r.left && e.clientX < r.right && e.clientY >= r.top && e.clientY < r.bottom;
+    // 自身兜底：getBoundingClientRect 在极端情况下会抛错（如元素脱离文档）。
+    // 本函数也被 isWhaleHit 的降级分支调用，抛错会顺着命中判定链连坐
+    // 到点击 / 拖拽 / 右键 / 滚轮所有入口，故必须与 isWhaleHit/isOverMenuBtn 同口径返回 false。
+    try {
+      var r = img.getBoundingClientRect();
+      if (!r || r.width <= 0 || r.height <= 0) return false;
+      return e.clientX >= r.left && e.clientX < r.right && e.clientY >= r.top && e.clientY < r.bottom;
+    } catch (err) {
+      return false;
+    }
   }
   // 纯几何判定，**无状态**：只回答「这个坐标此刻是否落在鲸鱼轮廓内」。
   // 拖拽 / 点击拦截 / 穿透接管等路径都用它 —— 那些场景要的是即时事实，不能受历史影响。
@@ -3288,7 +3297,13 @@
       if (!hitAlpha || !hitReady) return true;
       if (flipped) lx = 610 - lx;
       var x = Math.floor(lx), y = Math.floor(ly);
-      return hitAlpha[y * 610 + x] > 10;
+      // 越界保护：lx/ly 已判非负，但 x/y 可能因 hitAlpha 比 610×610 短（画布尺寸变更 /
+      // 采样表被截断）而落到表外。读到 undefined 时 `undefined > 10` 恒为 false，
+      // 会让整块区域静默判成「没命中」→ 点不动也拖不动。这里显式兜底为「矩形内即命中」。
+      if (x < 0 || y < 0 || x >= 610 || y >= 610) return true;
+      var a = hitAlpha[y * 610 + x];
+      if (typeof a !== 'number' || !isFinite(a)) return true;
+      return a > 10;
     } catch (err) {
       return false;
     }
@@ -3472,8 +3487,9 @@
     // 下面的 scheduleHover 只做命中测试（elementFromPoint / 穿透接管），它的 rAF 里
     // 传 syncBtn=false，不会再拿旧快照对按钮显隐判第二次（历史 bug：两套坐标在轮廓边界
     // 交替给出相反结论 → 按钮该隐藏时不隐藏）
-    applyMenuBtn(e);
-    scheduleHover(e); // 命中测试（elementFromPoint + closest）仍合并到每帧一次
+    // 两个子步骤各自兜底：本监听器是高频主路径，任一步抛错都不该让另一步（穿透接管 / 合帧重算）跟着断掉
+    try { applyMenuBtn(e); } catch (err) {}
+    try { scheduleHover(e); } catch (err) {} // 命中测试（elementFromPoint + closest）仍合并到每帧一次
   }
   // 拖拽位置上报：rAF 节流到「每帧最多一发」，宿主在 drag-move 里直接 setPosition。
   //
@@ -3508,7 +3524,7 @@
     drag = null;
     // 手势被系统没收也要解冻宿主（这里不像 pointerup 会吸附落盘，只是把冻结态撤掉）
     try { whaleApi.dragEnd(); } catch (err) {}
-    hoverAt(null); // 沿用上一次有效悬停点重算（取消事件的位置字段不可信）
+    try { hoverAt(null); } catch (err) {} // 沿用上一次有效悬停点重算（取消事件的位置字段不可信）
   }
   function endDrag(e, clickAllowed) {
     if (!drag || !drag.active) return;
@@ -3546,7 +3562,8 @@
     // 立即按松手位置重算：穿透态下这里要决定是交回穿透还是保持接管；
     // 按钮显隐也在这次重算里按松手位置判过（hoverAt → hoverNow → updateHover(..., true)），
     // 不要再补第二次 —— 两次决策配上不同坐标源就会互相翻盘（这正是「偶尔不隐藏」的来源）。
-    hoverAt(e);
+    // 收尾兜底：上面各分支已陆续解冻宿主（dragEnd），此处重算若抛错不应连坐成「拖拽卡死」
+    try { hoverAt(e); } catch (err) {}
   }
   function onDocClickStopper(e) {
     // 菜单按钮优先于气泡（原因见 onDocPointerDown 同名判断）：
@@ -3572,12 +3589,13 @@
     // 与左键是否按住无关）。菜单一弹出来就打断拖拽，用户看到的是「拖到一半突然冒出三点菜单」。
     // 注意这里只挡「正在拖」这一种情况，拖拽结束后右键唤菜单的能力完全保留
     if (drag && drag.active) { try { e.preventDefault(); e.stopPropagation(); } catch (err) {} return; }
-    if (e.target && e.target.closest) {
-      if (e.target.closest('.dshwv-menu') || e.target.closest('.dshwv-menu-btn')) return;
-    }
+    // closest 独立兜底：与 wheel 同理，抛错会吞掉后面的右键唤菜单能力
+    var inMenu = false;
+    try { inMenu = !!(e.target && e.target.closest && (e.target.closest('.dshwv-menu') || e.target.closest('.dshwv-menu-btn'))); } catch (err) {}
+    if (inMenu) return;
     if (!isWhaleHit(e)) return;
     try { e.preventDefault(); e.stopPropagation(); } catch (err) {}
-    toggleMenu();
+    try { toggleMenu(); } catch (err) {}
   }, true);
 
   // 窗口尺寸变化（滚轮/菜单滑块缩放在实时预览时宿主会连续 setSize）：
@@ -3604,7 +3622,11 @@
   document.addEventListener('wheel', function (e) {
     if (dragLock) return;
     if (drag && drag.active) return;
-    if (e.target && e.target.closest && e.target.closest('.dshwv-menu')) return; // 菜单内滚动不缩放
+    // closest 在事件目标被销毁/分离时可能抛错；本监听器在点击链路上，抛错会让后续
+    // 缩放逻辑整段中断，故独立兜底为「未命中菜单」继续往下走（isWhaleHit 自身已兜底）
+    var inMenu = false;
+    try { inMenu = !!(e.target && e.target.closest && e.target.closest('.dshwv-menu')); } catch (err) {}
+    if (inMenu) return; // 菜单内滚动不缩放
     if (!isWhaleHit(e)) return;
     try { e.preventDefault(); } catch (err) {}
     // 滚轮一次走一档（整数档位），再换算成倍率：curScale 可能是吸附前的非整档值，
