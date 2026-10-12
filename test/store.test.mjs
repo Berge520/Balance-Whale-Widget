@@ -9,8 +9,25 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import os from 'node:os'
+import { createRequire } from 'node:module'
 import store from '../public/preload/lib/store.js'
 import constants from '../public/preload/lib/constants.js'
+
+// ── utools 桩：账本 / 计时 / 模型状态 / 锚点走 utools.dbStorage（属性访问）。
+//    默认导入只在纯函数上用到；下面这族函数虽同属一个模块，但 store.js 全程用属性访问
+//    utools.dbStorage，所以挂个全局内存桩即可，不必重载模块（与 config.test.mjs 同范式）──
+const db = new Map()
+globalThis.utools = {
+  getPath: () => os.tmpdir(), // log.js 取临时目录，避免落到真实 %TEMP%
+  dbStorage: {
+    getItem: (k) => (db.has(k) ? db.get(k) : null),
+    setItem: (k, v) => { db.set(k, v) },
+    removeItem: (k) => { db.delete(k) },
+  },
+}
+const require = createRequire(import.meta.url)
+const { K } = require('../public/preload/lib/constants.js')
 
 const { normTokenPrice, normUiMode, QUOTE_TEXT_KEYS, DRAG_LINES_DEFAULT, normLineList } = store
 const { TOKEN_PRICE_DEFAULT, TOKEN_PRICE_MAX, TOKEN_RATE_MAX } = constants
@@ -275,4 +292,453 @@ test('normBubble 幂等：一次归一的出口再喂进去不变形（patchConf
   const once = normBubble({ on: true, items: bubbleDefaultItems(), tapAdvance: true, dwell: 12, dragLines: ['一条'] }, undefined)
   const twice = normBubble(JSON.parse(JSON.stringify(once)), once)
   assert.deepEqual(twice, once)
+})
+
+// ──────────────────────────────────────────────
+// 账本（recordLedgerUsage / calibrateTodayUsage / claimDailyNotice / mergeLedgerHistory / setTodayUsage）
+// ──────────────────────────────────────────────
+const {
+  todayKey, historyKeepDays, readLedger, recordLedgerUsage, calibrateTodayUsage, claimDailyNotice,
+  keyFingerprint, mergeLedgerHistory, setTodayUsage, readTimer, writeTimer, clearTimer,
+  readModelState, writeModelState, dropModelState, readAnchor, writeAnchor, resetAnchorCache,
+  DSB_KEEP_MIN, DSB_KEEP_MAX,
+} = store
+
+const clearLedger = () => db.delete(K.ledger)
+const clearCfg = () => db.delete(K.config)
+
+test('todayKey 是本地日期 YYYY-MM-DD 且与 Date 同步', () => {
+  const d = new Date()
+  const p2 = (n) => String(n).padStart(2, '0')
+  assert.equal(todayKey(), `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`)
+})
+
+test('historyKeepDays：直接读原始配置并夹取到 35–730，非法回默认 365', () => {
+  clearCfg()
+  assert.equal(historyKeepDays(), 365) // 空配置回默认
+  db.set(K.config, { historyKeepDays: 10 }); assert.equal(historyKeepDays(), 35) // 下夹
+  db.set(K.config, { historyKeepDays: 9999 }); assert.equal(historyKeepDays(), 730) // 上夹
+  db.set(K.config, { historyKeepDays: 400 }); assert.equal(historyKeepDays(), 400)
+  db.set(K.config, { historyKeepDays: 'abc' }); assert.equal(historyKeepDays(), 365)
+  db.set(K.config, { historyKeepDays: 400.6 }); assert.equal(historyKeepDays(), 401) // 取整
+  clearCfg()
+})
+
+test('keyFingerprint：空串回空、非空为 sha1 前 8 位且稳定可复现', () => {
+  assert.equal(keyFingerprint(''), '')
+  assert.equal(keyFingerprint(null), '')
+  const fp = keyFingerprint('sk-abcdef0123456789')
+  assert.match(fp, /^[0-9a-f]{8}$/)
+  assert.equal(fp, keyFingerprint('sk-abcdef0123456789')) // 同 key 同指纹
+  assert.notEqual(fp, keyFingerprint('sk-abcdef0123456790')) // 换 key 换指纹
+})
+
+test('readLedger：空存储回 freshLedger（全零基线）', () => {
+  clearLedger()
+  const led = readLedger()
+  assert.equal(led.date, todayKey())
+  assert.equal(led.lastBalance, null)
+  assert.equal(led.todayUsage, 0)
+  assert.deepEqual(led.history, {})
+  assert.equal(led.quotaUsed, 0)
+  assert.deepEqual(led.adjustLog, [])
+  assert.deepEqual(led.calibrateLog, [])
+  assert.equal(led.budgetNotifiedOn, '')
+  assert.equal(led.lowNotifiedOn, '')
+})
+
+test('readLedger：老账本缺 quotaUsed 时用 history 之和做起点（避免「不重置」累计小于本月累计）', () => {
+  clearLedger()
+  db.set(K.ledger, { date: todayKey(), history: { '2026-01-01': 1.5, '2026-01-02': 2.5 }, todayUsage: 0.1 })
+  const led = readLedger()
+  assert.equal(led.quotaUsed, 4) // 1.5 + 2.5
+})
+
+test('recordLedgerUsage：首次采样只落基准，不计用量', () => {
+  clearLedger()
+  const { ledger, adjust, drop } = recordLedgerUsage(100, 'CNY', { granted: 10, toppedUp: 5, keyId: 'kA' })
+  assert.equal(ledger.lastBalance, 100)
+  assert.equal(ledger.todayUsage, 0)
+  assert.equal(adjust, null)
+  assert.equal(drop, 0)
+  assert.equal(ledger.lastGranted, 10)
+  assert.equal(ledger.lastToppedUp, 5)
+  assert.equal(ledger.lastKeyId, 'kA')
+  assert.ok(ledger.lastSampleAt) // 采样时间已写
+})
+
+test('recordLedgerUsage：余额正常下降计入 todayUsage，drop 反映本轮下降总额', () => {
+  clearLedger()
+  recordLedgerUsage(100, 'CNY', {})
+  const { ledger, adjust, drop } = recordLedgerUsage(97.5, 'CNY', {})
+  assert.equal(ledger.todayUsage, 2.5)
+  assert.equal(adjust, null)
+  assert.equal(drop, 2.5)
+  // 继续累加
+  const r2 = recordLedgerUsage(97, 'CNY', {})
+  assert.equal(r2.ledger.todayUsage, 3)
+  assert.equal(r2.drop, 0.5)
+})
+
+test('recordLedgerUsage：跨天归档（写 history + quotaUsed 累计 + 清零当日），当天差值与历史互不干扰', () => {
+  clearCfg()
+  clearLedger()
+  db.set(K.config, { historyKeepDays: 35 })
+  // 老账本停在 2020-01-01：当天用量 8、quotaUsed 12。跨天时先把 8 归档进 history 并并入 quotaUsed
+  db.set(K.ledger, { date: '2020-01-01', todayUsage: 8, quotaUsed: 12, history: {}, lastBalance: 100, lastCurrency: 'CNY' })
+  const r = recordLedgerUsage(100, 'CNY', {}) // 换天首采样：只重置基准
+  assert.equal(r.ledger.date, todayKey(), '应切到今天')
+  assert.equal(r.ledger.history['2020-01-01'], 8, '跨天应把前一天用量归档进 history')
+  assert.equal(r.ledger.quotaUsed, 20, '跨天应把昨天用量并入「不重置」累计（12 + 8）')
+  assert.equal(r.ledger.todayUsage, 0, '跨天后今日用量归零')
+  // 当天再下降 3 → 只进 todayUsage，不污染历史
+  const r2 = recordLedgerUsage(97, 'CNY', {})
+  assert.equal(r2.ledger.todayUsage, 3)
+  assert.equal(r2.ledger.history['2020-01-01'], 8)
+  clearCfg()
+})
+
+test('recordLedgerUsage：换币种只重置基准，不把两边差额记成用量', () => {
+  clearLedger()
+  recordLedgerUsage(100, 'USD', {})
+  const { ledger, adjust, drop } = recordLedgerUsage(20, 'CNY', {}) // 20 远小于 100，若不识别换币种会被误记 80
+  assert.equal(ledger.todayUsage, 0)
+  assert.equal(drop, 0)
+  assert.equal(adjust, null)
+  assert.equal(ledger.lastBalance, 20)
+  assert.equal(ledger.lastCurrency, 'CNY')
+})
+
+test('recordLedgerUsage：换 Key 只重置基准，不把两边余额差记成用量', () => {
+  clearLedger()
+  recordLedgerUsage(100, 'CNY', { keyId: 'kA' })
+  const { ledger, drop } = recordLedgerUsage(30, 'CNY', { keyId: 'kB' })
+  assert.equal(ledger.todayUsage, 0)
+  assert.equal(drop, 0)
+  assert.equal(ledger.lastBalance, 30)
+  assert.equal(ledger.lastKeyId, 'kB')
+})
+
+test('recordLedgerUsage：赠送额度整块到期/被收回 → 进 adjustLog 与 todayAdjust，不计今日用量', () => {
+  clearLedger()
+  // 余额 500 里含赠送 271；赠送整块消失后余额骤降到 229
+  recordLedgerUsage(500, 'CNY', { granted: 271 })
+  const { ledger, adjust, drop } = recordLedgerUsage(229, 'CNY', { granted: 0 })
+  assert.equal(ledger.todayUsage, 0, '赠送到期不能被记成用量')
+  assert.ok(adjust && adjust.why === '赠送额度到期/被收回')
+  assert.equal(adjust.amount, 271)
+  assert.equal(drop, 271, 'drop 仍反映本轮下降总额（宿主据此做波动通知）')
+  assert.equal(ledger.todayAdjust, 271)
+  assert.equal(ledger.adjustLog.length, 1)
+  assert.equal(ledger.adjustLog[0].why, '赠送额度到期/被收回')
+  assert.equal(ledger.lastAdjustWhy, '赠送额度到期/被收回')
+})
+
+test('recordLedgerUsage：短时间超过可信上限的大跳变 → 计入 adjust 而非用量', () => {
+  clearLedger()
+  recordLedgerUsage(1000, 'CNY', {})
+  const { ledger, adjust } = recordLedgerUsage(900, 'CNY', {}) // 一分钟内掉 100 > limit(20)
+  assert.equal(ledger.todayUsage, 0)
+  assert.ok(adjust && adjust.why === '余额下降超过可信上限')
+  assert.equal(adjust.amount, 100)
+  assert.equal(ledger.todayAdjust, 100)
+})
+
+test('recordLedgerUsage：赠送额度只掉一部分（未整块消失）仍算正常消费', () => {
+  clearLedger()
+  recordLedgerUsage(500, 'CNY', { granted: 271 })
+  // 只掉 3 元，赠送还剩 268（未整块消失）→ 属正常消费
+  const { ledger, adjust } = recordLedgerUsage(497, 'CNY', { granted: 268 })
+  assert.equal(adjust, null)
+  assert.equal(ledger.todayUsage, 3)
+})
+
+test('recordLedgerUsage：余额未下降（持平或上升）不记任何差值', () => {
+  clearLedger()
+  recordLedgerUsage(100, 'CNY', {})
+  const up = recordLedgerUsage(120, 'CNY', {}) // 充值/赠送使余额上升
+  assert.equal(up.ledger.todayUsage, 0)
+  assert.equal(up.drop, 0)
+  assert.equal(up.ledger.lastBalance, 120)
+  const same = recordLedgerUsage(120, 'CNY', {})
+  assert.equal(same.ledger.todayUsage, 0)
+})
+
+test('recordLedgerUsage：写账本失败时不抛错（只 logErr 留痕）', () => {
+  clearLedger()
+  const saved = globalThis.utools.dbStorage.setItem
+  globalThis.utools.dbStorage.setItem = () => { throw new Error('quota') }
+  try {
+    assert.doesNotThrow(() => recordLedgerUsage(100, 'CNY', {}))
+  } finally {
+    globalThis.utools.dbStorage.setItem = saved
+  }
+})
+
+test('calibrateTodayUsage：非法 / 负数拒绝，等于现值不写，正常值写入并记 calibrateLog', () => {
+  clearLedger()
+  assert.equal(calibrateTodayUsage('abc').ok, false)
+  assert.equal(calibrateTodayUsage(-1).ok, false)
+  assert.match(calibrateTodayUsage(NaN).error, /不小于 0/)
+  // 等于现值 → 不写、不记 log
+  const r0 = calibrateTodayUsage(0)
+  assert.deepEqual([r0.ok, r0.from, r0.to], [true, 0, 0])
+  assert.equal(readLedger().calibrateLog.length, 0)
+  // 改值 → 写入 + 记一条
+  const r1 = calibrateTodayUsage(12.34567)
+  assert.deepEqual([r1.ok, r1.from, r1.to], [true, 0, 12.3457]) // round4
+  assert.equal(readLedger().todayUsage, 12.3457)
+  assert.equal(readLedger().calibrateLog.length, 1)
+  assert.equal(readLedger().calibrateLog[0].from, 0)
+})
+
+test('calibrateTodayUsage：写失败返回 ok:false 且带错误文案', () => {
+  clearLedger()
+  const saved = globalThis.utools.dbStorage.setItem
+  globalThis.utools.dbStorage.setItem = () => { throw new Error('quota') }
+  try {
+    const r = calibrateTodayUsage(5)
+    assert.equal(r.ok, false)
+    assert.match(r.error, /校准写入失败/)
+  } finally {
+    globalThis.utools.dbStorage.setItem = saved
+  }
+})
+
+test('claimDailyNotice：预算 / 低余额两类各自每天一次，跨天重置，kind 非法回落到 budget', () => {
+  clearLedger()
+  assert.equal(claimDailyNotice('budget'), true) // 首次认领
+  assert.equal(claimDailyNotice('budget'), false) // 同日再调被拒
+  assert.equal(claimDailyNotice('low'), true) // 另一类互不影响
+  assert.equal(claimDailyNotice('low'), false)
+  assert.equal(readLedger().budgetNotifiedOn, todayKey())
+  assert.equal(readLedger().lowNotifiedOn, todayKey())
+  // kind 非法 → 走 budget 分支（已被认领 → false）
+  assert.equal(claimDailyNotice('bogus'), false)
+  // 跨天：把标记改成昨天 → 可再次认领
+  const led = readLedger()
+  led.budgetNotifiedOn = '2000-01-01'
+  db.set(K.ledger, led)
+  assert.equal(claimDailyNotice('budget'), true)
+})
+
+test('mergeLedgerHistory：同日覆盖、当天天同步 todayUsage、按保留天数裁剪、返回计数', () => {
+  clearCfg()
+  clearLedger()
+  db.set(K.config, { historyKeepDays: 35 })
+  const t = todayKey()
+  const r = mergeLedgerHistory([
+    { date: '2020-01-01', usage: 1.5 },
+    { date: '2020-01-01', usage: 2.5 }, // 同日覆盖前值
+    { date: t, usage: 9 }, // 当天 → 同步 todayUsage
+    { date: '2020-01-02', usage: 'abc' }, // 非法 usage 丢
+    { usage: 5 }, // 无 date 丢
+  ])
+  assert.equal(r.imported, 3)
+  assert.equal(r.ok, true)
+  const led = readLedger()
+  assert.equal(led.history['2020-01-01'], 2.5)
+  assert.equal(led.history[t], 9)
+  assert.equal(led.todayUsage, 9, '当天天必须同步进 todayUsage，否则趋势图当天柱被忽略')
+  assert.equal(r.from, '2020-01-01')
+})
+
+test('mergeLedgerHistory：按保留天数裁剪，只留最近 keep 天', () => {
+  clearCfg()
+  clearLedger()
+  db.set(K.config, { historyKeepDays: 35 }) // 最小保留期
+  const entries = []
+  for (let i = 0; i < 40; i++) entries.push({ date: `2020-01-${String(i + 1).padStart(2, '0')}`, usage: i })
+  const r = mergeLedgerHistory(entries)
+  assert.equal(r.kept, 35, '应只保留最近 35 天')
+  const keys = Object.keys(readLedger().history).sort()
+  assert.equal(keys[0], '2020-01-06') // 前 5 天被裁掉
+  assert.equal(keys[keys.length - 1], '2020-01-40')
+  clearCfg()
+})
+
+test('mergeLedgerHistory：写失败返回 ok:false', () => {
+  clearLedger()
+  const saved = globalThis.utools.dbStorage.setItem
+  globalThis.utools.dbStorage.setItem = () => { throw new Error('quota') }
+  try {
+    assert.equal(mergeLedgerHistory([{ date: '2020-01-01', usage: 1 }]).ok, false)
+  } finally {
+    globalThis.utools.dbStorage.setItem = saved
+  }
+})
+
+test('setTodayUsage：直接覆盖当天用量、负数/非法夹到 0、返回账本', () => {
+  clearLedger()
+  assert.equal(setTodayUsage(7.5).todayUsage, 7.5)
+  assert.equal(readLedger().todayUsage, 7.5)
+  assert.equal(setTodayUsage(-3).todayUsage, 0)
+  assert.equal(setTodayUsage('abc').todayUsage, 0)
+})
+
+// ──────────────────────────────────────────────
+// 计时状态
+// ──────────────────────────────────────────────
+test('readTimer：空存储 / 非对象回默认（mode off）', () => {
+  db.delete(K.timer)
+  const d = readTimer()
+  assert.deepEqual(d, { mode: 'off', running: false, paused: false, startAt: 0, endAt: 0, elapsed: 0, remain: 0, arg: '' })
+})
+
+test('readTimer：逐字段归一化 —— mode 白名单、布尔严格、数值钳负、arg 只认串', () => {
+  db.set(K.timer, { mode: 'bogus', running: 1, paused: 'yes', startAt: 'abc', endAt: '123', elapsed: -5, remain: '9', arg: 42 })
+  const t = readTimer()
+  assert.equal(t.mode, 'off') // 认不出回 off
+  assert.equal(t.running, false) // 1 不算 true
+  assert.equal(t.paused, false)
+  assert.equal(t.startAt, 0) // 非数值回 0
+  assert.equal(t.endAt, 123)
+  assert.equal(t.elapsed, 0) // 负值钳到 0
+  assert.equal(t.remain, 9)
+  assert.equal(t.arg, '') // 非串回空
+  // 合法 mode 保留
+  db.set(K.timer, { mode: 'down' })
+  assert.equal(readTimer().mode, 'down')
+  db.set(K.timer, { mode: 'up' })
+  assert.equal(readTimer().mode, 'up')
+  db.set(K.timer, { mode: 'at' })
+  assert.equal(readTimer().mode, 'at')
+  db.delete(K.timer)
+})
+
+test('writeTimer：落盘成功回 true 且可回读；失败回 false 不抛', () => {
+  db.delete(K.timer)
+  const state = { mode: 'up', running: true, paused: false, startAt: 1000, endAt: 0, elapsed: 5, remain: 0, arg: 'x' }
+  assert.equal(writeTimer(state), true)
+  assert.deepEqual(readTimer(), state)
+  const saved = globalThis.utools.dbStorage.setItem
+  globalThis.utools.dbStorage.setItem = () => { throw new Error('quota') }
+  try {
+    assert.equal(writeTimer(state), false)
+  } finally {
+    globalThis.utools.dbStorage.setItem = saved
+  }
+  db.delete(K.timer)
+})
+
+test('clearTimer：删除计时状态，回读到默认', () => {
+  writeTimer({ mode: 'down', running: true })
+  clearTimer()
+  assert.equal(readTimer().mode, 'off')
+  assert.doesNotThrow(() => clearTimer()) // 重复清除不抛
+})
+
+// ──────────────────────────────────────────────
+// 多厂商模型的运行时状态
+// ──────────────────────────────────────────────
+test('readModelState：空存储 / 非对象回 {}；对象原样返回', () => {
+  db.delete(K.models)
+  assert.deepEqual(readModelState(), {})
+  db.set(K.models, { m1: { balance: 10 } })
+  assert.deepEqual(readModelState(), { m1: { balance: 10 } })
+  db.set(K.models, 'nope')
+  assert.deepEqual(readModelState(), {})
+  db.delete(K.models)
+})
+
+test('writeModelState：落盘可回读，非对象写 {}，失败不抛', () => {
+  db.delete(K.models)
+  writeModelState({ m1: { at: 1 } })
+  assert.deepEqual(readModelState(), { m1: { at: 1 } })
+  writeModelState(null)
+  assert.deepEqual(readModelState(), {})
+  const saved = globalThis.utools.dbStorage.setItem
+  globalThis.utools.dbStorage.setItem = () => { throw new Error('quota') }
+  try {
+    assert.doesNotThrow(() => writeModelState({ m1: {} }))
+  } finally {
+    globalThis.utools.dbStorage.setItem = saved
+  }
+  db.delete(K.models)
+})
+
+test('dropModelState：删除指定模型状态，不存在的 id 不写盘', () => {
+  db.delete(K.models)
+  writeModelState({ m1: { at: 1 }, m2: { at: 2 } })
+  dropModelState('m1')
+  assert.deepEqual(readModelState(), { m2: { at: 2 } })
+  // 不存在 → 不动（用写次数保证没多余 setItem）
+  let writes = 0
+  const saved = globalThis.utools.dbStorage.setItem
+  globalThis.utools.dbStorage.setItem = (k, v) => { writes++; saved(k, v) }
+  try {
+    dropModelState('nope')
+    assert.equal(writes, 0)
+  } finally {
+    globalThis.utools.dbStorage.setItem = saved
+  }
+  db.delete(K.models)
+})
+
+// ──────────────────────────────────────────────
+// 窗口锚点
+// ──────────────────────────────────────────────
+test('readAnchor：空存储回默认锚点（右下、距离 0）', () => {
+  resetAnchorCache()
+  db.delete(K.win)
+  assert.deepEqual(readAnchor(), { hAnchor: 'right', hDist: 0, vAnchor: 'bottom', vDist: 0 })
+})
+
+test('readAnchor：合法锚点取整并钳到非负；非法结构回落默认', () => {
+  resetAnchorCache()
+  db.set(K.win, { hAnchor: 'left', hDist: 12.6, vAnchor: 'top', vDist: -3 })
+  const a = readAnchor()
+  assert.equal(a.hAnchor, 'left')
+  assert.equal(a.hDist, 13) // 四舍五入
+  assert.equal(a.vAnchor, 'top')
+  assert.equal(a.vDist, 0) // 负值钳到 0
+  // 非法 hAnchor → 整份回落默认
+  resetAnchorCache()
+  db.set(K.win, { hAnchor: 'middle', hDist: 5, vAnchor: 'top', vDist: 5 })
+  assert.deepEqual(readAnchor(), { hAnchor: 'right', hDist: 0, vAnchor: 'bottom', vDist: 0 })
+  // 非数值 hDist → 回落
+  resetAnchorCache()
+  db.set(K.win, { hAnchor: 'left', hDist: 'x', vAnchor: 'top', vDist: 5 })
+  assert.deepEqual(readAnchor(), { hAnchor: 'right', hDist: 0, vAnchor: 'bottom', vDist: 0 })
+  db.delete(K.win)
+  resetAnchorCache()
+})
+
+test('readAnchor：内存缓存 —— 命中后不再读存储，resetAnchorCache 后重新读', () => {
+  resetAnchorCache()
+  db.set(K.win, { hAnchor: 'left', hDist: 1, vAnchor: 'top', vDist: 2 })
+  const first = readAnchor()
+  // 绕过 store 直接改存储，缓存应在，不反映新值
+  db.set(K.win, { hAnchor: 'right', hDist: 9, vAnchor: 'bottom', vDist: 9 })
+  assert.deepEqual(readAnchor(), first, '缓存命中时不应重新读存储')
+  resetAnchorCache()
+  assert.equal(readAnchor().hDist, 9, '清缓存后应重新读存储')
+  db.delete(K.win)
+  resetAnchorCache()
+})
+
+test('writeAnchor：同时更新内存缓存与存储，成功回 true；失败回 false', () => {
+  resetAnchorCache()
+  db.delete(K.win)
+  const a = { hAnchor: 'left', hDist: 7, vAnchor: 'top', vDist: 8 }
+  assert.equal(writeAnchor(a), true)
+  assert.deepEqual(readAnchor(), a) // 缓存与传入一致
+  assert.deepEqual(db.get(K.win), a) // 已落盘
+  const saved = globalThis.utools.dbStorage.setItem
+  globalThis.utools.dbStorage.setItem = () => { throw new Error('quota') }
+  try {
+    assert.equal(writeAnchor({ hAnchor: 'right', hDist: 0, vAnchor: 'bottom', vDist: 0 }), false)
+  } finally {
+    globalThis.utools.dbStorage.setItem = saved
+  }
+  db.delete(K.win)
+  resetAnchorCache()
+})
+
+// ──────────────────────────────────────────────
+// dsh 快照保留份数常量（导出值供设置页夹取，改动需同步 spec）
+// ──────────────────────────────────────────────
+test('DSB_KEEP 边界常量：min 1（0 会让快照建完即删），max 200', () => {
+  assert.equal(DSB_KEEP_MIN, 1)
+  assert.equal(DSB_KEEP_MAX, 200)
 })
