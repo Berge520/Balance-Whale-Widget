@@ -52,15 +52,30 @@ const assetsPacks = require('./assets-packs')
 const dlp = require('./download-progress')
 const bubbles = require('./bubbles')
 const codex = require('./codex')
-const dshUsage = require('./dsh-usage')
-const diagnostics = require('./diagnostics')
-const dshDump = require('./dsh-dump')
-const dshBackup = require('./dsh-backup')
-const dshExport = require('./dsh-export')
-const { parsePatch, applyToggle, applyBatchDisable } = require('./dsh-patch')
-const dshIsolate = require('./dsh-isolate')
-const dshMarket = require('./dsh-market')
-const dshHostCompat = require('./dsh-host-compat')
+
+// dsh 一族（dsh-usage / dsh-dump / dsh-backup / dsh-export / dsh-patch / dsh-isolate /
+// dsh-market / dsh-host-compat，合计 300KB+，且 dsh-dump 会连带把 dsh 核心也拖进来）全部
+// 只在函数体内被调用（无模块求值期引用）。顶层 require 会让「打开设置页」——哪怕用户只想
+// 改个通知开关——就把整族同步解析一遍，与 services.js 里「dsh 一族不在启动路径上求值」的
+// 惰性设计相悖。故与上面 dsh/hosts 同款惰性代理：首次访问 xxx.* 时才 require，之后复用同一份。
+function lazyRequire(id) {
+  let mod = null
+  return new Proxy({}, { get(_t, key) { if (!mod) mod = require(id); return mod[key] } })
+}
+const dshUsage = lazyRequire('./dsh-usage')
+// diagnostics 同样只服务 dsh 诊断（全部调用都在函数体内），一并惰性，省掉设置页首屏的解析
+const diagnostics = lazyRequire('./diagnostics')
+const dshDump = lazyRequire('./dsh-dump')
+const dshBackup = lazyRequire('./dsh-backup')
+const dshExport = lazyRequire('./dsh-export')
+const dshIsolate = lazyRequire('./dsh-isolate')
+const dshMarket = lazyRequire('./dsh-market')
+const dshHostCompat = lazyRequire('./dsh-host-compat')
+// dsh-patch 的三个函数也在函数体内调用，同样惰性；解构会立即求值，故用 getter 代理逐个转发
+const dshPatch = lazyRequire('./dsh-patch')
+const parsePatch = (...a) => dshPatch.parsePatch(...a)
+const applyToggle = (...a) => dshPatch.applyToggle(...a)
+const applyBatchDisable = (...a) => dshPatch.applyBatchDisable(...a)
 const pnpmCompat = require('./pnpm-compat')
 const { readTextSafe, writeFileAtomicSync, errMsg } = require('./util')
 const holidays = require('./holidays')
@@ -3140,18 +3155,18 @@ module.exports = {
   clearAllData(opts) {
     const o = opts && typeof opts === 'object' ? opts : {}
     const wasVisible = winAlive()
-    if (o.secrets) { try { utools.dbCryptoStorage.removeItem(K.secrets) } catch (err) {} }
+    if (o.secrets) { try { utools.dbCryptoStorage.removeItem(K.secrets) } catch (err) { logErr('[whale][settings] 清除凭据失败', err && err.message) } }
     if (o.config) {
-      try { utools.dbStorage.removeItem(K.config) } catch (err) {}
+      try { utools.dbStorage.removeItem(K.config) } catch (err) { logErr('[whale][settings] 清除配置失败', err && err.message) }
       // 模型列表随配置一起没了，运行时快照（余额/额度）留着只会在下次同名重建时冒充新数据
-      try { utools.dbStorage.removeItem(K.models) } catch (err) {}
+      try { utools.dbStorage.removeItem(K.models) } catch (err) { logErr('[whale][settings] 清除模型快照失败', err && err.message) }
       clearTimer() // 设置被重置，一并清掉已落库的计时状态
       // 节假日联网覆盖层：它改的是峰谷计费判据（哪几天算节假日），属于「设置」的一部分；
       // 不随设置清掉的话，用户以为自己回到了默认，实际峰谷时段仍按联网表走
       try { holidays.clear() } catch (err) { logErr('[whale][settings] 清除节假日覆盖层失败', err && err.message) }
     }
     if (o.ledger) {
-      try { utools.dbStorage.removeItem(K.ledger) } catch (err) {}
+      try { utools.dbStorage.removeItem(K.ledger) } catch (err) { logErr('[whale][settings] 清除账本失败', err && err.message) }
       // 用量类派生缓存与账本同源（Codex 会话统计 / dsh 用量），一并清掉才叫「清干净」：
       // 只清账本会留下这两份按天聚合的缓存，重开后设置页仍显示旧用量，像是没清
       try { codex.clearCodexCache() } catch (err) { logErr('[whale][settings] 清除 Codex 统计缓存失败', err && err.message) }
@@ -3199,16 +3214,16 @@ module.exports = {
       try { bubbles.clearAll() } catch (err) { logErr('[whale][settings] 清除按压气泡配图失败', err && err.message) }
     }
     if (o.window) {
-      try { utools.dbStorage.removeItem(K.win) } catch (err) {}
-      try { utools.dbStorage.removeItem(K.update) } catch (err) {}
-      try { utools.dbStorage.removeItem(K.dshVersions) } catch (err) {}
+      try { utools.dbStorage.removeItem(K.win) } catch (err) { logErr('[whale][settings] 清除窗口锚点失败', err && err.message) }
+      try { utools.dbStorage.removeItem(K.update) } catch (err) { logErr('[whale][settings] 清除更新检查缓存失败', err && err.message) }
+      try { utools.dbStorage.removeItem(K.dshVersions) } catch (err) { logErr('[whale][settings] 清除 dsh 版本列表失败', err && err.message) }
       // 「查过版本」标记与版本列表同进退：清了列表却留着标记，设置页会以为已查过而不再自动查
-      try { utools.dbStorage.removeItem(K.dshVersionsQueried) } catch (err) {}
+      try { utools.dbStorage.removeItem(K.dshVersionsQueried) } catch (err) { logErr('[whale][settings] 清除 dsh 版本查询标记失败', err && err.message) }
       // 说明正文缓存也一并清：它按版本号索引，版本列表都清了，留着这份正文没有意义
       // （正文写完虽不可变，但用户点「清除」的意图就是「别再留着这些缓存了」，不该偷偷保留）
-      try { utools.dbStorage.removeItem(K.dshNotes) } catch (err) {}
+      try { utools.dbStorage.removeItem(K.dshNotes) } catch (err) { logErr('[whale][settings] 清除 dsh 说明缓存失败', err && err.message) }
       // 「自动刷新版本」是设置页侧的纯偏好（宿主不读它），与查询标记同进退清掉即可
-      try { utools.dbStorage.removeItem(K.dshAutoRefreshVersions) } catch (err) {}
+      try { utools.dbStorage.removeItem(K.dshAutoRefreshVersions) } catch (err) { logErr('[whale][settings] 清除 dsh 自动刷新偏好失败', err && err.message) }
       // dsh 诊断 / 配置转储 / 市场目录都是缓存：TTL 内会被复用，不清掉会看到旧结果
       // （市场目录还兼「离线兜底」，不清则断网时仍按旧目录展示）
       try { diagnostics.clearDshDiagnoseCache() } catch (err) { logErr('[whale][settings] 清除 dsh 诊断缓存失败', err && err.message) }

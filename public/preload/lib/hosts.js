@@ -1373,9 +1373,24 @@ module.exports = {
   verifyIps,
   enable,
   disable,
+  opProgress,
   normSources, // 仅供单测：源表顺序归一化（曾漏剥 'community:' 前缀，导致用户排序静默失效）
   normCustomSources, // 仅供单测：自定义源 URL 校验 / 去重 / 上限
   srcChainLabel, // 供 settings 生成操作标题：按用户实际设置动态显示来源顺序
+  // ── 以下仅供单测。这几处取错值/写坏字节都不抛错、只会静默毁数据（把域名解析错、
+  //    把用户 hosts 改乱、把设置页卡住），必须用机器钉住行为 ──
+  normSrcOrder, // 候选链来源顺序归一化
+  mapLimit, // 带并发上限的 map：卡界面的根因，且「同序」是调用方的硬依赖
+  srcHost, // 来源列取主机名
+  guessWriter, // 冲突条目猜「哪类工具写的」
+  certMatchesDomain, // 证书 SAN 匹配：判错会把别家域名的 IP 写进 hosts（浏览器直接拦死）
+  dohName, // DoH 入口 → 厂商简称
+  dohUrl, // DoH 查询 URL 拼接
+  lineStart, // 按字节定位行首（hosts 读写的地基，不解码原文避免乱码）
+  lineEnd, // 按字节定位行尾
+  stripBlock, // 删标记块：删错范围会毁掉用户的 hosts
+  prependBlock, // 写标记块到文件最前
+  blockActive, // 解析块内生效域名
 }
 // 最近一次获取过程的来源追踪（内存态；每次开启/刷新/重写更新，重开插件即清空）
 function ghAccelTrace() {

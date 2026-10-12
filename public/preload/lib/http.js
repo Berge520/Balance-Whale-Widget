@@ -3,7 +3,7 @@
  *
  * 只做三件事：① 统一超时（AbortSignal.timeout，真 abort，不像 Promise.race 只放弃等待）
  * ② 可选重试（只对「网络异常 / 5xx / 429」重试，4xx 立即放弃——用户填错 key 重试无意义）
- * ③ 结构化结果（ok / status / data / text / code / transient / error），错误归一化到 errMsg。
+ * ③ 结构化结果（ok / status / res / retriable / error），错误经 errMsg 归一化后放在 error。
  *
  * ⚠️ 硬禁令（与 util.js 同口径）：本模块不得 require `log` / `utools` / `constants`，
  * 必须能在无 utools 桩下加载并可被单测直接 require。超时值由调用方传入（或用本文件

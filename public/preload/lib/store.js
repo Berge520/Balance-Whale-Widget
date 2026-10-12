@@ -1661,7 +1661,7 @@ function writeTimer(state) {
   }
 }
 function clearTimer() {
-  try { utools.dbStorage.removeItem(K.timer) } catch (err) {}
+  try { utools.dbStorage.removeItem(K.timer) } catch (err) { logErr('[whale][timer] 清除计时状态失败', err && err.message) }
 }
 
 // ──────────────────────────────────────────────

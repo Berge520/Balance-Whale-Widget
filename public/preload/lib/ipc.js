@@ -196,7 +196,11 @@ function registerIpc() {
         // 吸附后重算上下空白：页面据此决定菜单往上还是往下展开
         space: spaceAround(wa, r.x, r.y, width),
       })
-    } catch (err) {}
+    } catch (err) {
+      // 拖拽中吸附/写 anchor/推送都在这段：任一步失败会表现为「松手后位置没对齐且不落库」。
+      // 拖拽期每帧都可能触发，靠 log.js 的 5s 同键去重折叠，不会刷屏。
+      logErr('[whale][drag] 拖拽吸附处理失败', err && err.message)
+    }
     // 拖拽中来的缩放请求：按吸附后的新位置把尺寸补做一次并持久化
     // （applyScaleToWindow 会以窗口真实状态重算不动点，所以不会跳位）。
     // 必须排在吸附之后：补做缩放会写 anchor、推配置，顺序颠倒会把吸附结果覆盖掉。

@@ -17,7 +17,19 @@ const path = require('path')
 const { K, DSH_PORT_DEFAULT } = require('./constants')
 const { logErr } = require('./log')
 const { num, homeDir, readTextSafe, readJsonSafe, normalizePath } = require('./util')
-const { probePort, snapshot } = require('./dsh')
+// dsh.js（300KB+，连带其子模块）只在 diagnoseDsh/环境快照的**函数体内**用到 probePort / snapshot，
+// 模块求值期不引用。而本模块被 settings.js 顶层 require，settings 又是设置页窗口一开就要加载的 ——
+// 顶层 require('./dsh') 会让「打开设置页」把整个 dsh 族拖进来，即便用户从没碰过任何 dsh 功能，
+// 与 services.js 里「dsh 一族不在启动路径上求值」的惰性设计相悖。故改成与 settings.js 同款惰性代理：
+// 首次访问 dsh.* 才 require，之后复用同一份。
+let dshMod = null
+function dshOf() {
+  if (!dshMod) dshMod = require('./dsh')
+  return dshMod
+}
+const dsh = new Proxy({}, {
+  get(_t, key) { return dshOf()[key] },
+})
 
 // 平台判定：只用于 globalModuleRoots 的候选目录分派（Windows 的 npm 全局目录 vs POSIX 的 /usr 布局）。
 // ⚠️ 判据是「当前进程是否 Windows」而不是 process.platform 的静态值 —— 单测会在 Linux CI 上
@@ -650,10 +662,10 @@ function detectPort(cb) {
     // 每 1.2s 就探一次，用户点「强制重跑」时极可能撞上它，于是诊断读到的是几毫秒前
     // （当时 dsh 还没 bind 端口）的空结果，界面报「端口空闲」，而状态卡同时显示「运行中」。
     // 本机实测（2026-09-22，端口 3080）：状态卡 pid 37112、诊断报「3080 空闲」，netstat 显示 28216 在监听。
-    probePort(() => {
+    dsh.probePort(() => {
       clearTimeout(timer)
       try {
-        const snap = snapshot()
+        const snap = dsh.snapshot()
         // 语义直接沿用 dsh.js 的推导（externalPid / portOccupiedByOther 内部已含
         // 「不是本插件子进程」「进程名像不像 dsh」两层判断），诊断不要自己再判一遍，
         // 否则两处口径漂移会让「状态卡说空闲、诊断说被占」这种自相矛盾出现
@@ -711,7 +723,7 @@ function readEnv() {
   const out = { home: '', nodeVersion: '', dshVersion: '', dshSource: '', profile: 'web', installed: false, port: DSH_PORT_DEFAULT }
   out.home = homeDir({ env: 'DSH_HOME', fallback: '.dsh', expand: true, relative: true })
   try {
-    const snap = snapshot()
+    const snap = dsh.snapshot()
     out.nodeVersion = String(snap.nodeVersion || '')
     out.dshVersion = String(snap.resolved || snap.installed || snap.globalVersion || '')
     out.dshSource = String(snap.source || '')
