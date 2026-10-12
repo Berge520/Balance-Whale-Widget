@@ -357,7 +357,7 @@ async function probeConnectivity(op) {
   const t0 = Date.now()
   opStep(op, 'HEAD 请求 https://github.com', 'running', '走系统当前的 DNS 与 hosts 解析')
   try {
-    const res = await fetch('https://github.com', { method: 'HEAD', redirect: 'follow', signal: AbortSignal.timeout(8000) })
+    const res = await fetch('https://github.com', { method: 'HEAD', redirect: 'follow', signal: AbortSignal.timeout(CONNECTIVITY_TIMEOUT_MS) })
     opStep(op, 'HEAD 请求 https://github.com', 'done', 'HTTP ' + res.status + '，耗时 ' + (Date.now() - t0) + 'ms')
     return { ok: true, ms: Date.now() - t0, status: res.status }
   } catch (err) {
@@ -495,7 +495,7 @@ async function refreshIps(current, op, srcOrder, order, customSources) {
       let pulled = 0
       const pulls = await mapLimit(order2, order2.length, async (url) => {
         try {
-          const res = await fetch(url, { signal: AbortSignal.timeout(15000) })
+          const res = await fetch(url, { signal: AbortSignal.timeout(SOURCE_FETCH_TIMEOUT_MS) })
           if (!res.ok) {
             const e = 'HTTP ' + res.status
             logErr('[whale][ghaccel] 源返回非 2xx', url, e)
@@ -840,6 +840,10 @@ async function applyHostsBlock(action, ips, op) {
 //  - 同时砍掉「8s 全黑等」——超过 4.5s 无响应的基本是黑洞/被墙地址。
 // 真正让开启变快的是下面 DOH_URLS 减半（去掉串行瓶颈），不是靠压这个值。
 const PROBE_TIMEOUT_MS = 4500
+// 连通性自检（HEAD github.com）与社区源拉取的单次超时。原先硬编码字面量 8000 / 15000，
+// 与 DOH/探针等常量同值不同名，抽出来便于统一调整与检索
+const CONNECTIVITY_TIMEOUT_MS = 8000
+const SOURCE_FETCH_TIMEOUT_MS = 15000
 // 探测的并发上限。本模块所有代码跑在渲染进程主线程（services.js 把 lib/settings 直接挂 window，
 // 是同进程直调而非 IPC），把上百个候选一次性全推出去会让主线程连续处理成百上千次 socket 事件与
 // TLS 握手回调，Vue 的渲染被挤到队尾 —— 表现就是「点一下开启/刷新整个设置页卡住」。

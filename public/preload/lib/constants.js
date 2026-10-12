@@ -8,6 +8,10 @@ const BALANCE_URL = 'https://api.deepseek.com/user/balance'
 const USAGE_URL = 'https://platform.deepseek.com/api/v0/usage/by_api_key/amount'
 const BALANCE_TTL_MS = 25000
 const FETCH_TIMEOUT_MS = 20000
+// 平台用量接口单次超时（原先硬编码字面量 15000）
+const USAGE_TIMEOUT_MS = 15000
+// 更新检查接口单次超时（原先硬编码字面量 15000）；更新检查不重试，故无独立重试常量
+const UPDATE_FETCH_TIMEOUT_MS = 15000
 
 // 检查更新：拉取远端 package.json（经 ghfast 加速），只取 version 字段做比对
 const UPDATE_CHECK_URL = 'https://ghfast.top/https://raw.githubusercontent.com/Berge520/Balance-Whale-Widget/refs/heads/main/package.json'
@@ -507,6 +511,8 @@ module.exports = {
   USAGE_URL,
   BALANCE_TTL_MS,
   FETCH_TIMEOUT_MS,
+  USAGE_TIMEOUT_MS,
+  UPDATE_FETCH_TIMEOUT_MS,
   UPDATE_CHECK_URL,
   PLUGIN_VERSION,
   UPDATE_TTL_MS,

@@ -6,12 +6,13 @@
 try { require('dns').setDefaultResultOrder('ipv4first') } catch (_) {}
 
 const {
-  BALANCE_URL, USAGE_URL, BALANCE_TTL_MS, FETCH_TIMEOUT_MS,
-  UPDATE_CHECK_URL, PLUGIN_VERSION, UPDATE_TTL_MS, K,
+  BALANCE_URL, USAGE_URL, BALANCE_TTL_MS, FETCH_TIMEOUT_MS, USAGE_TIMEOUT_MS,
+  UPDATE_CHECK_URL, PLUGIN_VERSION, UPDATE_TTL_MS, UPDATE_FETCH_TIMEOUT_MS, K,
   MODEL_FETCH_TIMEOUT_MS, MODEL_STALE_MS, MODEL_MONEY_PREFIX, MODEL_TEMPLATES,
 } = require('./constants')
 const { logErr } = require('./log')
 const { errMsg } = require('./util')
+const http = require('./http')
 const {
   readSecrets, sanitizeKey, recordLedgerUsage, keyFingerprint, readConfig, setTodayUsage,
   claimDailyNotice, readModelState, writeModelState, todayKey, alertFor, alertOneLine,
@@ -52,71 +53,68 @@ async function fetchBalanceWith(rawKey) {
       error: 'API Key 格式不正确：应以 sk- 开头且不含空格/中文（请填写 api.deepseek.com 的 API Key，不是「平台 Token」）',
     }
   }
-  for (let attempt = 0; attempt < 2; attempt++) {
-    let res
-    try {
-      res = await fetch(BALANCE_URL, {
-        headers: { Authorization: 'Bearer ' + apiKey },
-        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-      })
-    } catch (err) {
-      if (attempt === 0) { await new Promise((r) => setTimeout(r, 500)); continue }
+  // 网络异常 / 5xx / 429 重试一次（4xx 不重试）；超时用 http.request 统一封装
+  const r = await http.request(BALANCE_URL, { headers: { Authorization: 'Bearer ' + apiKey } }, {
+    timeout: FETCH_TIMEOUT_MS, retries: 1,
+  })
+  if (!r.ok) {
+    // 网络/超时失败：无 status（=0）或 5xx/429 用「网络」口径，4xx 走下面的状态分支
+    if (r.status === 0) {
       return {
         ok: false, code: 'HTTP', transient: true,
         error: '网络请求失败（超时或无法连接 api.deepseek.com），请检查网络/代理后重试',
       }
     }
-    if (!res.ok) {
-      // 读取 DeepSeek 返回的具体错误：{"error":{"message":"...","type":"authentication_error"}}
-      let serverMsg = ''
-      try {
-        const j = await res.json()
-        serverMsg = (j && j.error && j.error.message) ? String(j.error.message) : ''
-      } catch (err) {
-        try { serverMsg = (await res.text()).slice(0, 160) } catch (e2) {}
-      }
-      if (res.status === 401) {
-        return {
-          ok: false, code: 'AUTH', transient: false,
-          error: 'API Key 无效或已过期（401）。请确认填的是 platform.deepseek.com「API keys」里 sk- 开头的密钥，而不是「平台 Token」；若刚复制请重新完整复制后再保存。' +
-                 (serverMsg ? '（服务器：' + serverMsg.slice(0, 120) + '）' : ''),
-        }
-      }
-      if (res.status < 500) {
-        return {
-          ok: false, code: 'HTTP', transient: false,
-          error: '余额接口返回 HTTP ' + res.status + (serverMsg ? '：' + serverMsg : ''),
-        }
-      }
-      if (attempt === 0) { await new Promise((r) => setTimeout(r, 500)); continue }
+    // 非 2xx 时只有 status，没有 res —— 拿不到 body 也别抛（旧实现会在这里解体）
+    const res = r.res || { json: async () => ({}), text: async () => '' }
+    // 读取 DeepSeek 返回的具体错误：{"error":{"message":"...","type":"authentication_error"}}
+    let serverMsg = ''
+    try {
+      const j = await res.json()
+      serverMsg = (j && j.error && j.error.message) ? String(j.error.message) : ''
+    } catch (err) {
+      try { serverMsg = (await res.text()).slice(0, 160) } catch (e2) {}
+    }
+    if (r.status === 401) {
       return {
-        ok: false, code: 'HTTP', transient: true,
-        error: '余额接口暂时不可用（HTTP ' + res.status + (serverMsg ? '：' + serverMsg : '') + '）',
+        ok: false, code: 'AUTH', transient: false,
+        error: 'API Key 无效或已过期（401）。请确认填的是 platform.deepseek.com「API keys」里 sk- 开头的密钥，而不是「平台 Token」；若刚复制请重新完整复制后再保存。' +
+               (serverMsg ? '（服务器：' + serverMsg.slice(0, 120) + '）' : ''),
       }
     }
-    let data
-    try { data = await res.json() } catch (err) {
-      return { ok: false, code: 'PARSE', transient: false, error: '余额接口返回不是合法 JSON' }
-    }
-    const info = pickBalanceInfo(data && data.balance_infos)
-    if (!info || info.total_balance === undefined) {
-      return { ok: false, code: 'SHAPE', transient: false, error: '余额接口返回结构异常' }
-    }
-    // 赠送/充值分项余额：赠送额可能整块到期被收回，记账时要与真实消费区分开
-    const numOrNull = (v) => {
-      const n = Number(v)
-      return v !== undefined && v !== null && v !== '' && isFinite(n) ? n : null
+    if (r.status < 500) {
+      return {
+        ok: false, code: 'HTTP', transient: false,
+        error: '余额接口返回 HTTP ' + r.status + (serverMsg ? '：' + serverMsg : ''),
+      }
     }
     return {
-      ok: true,
-      totalBalance: Number(info.total_balance),
-      grantedBalance: numOrNull(info.granted_balance),
-      toppedUpBalance: numOrNull(info.topped_up_balance),
-      currency: String(info.currency || 'CNY'),
-      updatedAt: new Date().toISOString(),
+      ok: false, code: 'HTTP', transient: true,
+      error: '余额接口暂时不可用（HTTP ' + r.status + (serverMsg ? '：' + serverMsg : '') + '）',
     }
   }
-  return { ok: false, code: 'HTTP', transient: true, error: '余额接口请求失败，请稍后重试' }
+  const res = r.res
+  let data
+  try { data = await res.json() } catch (err) {
+    return { ok: false, code: 'PARSE', transient: false, error: '余额接口返回不是合法 JSON' }
+  }
+  const info = pickBalanceInfo(data && data.balance_infos)
+  if (!info || info.total_balance === undefined) {
+    return { ok: false, code: 'SHAPE', transient: false, error: '余额接口返回结构异常' }
+  }
+  // 赠送/充值分项余额：赠送额可能整块到期被收回，记账时要与真实消费区分开
+  const numOrNull = (v) => {
+    const n = Number(v)
+    return v !== undefined && v !== null && v !== '' && isFinite(n) ? n : null
+  }
+  return {
+    ok: true,
+    totalBalance: Number(info.total_balance),
+    grantedBalance: numOrNull(info.granted_balance),
+    toppedUpBalance: numOrNull(info.topped_up_balance),
+    currency: String(info.currency || 'CNY'),
+    updatedAt: new Date().toISOString(),
+  }
 }
 
 // ──────────────────────────────────────────────
@@ -176,57 +174,51 @@ async function fetchPlatformUsage(platformToken, custom) {
   // 错误一律中文化、不透出英文码/原始异常（对齐 fetchBalanceWith）：调用方（getTodayModels /
   // testPlatformToken）把这些 error 直接展示给用户，'http 401' / 'fetch failed' 用户看不懂。
   // 5xx 与网络失败重试一次（与余额接口同口径）；空态仍返回硬契约 'no usage'，由调用方判为空列表。
-  for (let attempt = 0; attempt < 2; attempt++) {
-    let res
-    try {
-      res = await fetch(url, {
-        headers: { Authorization: 'Bearer ' + token },
-        signal: AbortSignal.timeout(15000),
-      })
-    } catch (err) {
-      if (attempt === 0) { await new Promise((r) => setTimeout(r, 500)); continue }
+  const r = await http.request(url, { headers: { Authorization: 'Bearer ' + token } }, {
+    timeout: USAGE_TIMEOUT_MS, retries: 1,
+  })
+  if (!r.ok) {
+    if (r.status === 0) {
       return { ok: false, code: 'NET', transient: true, error: '网络请求失败（超时或无法连接用量接口），请检查网络/代理后重试' }
     }
-    if (!res.ok) {
-      // 读取平台返回的具体错误：{"error":{"message":"..."}}
-      let serverMsg = ''
-      try {
-        const j = await res.json()
-        serverMsg = (j && j.error && j.error.message) ? String(j.error.message) : ''
-      } catch (err) {
-        try { serverMsg = (await res.text()).slice(0, 160) } catch (e2) {}
-      }
-      if (res.status === 401) {
-        return {
-          ok: false, code: 'AUTH', transient: false,
-          error: '平台 Token 无效或已过期（401）。请确认填的是 platform.deepseek.com「API keys」里 sk- 开头的密钥；若刚复制请重新完整复制后再保存。' +
-                 (serverMsg ? '（服务器：' + serverMsg.slice(0, 120) + '）' : ''),
-        }
-      }
-      if (res.status < 500) {
-        return {
-          ok: false, code: 'HTTP', transient: false,
-          error: '用量接口返回 HTTP ' + res.status + (serverMsg ? '：' + serverMsg : ''),
-        }
-      }
-      if (attempt === 0) { await new Promise((r) => setTimeout(r, 500)); continue }
+    const res = r.res || { json: async () => ({}), text: async () => '' }
+    // 读取平台返回的具体错误：{"error":{"message":"..."}}
+    let serverMsg = ''
+    try {
+      const j = await res.json()
+      serverMsg = (j && j.error && j.error.message) ? String(j.error.message) : ''
+    } catch (err) {
+      try { serverMsg = (await res.text()).slice(0, 160) } catch (e2) {}
+    }
+    if (r.status === 401) {
       return {
-        ok: false, code: 'HTTP', transient: true,
-        error: '用量接口暂时不可用（HTTP ' + res.status + (serverMsg ? '：' + serverMsg : '') + '），请稍后重试',
+        ok: false, code: 'AUTH', transient: false,
+        error: '平台 Token 无效或已过期（401）。请确认填的是 platform.deepseek.com「API keys」里 sk- 开头的密钥；若刚复制请重新完整复制后再保存。' +
+               (serverMsg ? '（服务器：' + serverMsg.slice(0, 120) + '）' : ''),
       }
     }
-    let data
-    try { data = await res.json() } catch (err) {
-      return { ok: false, code: 'PARSE', transient: false, error: '用量接口返回不是合法 JSON' }
+    if (r.status < 500) {
+      return {
+        ok: false, code: 'HTTP', transient: false,
+        error: '用量接口返回 HTTP ' + r.status + (serverMsg ? '：' + serverMsg : ''),
+      }
     }
-    const u = computeTodayUsage(data, custom)
-    if (u && isFinite(u.amount)) {
-      return { ok: true, amount: u.amount, tokens: u.tokens, byModel: u.byModel }
+    return {
+      ok: false, code: 'HTTP', transient: true,
+      error: '用量接口暂时不可用（HTTP ' + r.status + (serverMsg ? '：' + serverMsg : '') + '），请稍后重试',
     }
-    // 空态：接口连通、当天没消耗。这个字面量是硬契约，调用方（getTodayModels / testPlatformToken）按它判空
-    return { error: 'no usage' }
   }
-  return { ok: false, code: 'HTTP', transient: true, error: '用量接口请求失败，请稍后重试' }
+  const res = r.res
+  let data
+  try { data = await res.json() } catch (err) {
+    return { ok: false, code: 'PARSE', transient: false, error: '用量接口返回不是合法 JSON' }
+  }
+  const u = computeTodayUsage(data, custom)
+  if (u && isFinite(u.amount)) {
+    return { ok: true, amount: u.amount, tokens: u.tokens, byModel: u.byModel }
+  }
+  // 空态：接口连通、当天没消耗。这个字面量是硬契约，调用方（getTodayModels / testPlatformToken）按它判空
+  return { error: 'no usage' }
 }
 
 // ──────────────────────────────────────────────
@@ -325,40 +317,31 @@ function modelBusinessError(data) {
   return ''
 }
 async function fetchModelJson(url, model, key) {
-  for (let attempt = 0; attempt < 2; attempt++) {
-    let res
-    try {
-      res = await fetch(url, {
-        headers: modelAuthHeaders(model, key),
-        signal: AbortSignal.timeout(MODEL_FETCH_TIMEOUT_MS),
-      })
-    } catch (err) {
-      if (attempt === 0) { await new Promise((r) => setTimeout(r, 500)); continue }
-      return { ok: false, error: '网络请求失败（超时或无法连接），请检查网络/代理' }
+  // 网络异常 / 5xx / 429 重试一次（401/403 与其它 4xx 不重试，重试也是白重试）
+  const r = await http.request(url, { headers: modelAuthHeaders(model, key) }, {
+    timeout: MODEL_FETCH_TIMEOUT_MS, retries: 1,
+  })
+  if (!r.ok) {
+    if (r.status === 0) return { ok: false, error: '网络请求失败（超时或无法连接），请检查网络/代理' }
+    if (r.status === 401 || r.status === 403) {
+      return { ok: false, error: 'API Key 无效或无权限（HTTP ' + r.status + '）' }
     }
-    if (!res.ok) {
-      if (res.status === 401 || res.status === 403) {
-        return { ok: false, error: 'API Key 无效或无权限（HTTP ' + res.status + '）' }
-      }
-      if (res.status >= 500 && attempt === 0) { await new Promise((r) => setTimeout(r, 500)); continue }
-      return { ok: false, error: '接口返回 HTTP ' + res.status }
-    }
-    try {
-      const data = await res.json()
-      // 200 不代表业务成功：先把 body 里的错误提炼出来，别让真原因埋进「路径取不到数值」
-      const bizErr = modelBusinessError(data)
-      if (bizErr) {
-        // 模板可带 errorHint：像智谱「当前用户不存在coding plan」这类报错是套餐形态不匹配，
-        // 不是用户填错，光看上游原文不知道怎么办 ⇒ 附一句定向提示
-        const hint = MODEL_TEMPLATES[model.tpl] && MODEL_TEMPLATES[model.tpl].errorHint
-        return { ok: false, error: bizErr + (hint ? '（' + hint + '）' : '') }
-      }
-      return { ok: true, data }
-    } catch (err) {
-      return { ok: false, error: '接口返回不是合法 JSON' }
-    }
+    return { ok: false, error: '接口返回 HTTP ' + r.status }
   }
-  return { ok: false, error: '接口请求失败，请稍后重试' }
+  try {
+    const data = await r.res.json()
+    // 200 不代表业务成功：先把 body 里的错误提炼出来，别让真原因埋进「路径取不到数值」
+    const bizErr = modelBusinessError(data)
+    if (bizErr) {
+      // 模板可带 errorHint：像智谱「当前用户不存在coding plan」这类报错是套餐形态不匹配，
+      // 不是用户填错，光看上游原文不知道怎么办 ⇒ 附一句定向提示
+      const hint = MODEL_TEMPLATES[model.tpl] && MODEL_TEMPLATES[model.tpl].errorHint
+      return { ok: false, error: bizErr + (hint ? '（' + hint + '）' : '') }
+    }
+    return { ok: true, data }
+  } catch (err) {
+    return { ok: false, error: '接口返回不是合法 JSON' }
+  }
 }
 // 余额：优先用「余额字段」；若配了「已用字段」再相减（OpenRouter 只给总额度与已用）
 async function parseModelBalance(model, data, key) {
@@ -625,7 +608,7 @@ function checkUpdate(force) {
     } catch (err) {}
   }
   if (updateInFlight) return updateInFlight
-  updateInFlight = fetch(UPDATE_CHECK_URL, { signal: AbortSignal.timeout(15000) })
+  updateInFlight = fetch(UPDATE_CHECK_URL, { signal: AbortSignal.timeout(UPDATE_FETCH_TIMEOUT_MS) })
     .then((res) => {
       if (!res.ok) throw new Error('HTTP ' + res.status)
       return res.json()
