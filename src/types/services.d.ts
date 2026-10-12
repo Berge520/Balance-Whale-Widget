@@ -135,8 +135,6 @@ export interface WhaleConfig {
   models: WhaleModel[]
   // 挂件主显示的模型 id（'deepseek' = 内置）
   mainModelId: string
-  // 挂件菜单五个分组的展开状态：重开挂件 / 重载插件后保持上次的组合
-  menuGroups: { look: boolean; models: boolean; usage: boolean; timer: boolean; dsh: boolean }
   // GitHub 加速（hosts 方案）：on = 开关意图（实际是否生效以 hosts 文件里的标记块为准）；
   // ips = 可编辑 IP 表（{ domain, ip }，非法条目会在保存时被丢弃）
   ghAccelOn: boolean

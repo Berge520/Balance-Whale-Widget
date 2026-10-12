@@ -26,7 +26,7 @@ const {
   SHARED_PACK_TIMEOUT_MS, SHARED_PACK_MAX_BYTES,
 } = require('./constants')
 const { log, logErr } = require('./log')
-const { errMsg, sha256 } = require('./util')
+const { errMsg, readBodyWithProgress, sha256 } = require('./util')
 const skins = require('./skins')
 const sounds = require('./sounds')
 const dlp = require('./download-progress')
@@ -132,31 +132,9 @@ function labelOf(url, origin) {
   return '自定义加速源'
 }
 
-// 流式读取响应体，边读边把字节数写进进度。
-// ⚠️ 与 skin-packs.js#readBodyWithProgress 是同一份逻辑的两份拷贝 —— 刻意不抽公共模块：
-//    两条链路的进度「总量语义」不同（这里用 Content-Length，那边用清单预期字节），
-//    抽出来反而要传一堆开关。真要合并时注意别把上限校验（SHARED_PACK_MAX_BYTES）弄丢。
-async function readBodyWithProgress(res, onChunk) {
-  const lenHeader = Number(res.headers && res.headers.get ? res.headers.get('content-length') : 0)
-  const total = lenHeader > 0 ? lenHeader : 0
-  if (!res.body || typeof res.body.getReader !== 'function') {
-    const buf = Buffer.from(await res.arrayBuffer())
-    if (onChunk) onChunk(buf.length, total)
-    return buf
-  }
-  const reader = res.body.getReader()
-  const chunks = []
-  let received = 0
-  for (;;) {
-    const step = await reader.read()
-    if (step.done) break
-    const c = Buffer.from(step.value)
-    chunks.push(c)
-    received += c.length
-    if (onChunk) onChunk(received, total)
-  }
-  return Buffer.concat(chunks)
-}
+// 流式读取响应体、边读边报进度：实现已收进 util.readBodyWithProgress
+// （原与 skin-packs.js 各有一份逐字相同的拷贝，本轮合并；上限校验 SHARED_PACK_MAX_BYTES
+//  留在下方调用点，不会因合并丢失）。Content-Length 缺失时 total 记 0、显示不确定进度条。
 
 // 从单个源取单张字节并校验。任何一步不过都抛错（供候选链顺延到下一个源）。
 async function fetchFrom(url, wantSha, fetchImpl) {

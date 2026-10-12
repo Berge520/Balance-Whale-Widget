@@ -119,15 +119,15 @@ test('挂件视觉类配置键在消费方（挂件页 / 宿主建窗）里都�
   // 形态各异（readConfig().<k>、参数透传等），按键名一律要求「在消费方文件里有读点」
   // 会误报十几条 —— 那正是上游脚本要配 ALLOW 白名单的原因。收窄后本表天然零白名单、免维护。
   //
-  // 表内取舍：以「用户可调、且调了直接影响挂件外观/行为」为准；因此含 menuGroups(右键菜单分组)、
-  // timerMode/timerAt/timerRemindSec(计时模式) 这类偏行为项 —— 它们同样由挂件页消费，
+  // 表内取舍：以「用户可调、且调了直接影响挂件外观/行为」为准；因此含 timerMode/timerAt/timerRemindSec(计时模式)
+  // 这类偏行为项 —— 它们同样由挂件页消费，
   // 且「调了没用」的观感与视觉项一致。少数键在 App.vue 里搜不到（配置经 services.saveConfig
   // 的其它路径写入），这不影响本测试：它只查「消费方有没有读」，不查「设置页怎么写」。
   const WIDGET_VISUAL_KEYS = [
     // 外观 / 尺寸
     'scale', 'opacity', 'skin', 'theme', 'passThrough', 'dragLock', 'onTop', 'avoidTaskbar',
     'snapMode', 'snapRatio', 'edgeTop', 'edgeRight', 'edgeBottom', 'edgeLeft',
-    'scrollGapOn', 'scrollGapPx', 'menuBtn', 'menuGroups', 'menuGroupsRev',
+    'scrollGapOn', 'scrollGapPx', 'menuBtn',
     // 声音
     'vol', 'soundOn', 'soundSet',
     // 气泡 / 台词

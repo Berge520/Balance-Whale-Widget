@@ -2,6 +2,13 @@
 // 原先这些同名同体的实现散在 App.vue / AssetsView.vue / CodexView.vue / useDsh.ts / UsageView.vue，
 // 一处改了另一处不改就会漂移（历史上柱状图的 min 就分叉成 2/2/3），统一收在这里。
 
+// 两位补零（9 → '09'）。各卡拼时间戳（连测时间 / 素材时间 / 重置倒计时）都要用，
+// 原先 AssetsView 叫 pad2（三目版）、App 与 ModelsView 叫 p2（padStart 版），同物异名，
+// 收成一处。入参恒为非负整数（时/分/秒/月/日），两种写法等价。
+export function pad2(n: number): string {
+  return String(n).padStart(2, '0')
+}
+
 // 体积展示：元信息里的 size 由宿主读取时派生，文件缺失为 0。<=0 一律 '0 KB'，
 // 大于 0 但不足 1KB 也至少显示 '1 KB'（不让「有文件却显示 0 KB」出现）。
 export function fmtBytes(n: number): string {

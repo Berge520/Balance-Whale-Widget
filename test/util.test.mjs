@@ -334,3 +334,57 @@ test('hhmm 输出本地 HH:mm，单位数补零', () => {
   const midnight = new Date(2026, 8, 22, 0, 0, 0).getTime()
   assert.equal(util.hhmm(midnight), '00:00')
 })
+
+// ── isIpv4 ──
+// 原 store.js 与 hosts.js 各一份，合并后统一取带 String() 归一的那版：非字符串输入
+// （数字形式 IP、数字段）也应按其字符串形态判定，而不是因类型隐式转换放过。
+test('isIpv4 接受合法点分四段，拒绝越界 / 段数不对 / 带前缀零之外的脏值', () => {
+  assert.equal(util.isIpv4('127.0.0.1'), true)
+  assert.equal(util.isIpv4('0.0.0.0'), true)
+  assert.equal(util.isIpv4('255.255.255.255'), true)
+  assert.equal(util.isIpv4('256.0.0.1'), false)     // 段越界
+  assert.equal(util.isIpv4('1.2.3'), false)         // 段数不足
+  assert.equal(util.isIpv4('1.2.3.4.5'), false)     // 段数过多
+  assert.equal(util.isIpv4('a.b.c.d'), false)
+  assert.equal(util.isIpv4(''), false)
+  assert.equal(util.isIpv4(null), false)
+  assert.equal(util.isIpv4(undefined), false)
+})
+
+test('isIpv4 对数字型输入按字符串形态判定（String() 归一的用意）', () => {
+  // 数字 1 的字符串形态是 '1'，不是合法四段 → false（旧 store 版不包 String 也得到 false，
+  // 但旧版传给 exec 的是数字，靠隐式转换；此处显式归一后行为一致且更明确）
+  assert.equal(util.isIpv4(1), false)
+  assert.equal(util.isIpv4(' 127.0.0.1 '), false) // 不做 trim，带空白即非法
+})
+
+// ── readBodyWithProgress ──
+// 用假响应对象覆盖两条分支：有 body.getReader 的流式路径、无 body 的退回路径。
+test('readBodyWithProgress 流式读取并按 content-length 报进度，最终拼回完整 Buffer', async () => {
+  const chunks = [Buffer.from('hello '), Buffer.from('world')]
+  let i = 0
+  const fakeRes = {
+    headers: { get: (k) => (k === 'content-length' ? '11' : null) },
+    body: {
+      getReader: () => ({
+        read: async () => (i < chunks.length ? { done: false, value: chunks[i++] } : { done: true }),
+      }),
+    },
+  }
+  const seen = []
+  const buf = await util.readBodyWithProgress(fakeRes, (received, total) => seen.push([received, total]))
+  assert.equal(buf.toString('utf8'), 'hello world')
+  assert.deepEqual(seen, [[6, 11], [11, 11]]) // 两块各报一次，total 恒为 11
+})
+
+test('readBodyWithProgress 无 body 流时退回一次性读取，total 缺失记 0', async () => {
+  const fakeRes = {
+    headers: { get: () => null },
+    // 注意：不能返回 Buffer.from('abc').buffer —— Buffer 走共享池，底层 ArrayBuffer 的 byteLength 恒为 65536
+    arrayBuffer: async () => Uint8Array.from([97, 98, 99]).buffer,
+  }
+  const seen = []
+  const buf = await util.readBodyWithProgress(fakeRes, (received, total) => seen.push([received, total]))
+  assert.equal(buf.length, 3)
+  assert.deepEqual(seen, [[3, 0]]) // chunked 响应拿不到 length → total 0
+})

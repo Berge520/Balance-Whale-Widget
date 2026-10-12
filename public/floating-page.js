@@ -119,19 +119,14 @@
   function menuLabel(text) { var s = document.createElement('span'); s.className = 'dshwv-menu-label'; s.textContent = text; return s; }
   function menuRow() { var r = document.createElement('div'); r.className = 'dshwv-menu-row'; return r; }
 
-  // 菜单分组的展开状态（key → 布尔）：随 config.menuGroups 落盘，重开挂件后保持上次的组合。
-  // 全部组默认收起：菜单一打开就是一屏、每组的标题都可扫到，想用哪组再点开，
-  // 免得「默认展开 models」把别的组挤到折叠线以下、找起来费劲
-  var menuGroups = { look: false, models: false, usage: false, timer: false, dsh: false };
-  // 展开组合的「版本」：改了某组默认展开态 / 删掉某组就 +1，用来把老配置里存过的旧值迁移掉（见 onInit）。
-  // v3：删掉 timer 组内的子折叠 timerAdv，老配置里残留的该键不再被读取
-  // v4：默认全收起；老配置里存过 models:true 的，一次性迁移掉（见 onInit 的 needGroupsMigration）
-  var MENU_GROUPS_REV = 4;
+  // 菜单分组：**全部默认折叠，且每次打开菜单都重置成全折叠** —— 展开组合不落盘、不记忆，
+  // 无论上次展开过哪一组，重新打开都回到「一屏可扫、每组标题都看得见」的收起态（见 toggleMenu）。
+  // 这样菜单高度恒定、不会因为上次展开的组把别的组挤到折叠线以下。
   var menuGroupEls = {};
 
-  // 菜单分组：点标题折叠/展开。只默认展开常用组，避免菜单过长
-  // key：落盘标识；onExpand：展开时的回调（dsh 组用它按需拉状态：收着时状态行看不见，不必白探一次端口）
-  function menuGroup(key, title, defaultOpen, onExpand) {
+  // 菜单分组：点标题折叠/展开。
+  // key：标识（menuGroupEls 的键）；onExpand：展开时的回调（dsh 组用它按需拉状态：收着时状态行看不见，不必白探一次端口）
+  function menuGroup(key, title, onExpand) {
     var box = document.createElement('div');
     box.className = 'dshwv-group';
     var head = document.createElement('button');
@@ -153,7 +148,8 @@
     inner.className = 'dshwv-group-inner';
     bodyEl.appendChild(inner);
     box.appendChild(head); box.appendChild(bodyEl);
-    var open = typeof menuGroups[key] === 'boolean' ? menuGroups[key] : !!defaultOpen;
+    // 出厂即收起（展开态不落盘、不记忆，见上面的说明）
+    var open = false;
     function apply() {
       box.classList.toggle('dshwv-group-open', open);
       // 展开/收起在 CSS 里用 grid-template-rows 0fr↔1fr 过渡（见 floating.css）。
@@ -168,9 +164,8 @@
     head.addEventListener('click', function (e) {
       e.stopPropagation();
       open = !open;
-      menuGroups[key] = open;
       apply();
-      saveCfg(); // 记住展开组合：下次开菜单不用重新点开常用组
+      // 不再 saveCfg()：展开态是纯展示态、不落盘（每次开菜单都重置，见 toggleMenu）
       if (open && typeof onExpand === 'function') { try { onExpand() } catch (err) {} }
       positionMenu(); // 高度变化后重新夹取，保证菜单始终在按钮上方
     });
@@ -179,7 +174,6 @@
       el: box,
       // 暴露 inner：各组的行都 append 到这里（bodyEl 只是高度动画用的 grid 外壳）
       body: inner,
-      // 配置回推（设置页 / 别的窗口改过）时同步展开态；不走 saveCfg，否则自己回写自己
       setOpen: function (v) { open = !!v; apply(); },
     };
     menuGroupEls[key] = api;
@@ -552,17 +546,17 @@
   var rowDshCmd = menuRow();
   rowDshCmd.appendChild(menuLabel('命令')); rowDshCmd.appendChild(dshCmdEl);
 
-  // 分组：常用组默认展开，其余折叠，菜单整体高度约减半。
-  // look 组默认收起：里面 7 行控件（大小 / 音效 / 音量 / 透明度 / 气泡 / 报时 / 锁定）
-  // 一次铺开会把菜单塞满，而打开菜单最高频的动作是切模型 —— 见下面 models 组
-  var groupLook = menuGroup('look', '外观与音效', false);
+  // 分组：全部默认折叠，每次打开菜单都重置为全折叠（见 toggleMenu），菜单高度恒定。
+  // look 组有 7 行控件（大小 / 音效 / 音量 / 透明度 / 气泡 / 报时 / 锁定），
+  // 一次铺开会把菜单塞满，故与其他组一样收起、想用再点开
+  var groupLook = menuGroup('look', '外观与音效');
   groupLook.body.appendChild(row1); groupLook.body.appendChild(row2); groupLook.body.appendChild(row3);
   groupLook.body.appendChild(rowOpacity);
   groupLook.body.appendChild(row6); groupLook.body.appendChild(row7); groupLook.body.appendChild(row8);
-  var groupUsage = menuGroup('usage', '用量与峰谷', false);
+  var groupUsage = menuGroup('usage', '用量与峰谷');
   groupUsage.body.appendChild(row4); groupUsage.body.appendChild(row5);
   groupUsage.body.appendChild(rowRemind);
-  var groupTimer = menuGroup('timer', '计时', false);
+  var groupTimer = menuGroup('timer', '计时');
   groupTimer.body.appendChild(rowTimer); groupTimer.body.appendChild(rowTimerDown);
   groupTimer.body.appendChild(rowTimerAt);
   groupTimer.body.appendChild(rowNotify);
@@ -571,13 +565,13 @@
   // 现在无条件建组，再用「这台机器上有没有 dsh」决定显隐：探测到已安装（source 非空）
   // 或正在运行（running / external）才显示，没装过 dsh 的普通用户依旧看不到这一节。
   // 初始先藏起来，等首帧探测结果回来再决定 —— 否则没装 dsh 的用户会看到它闪一下
-  var groupDsh = menuGroup('dsh', 'dsh', false, function () { dshSend('status') });
+  var groupDsh = menuGroup('dsh', 'dsh', function () { dshSend('status') });
   groupDsh.body.appendChild(rowDsh); groupDsh.body.appendChild(rowDshPage);
   groupDsh.body.appendChild(rowDshState); groupDsh.body.appendChild(rowDshCmd);
   groupDsh.el.style.display = 'none';
 
   // —— 多厂商模型：点一行即把它设为挂件主显示 ——
-  var groupModels = menuGroup('models', '模型', false);
+  var groupModels = menuGroup('models', '模型');
   var modelsListEl = document.createElement('div');
   modelsListEl.className = 'dshwv-models';
   var rowModelsRefresh = menuRow();
@@ -1339,8 +1333,7 @@
   // 深夜(<6)/清晨(6-10)/白天(11-22)/深夜前(>=23)；每池抽一条，{t} 换成当前时间
   function timeLabel() {
     var d = new Date();
-    var p2 = function (n) { return String(n).padStart(2, '0'); };
-    var t = p2(d.getHours()) + ':' + p2(d.getMinutes());
+    var t = pad2(d.getHours()) + ':' + pad2(d.getMinutes());
     var h = d.getHours();
     var pool;
     if (h < 6) pool = QUOTES.timeEarly;
@@ -1768,6 +1761,7 @@
   timerDoneActions.appendChild(timerAgainBtn);
   timerDoneActions.appendChild(timerDoneBtn);
   document.body.appendChild(timerDoneActions);
+  // 两位补零：报时 / 计时 / 重置时刻统一共用（原先 timeLabel 内另抄了一份 p2）
   function pad2(n) { return n < 10 ? '0' + n : String(n); }
   // 时长统一显示成 时:分:秒（满一分钟起就带小时位，避免正计时走成 90:00 这种读不出小时的形式）
   function fmtClock(ms) {
@@ -2551,10 +2545,6 @@
       timerRemindSec: timerRemindSec,
       timerBubblePin: timerBubblePin,
       timerBubbleOnly: timerBubbleOnly,
-      // 分组展开组合（整份提交；宿主侧逐组合并，不会影响其余组）
-      menuGroups: menuGroups,
-      // 带上版本号，下次启动才不会再触发一次 look 迁移（见 onInit）
-      menuGroupsRev: MENU_GROUPS_REV,
     });
   }
   // 拖动中的实时预览：rAF 合并，只通知宿主改窗口几何，不写存储、不回推
@@ -2756,20 +2746,8 @@
         applyMenuBtnAtLast(); // applyMenuBtn 的 menuBtnEnabled=false 分支会移除 visible
       }
     }
-    // 菜单分组展开态：设置页 / 别的窗口改过就同步过来；不在这里回写（saveCfg），
-    // 否则自己刚存的展开组合会被自己再提交一遍。
-    // 组的「默认展开态」改过之后（v3 look 收、v4 models 收），老配置里存过的旧默认会盖住新默认，
-    // 看起来像改动没生效 —— 版本号对不上时整表按新默认收起一次；之后用户的点击都会带上 rev 正常生效
-    var needGroupsMigration = cfg.menuGroupsRev !== MENU_GROUPS_REV;
-    if (cfg.menuGroups && typeof cfg.menuGroups === 'object') {
-      Object.keys(menuGroupEls).forEach(function (k) {
-        if (needGroupsMigration) { menuGroups[k] = false; menuGroupEls[k].setOpen(false); return; }
-        if (typeof cfg.menuGroups[k] !== 'boolean') return;
-        menuGroups[k] = cfg.menuGroups[k];
-        menuGroupEls[k].setOpen(cfg.menuGroups[k]);
-      });
-      positionMenu(); // 展开组合变了，菜单高度跟着变
-    }
+    // 菜单分组展开态**不从配置回填**：展开组合不落盘、不记忆，每次开菜单都重置（见 toggleMenu）。
+    // 设置页 / 别的窗口没有该键的入口，无需同步。
     if (typeof cfg.lowAlertOn === 'boolean') lowAlertOn = cfg.lowAlertOn;
     if (typeof cfg.lowAlertAmount === 'number' && isFinite(cfg.lowAlertAmount)) lowAlertAmount = Math.max(0, cfg.lowAlertAmount);
     // 阈值/开关变化后同步「已低于阈值」状态，避免下一次刷新把旧状态当越线又弹一次
@@ -3103,14 +3081,16 @@
     menuOpen = !menuOpen;
     if (menuOpen) {
       menuDirLocked = false; // 新一轮打开：按当前几何重新决定展开方向（见 positionMenu）
+      // 每次打开菜单一律回到全折叠：展开组合不落盘、不记忆（见 menuGroup 说明），
+      // 无论上次展开过哪一组，重开都是「一屏可扫、每组标题都看得见」的收起态。
+      // 必须在 positionMenu 之前做：菜单需按折叠后的高度重新量取自然高度、定展开方向
+      Object.keys(menuGroupEls).forEach(function (k) { menuGroupEls[k].setOpen(false); });
       // 点开菜单＝最强交互信号，无条件亮起按钮。
       // positionMenu 紧接着要读它的 getBoundingClientRect 当锚点 —— 先亮起再定位最稳。
       // 不能靠位置判定：按钮压在鲸鱼轮廓顶边上沿，位置判定常判成「不在鲸鱼上」而隐藏
       forceShowMenuBtn();
       positionMenu();
       menuBox.scrollTop = 0; // 小尺寸挂件上菜单可滚动：重开时回到顶部，否则停在上次滚到的位置
-      // dsh 分组收着时状态行看不见，不必白探一次 dsh 端口；展开时才拉（见 menuGroup 的 onExpand）
-      if (groupDsh.el.classList.contains('dshwv-group-open')) dshSend('status');
       // 模型列表懒加载：宿主侧有 5 分钟节流，反复开菜单不会一直打网络
       whaleApi.refreshModels(null, false);
       // 菜单里的数字不该是几分钟前的。余额侧有 25s 缓存 + 请求去重（见 preload/lib/api.js），

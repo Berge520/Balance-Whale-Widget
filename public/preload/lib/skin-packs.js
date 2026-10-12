@@ -39,7 +39,7 @@ const {
   SKIN_PACK_SHA256, SKIN_PACK_TIMEOUT_MS, SKIN_PACK_MAX_BYTES, SKIN_PACK_SKINS,
 } = require('./constants')
 const { log, logErr } = require('./log')
-const { errMsg, sha256 } = require('./util')
+const { errMsg, readBodyWithProgress, sha256 } = require('./util')
 const skins = require('./skins')
 const dlp = require('./download-progress')
 
@@ -124,38 +124,15 @@ function labelOf(url) {
   return '自定义加速源'
 }
 
-// 把响应体流式读成 Buffer，边读边累加字节数。
-//
-// ── 为什么不用 `res.arrayBuffer()` ──
-// 那样一次性读完，中间没有任何可上报的时点，设置页只能干显「正在下载…」（用户实测反馈：
+// ── 读体为什么要流式、而不是 `res.arrayBuffer()` ──
+// 一次性读完中间没有任何可上报的时点，设置页只能干显「正在下载…」（用户实测反馈：
 // 「看不见下载进度，一直显示正在下载」）。改成读 res.body 的 reader 逐块累加，
 // 才有 received / total 可报。整包 0.9MB 不大，但链路一致更重要。
-//
-// ── 为什么 Content-Length 缺失也要能跑 ──
+// 实现已收进 util.readBodyWithProgress（原与 assets-packs.js 各有一份逐字相同的拷贝，
+// 本轮合并；上限校验留在下方调用点）：
+// ── Content-Length 缺失也能跑 ──
 // 走加速代理时响应可能被重新分块（Transfer-Encoding: chunked），拿不到 Content-Length。
 // 这时 total 记 0、由读侧显示「不确定进度条」，而不是谎报百分比。
-async function readBodyWithProgress(res, onChunk) {
-  const lenHeader = Number(res.headers && res.headers.get ? res.headers.get('content-length') : 0)
-  const total = lenHeader > 0 ? lenHeader : 0
-  // 没有可读流（单测注入的假响应 / 老实现）时退回一次性读取，保证兼容
-  if (!res.body || typeof res.body.getReader !== 'function') {
-    const buf = Buffer.from(await res.arrayBuffer())
-    if (onChunk) onChunk(buf.length, total)
-    return buf
-  }
-  const reader = res.body.getReader()
-  const chunks = []
-  let received = 0
-  for (;;) {
-    const step = await reader.read()
-    if (step.done) break
-    const c = Buffer.from(step.value)
-    chunks.push(c)
-    received += c.length
-    if (onChunk) onChunk(received, total)
-  }
-  return Buffer.concat(chunks)
-}
 
 // 从单个源取包并做全部前置校验。任何一步不过都抛错（供候选链顺延到下一个源）。
 // 返回 { buf, parsed }。

@@ -1,6 +1,7 @@
 <script lang="ts" setup>
 import { computed, reactive, ref } from 'vue'
 import { msgCls, useFlash, type Flash } from '../composables/useFlash'
+import { pad2 } from '../utils/format'
 import type { WhaleModel, WhaleModelRow, WhaleModelTemplate, WhaleServices } from '../types/services'
 
 // 多厂商模型卡（余额 / 额度 / Codex 本地会话）。
@@ -217,8 +218,7 @@ async function testModelForm() {
 function resetSuffix(at?: number) {
   if (!at) return ''
   const d = new Date(at)
-  const p2 = (n: number) => String(n).padStart(2, '0')
-  return `，${d.getMonth() + 1}-${d.getDate()} ${p2(d.getHours())}:${p2(d.getMinutes())} 重置`
+  return `，${d.getMonth() + 1}-${d.getDate()} ${pad2(d.getHours())}:${pad2(d.getMinutes())} 重置`
 }
 // 余额一律按原币种显示（与挂件口径一致，不折算汇率）
 function fmtModelMoney(v: number | null | undefined, currency: string) {
@@ -250,7 +250,7 @@ function modelSubText(m: WhaleModelRow) {
   if (typeof m.todayUsage === 'number') return '今日约 ' + fmtModelMoney(m.todayUsage, m.currency)
   if (m.at) {
     const d = new Date(m.at)
-    return '更新于 ' + String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0')
+    return '更新于 ' + pad2(d.getHours()) + ':' + pad2(d.getMinutes())
   }
   return ''
 }

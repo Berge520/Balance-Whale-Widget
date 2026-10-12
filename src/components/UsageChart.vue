@@ -9,6 +9,7 @@
 // 与口径说明差异很大，不纳入本组件 —— 抽公共组件的前提是差异真的只是变量名，
 // 而不是为了复用把不同口径强行拉平。
 import { ref, computed } from 'vue'
+import { barHeightOf } from '../utils/format'
 
 const props = defineProps<{
   // 图表档位（7/14/30），由父组件持有：切换只改前端切片，不重扫数据
@@ -107,15 +108,10 @@ const emptyMsg = computed(() => props.emptyText ?? `近 ${props.range} 天没有
 
 // 占比条按「最大模型」为满格，而不是按总量占比 —— 排行榜里第一名贴满、
 // 其余按与第一名的倍数收窄，比全部挤在 0–30% 的一小段里更容易分辨。
-// 判据与柱状图一致：用 hasBars 同款的「有没有量为正」判断，全 0 时不出条。
-const modelMax = computed(() => {
-  let max = 0
-  for (const m of props.models) max = Math.max(max, Number(m.tokens) || 0)
-  return max
-})
+// 最小值 3%（与用量卡金额口径一致）：模型占比也常是零点几个百分点，太小会看不出。
+// 与柱状图同款实现（utils/format.ts 的 barHeightOf），只是数据源换成各模型用量。
 function modelBarWidth(tokens?: number) {
-  if (!modelMax.value) return '0%'
-  return Math.max(3, Math.round(((Number(tokens) || 0) / modelMax.value) * 100)) + '%'
+  return barHeightOf(props.models, tokens, 3)
 }
 </script>
 

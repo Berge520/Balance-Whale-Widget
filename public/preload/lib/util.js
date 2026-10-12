@@ -305,6 +305,43 @@ function hhmm(ts) {
   return p2(d.getHours()) + ':' + p2(d.getMinutes())
 }
 
+// ── 网络值 ──
+// IPv4 合法性判据（点分四段，每段 ≤255）。store.js 的 IP 表清洗与 hosts.js 的写入前
+// 校验原本各有一份（后者多一层 String() 归一，因为源表里 ip 可能是数字形式）。
+// 统一取**带 String() 的那版**：对合法输入判定不变，但顺带兜住「传进来不是字符串」的情况。
+function isIpv4(s) {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(String(s == null ? '' : s))
+  return !!m && m.slice(1).every((n) => Number(n) <= 255)
+}
+
+// 流式读取 fetch 响应体，边读边把已收字节数回调出去（供下载进度显示）。
+// skin-packs.js 与 assets-packs.js 原本各有一份**逐字相同**的拷贝（后者注释自承是拷贝，
+// 并担心「总量语义不同」——但其实函数体里 total 一律取 Content-Length，差异在各自调用点
+// 的上限校验常量，不在本函数，故可以安全合并）。
+// 无 Content-Length（chunked 响应）时 total 记 0，由读侧显示「不确定进度条」而不是谎报百分比；
+// 无 body 流（单测注入的假响应 / 老实现）时退回一次性 arrayBuffer 读取。
+async function readBodyWithProgress(res, onChunk) {
+  const lenHeader = Number(res.headers && res.headers.get ? res.headers.get('content-length') : 0)
+  const total = lenHeader > 0 ? lenHeader : 0
+  if (!res.body || typeof res.body.getReader !== 'function') {
+    const buf = Buffer.from(await res.arrayBuffer())
+    if (onChunk) onChunk(buf.length, total)
+    return buf
+  }
+  const reader = res.body.getReader()
+  const chunks = []
+  let received = 0
+  for (;;) {
+    const step = await reader.read()
+    if (step.done) break
+    const c = Buffer.from(step.value)
+    chunks.push(c)
+    received += c.length
+    if (onChunk) onChunk(received, total)
+  }
+  return Buffer.concat(chunks)
+}
+
 // atomicTmpPath 保持原样导出：主写是**按调用时从 module.exports 取**，
 // 所以测试替换 `require('util').atomicTmpPath` 会紧接着影响下一次主写。
 module.exports = {
@@ -323,4 +360,6 @@ module.exports = {
   atomicTmpPath,
   walkDir,
   normalizePath,
+  isIpv4,
+  readBodyWithProgress,
 }

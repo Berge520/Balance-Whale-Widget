@@ -25,7 +25,7 @@ const https = require('https')
 const { log, logErr } = require('./log')
 const { GH_DOMAINS, GH520_HOSTS_URL } = require('./constants')
 const { normIps, patchConfig, readConfig } = require('./store')
-const { errMsg } = require('./util')
+const { errMsg, isIpv4 } = require('./util')
 // psExe 只在提权写 hosts 时（运行时）用得到；顶层 require 会把整片 dsh 一族压进本模块的
 // 求值阶段。改成惰性取用，避免 hosts.js 一被加载就连带解析 300KB+。
 let dshMod = null
@@ -204,11 +204,8 @@ function hostsBackupPath() {
 }
 // 先 String(s) 再判别：来源追踪 / 源表里 ip 可能不是字符串（数字形式的 IP），
 // 直接 exec 会因类型隐式转换放过非字符串值。统一在这里转成字符串，
-// 保证调用方拿到的 ip 一定是 string（设置页侧有对应类型契约）
-function isIpv4(s) {
-  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(String(s == null ? '' : s))
-  return !!m && m.slice(1).every((n) => Number(n) <= 255)
-}
+// 保证调用方拿到的 ip 一定是 string（设置页侧有对应类型契约）。
+// 实现已收进 util（store.js 的 IP 表清洗是同一判据，两处合并）。
 
 // ──────────────────────────────────────────────
 // 按字节读写 hosts（不改变原文编码）

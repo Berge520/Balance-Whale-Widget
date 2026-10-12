@@ -100,7 +100,6 @@ const PATCH_FIXTURES = {
   quotaTotal: { quotaTotal: 88 },
   quotaReset: { quotaReset: 'never' }, tokenPrice: { tokenPrice: { on: true, cur: 'USD', rate: 7.5, hit: 1, miss: 2, out: 3 } },
   historyKeepDays: { historyKeepDays: 400 }, dshBackupKeep: { dshBackupKeep: 33 },
-  menuGroups: { menuGroups: { look: true } }, menuGroupsRev: { menuGroupsRev: 7 },
   ghAccelOn: { ghAccelOn: true }, ghAccelIps: { ghAccelIps: [{ domain: 'github.com', ip: '1.2.3.4' }] },
   ghAccelRefreshedAt: { ghAccelRefreshedAt: 1700000000000 }, ghAccelSrc: { ghAccelSrc: { doh: false } },
   skinPackSrc: { skinPackSrc: 'https://example.com/' },

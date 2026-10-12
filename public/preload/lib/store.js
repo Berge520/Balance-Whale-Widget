@@ -7,16 +7,13 @@ const {
   NEWEST_VERSION, DSH_PORT_DEFAULT, SKIN_PACK_PREFIX_MAX,
 } = require('./constants')
 const { logErr } = require('./log')
-const { errMsg } = require('./util')
+const { errMsg, isIpv4 } = require('./util')
 
 // GitHub 加速 IP 表归一化：domain 去空白转小写限长、ip 必须是合法 IPv4，非法条目丢弃。
 // 传 null/非数组 = 空表（不再内置 IP 快照：没有拿得到新鲜 IP 的途径时，宁可不写 hosts 也不写一批
 // 可能过时的地址——写入前探测会把不可达的滤掉，真正生效的只有当天可达的那些）；
 // hosts.js 的写块 / 刷新结果也用它清洗（IP 表存进配置一起走备份/恢复）。
-function isIpv4(s) {
-  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(s)
-  return !!m && m.slice(1).every((n) => Number(n) <= 255)
-}
+// isIpv4 已收进 util（与 hosts.js 同物异名，统一取带 String() 归一的那版）。
 function normIps(v) {
   if (!Array.isArray(v)) return []
   const out = []
@@ -714,29 +711,6 @@ const SNAP_RATIO_DEFAULT = 25
 // 设置页拿不到宿主常量，App.vue 里有一份同值副本，由 scripts/check-shared.mjs 比对
 const SCROLL_GAP_DEFAULT = 17
 
-// 挂件菜单的分组展开状态（每组一个布尔）。落配置是为了重开挂件 / 重载插件后
-// 保持用户上次的展开组合，而不是每次都回到默认那两组。
-// 默认只展开 models（切模型最高频）；look 组有 7 行控件，展开会把菜单塞满，故默认收起。
-//
-// menuGroupsRev 是「默认展开态」的版本号：改了上面任一组的默认值 / 删掉某组就 +1。
-// 页面侧（floating-page.js）在配置里读到旧版本号时，会把受影响的组强制回到新默认，
-// 否则老配置里存过的旧默认值会一直盖着新默认值，看起来像改动没生效。
-// （v3 起 timer 组内不再有 timerAdv 子折叠，该键已从表里删掉；
-//   v4 起全部组默认收起，菜单一屏可见，避免默认展开的组把别的组挤出视野）
-const MENU_GROUPS_DEFAULT = { look: false, models: false, usage: false, timer: false, dsh: false }
-function normMenuGroups(v) {
-  const p = v && typeof v === 'object' ? v : {}
-  const out = {}
-  Object.keys(MENU_GROUPS_DEFAULT).forEach((k) => {
-    out[k] = typeof p[k] === 'boolean' ? p[k] : MENU_GROUPS_DEFAULT[k]
-  })
-  return out
-}
-
-function normMenuGroupsRev(v) {
-  const n = Math.round(clampNum(v, 0, 1e6, 0))
-  return n
-}
 // 提醒音独立音量（low/budget/peak/pass 四类提醒音，press/release 音色音不在此列）：
 // vol = 音量 0-1；volSet = 用户是否显式设置过。必须用布尔位区分「没动过」和「恰好设成同值」
 // ——配置每次保存都整体写盘，无法从值本身推断意图。volSet=false 时播放跟随全局 vol。
@@ -756,7 +730,7 @@ function normAlertVols(v, dft) {
   return out
 }
 function defaultConfig() {
-  return { scale: 1.3, vol: 0.9, soundOn: true, soundSet: 'duck', usageMode: 'ledger', peakMode: 'default', peakRemindOn: true, bubbleOn: true, menuBtn: true, onTop: true, lowAlertOn: true, lowAlertAmount: LOW_ALERT_BY_CURRENCY.CNY, budgetOn: false, budgetAmount: 0, dropAlertOn: false, dropAlertAmount: 5, remindSec: 8, quietOn: false, quietFrom: '23:00', quietTo: '07:00', timeBubbleOn: true, updateCheckOn: false, dragLock: false, bubbleDwell: 5, dragLines: null, tapAdvance: false, enterMode: 'both', timerNotifyOn: true, timerMailOn: true, timerPersistOn: true, timerMode: 'off', timerSec: 1500, timerAt: '07:30', timerNote: '', timerBreakMin: 5, timerRemindSec: 8, timerBubblePin: true, timerBubbleOnly: true, guideDone: false, dshNodeDir: '', dshKeepAlive: false, dshPort: DSH_PORT_DEFAULT, dshRegistry: '', dshVersion: '', dshReinstall: false, dshNoOpen: true, dshMarketUrl: '', dshMarketMirror: true, dshMarketRegistry: '', dshMarketOfficial: false, dshExportCred: false, dshExportNoMod: true, avoidTaskbar: true, edgeTop: 0, edgeRight: 0, edgeBottom: 0, edgeLeft: 0, scrollGapOn: false, scrollGapPx: SCROLL_GAP_DEFAULT, snapMode: 'ratio', snapRatio: SNAP_RATIO_DEFAULT, opacity: 100, passThrough: false, skin: 'DSniang1', theme: 'default', uiMode: 'auto', bubble: normBubble(null, null, null), alerts: normAlerts(null), alertVols: normAlertVols(null), quotaTotal: 0, quotaReset: 'monthly', tokenPrice: normTokenPrice(null), historyKeepDays: HISTORY_KEEP_DEFAULT, models: [], mainModelId: DEFAULT_MAIN_MODEL, dshBackupKeep: DSB_KEEP_DEFAULT, menuGroups: normMenuGroups(null), menuGroupsRev: 0, ghAccelOn: false, ghAccelIps: normIps(null), ghAccelRefreshedAt: 0, ghAccelSrc: normGhAccelSrc(null), skinPackSrc: '', randomIncludeBuiltin: true, notifySystemOn: true, notifyMailOn: false, mailFrom: '', mailTo: '', mailFromName: '小鲸鱼余额挂件', mailSubjectPrefix: '[小鲸鱼余额挂件]' }
+  return { scale: 1.3, vol: 0.9, soundOn: true, soundSet: 'duck', usageMode: 'ledger', peakMode: 'default', peakRemindOn: true, bubbleOn: true, menuBtn: true, onTop: true, lowAlertOn: true, lowAlertAmount: LOW_ALERT_BY_CURRENCY.CNY, budgetOn: false, budgetAmount: 0, dropAlertOn: false, dropAlertAmount: 5, remindSec: 8, quietOn: false, quietFrom: '23:00', quietTo: '07:00', timeBubbleOn: true, updateCheckOn: false, dragLock: false, bubbleDwell: 5, dragLines: null, tapAdvance: false, enterMode: 'both', timerNotifyOn: true, timerMailOn: true, timerPersistOn: true, timerMode: 'off', timerSec: 1500, timerAt: '07:30', timerNote: '', timerBreakMin: 5, timerRemindSec: 8, timerBubblePin: true, timerBubbleOnly: true, guideDone: false, dshNodeDir: '', dshKeepAlive: false, dshPort: DSH_PORT_DEFAULT, dshRegistry: '', dshVersion: '', dshReinstall: false, dshNoOpen: true, dshMarketUrl: '', dshMarketMirror: true, dshMarketRegistry: '', dshMarketOfficial: false, dshExportCred: false, dshExportNoMod: true, avoidTaskbar: true, edgeTop: 0, edgeRight: 0, edgeBottom: 0, edgeLeft: 0, scrollGapOn: false, scrollGapPx: SCROLL_GAP_DEFAULT, snapMode: 'ratio', snapRatio: SNAP_RATIO_DEFAULT, opacity: 100, passThrough: false, skin: 'DSniang1', theme: 'default', uiMode: 'auto', bubble: normBubble(null, null, null), alerts: normAlerts(null), alertVols: normAlertVols(null), quotaTotal: 0, quotaReset: 'monthly', tokenPrice: normTokenPrice(null), historyKeepDays: HISTORY_KEEP_DEFAULT, models: [], mainModelId: DEFAULT_MAIN_MODEL, dshBackupKeep: DSB_KEEP_DEFAULT, ghAccelOn: false, ghAccelIps: normIps(null), ghAccelRefreshedAt: 0, ghAccelSrc: normGhAccelSrc(null), skinPackSrc: '', randomIncludeBuiltin: true, notifySystemOn: true, notifyMailOn: false, mailFrom: '', mailTo: '', mailFromName: '小鲸鱼余额挂件', mailSubjectPrefix: '[小鲸鱼余额挂件]' }
 }
 // dsh Web UI 监听端口（默认 3080）。
 // ⚠️ 为什么必须能配：3080 属于 Windows/Hyper-V 的「动态端口保留段」，被系统预留时
@@ -1111,8 +1085,6 @@ function readConfig() {
     // 多厂商模型：models 是用户填的注册表（自动进备份），运行时结果另存 K.models
     models: models,
     mainModelId: normMainModelId(p.mainModelId, models),
-    menuGroups: normMenuGroups(p.menuGroups),
-    menuGroupsRev: normMenuGroupsRev(p.menuGroupsRev),
     // GitHub 加速：on = 开关意图（实际是否生效以 hosts 文件里的标记块为准）；ips = 可编辑 IP 表；
     // refreshedAt = 上次成功刷新的时间戳（epoch ms，0 = 从未刷新过，用于设置页表龄提醒）
     ghAccelOn: p.ghAccelOn === true,
@@ -1217,8 +1189,6 @@ function writeConfig(cfg) {
       dshBackupKeep: Math.round(clampNum(cfg.dshBackupKeep, DSB_KEEP_MIN, DSB_KEEP_MAX, DSB_KEEP_DEFAULT)),
       models: models,
       mainModelId: normMainModelId(cfg.mainModelId, models),
-      menuGroups: normMenuGroups(cfg.menuGroups),
-      menuGroupsRev: normMenuGroupsRev(cfg.menuGroupsRev),
       ghAccelOn: cfg.ghAccelOn === true,
       ghAccelIps: normIps(cfg.ghAccelIps),
       ghAccelRefreshedAt: normGhAccelRefreshedAt(cfg.ghAccelRefreshedAt),
@@ -1359,18 +1329,6 @@ function patchConfig(patch) {
   // 多厂商模型：models 先于 mainModelId 处理，否则「同时传两者」时新加的 id 还没进列表，主显示会被判为失效
   if (p.models !== undefined) cfg.models = normModels(p.models)
   if (p.mainModelId !== undefined) cfg.mainModelId = normMainModelId(p.mainModelId, cfg.models)
-  // 菜单分组展开状态：逐组合并 —— 挂件只报变化的那一组时，不能把其余组打回默认
-  if (p.menuGroups !== undefined && p.menuGroups && typeof p.menuGroups === 'object') {
-    Object.keys(MENU_GROUPS_DEFAULT).forEach((k) => {
-      if (typeof p.menuGroups[k] === 'boolean') cfg.menuGroups[k] = p.menuGroups[k]
-    })
-  }
-  // 默认展开态的版本号：挂件迁移过 look 组后回报当前版本，下次启动不再重复迁移。
-  // 只增不减：patchConfig 是「读现有配置 → 打补丁 → 整份写回」，而 readConfig 会把
-  // 缺失的 menuGroupsRev 归一成 0；若这里直接接受补丁里的值，任何不带该字段的补丁
-  // （设置页 patchCfg、改模型、改透明度…）都会把版本号冲回 0，
-  // 导致挂件每次启动都重跑一次 look 迁移、并把 dsh 组一并强制收起
-  if (p.menuGroupsRev !== undefined) cfg.menuGroupsRev = Math.max(cfg.menuGroupsRev, normMenuGroupsRev(p.menuGroupsRev))
   // GitHub 加速：开关意图（hosts 实际状态由 hosts.js 读文件现算）与可编辑 IP 表
   if (p.ghAccelOn !== undefined) cfg.ghAccelOn = !!p.ghAccelOn
   if (p.ghAccelIps !== undefined) cfg.ghAccelIps = normIps(p.ghAccelIps)

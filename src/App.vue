@@ -6,7 +6,7 @@ import SoundTrimmer from './components/SoundTrimmer.vue'
 import FirstRunGuide from './components/FirstRunGuide.vue'
 import UsageChart from './components/UsageChart.vue'
 import { msgCls, useFlash, type Flash } from './composables/useFlash'
-import { assetSize, fetchAsDataUrl, sharedSkinThumb } from './utils/format'
+import { assetSize, fetchAsDataUrl, pad2, sharedSkinThumb } from './utils/format'
 // 卡片「全文」索引：scripts/gen-search-index.mjs 在构建期从模板提取每张卡的可见文本
 // （h2 卡头 + label 字段名），搜索第三档兜底用。模板改了没重新生成会被 prebuild 拦下
 import { CARD_TEXT } from './search-index.gen'
@@ -421,12 +421,10 @@ const guideReopen = ref(false)
 const testing = ref(false)
 const testResults = ref<Array<{ label: string; ok: boolean; msg: string }>>([])
 const lastTestAt = ref(0)
-// 两位补零（如 9 → '09'）。父级多处拼时间戳（连测时间 / hhmm 等），收成一处不重复声明。
-const p2 = (n: number) => String(n).padStart(2, '0')
 const lastTestText = computed(() => {
   if (!lastTestAt.value) return ''
   const d = new Date(lastTestAt.value)
-  return `${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}`
+  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`
 })
 
 // dsh Web UI 的默认监听端口：与宿主 constants.js 的 DSH_PORT_DEFAULT 必须一致
@@ -958,7 +956,7 @@ function fmtMoney(v: number) {
 // 留在父级作单一来源按 props 下传，避免各 view 各写一份补零拼装。
 function hhmm(ts: number): string {
   const d = new Date(ts)
-  return p2(d.getHours()) + ':' + p2(d.getMinutes())
+  return pad2(d.getHours()) + ':' + pad2(d.getMinutes())
 }
 // 用量趋势：令牌模式下挂件刷新后今日总量会写入账本，
 // 因此导入后、切用量模式、以及本窗口重新获得焦点时都要重新拉一次趋势。

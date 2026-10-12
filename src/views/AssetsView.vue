@@ -12,7 +12,7 @@
 // ============================================================================
 import { computed, onMounted, onUnmounted, reactive, ref, watch, nextTick } from 'vue'
 import { msgCls, useFlash, type Flash } from '../composables/useFlash'
-import { assetSize, fetchAsDataUrl, fmtBytes, sharedSkinThumb } from '../utils/format'
+import { assetSize, fetchAsDataUrl, fmtBytes, pad2, sharedSkinThumb } from '../utils/format'
 import SoundRow from '../components/SoundRow.vue'
 import DownloadBox from '../components/DownloadBox.vue'
 import type {
@@ -240,9 +240,6 @@ const assetTotalBytes = computed(() => {
   return n
 })
 // assetSize：素材体积文案，已收进 utils/format.ts（此处直接引用）
-function pad2(n: number) {
-  return n < 10 ? '0' + n : '' + n
-}
 function assetAt(m: { at?: number } | null | undefined) {
   const t = Number(m && m.at) || 0
   if (!t) return '时间未知'
