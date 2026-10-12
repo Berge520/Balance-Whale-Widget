@@ -564,6 +564,34 @@ export interface DshDumpResult {
   // 默认树读取失败时为 null，原因在 diffError（分层可视化仍可用，属降级不属失败）
   diff?: DshDumpDiff | null
   diffError?: string
+  // 生效树里的「挂载名」三源快照，供 verifyActivation 判「装了是否生效」。
+  // ⚠️ 不能拿 entries 当已知清单：dump 的条目清单**不完整**（§688），只能采信 dsh 自己说了什么
+  bundles?: DshDumpBundles
+  // dsh 输出里「跳过了某个 profile bundle」的声明（最有价值的一态，见 verifyActivation）。
+  // ⚠️ 与 layers/entries 同源于同一次转储；缺失表示 dsh 没报跳过，不是「没解析」
+  skipped?: DshDumpSkip[]
+}
+
+// 生效树的挂载名快照。三源并查，任一命中即算已装配（§678-684 三个命名空间互不相通）
+export interface DshDumpBundles {
+  // 分节标题里的包名（如 dsh-better-sidebar，已剥 `patched by` 后缀、去 scope、小写）
+  bundles: string[]
+  // 条目 `name:` 字段的值（如 dshmarket，可能与分节标题不同）
+  names: string[]
+  // patch 的 `- id:`（组装树注册 id，如 better-sidebar）
+  ids: string[]
+  // 是否解析出了分节。false 时三个数组都不可信，调用方必须当 unknown 处理
+  complete: boolean
+}
+
+// dsh 主动声明「跳过某个 profile bundle」的一条（输出形如
+// `dsh: skipping profile bundle "dsh-find-plugin": Error: ...`）
+export interface DshDumpSkip {
+  name: string
+  // dsh 给出的跳因原文（截到行尾）
+  reason: string
+  // 出现在输出的第几行（1 基），方便用户对照原始转储
+  line: number
 }
 
 // 用户层 patch（$DSH_HOME/profiles/<p>/cordis.patch.yml）里的一个条目。
@@ -916,6 +944,16 @@ export interface DshMarketStatusResult {
   count: number
 }
 
+// 「装了是否真的生效」的判定结论（preload/lib/dsh-dump.js 的 verifyActivation）。
+// 五态语义见 DshMarketInstallResult.activation 处的注释
+export interface DshMarketActivation {
+  state: 'active' | 'skipped' | 'pending' | 'shadowed' | 'unknown'
+  // 归一化后的包名（去 scope、小写）；来源没有 npm 名时为空串
+  pkg: string
+  // 补充说明：skipped 为 dsh 给出的跳因、pending/unknown 为原因、active/shadowed 为空
+  reason: string
+}
+
 export interface DshMarketInstallResult {
   ok: boolean
   error?: string
@@ -986,6 +1024,17 @@ export interface DshMarketInstallResult {
   hostForced?: boolean
   // 兼容性判定的完整结论（dryRun 回传，供列表/详情显示「要求 DSH x ∩ y，当前 z」）
   hostCompat?: DshHostCompatVerdict
+  // 「装上了」≠「真的生效」：装完后拿生效树核对一次（见 preload/lib/dsh-dump.js 的 verifyActivation）。
+  // ⚠️ dependencies 里的 npm 包名、profile bundles 的挂载名、patch 的 `- id:` 是**三个互不相通的
+  //    命名空间**（spec §678-684），只对包名比对会漏；故三源并查。
+  // state 五态互斥，界面按顺序读，不要合并：
+  //   · active   —— 生效树里认得它，本次安装确实进入了组装树
+  //   · skipped  —— dsh 自己声明跳过了它（如 peerDependencies 不兼容），最有价值的一态
+  //   · pending  —— 转储早于本次安装（陈旧），重启 dsh 后才会生效
+  //   · shadowed —— 转储是新的、树里却没有：真的没被装配
+  //   · unknown  —— 读不到判据（转储失败 / 解析不出分节 / 该来源没有 npm 名）。
+  //                ⚠️ 读不到**必须**是 unknown，绝不能降级成 shadowed —— 那等于凭空断言「装失败」
+  activation?: DshMarketActivation
 }
 
 // 一个插件与当前宿主 DSH 的兼容性结论（三态，见 preload/lib/dsh-host-compat.js）

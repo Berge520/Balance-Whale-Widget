@@ -371,6 +371,102 @@ function parseDshWarnings(text) {
 }
 
 // ──────────────────────────────────────────────
+// 「装了但被 dsh 跳过」的警告
+// ──────────────────────────────────────────────
+// dsh 加载 profile bundle 时若判定插件与运行时**不兼容**，会主动跳过并在输出里声明（本机实测）：
+//   dsh: skipping profile bundle "dsh-find-plugin": Error: Plugin dsh-find-plugin@0.4.0 is
+//        incompatible with dsh 0.2.1-alpha.2: peerDependencies {...}
+//        ... To accept this risk explicitly, grant the exact-version exemption ...
+//
+// ⚠️ 这是**唯一权威的「装了但没生效」判据** —— 是 dsh 加载期的真实结论，不是我们的推测。
+//    与上面 not-found 同源（采信 dsh 说了什么），故同样只做「抽取」，不做成因推断。
+//
+// 为什么单独成函数而不并进 parseDshWarnings：后者的契约是「返回 [{id,line}]」且已有 3 处
+// 单测钉着「无警告 → 空数组」。改它的返回结构会让既有调用方与测试全部漂移，
+// 而这两类警告的**消费方不同**（not-found 进转储卡；skipping 进安装结果卡），分开更清晰。
+const SKIPPING_RE = /skipping\s+profile\s+bundle\s+"([^"]+)"\s*:\s*(?:Error:\s*)?([^\n]*)/g
+
+// 抽取 dsh 报告的 skipped bundle → [{ name, reason, line }]
+//   name   ：被跳过的 bundle 名（实测为 npm 包名，如 dsh-find-plugin）
+//   reason ：dsh 给的原文原因（截断到首行，够界面展示；原文可能很长且含 peerDependencies 明细）
+//   line   ：警告在输出里的行号，仅供排查
+function parseSkipWarnings(text) {
+  const out = []
+  const seen = {}
+  const lines = stripAnsi(text).split('\n')
+  for (let i = 0; i < lines.length; i++) {
+    SKIPPING_RE.lastIndex = 0
+    let m = SKIPPING_RE.exec(lines[i])
+    while (m) {
+      const name = m[1]
+      if (!seen[name]) {
+        seen[name] = true
+        out.push({ name: name, reason: String(m[2] || '').trim(), line: i + 1 })
+      }
+      m = SKIPPING_RE.exec(lines[i])
+    }
+  }
+  return out
+}
+
+// ──────────────────────────────────────────────
+// 「这个包有没有被装配进生效树」
+// ──────────────────────────────────────────────
+// 判据三源并查（本机真实样本钉死，见 specs §5 dsh 配置转储）：
+//   ① 分节标题里的包名 —— `# == dsh-whale-widget` / `# == dshmarket`
+//   ② 条目 `name:` 字段   —— 分节标题可能被 patch 改写成挂载 id（见下）
+//   ③ patch 的 `- id:`   —— 挂载 id 与包名不同时（本机反例见下）
+//
+// ⚠️ 为什么不能只比对「分节标题 == 包名」：本机实测 `dsh-better-sidebar` 已生效，但它的
+//    分节标题是 `# == dsh-better-sidebar, patched by …\cordis.patch.yml`，挂载 id 是
+//    `better-sidebar`（在 cordis.patch.yml 的 `- id: better-sidebar`）。只做精确相等
+//    会把这个**合法生效**的插件判成「未生效」—— 正是 §688 那类假阴性。
+//    故必须先剥 `patched by` 后缀，并把条目 name / patch id 一并纳入比对。
+//
+// 归一化：去 `@scope/` 前缀、小写、去首尾空白。`@linxin666/dsh-web-all` 与 `dsh-web-all`
+// 在 dump 里两种写法都出现过，不归一会互相认不出。
+function normPkgName(s) {
+  return String(s == null ? '' : s).trim().toLowerCase().replace(/^@[^/]+\//, '')
+}
+
+// parsed（parseDump 的结果）→ 生效树里的包名集合（供「是否生效」比对）
+// 返回 { bundles: string[], names: string[], ids: string[], complete: boolean }
+//   complete=false 表示 dump 根本没解析出分节（无凭证下结论），调用方必须退到 unknown
+function sectionBundles(parsed) {
+  const p = parsed && typeof parsed === 'object' ? parsed : { sections: [], entries: {} }
+  const bundles = []
+  const seenB = {}
+  const ids = []
+  const seenI = {}
+  for (let i = 0; i < p.sections.length; i++) {
+    const b = normPkgName(p.sections[i].bundle)
+    if (b && !seenB[b]) { seenB[b] = true; bundles.push(b) }
+    const list = p.sections[i].ids || []
+    for (const id of list) {
+      const n = normPkgName(id)
+      if (n && !seenI[n]) { seenI[n] = true; ids.push(n) }
+    }
+  }
+  // 条目 name 字段（分节标题被改写成挂载 id 时，name 仍保留真实包名）
+  const names = []
+  const seenN = {}
+  for (const key of Object.keys(p.entries)) {
+    if (key.indexOf('@name:') === 0) continue
+    const en = p.entries[key]
+    const n = normPkgName(en && en.name)
+    if (n && !seenN[n]) { seenN[n] = true; names.push(n) }
+  }
+  return { bundles: bundles, names: names, ids: ids, complete: p.sections.length > 0 }
+}
+
+// 生效三源里是否认得这个包名
+function seenInTree(pkgName, tree) {
+  const n = normPkgName(pkgName)
+  if (!n || !tree) return false
+  return tree.bundles.indexOf(n) >= 0 || tree.names.indexOf(n) >= 0 || tree.ids.indexOf(n) >= 0
+}
+
+// ──────────────────────────────────────────────
 // 子进程：跑一次 dump
 // ──────────────────────────────────────────────
 // run(args, cb)：cb(err, stdout, stderr)。永不抛错、永不 cb 两次。
@@ -503,6 +599,12 @@ function collectDshDump(opts, cb) {
     if (warnings.length) {
       logErr('[whale][dsh-dump] dsh 报告 patch 条目不存在', warnings.map((w) => w.id).join(', '))
     }
+    // dsh 主动跳过的 bundle（装完「是否生效」的权威判据，见 verifyActivation）。
+    // 同样两路都抽：实测该行打在 dump 正文**之前**（与 not-found 同区）
+    const skipped = parseSkipWarnings(eOut + '\n' + eErrOut)
+    if (skipped.length) {
+      logErr('[whale][dsh-dump] dsh 跳过了 bundle', skipped.map((s) => s.name).join(', '))
+    }
     const result = {
       ok: true,
       at: at,
@@ -511,6 +613,9 @@ function collectDshDump(opts, cb) {
       layers: buildLayers(effective),
       entries: entriesOf(effective),
       warnings: warnings,
+      // 生效树里的包名集合 + 被跳过的 bundle：供安装/更新后判「是否生效」
+      bundles: sectionBundles(effective),
+      skipped: skipped,
       unparsed: !effective.sections.length,
       diff: null,
       diffError: '',
@@ -544,6 +649,78 @@ function summarizeDump(r) {
   const d = r.diff
   const diffText = d ? '，diff 改 ' + d.changedTotal + ' 增 ' + d.addedTotal + ' 删 ' + d.removedTotal : '，diff 不可用'
   return 'profile ' + r.profile + '，' + r.sections + ' 个分节 / ' + r.entries.length + ' 个条目' + diffText
+}
+
+// ──────────────────────────────────────────────
+// 「装完之后，它到底生效了没有」
+// ──────────────────────────────────────────────
+// 背景：pnpm 退出码 0 + `profile/package.json` 出现依赖 + node_modules 版本正确，
+// **仍不等于**插件被 dsh 装进了生效树 —— 「装了」和「生效」是两个命名空间
+// （依赖名 ≠ bundles 挂载名 ≠ patch 组装 id，spec §678-684）。
+// 过去安装/更新只回读到「依赖在 + 版本对」，于是「装了但被 dsh 跳过」这类结果
+// 会被报成「已安装成功」，用户回头一看插件没出现 —— 这是「点了没反应」差评的主因。
+//
+// 本函数把结论落成**五态**，每态对应一句明确的用户可见措辞与下一步动作。
+// 判据全部来自 dsh 自己的输出（采信 dsh 说了什么，§689），不自己拼清单。
+//
+// 入参是一个「dump 快照」描述对象（形如 collectDshDump 的返回，字段可缺省）：
+//   { ok, unparsed, at, bundles, skipped }
+//     ok          : dump 是否读取成功（失败时另可带 error，用作 unknown 的 reason）
+//     unparsed    : 读到了但一个分节都解析不出（无凭证下结论）
+//     at          : 本次 dump **发起**的时刻（ms），用于和安装时刻比对，判这份树是不是安装前的旧状态
+//                   （⚠️ 必须是「发起」而非「返回」时刻 —— 取返回时刻会恒晚于 installAt，见下 ③）
+//     bundles     : sectionBundles(parsed) 的结果（含 bundles/names/ids/complete）
+//     skipped     : parseSkipWarnings 的结果（[{name, reason}])
+//
+// 注：collectDshDump 的返回里还有 notInstalled 字段，本函数**不读**它 ——
+//     dsh 没装时 dump 必然读失败（ok !== true），已由 ① 归入 unknown，无需单独分支。
+//
+// 返回 { state, reason, pkg }：
+//   state ∈ 'active' | 'skipped' | 'pending' | 'shadowed' | 'unknown'
+//     active   : 已生效（在生效树三源里认得，且未被跳过）
+//     skipped  : 装了但被 dsh 主动跳过（带 dsh 原文原因）—— 最有下一步动作价值的一态
+//     pending  : 已装，但 dump 陈旧（这份树反映安装前状态），重启 dsh 后才有结论
+//     shadowed : dump 有效，但生效树里找不到它（装了没被装配）
+//     unknown  : 任何判据都读不到 —— **绝不退化成 active**（§694 同型陷阱）
+//
+// ⚠️ 三处顺序不可换：
+//   1. **unknown 先判**：读不到时若往下走，会因「三源都没命中」误报 shadowed，
+//      把「不知道」说成「没生效」—— 与把 warnings 缺失当成 [] 是同一个错。
+//   2. **skipped 优先于 active**：跳过是 dsh 加载期的明确否决；即便分节里出现过
+//      （某些版本先登记后跳过），也应以「被跳过」为准。
+//   3. **陈旧 dump → pending 而非 shadowed**：dump 反映的是安装**之前**的状态时，
+//      树里当然找不到它，此时报 shadowed 是假阴性。用 `at`（dump 发起时刻）与 installAt
+//      （安装发起时刻）比：`at < installAt` 说明这份树早于安装 → pending。
+//      ⚠️ `at` 必须是 dump「发起」时刻。若调用方取转储**返回**后的时刻，at 恒晚于 installAt，
+//      本分支永不触发 —— 强跑新转储时这是无害的（树是新的，找不到就是真 shadowed），
+//      但一旦改成复用缓存，就会把陈旧误报成 shadowed。见 settings.js `activationOf`。
+function verifyActivation(pkgName, dump, installAt) {
+  const snap = dump && typeof dump === 'object' ? dump : null
+  const n = normPkgName(pkgName)
+  // ① 读不到任何判据 → unknown（连包名都没有也归这里，无从判定）
+  if (!n || !snap || snap.ok !== true) {
+    return { state: 'unknown', pkg: n, reason: (snap && snap.error) || '没有可用的 dsh 配置转储' }
+  }
+  // ② dump 有效但没解析出分节 → 无凭证下结论，同样是 unknown
+  const tree = snap.bundles
+  if (snap.unparsed || !tree || tree.complete !== true) {
+    return { state: 'unknown', pkg: n, reason: '配置转储里没有解析出任何分节，无法判断是否生效' }
+  }
+  // ③ 被 dsh 跳过的在前（跳过是明确否决，优先于「在树里出现过」）
+  const skipped = Array.isArray(snap.skipped) ? snap.skipped : []
+  for (const s of skipped) {
+    if (normPkgName(s && s.name) === n) {
+      return { state: 'skipped', pkg: n, reason: (s && s.reason) || '' }
+    }
+  }
+  // ④ 在生效树里认得 → active
+  if (seenInTree(n, tree)) return { state: 'active', pkg: n, reason: '' }
+  // ⑤ 树里找不到：区分「dump 陈旧」与「真的没装配」
+  //    dump 比安装早 → 这份树反映的是安装前的状态，此刻下「没装配」的结论是假阴性 → pending
+  if (typeof installAt === 'number' && typeof snap.at === 'number' && snap.at < installAt) {
+    return { state: 'pending', pkg: n, reason: '配置转储早于本次安装，重启 dsh 后生效' }
+  }
+  return { state: 'shadowed', pkg: n, reason: '' }
 }
 
 // ──────────────────────────────────────────────
@@ -585,6 +762,9 @@ module.exports = {
   indexEntries,
   entriesOf,
   parseDshWarnings,
+  parseSkipWarnings,
+  sectionBundles,
+  verifyActivation,
   summarizeDump,
   // 子进程 + 编排
   run,

@@ -996,7 +996,10 @@ function updateAfterCompat(o, ctx) {
       }
     }
     log('[whale][dsh-market] 已更新插件', { spec: spec, from: fromBefore, to: to })
-    return {
+    // 第五道校验：装了 ≠ 生效（可能被 dsh 因不兼容跳过）。结论只作为附加信息回传，
+    // **不改 ok**：依赖已正确落盘、快照已建，这一步失败不该把「已更新」翻成失败，
+    // 而是让结果卡多一句「已装好，但 dsh 跳过了它 / 需要重启生效」。
+    return activationOf(profile, npm, Date.now()).then((activation) => ({
       ok: true,
       spec: spec,
       npm: npm,
@@ -1010,7 +1013,8 @@ function updateAfterCompat(o, ctx) {
       hostIncompatible: ctx.hostIncompatible === true,
       hostForced: ctx.hostForced === true,
       needsRestart: true,
-    }
+      activation: activation,
+    }))
   })
 }
 
@@ -1043,6 +1047,52 @@ function realizedOf(profile, hit, spec) {
   const versions = dsh.installedVersions(profile)
   if (hit && hit.key && versions[hit.key]) return String(versions[hit.key])
   return spec ? dshMarket.realizedVersionBySpec(versions, spec) : ''
+}
+
+// 安装/更新成功后，判「它到底生效了没有」（第五道校验，返回 Promise）。
+//
+// ⚠️ 为什么必须在「依赖回读正确」之后再走这一步：「装了」和「生效」是两个命名空间
+//    （依赖名 ≠ bundles 挂载名 ≠ patch 组装 id）。过去只验到「依赖在 + 版本对」，
+//    于是「装了但被 dsh 跳过」（本机实测 dsh-find-plugin 因 peerDependencies 不兼容被
+//    skip）会被报成「已安装成功」，用户回 dsh 一看插件没出现。见 dsh-dump.js
+//    `verifyActivation` 的五态说明。
+//
+// ⚠️ 这里**强制重跑一次生效树**（不吃 60s 缓存）：缓存十有八九是安装**之前**的，
+//    拿它判会把刚装的插件误报成 shadowed。单跑生效树（不跑默认树）省一半时间，
+//    8s 上限；失败不阻断 —— 结论退到 unknown，比报一个错的「已生效」诚实。
+//
+// ⚠️ 只看**这一个包**：不重跑整卡，不影响其它 UI；返回 `activation` 交给结果卡渲染。
+function activationOf(profile, npm, installAt) {
+  const pkg = String(npm == null ? '' : npm).trim()
+  if (!pkg) {
+    // 没有 npm 名（纯 github:/tarball 来源）时，用 spec 反查不出来 —— 明确 unknown，
+    // 让界面走「装好了但无法确认生效」的措辞，而不是假装 active
+    return Promise.resolve({ state: 'unknown', pkg: '', reason: '该来源没有可用的 npm 包名，无法核对生效状态' })
+  }
+  return new Promise((resolve) => {
+    // ⚠️ `at` 取「本次转储**发起**的时刻」，不是转储返回后的时刻：
+    //    verifyActivation 拿它跟 installAt 比，判「这份树是不是安装前的旧状态」。
+    //    若取返回后的 Date.now()，at 恒 > installAt（安装发起更早），那条兜底永不触发 ——
+    //    一旦将来改成复用缓存转储，就会把「缓存陈旧」误报成 shadowed（假阴性）。
+    //    取发起时刻后语义才成立：强跑新转储时 at 仍晚于 installAt（不触发，正确），
+    //    真拿到旧快照时 at < installAt（触发 pending，正确）。
+    const atStarted = Date.now()
+    dshDump.dumpEffective(profile, (err, out, errOut) => {
+      if (err) {
+        logErr('[whale][dsh-market] 生效校验读转储失败（降级为 unknown）', (err && err.message) || '')
+        return resolve({ state: 'unknown', pkg: pkg, reason: (err && err.message) || '读取配置转储失败' })
+      }
+      const parsed = dshDump.parseDump(out)
+      const dump = {
+        ok: true,
+        at: atStarted,
+        unparsed: !parsed.sections.length,
+        bundles: dshDump.sectionBundles(parsed),
+        skipped: dshDump.parseSkipWarnings(out + '\n' + (errOut || '')),
+      }
+      resolve(dshDump.verifyActivation(pkg, dump, installAt))
+    })
+  })
 }
 
 // 把长输出**只留尾部**再回传给界面（与 dsh-market 的 message.slice(-1200) 同口径）。
@@ -1430,7 +1480,12 @@ function installWrite(o, ctx) {
     //    `got` 读不到（node_modules 缺该包）才退回范围，至少给用户一个能看的串。
     const shownVersion = got || hit.depVersion || ''
     log('[whale][dsh-market] 已安装插件', { spec: spec, runSpec: runSpec, version: shownVersion, declared: hit.depVersion })
-    return {
+    // 第五道校验：装了 ≠ 生效（见 updateAfterCompat 同处说明与 dsh-dump.js verifyActivation）。
+    // ⚠️ 只传 npm 名，不拿 spec 兜底（与 updateAfterCompat 口径一致）：纯 github:/tarball 来源
+    //    没有 npm 名时，activationOf 直接退 unknown；若传 spec（`github:o/r` / `.tgz` 串），
+    //    pkg 会回一个**非包名**字符串（污染 DshMarketActivation.pkg 的语义），且三源必然不命中，
+    //    白跑一次转储还落个语义含糊的 pending。
+    return activationOf(profile, npm, Date.now()).then((activation) => ({
       ok: true,
       spec: spec,
       npm: npm,
@@ -1451,7 +1506,8 @@ function installWrite(o, ctx) {
       hostForced: ctx.hostForced === true,
       // 装完必须让 dsh 重新加载才生效，但重启会掐掉正在跑的会话 —— 交给用户点按钮
       needsRestart: true,
-    }
+      activation: activation,
+    }))
   })
 }
 

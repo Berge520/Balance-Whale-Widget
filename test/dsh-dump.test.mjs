@@ -9,7 +9,7 @@
  * 与 dsh.js（→ require log.js → utools）。所以必须先挂上 globalThis.utools。
  * 这与 test/util.test.mjs 的「零桩」是刻意的区别：util.js 的边界禁令不适用于此。
  *
- * 覆盖：
+ * 覆盖（**仅列本卡新增 / 改动的纯函数**，非全文 test 块枚举；其余用例按函数名自明，不在此重复）：
  *   1. stripAnsi 去掉 dsh 的颜色转义与 BOM（带转义会让标题正则全部失配）
  *   2. parseSectionHead 三种分节形态 + 用户层判据（绝对路径，含 Windows 盘符）
  *   3. shortSource 把 cordis.patch.yml 绝对路径缩成可读来源名
@@ -17,6 +17,11 @@
  *   5. buildLayers 按「用户层按文件、包内层按包名」聚合
  *   6. diffTrees 找出 changed / added / removed
  *   7. lastPathLine 从带欢迎语噪声的 shell 输出里取最后一行路径
+ *   8. parseSkipWarnings 抽出 dsh 跳过的 bundle（第五态 skipped 的唯一来源）
+ *   9. sectionBundles / verifyActivation 判「装了是否真的生效」的五态，
+ *      含两条反向钉子（读不到必 unknown、挂载名≠包名仍须 active）
+ *  10. pending 的陈旧判据边界（at 与 installAt 相等不算陈旧），
+ *      同时钉住 settings.js 里 at 取「转储发起时刻」的语义
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
@@ -480,6 +485,163 @@ test('summarizeDump 给出可读摘要且不抛错', () => {
   assert.match(s, /profile web/)
   assert.match(s, /41 个分节/)
   assert.match(s, /2 个条目/)
+})
+
+// ── parseSkipWarnings（第五态 skipped 的唯一来源）──
+// 实测 dsh 会主动在最前打印一行：装上的包若和 dsh 版本对不上，dsh 会**跳过**它而不是报错，
+// 用户界面却看着「已安装」。这行是唯一能把这态认出来的线索。
+test('parseSkipWarnings 抽出 dsh 跳过的 bundle 与跳因（本机真实行）', () => {
+  const text = [
+    'dsh: skipping profile bundle "dsh-find-plugin": Error: Plugin dsh-find-plugin@0.4.0 is incompatible with dsh 0.2.1-alpha.2: peerDependencies {}',
+    '# == @deepseek-ai/dsh-base',
+    '- id: llm',
+  ].join('\n')
+  const s = dump.parseSkipWarnings(text)
+  assert.equal(s.length, 1)
+  assert.equal(s[0].name, 'dsh-find-plugin')
+  assert.match(s[0].reason, /incompatible with dsh/)
+  assert.equal(s[0].line, 1)
+})
+
+test('parseSkipWarnings：没有跳过行 → 空数组（这才是「dsh 没跳过任何东西」）', () => {
+  assert.deepEqual(dump.parseSkipWarnings('# == pkg\n- id: a\n'), [])
+  assert.deepEqual(dump.parseSkipWarnings(''), [])
+})
+
+test('parseSkipWarnings：带 ANSI 颜色也能抽；同名重复只记一次', () => {
+  const esc = '\u001b[31m'
+  const text = [
+    esc + 'dsh: skipping profile bundle "ghost": Error: nope\u001b[0m',
+    'dsh: skipping profile bundle "ghost": Error: nope',
+    'dsh: skipping profile bundle "other": Error: boom',
+  ].join('\n')
+  const s = dump.parseSkipWarnings(text)
+  assert.deepEqual(s.map((x) => x.name), ['ghost', 'other'], '同名只报一次，顺序按出现先后')
+})
+
+// ── sectionBundles（三源快照：分节标题 ∪ 条目 name ∪ patch id）──
+test('sectionBundles 同时抽三源，并去掉 `patched by` 后缀与 scope', () => {
+  const p = dump.parseDump([
+    '# == dsh-better-sidebar, patched by C:\\Users\\Berge\\.dsh\\profiles\\web\\cordis.patch.yml',
+    '- id: better-sidebar',
+    '  name: dsh-better-sidebar',
+    '# == dshmarket',
+    '- id: dshmarket',
+    '  name: dshmarket',
+  ].join('\n'))
+  const b = dump.sectionBundles(p)
+  assert.equal(b.complete, true)
+  // 分节标题必须剥掉 `, patched by ...` 只留包名，否则去对包名永远对不上
+  assert.deepEqual(b.bundles, ['dsh-better-sidebar', 'dshmarket'])
+  assert.deepEqual(b.ids, ['better-sidebar', 'dshmarket'])
+  assert.deepEqual(b.names, ['dsh-better-sidebar', 'dshmarket'])
+})
+
+test('sectionBundles 去 scope 小写归一（@scope/dsh-x 与 DSH-X 视为同一）', () => {
+  const p = dump.parseDump([
+    '# == @deepseek-ai/DSH-Base',
+    '- id: X',
+    '  name: @deepseek-ai/Dsh-Base',
+  ].join('\n'))
+  const b = dump.sectionBundles(p)
+  assert.deepEqual(b.bundles, ['dsh-base'])
+  assert.deepEqual(b.ids, ['x'])
+  assert.deepEqual(b.names, ['dsh-base'])
+})
+
+test('sectionBundles 对空输入给出 complete:false（调用方必须当 unknown 处理）', () => {
+  const b = dump.sectionBundles(dump.parseDump(''))
+  assert.equal(b.complete, false)
+  assert.deepEqual(b.bundles, [])
+  const b2 = dump.sectionBundles(null)
+  assert.equal(b2.complete, false)
+})
+
+// ── verifyActivation（装了 ≠ 生效：五态判定）──
+// 五态互斥且顺序敏感。下面逐态钉死，并单列两条**反向钉子** —— 它们防的是本仓库历史上
+// 栽过的两个坑：把「读不到」说成「没生效」（§694）、拿 entries 当已知清单（§688）。
+function treeOf(text) {
+  const p = dump.parseDump(text)
+  return { ok: true, at: 1000, unparsed: !p.sections.length, bundles: dump.sectionBundles(p), skipped: dump.parseSkipWarnings(text) }
+}
+
+test('verifyActivation：在生效树里认得 → active', () => {
+  const dumpRes = treeOf(['# == dsh-whale-widget', '- id: dsh-whale-widget', '  name: dsh-whale-widget'].join('\n'))
+  const r = dump.verifyActivation('dsh-whale-widget', dumpRes, 500)
+  assert.equal(r.state, 'active')
+  assert.equal(r.pkg, 'dsh-whale-widget')
+})
+
+// ⚠️ 反例钉子（本机实测）：dsh-better-sidebar 的分节头写的是包名，条目 id 却是 better-sidebar，
+// 且分节头带 `, patched by ...` 后缀。只比对 id 或只精确比对分节标题都会把它误判成未生效
+test('verifyActivation：挂载名 ≠ 包名（dsh-better-sidebar / better-sidebar）仍须 active', () => {
+  const text = [
+    '# == dsh-better-sidebar, patched by C:\\Users\\Berge\\.dsh\\profiles\\web\\cordis.patch.yml',
+    '- id: better-sidebar',
+    '  name: dsh-better-sidebar',
+  ].join('\n')
+  assert.equal(dump.verifyActivation('dsh-better-sidebar', treeOf(text), 500).state, 'active')
+  // 反过来，用挂载 id 去问也必须 active
+  assert.equal(dump.verifyActivation('better-sidebar', treeOf(text), 500).state, 'active')
+})
+
+test('verifyActivation：dsh 声明跳过 → skipped，且带上跳因', () => {
+  const text = [
+    'dsh: skipping profile bundle "dsh-find-plugin": Error: incompatible with dsh 0.2.1-alpha.2',
+    '# == @deepseek-ai/dsh-base',
+    '- id: llm',
+    '  name: llm',
+  ].join('\n')
+  const r = dump.verifyActivation('dsh-find-plugin', treeOf(text), 500)
+  assert.equal(r.state, 'skipped')
+  assert.match(r.reason, /incompatible/)
+})
+
+test('verifyActivation：树里没有、转储早于本次安装 → pending（陈旧，不是没生效）', () => {
+  const dumpRes = treeOf(['# == other', '- id: other', '  name: other'].join('\n'))
+  const r = dump.verifyActivation('dsh-whale-widget', dumpRes, 2000)
+  assert.equal(r.state, 'pending')
+  assert.match(r.reason, /重启/)
+})
+
+test('verifyActivation：转储新于本次安装 → shadowed', () => {
+  const dumpRes = treeOf(['# == other', '- id: other', '  name: other'].join('\n'))
+  const r = dump.verifyActivation('dsh-whale-widget', dumpRes, 500)
+  assert.equal(r.state, 'shadowed')
+})
+
+// ⚠️ pending 的边界必须钉死：相等的时刻**不算**陈旧（`<` 而非 `<=`）—— 否则同一毫秒内
+// 完成安装+转储会被判成 pending，把「树是新的、确实没装配」这种真 shadowed 说成「等重启」。
+// 这条同时守住 settings.js `activationOf` 里 `at` 取「发起时刻」的语义：
+// 若哪天有人改回取「转储返回时刻」，at 恒 > installAt，本测试不会失败，
+// 但真实链路的 pending 会静默失效 —— 故另有注释钉在 activationOf 与 spec §781。
+test('verifyActivation：at 与 installAt 相等 → 不算陈旧，判 shadowed（边界 < 而非 <=）', () => {
+  const dumpRes = treeOf(['# == other', '- id: other', '  name: other'].join('\n'))
+  assert.equal(dump.verifyActivation('dsh-whale-widget', dumpRes, 1000).state, 'shadowed')
+})
+
+// ⚠️ 反向钉子（§694）：读不到任何判据时必须 unknown，**绝不能**降级成 shadowed ——
+// 那等于凭空向用户断言「装失败了」。转储失败 / 解析不出分节 / 没有 npm 名，三种都要 unknown
+test('verifyActivation：读不到判据一律 unknown，绝不误报 shadowed（§694 反向钉子）', () => {
+  const okTree = treeOf('# == pkg\n- id: a\n  name: a')
+  // ① 转储失败
+  assert.equal(dump.verifyActivation('x', { ok: false, error: '超时' }, 500).state, 'unknown')
+  // ② 转储成功但解析不出任何分节（dsh 报错 / 格式变了）
+  assert.equal(dump.verifyActivation('x', { ok: true, at: 1000, unparsed: true, bundles: dump.sectionBundles(dump.parseDump('')), skipped: [] }, 500).state, 'unknown')
+  // ③ 根本没有 npm 包名（github / tarball 来源）
+  assert.equal(dump.verifyActivation('', okTree, 500).state, 'unknown')
+  // ④ 传进来就是空的
+  assert.equal(dump.verifyActivation('x', null, 500).state, 'unknown')
+})
+
+test('verifyActivation：skipped 优先于 active（同一包既被跳过又出现在树里，按跳过报）', () => {
+  const text = [
+    'dsh: skipping profile bundle "dup": Error: boom',
+    '# == dup',
+    '- id: dup',
+    '  name: dup',
+  ].join('\n')
+  assert.equal(dump.verifyActivation('dup', treeOf(text), 500).state, 'skipped')
 })
 
 // ── validPkgSpec / validPkgName（安装 spec 进命令行的唯一关口）──
