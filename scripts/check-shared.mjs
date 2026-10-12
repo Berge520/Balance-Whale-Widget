@@ -9,12 +9,16 @@
  * 因此这里逐对比对，不一致直接让构建失败。
  *
  * 由 npm run build 的 prebuild 钩子自动执行，也可手动执行：node scripts/check-shared.mjs
+ * 自检：test/check-shared.test.mjs 经 CS_ROOT / CS_CHECKS 注入样本，反向证明「两侧都读失败
+ *       不得被判成一致」（见末尾 failed.length 分支的注释）。
  */
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
+const root = path.resolve(
+  process.env.CS_ROOT || path.join(path.dirname(fileURLToPath(import.meta.url)), '..'),
+)
 const read = (rel) => readFileSync(path.join(root, rel), 'utf8')
 
 // 从 marker 之后第一个 { 或 [ 开始，取括号配平的整段字面量，再压掉空白便于比对。
@@ -317,7 +321,15 @@ const WINDOW_VIEW = 'src/views/WindowView.vue'
 // MAX_BATCH / NEWEST_VERSION 两项的抠取路径指向这里；DEFAULT_DSH_PORT 仍留 App.vue（cfg 初始化消费）
 const USE_DSH = 'src/composables/useDsh.ts'
 
-const CHECKS = [
+const CHECKS = process.env.CS_CHECKS
+  ? JSON.parse(process.env.CS_CHECKS).map((c) => ({
+      name: c.name,
+      parts: c.parts.map((p) => ({
+        file: p.file,
+        pick: { literal: jsLiteral, number: jsNumber, string: jsString }[p.pick](p.marker),
+      })),
+    }))
+  : [
   {
     name: '峰谷时段表',
     parts: [
