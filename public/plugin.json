@@ -6,14 +6,14 @@
   "features": [
     {
       "code": "whale",
-      "explain": "小鲸鱼余额挂件：桌面透明置顶小窗显示 DeepSeek 余额，并可打开设置窗口",
+      "explain": "小鲸鱼余额挂件：桌面透明置顶小窗显示 DeepSeek 余额，也可管理 DeepSeek Harness（dsh）开发者环境，并可打开设置窗口",
       "mainHide": true,
       "cmds": [
         "余额挂件",
         "小鲸鱼",
-        "小鲸鱼余额",
-        "DeepSeek余额",
-        "whale"
+        "DeepSeek",
+        "DeepSeek Harness",
+        "harness"
       ]
     },
     {

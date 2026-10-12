@@ -110,7 +110,8 @@ try {
     // 默认功能（whale）：按「进入方式」决定主窗与挂件的显隐。
     // 注意：whale 这个 feature 已设 mainHide:true —— 进入插件时 uTools 不再自动弹出主窗
     // （避免「主窗闪一下被挂件抢焦点自动隐藏」的闪烁），改由这里按需显式唤出。
-    // 合并后「小鲸鱼设置」这类别名已移除（uTools 建议每个 feature 的 cmds ≤ 5，故 whale 保留原 5 个），
+    // 合并后「小鲸鱼设置」这类别名已移除（官方建议每个 feature 的 cmds 不超过 5 个，
+    // 故 whale 用 5 个词覆盖「余额挂件 / 小鲸鱼 / DeepSeek / Harness」几类搜法），
     // 设置页入口只剩：enterMode = settings/both，或挂件菜单的 redirect 兜底（见上方 redirect 分支）。
     const mode = readConfig().enterMode
     if (mode === 'settings') {

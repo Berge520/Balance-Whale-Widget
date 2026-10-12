@@ -98,6 +98,9 @@ resources/manifest.json
 .trae/
 .cursor/
 .claude/
+# .bak-strip/ 是市场文案（.trae/market/）的带版本备份：.trae/ 整体不入库，
+# 这里再放一份防换机器丢失，同样不进仓库
+.bak-strip/
 
 # ── 操作系统垃圾 ──
 # Windows
