@@ -5,8 +5,11 @@ import SkinCropper from './components/SkinCropper.vue'
 import SoundTrimmer from './components/SoundTrimmer.vue'
 import FirstRunGuide from './components/FirstRunGuide.vue'
 import UsageChart from './components/UsageChart.vue'
+import DisplayManager from './components/DisplayManager.vue'
 import { msgCls, useFlash, type Flash } from './composables/useFlash'
 import { assetSize, fetchAsDataUrl, pad2, sharedSkinThumb } from './utils/format'
+// 自定义显示：Tab/卡片/依赖关系常量（供 DisplayManager.vue 等组件共享）
+import { TABS, SEARCH_INDEX, CORE_CARDS, CARD_DEPENDENCIES, type TabKey } from './constants/display'
 // 卡片「全文」索引：scripts/gen-search-index.mjs 在构建期从模板提取每张卡的可见文本
 // （h2 卡头 + label 字段名），搜索第三档兜底用。模板改了没重新生成会被 prebuild 拦下
 import { CARD_TEXT } from './search-index.gen'
@@ -59,6 +62,10 @@ import NotifyView from './views/NotifyView.vue'
 // 需要父级 reloadModels 重新取快照，故 emit('reload')；主显示切换经 update:mainId 上抛。
 // 按需异步加载：expose 的 closeModelForm 仅组件内部使用，父级无 ref 调用点，异步安全。
 const ModelsView = defineAsyncComponent(() => import('./views/ModelsView.vue'))
+// 「专注与待办」整卡：专注记录开关 + 近 7 天统计 + 待办清单编辑面。
+// 待办与统计都归宿主（preload 的 settings.js），本卡只读写快照、订阅宿主推送；
+// 输入法组字守卫与其它卡共用父级的 isImeComposing，故按 props 下传。
+import FocusView from './views/FocusView.vue'
 // 「使用帮助」整卡：使用说明 / 快捷键绑定 / 挂件故障排查 / 挂件创建错误详情。
 // 卡片自身的折叠态与诊断日志入口内聚在组件内；挂件错误状态（errDetail / errFlash）与
 // checkWidgetError 由父级 onMounted、showWidget 驱动，故按 props 收、emit 触发；
@@ -89,6 +96,10 @@ const HISTORY_KEEP = { DEFAULT: 365, MIN: 35, MAX: 730 }
 
 // 计时到点留言长度上限，是宿主 constants.js TIMER_NOTE_MAX 的同值副本（下传给 NotifyView）
 const TIMER_NOTE_MAX = 60
+// 番茄循环：长休时长（分钟），是宿主 constants.js TIMER_LONG_BREAK_DEFAULT 的同值副本
+const TIMER_LONG_BREAK_DEFAULT = 15
+// 番茄循环：每 N 轮进入长休，是宿主 constants.js TIMER_LONG_EVERY_DEFAULT 的同值副本
+const TIMER_LONG_EVERY_DEFAULT = 4
 
 // 随包内置形象 id（= public/whale/ 下的图片文件名），数组顺序即「形象」下拉的顺序。
 // 也是同值副本：宿主 store.js 的 BUILTIN_SKINS 与挂件页面 floating-page.js 的 BUILTIN_SKINS
@@ -194,28 +205,10 @@ const toolOpen = reactive({ credentials: false })
 // 所以看模板不要以为同一组的卡挨在一起 —— 渲染顺序由下面 TABS 的 key 决定，与源码位置无关。
 // desc 是分组说明：凭据、备份这类「不常用但找不到会着急」的项靠它暴露位置；
 // 它得与卡片实际**顺序和数量**对得上（按错顺序写、漏掉某张卡，用户按描述找就会找不到）。
-const TABS = [
-  { key: 'look', label: '外观', desc: '挂件外观 · 按压气泡' },
-  // desc 只列**真实存在的卡片**、且用卡片标题的原词：此前写「形象画廊」（卡名是「导入的形象」）、
-  // 又把「素材包」当并列卡列出（它其实是「资源概览」卡里的导出/导入入口，不是独立卡）→ 用户按描述找不到。
-  // 「内置资源与下载源」卡已并入「形象」卡（形象部分）与「音效」卡（内置音色 + 共享音效库），故不再单列。
-  { key: 'assets', label: '资源', desc: '我的素材：资源概览 · 气泡图　｜　下载素材：形象 · 音效' },
-  { key: 'usage', label: '用量', desc: '用量与账本 · 提醒与通知 · 模型与余额' },
-  // 本组只有一张卡，「挂件窗口」这个卡名起头最有用（原先只列分区名，用户不知道这页就是挂件窗口）
-  { key: 'window', label: '窗口', desc: '挂件窗口：显隐 · 位置 · 透明度 · 穿透' },
-  { key: 'data', label: '数据', desc: 'DeepSeek 凭据 · 清除数据 · 备份与恢复' },
-  // 顺渲染顺序（模板里 HelpView → AboutView → AccelView）；此前漏了「GitHub 加速」卡，
-  // 后又把它错列在「关于与更新」之前，用户按描述找加速会先撞上关于
-  { key: 'help', label: '帮助', desc: '使用帮助 · 关于与更新 · GitHub 加速' },
-  // desc 是 Tab 栏下方的静态说明，得与卡片的实际顺序、数量对得上：
-  // 原先只列「dsh / dsh 用量 / Codex」三项，而这一页实际有 8 张卡，用户按描述找
-  // 「插件开关」「插件市场」会以为不在这里。按实际顺序列全，并把非 dsh 的 Codex 单独隔开。
-  // 与其它组同口径用卡片标题原词（主控卡标题即「DeepSeek Harness（dsh）」，不再另起「主控」这种别名）
-  { key: 'dev', label: '开发者', desc: 'DeepSeek Harness（dsh） · dsh 环境诊断 · dsh 配置转储 · dsh 全量导出 · dsh 用量统计 · dsh 插件开关 · dsh 插件市场　｜　Codex 会话统计' },
-] as const
-type TabKey = (typeof TABS)[number]['key']
 const activeTab = ref<TabKey>('look')
 const activeTabDesc = computed(() => TABS.find((t) => t.key === activeTab.value)?.desc || '')
+// 自定义显示：过滤掉用户隐藏的 Tab（devOnly 的 Tab 始终显示，因为它的显隐由其他逻辑控制）
+const visibleTabs = computed(() => TABS.filter((t) => !cfg.hiddenTabs.includes(t.key)))
 
 // —— 卡片搜索（跨 Tab 找卡片）——
 // 痛点：卡片按主题分了 7 组、共 20 余张，还大量用 .fold 折叠；找一项要「先猜在哪组、再翻折叠」。
@@ -231,41 +224,6 @@ function normSearch(s: string) {
 }
 // 卡片索引：key 与模板上的 data-search 一一对应。额外收一批「同义词 / 别称 / 英文名」——
 // 用户不一定记得界面上的措辞（如搜「穿透」得能命中「挂件窗口」，搜「token」得能命中「DeepSeek 凭据」）。
-const SEARCH_INDEX: Record<string, { label: string; tab: TabKey; keys: string }> = {
-  credentials: { label: 'DeepSeek 凭据（API Key / 平台 Token）', tab: 'data', keys: 'apikey api key 密钥 token 令牌 凭据 授权 余额 认证' },
-  // keys 覆盖守卫（build-gates）：卡内每个字段名至少要有一个 ≥2 字词出现在 label+keys 里，
-  // 缺词会构建红 —— 下面各卡的「生僻字段词」（音量 / 币种 / 授权码 / 写入位置…）就是补欠账补出来的
-  look: { label: '挂件外观', tab: 'look', keys: '形象 皮肤 音色 音效 音量 大小 缩放 气泡 主题 报时 点按 播放 界面 深浅色 深色 浅色 暗色 亮色 跟随 uTools 峰谷 文案 随机 节假日 法定节假日表 更新' },
-  // 按压气泡（自定义泡泡）：卡内字段名简单（「按压气泡开关」「思考气泡」），
-  // 但真正要能被搜到的是「自定义泡泡 / 点我弹什么 / 点击队列」这类叫法，一并收进 keys。
-  // 挂件菜单的「气泡设置」按钮也指向本卡（导航 target='bubble'）
-  bubbleCustom: { label: '按压气泡（自定义泡泡）', tab: 'look', keys: '按压气泡 自定义泡泡 泡泡 气泡 编辑 撤销 重做 队列 排序 步骤 模块 行 文本 报时 余额 赠金 充值 今日 峰谷 对话名 随机 超链接 图片 动图 额度 订阅 试播 预览 开关 思考 点我 点击 停留' },
-  assetsOverview: { label: '资源概览', tab: 'assets', keys: '素材 形象 音效 气泡图 占用 体积 清除 未使用 素材包 导出 导入' },
-  // 「形象」卡合并了三个来源（用户导入 / 随包内置 / 上游共享角色），keys 要覆盖这三类叫法 ——
-  // 否则搜「共享」「内置」「角色」都命中不了这张卡（曾把这三张各登记一条，合并后必须并成一条）
-  assetsSkins: { label: '形象', tab: 'assets', keys: '形象 皮肤 图片 缩略图 置顶 删除 导入 内置 下载源 共享 角色 下载 选用 预览 随机' },
-  assetsBubbles: { label: '导入的气泡图', tab: 'assets', keys: '气泡 图 动图 gif 图片 导入 删除' },
-  // 「音效」卡合并了两个来源（用户手导的六槽位 / 上游共享音效库），keys 要覆盖这两类叫法 ——
-  // 否则搜「共享」「下载」「段」都命中不了这张卡（曾把这两张各登记一条，合并后必须并成一条）
-  assetsSounds: { label: '音效', tab: 'assets', keys: '音效 声音 按压 释放 提醒音 试听 导入 删除 共享音效库 共享 下载 段 筛选 过滤 搜索 候选 已参加播放 一段都没挂 下载源' },
-  usage: { label: '用量与账本', tab: 'usage', keys: '用量 趋势 账本 历史 区间 导出 csv 导入 校准 额度 单价 模型占比 明细 币种 汇率 保留' },
-  notify: { label: '提醒与通知', tab: 'usage', keys: '提醒 通知 系统通知 邮件 smtp 预算 低余额 波动 免打扰 计时 倒计时 休息 预警 阈值 端口 ssl tls 直连 账号 授权码 发件人 收件人 主题 前缀 停留 切换' },
-  models: { label: '模型与余额', tab: 'usage', keys: '模型 余额 提供商 厂商 刷新 api key 额度 主显示 密钥 凭据 token 名称 类型 币种 接口 地址 base url scale 认证 字段 路径 取值 倍数 重置 提醒 阈值' },
-  window: { label: '挂件窗口', tab: 'window', keys: '窗口 显隐 位置 复位 透明度 穿透 吸附 翻转 避让 任务栏 间距 插件 滚动条 置顶 锁定 贴边 宽度' },
-  help: { label: '使用帮助', tab: 'help', keys: '帮助 快捷键 使用说明 故障排查 日志 新手引导 异常 详情' },
-  privacy: { label: '清除数据', tab: 'data', keys: '清除 数据 隐私 重置 卸载 凭据 挂件 账本 窗口 素材 按压 气泡 泡泡' },
-  backup: { label: '备份与恢复', tab: 'data', keys: '备份 恢复 导出 导入 json 迁移 密码 加密 凭据 气泡 泡泡 素材' },
-  dshMain: { label: 'DeepSeek Harness（dsh）', tab: 'dev', keys: 'dsh harness 启动 重启 结束 更新 版本 端口 注册源 node 日志 状态 安装 目录 命令 地址 使用' },
-  dshDiagnose: { label: 'dsh 环境诊断', tab: 'dev', keys: 'dsh 诊断 环境 检查 排障 patch 冲突 端口占用' },
-  dshDump: { label: 'dsh 配置转储', tab: 'dev', keys: 'dsh 配置 转储 dump 分层 默认树 差异 概览' },
-  dshExport: { label: 'dsh 全量导出', tab: 'dev', keys: 'dsh 导出 zip 打包 全量 备份 来源 目录 凭据 跳过 依赖 文件夹' },
-  dshUsage: { label: 'dsh 用量统计', tab: 'dev', keys: 'dsh 用量 统计 token 趋势 数据 目录 来源 会话' },
-  dshIsolate: { label: 'dsh 插件开关', tab: 'dev', keys: 'dsh 插件 开关 隔离 patch 启用 禁用 写入 位置 保留' },
-  dshMarket: { label: 'dsh 插件市场', tab: 'dev', keys: 'dsh 市场 插件 安装 卸载 更新 目录 数据 来源 写入 位置 关键词' },
-  codex: { label: 'Codex 会话统计', tab: 'dev', keys: 'codex 会话 统计 token 用量 日志 订阅 窗口' },
-  about: { label: '关于与更新', tab: 'help', keys: '关于 更新 版本 反馈 好评 市场' },
-  ghAccel: { label: 'GitHub 加速', tab: 'help', keys: 'github 加速 hosts 直连 ip 刷新 源 冲突 证书 状态' },
-}
 // 命中卡片的 key 列表（按 SEARCH_INDEX 声明顺序，与模板中的卡片顺序不同也没关系，
 // 因为搜索结果里每张卡自带栏目名，用户看得到它属于哪一组）
 // 匹配口径：查询按空格拆成多词，**每个词都命中**（AND）才算命中 —— 整句includes会把
@@ -332,7 +290,10 @@ const searchHits = computed(() => {
   return [...orScore.entries()].sort((a, b) => b[1] - a[1]).map(([k]) => k)
 })
 // 某张卡是否应该在当前搜索态下渲染：搜索中 → 只有命中的卡渲染（跨 Tab）；非搜索态 → 沿用原 Tab 判定
+// 自定义显示：被用户隐藏的卡片不渲染（核心卡片 credentials/window/look 不可隐藏，见 constants/display.ts）
 function cardOn(tab: string, key: string) {
+  // 隐藏的卡片始终不渲染（无论搜索态还是正常态）
+  if (cfg.hiddenCards.includes(key)) return false
   if (searchActive.value) return searchHits.value.includes(key)
   return activeTab.value === tab
 }
@@ -345,6 +306,54 @@ function cardTabLabel(key: string) {
 function clearSearch() {
   searchQuery.value = ''
 }
+
+// —— 自定义显示管理 ——
+// DisplayManager 弹窗的显隐
+const showDisplayManager = ref(false)
+// 判断卡片是否被隐藏（用于搜索结果标记）
+function isCardHidden(key: string): boolean {
+  return cfg.hiddenCards.includes(key)
+}
+// 切换卡片显隐（由 DisplayManager 组件调用）
+async function toggleCardVisibility(key: string, hidden: boolean) {
+  const current = new Set(cfg.hiddenCards)
+  if (hidden) current.add(key)
+  else current.delete(key)
+  try {
+    await patchConfig({ hiddenCards: [...current] })
+  } catch (err) {
+    flash('保存失败', 'err')
+  }
+}
+// 切换 Tab 显隐（由 DisplayManager 组件调用）
+async function toggleTabVisibility(tabKey: TabKey, hidden: boolean) {
+  const current = new Set(cfg.hiddenTabs)
+  if (hidden) current.add(tabKey)
+  else current.delete(tabKey)
+  try {
+    await patchConfig({ hiddenTabs: [...current] })
+    // 如果当前激活的 Tab 被隐藏了，切到第一个可见的 Tab
+    if (hidden && activeTab.value === tabKey) {
+      const visible = TABS.filter((t) => !cfg.hiddenTabs.includes(t.key) && (t.key !== 'dev' || devMode.value))
+      if (visible.length) activeTab.value = visible[0].key
+    }
+  } catch (err) {
+    flash('保存失败', 'err')
+  }
+}
+// 恢复默认显示（全部显示）
+async function resetDisplayToDefault() {
+  try {
+    await patchConfig({ hiddenTabs: [], hiddenCards: [] })
+  } catch (err) {
+    flash('保存失败', 'err')
+  }
+}
+// DisplayManager 更新后的回调（目前不需要额外处理，配置已实时生效）
+function onDisplayManagerUpdate() {
+  // 配置已通过 patchConfig 实时更新，无需额外操作
+}
+
 // 输入法组字守卫：组字期间按 Enter/Esc 是「确认候选词 / 取消组字」，不该触发输入框上挂的
 // 确认 / 关闭动作（比如给快照起中文名时一回车名字就被提交了）。keyCode 229 是 IME 处理中的经典标记
 function isImeComposing(e: Event | undefined) {
@@ -1053,7 +1062,7 @@ function patchCfg(p: Record<string, any>) {
 // 每个槽位只保留一段：再导入就是替换掉旧的（挂件端不再有「随机播」这回事）
 // 同值副本：preload 不参与打包，设置页读不到宿主常量（见 public/preload/lib/sounds.js 的 ROLES / ROLE_LABEL）
 const SOUND_ROLES: SoundRole[] = ['press', 'release', 'low', 'budget', 'peak', 'pass']
-// 四类提醒各自的提醒音：留空 = 静音（没有内置回落，不打扰是默认），导入后跟随音效开关与音量
+// 四类提醒各自的提醒音：留空 = 用内置提醒音（挂件页 ALERT_FALLBACK），导入后跟随音效开关与音量
 // 类型是 SoundRole 的提醒子集：它们还要索引 cfg.alertVols（音色两段没有独立音量）
 const ALERT_SOUND_ROLES: AlertRole[] = ['low', 'budget', 'peak', 'pass']
 const SOUND_ROLE_LABEL: Record<SoundRole, string> = {
@@ -2121,7 +2130,7 @@ function copyWidgetError() {
 // 清除数据（勾选与二次确认）已内聚到 PrivacyView.vue，由它调用 services.clearAllData；
 // 这里只做「清除成功后的回显刷新」——要读父级全局状态（secrets / cfg / 账本 / 各素材卡片）。
 // picked 由组件按同一语义拆好：素材三项（sounds/skins/bubbles）同开关一起下发。
-function onDataCleared(picked: { secrets: boolean; config: boolean; ledger: boolean; window: boolean; sounds: boolean; skins: boolean; bubbles: boolean; bubble: boolean }) {
+function onDataCleared(picked: { secrets: boolean; config: boolean; ledger: boolean; window: boolean; sounds: boolean; skins: boolean; bubbles: boolean; bubble: boolean; todo: boolean }) {
   if (picked.secrets) {
     secrets.apiKey = ''
     secrets.platformToken = ''
@@ -2362,15 +2371,23 @@ const taskbarPolling = usePolling(taskbarSync, 2000, true)
 // 宿主推送的配置变更订阅（挂件菜单改设置时，让本页开关同步）
 let unsubConfig: (() => void) | undefined
 // 挂件菜单「气泡设置」→ 宿主 showMainWindow + emitNavigate('bubble') → 这里切到「外观」Tab 并滚到
-// 「按压气泡」卡。订阅放父级（与 onConfigChange 同处），不放进 BubbleView：
+// 「按压气泡」卡；「管理待办」→ emitNavigate('focus') → 切到「用量」Tab 并滚到「专注与待办」卡。
+// 订阅放父级（与 onConfigChange 同处），不放进 BubbleView / FocusView：
 // 卡片是 v-if 渲染的（未激活 Tab 根本不挂载），订阅一旦跟着卡走就会「卡没渲染 = 收不到导航」。
 // 切换 Tab 后卡片要等下一帧才进 DOM，scrollToCard 必须 nextTick 之后再调，否则 querySelector 落空
 let unsubNavigate: (() => void) | undefined
 function onBubbleNavigate(target: string) {
-  if (target !== 'bubble') return
-  activeTab.value = 'look'
-  clearSearch()
-  nextTick(() => scrollToCard('bubbleCustom'))
+  if (target === 'bubble') {
+    activeTab.value = 'look'
+    clearSearch()
+    nextTick(() => scrollToCard('bubbleCustom'))
+    return
+  }
+  if (target === 'focus') {
+    activeTab.value = 'usage'
+    clearSearch()
+    nextTick(() => scrollToCard('focus'))
+  }
 }
 // 本窗口重新可见/重新聚焦时刷新趋势（挂件刷新余额后账本可能已变）
 function onWindowActive() {
@@ -2476,8 +2493,10 @@ onUnmounted(() => {
     <!-- 顶部 Tab：一次只显示一组卡片 -->
     <nav class="tab-bar" ref="tabBarEl">
       <div class="tab-row">
-        <button v-for="t in TABS" :key="t.key" type="button" class="tab"
+        <button v-for="t in visibleTabs" :key="t.key" type="button" class="tab"
                 :class="{ 'tab-on': !searchActive && activeTab === t.key }" @click="clearSearch(); activeTab = t.key">{{ t.label }}</button>
+        <!-- 自定义显示管理入口：齿轮图标，点击打开 DisplayManager 弹窗 -->
+        <button type="button" class="display-manager-btn" @click="showDisplayManager = true" title="自定义显示">⚙</button>
       </div>
       <!-- 卡片搜索：输入即跨 Tab 过滤出命中的卡片（见 SEARCH_INDEX）。清空 / Esc 回到正常 Tab 视图 -->
       <div class="search-row">
@@ -2500,7 +2519,10 @@ onUnmounted(() => {
     </p>
     <!-- 搜索态下每张命中卡标出「本来在哪一组」，点标签直接滚到那张卡（命中卡按索引顺序渲染、不带分组名会找不到北） -->
     <div v-if="searchActive && searchHits.length" class="search-hits">
-      <button v-for="k in searchHits" :key="k" type="button" class="search-hit-tag" @click="scrollToCard(k)">{{ cardTabLabel(k) }} · {{ SEARCH_INDEX[k].label }}</button>
+      <button v-for="k in searchHits" :key="k" type="button" class="search-hit-tag" :class="{ hidden: isCardHidden(k) }" @click="scrollToCard(k)">
+        {{ cardTabLabel(k) }} · {{ SEARCH_INDEX[k].label }}
+        <span v-if="isCardHidden(k)" class="hidden-badge">（已隐藏）</span>
+      </button>
     </div>
 
     <!-- [数据] 凭据：填一次就不动，默认收起（展开状态见 toolOpen.credentials） -->
@@ -2692,6 +2714,12 @@ onUnmounted(() => {
                 :low-alert-default="LOW_ALERT_DEFAULT"
                 :fmt-tokens="fmtTokens" :codex-win-text="codexWinText"
                 @reload="reloadModels" @update:main-id="onModelsMainChange" />
+
+    <!-- [用量] 专注与待办：专注记录（开关 + 近 7 天统计）+ 待办清单编辑面。
+         挂件菜单的「管理待办」导航到本卡（target='focus'），故卡上挂 data-search="focus" -->
+    <FocusView v-if="cardOn('usage', 'focus')"
+               :cfg="cfg" :services="services" :is-ime-composing="isImeComposing"
+               @patch="patchCfg" />
 
     <!-- [窗口] 挂件窗口：显隐、位置与窗口属性（使用说明 / 故障排查已挪到「帮助」组）。
          模板已迁至 WindowView.vue：widgetFlash / 显隐 / 复位 / 复制指令 / 新增快捷键
@@ -4470,6 +4498,22 @@ onUnmounted(() => {
       @browse-skins="onGuideBrowseSkins"
       @doc="openDoc"
     />
+
+    <!-- 自定义显示管理弹窗 -->
+    <DisplayManager
+      v-if="showDisplayManager"
+      :tabs="TABS"
+      :search-index="SEARCH_INDEX"
+      :core-cards="CORE_CARDS"
+      :card-dependencies="CARD_DEPENDENCIES"
+      :hidden-tabs="cfg.hiddenTabs"
+      :hidden-cards="cfg.hiddenCards"
+      @close="showDisplayManager = false"
+      @toggle-tab="toggleTabVisibility"
+      @toggle-card="toggleCardVisibility"
+      @reset="resetDisplayToDefault"
+      @update="onDisplayManagerUpdate"
+    />
   </div>
 </template>
 
@@ -4556,6 +4600,25 @@ h1 {
 .tab-on:hover {
   color: #fff;
 }
+/* 自定义显示管理入口：齿轮图标，放在 Tab 行末尾 */
+.display-manager-btn {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  font-size: 16px;
+  line-height: 1;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--fg-dim);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.display-manager-btn:hover {
+  background: var(--line);
+  color: var(--fg);
+}
 .tab-desc {
   margin: 8px 2px 0;
   font-size: 12px;
@@ -4605,6 +4668,16 @@ h1 {
 .search-hit-tag:hover {
   color: var(--fg);
   border-color: var(--accent);
+}
+/* 已隐藏的卡片在搜索结果中标记：半透明 + 删除线，提示用户这张卡当前不可见 */
+.search-hit-tag.hidden {
+  opacity: 0.5;
+  text-decoration: line-through;
+}
+.hidden-badge {
+  margin-left: 4px;
+  font-size: 10px;
+  color: var(--err);
 }
 .search-empty {
   color: var(--fg-dim);

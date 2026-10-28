@@ -33,6 +33,8 @@ test('prebuild 同时挂上 sync-version 与 check-shared', () => {
   // 同理钉住 --fail：不带这个参数时孤儿 CSS 脚本只警告不拦截，闸门会静默退化
   assert.match(prebuild, /scripts\/check-orphan-css\.mjs\s+--fail/, 'prebuild 少了 check-orphan-css.mjs --fail：孤儿 CSS 不再拦截')
   assert.match(prebuild, /scripts\/check-z-layers\.mjs\s+--fail/, 'prebuild 少了 check-z-layers.mjs --fail：悬浮窗 z-index 裸数字不再拦截')
+  // public/ 会被原样拷进 dist/，未入库（未跟踪 / 被 .gitignore 忽略）的文件等于直接进发行包
+  assert.match(prebuild, /scripts\/check-public-tracked\.mjs/, 'prebuild 少了 check-public-tracked.mjs：public/ 下的 .bak / 副本会静默进包')
 })
 
 test('prebuild 仍由 build 触发', () => {
@@ -66,6 +68,13 @@ test('Release 校验 tag 与 package.json 版本一致', () => {
   // 两者对不上会让 Release 的产物与版本号各说各话
   assert.match(release, /GITHUB_REF_NAME/, 'release.yml 没有读取 tag 名，无法校验版本')
   assert.match(release, /package\.json/, 'release.yml 没有读取 package.json 版本，无法校验版本')
+})
+
+test('Release 打包后校验 zip 体积', () => {
+  // 打包是「dist 里有什么就打什么」，四关都不看体积：dist/ 混进陈年大件时
+  // lint / typecheck / test / build 全绿、Release 照发（历史事故：44MB 的废弃素材包）。
+  // 这一步是唯一能拦住它的地方，删掉就等于没有体积防线。
+  assert.match(release, /scripts\/check-zip-size\.mjs/, 'release.yml 没有校验 zip 体积：dist/ 混进大件时会静默发出去')
 })
 
 test('plugin.json 的 feature code 都有 onPluginEnter 分支', () => {
@@ -187,6 +196,8 @@ test('App.vue 的 data-search 与 SEARCH_INDEX 一一对应', () => {
   //（cardOn 走 searchHits，不在索引里就命中不了）；多登记 → 产生死链接。
   // 这个坑真实发生过（共享形象 / 共享音效两张卡漏登记），故用门禁钉死。
   const app = read('src/App.vue')
+  // SEARCH_INDEX 已移至 constants/display.ts
+  const displayConst = read('src/constants/display.ts')
 
   // 模板里所有 data-search="xxx"（去重）；排除 scrollToCard 里的选择器字符串。
   // 锚点不只在 App.vue：抽出去的异步组件（AccelView）自带 .card，锚点挂在那里，
@@ -197,8 +208,8 @@ test('App.vue 的 data-search 与 SEARCH_INDEX 一一对应', () => {
     .map((f) => read(`src/views/${f}`)).join('\n')
   for (const m of appSrc.matchAll(/data-search="([A-Za-z0-9_]+)"/g)) templateKeys.add(m[1])
 
-  // SEARCH_INDEX 对象的键：从 `const SEARCH_INDEX ... = {` 到下一个顶层 `}`
-  const block = app.match(/const SEARCH_INDEX[^=]*=\s*\{([\s\S]*?)\n\}/)
+  // SEARCH_INDEX 对象的键：从 `export const SEARCH_INDEX ... = {` 到下一个顶层 `}`
+  const block = displayConst.match(/export const SEARCH_INDEX[^=]*=\s*\{([\s\S]*?)\n\}/)
   assert.ok(block, '没找到 SEARCH_INDEX 定义，解析规则可能已失效')
   const indexKeys = new Set()
   // 只取形如 `  key: {` 的行（行首缩进 + 键名 + 冒号 + 花括号），避开注释与嵌套对象
@@ -261,13 +272,15 @@ test('卡内每个字段名都能被该卡的搜索索引命中（label/keys 覆
   // ⚠️ 白名单是**欠账清单**不是免检牌：只允许「历史遗留、值得配词但还没配」的条目，
   //    新增字段不许进（进来就说明有人在绕闸门）。清一条删一条，目标永远是空表。
   const app = read('src/App.vue')
+  // SEARCH_INDEX 已移至 constants/display.ts
+  const displayConst = read('src/constants/display.ts')
   // 与上一测试同口径：锚点也可能在 views/ 下的异步组件里
   const appSrc = app + '\n' + fs.readdirSync(new URL('../src/views', import.meta.url))
     .filter((f) => f.endsWith('.vue'))
     .map((f) => read(`src/views/${f}`)).join('\n')
 
   // 解析 SEARCH_INDEX（同上一测试的取法）
-  const block = app.match(/const SEARCH_INDEX[^=]*=\s*\{([\s\S]*?)\n\}/)
+  const block = displayConst.match(/export const SEARCH_INDEX[^=]*=\s*\{([\s\S]*?)\n\}/)
   assert.ok(block, '没找到 SEARCH_INDEX 定义，解析规则可能已失效')
   const indexOf = {}
   for (const m of block[1].matchAll(/^\s{2}([A-Za-z0-9_]+):\s*\{[^}]*?label:\s*'([^']*)',\s*tab:\s*'[^']*',\s*keys:\s*'([^']*)'/gm)) {

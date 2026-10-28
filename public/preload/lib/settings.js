@@ -3,14 +3,17 @@
  */
 const fs = require('fs')
 const path = require('path')
-const { PLUGIN_VERSION, K, MODEL_TEMPLATES, MODEL_MAX, DEFAULT_MAIN_MODEL, DSH_PORT_DEFAULT } = require('./constants')
+const { PLUGIN_VERSION, K, MODEL_TEMPLATES, MODEL_MAX, DEFAULT_MAIN_MODEL, DSH_PORT_DEFAULT, TODO_TEXT_MAX, TODO_MAX } = require('./constants')
 const { log, logErr, LOG_FILE } = require('./log')
 const {
   clampNum, readConfig, patchConfig, readSecrets, writeSecrets, readLedger, historyKeepDays,
   resetAnchorCache, mergeLedgerHistory, clearTimer, calibrateTodayUsage,
   defaultAnchor, writeAnchor, normModelId, normModel, sanitizeKey, dropModelState,
   normBubble, defaultConfig,
+  readTodo, writeTodo, clearTodo, normTodoText,
+  readFocus, clearFocus, todayKey,
 } = require('./store')
+const { summarize: summarizeFocus } = require('./focus')
 const {
   fetchBalanceWith, fetchPlatformUsage, checkUpdate, resetBalanceCache,
   fetchModelBalance, refreshModels: refreshModelsApi, getModelsPayload,
@@ -18,7 +21,7 @@ const {
 const {
   ensureWidget, destroyWidget, winAlive, getWidgetError, getWindow,
   applyScaleToWindow, applyOnTop, pushConfig, queueLiveScale, repositionFromAnchor,
-  taskbarState, syncTaskbarWatch, sendToWidget,
+  taskbarState, syncTaskbarWatch, sendToWidget, pushTodo,
 } = require('./widget')
 // dsh 一族合计 300KB+，且本模块在设置窗加载时会被求值。下面所有 dsh.xxx 的调用都在函数体内
 // （无模块求值期引用），故改成惰性：首次访问 dsh.* 时才 require，之后复用同一份。
@@ -1796,6 +1799,26 @@ function emitConfigChange() {
   }
 }
 
+// 待办变更订阅（设置页 ← 宿主）：挂件页勾选完成 / 设为专注后，宿主把整份清单回推过来。
+// 与 configListeners 同款：只在有订阅者时读一次存储，逐个子回调。
+const todoListeners = []
+function emitTodoChange() {
+  if (!todoListeners.length) return
+  const st = readTodo()
+  for (const cb of todoListeners) {
+    try { cb(st) } catch (err) { logErr('[whale][todo] 订阅回调异常', err && err.message) }
+  }
+}
+// 专注统计变更订阅（设置页 ← 宿主）：挂件到点记一轮后触发。
+// 刻意不带载荷：统计窗口（7/14/30 天）是设置页自己的展示选择，让它收到信号后按当前窗口重算。
+const focusListeners = []
+function emitFocusChange() {
+  if (!focusListeners.length) return
+  for (const cb of focusListeners) {
+    try { cb() } catch (err) { logErr('[whale][focus] 订阅回调异常', err && err.message) }
+  }
+}
+
 // 导航订阅（设置页 ← 宿主）。挂件菜单的「气泡设置」按钮请求唤出设置页并直达某张卡片时，
 // 宿主先 showMainWindow、再调 emitNavigate 让已打开的设置窗切到对应 Tab 并展开目标卡。
 // 与 configListeners 分开：这里是「一次性动作」，不重复回放给后来订阅者。
@@ -1958,10 +1981,135 @@ function dumpDshConfig(opts) {
   })
 }
 
+// ──────────────────────────────────────────────
+// 待办清单写操作（设置页直通）
+// ──────────────────────────────────────────────
+// 所有写操作走同一条路：读权威状态 → 改 → 写 → 回推挂件 → 通知设置页。
+// 返回 { ok, todo, error? }：设置页拿到就能直接渲染，不必再读一次；
+// 失败也带回当前状态，免得界面停留在「乐观更新」后的错误内容。
+function newTodoId(items) {
+  const seen = new Set((items || []).map((x) => x.id))
+  for (;;) {
+    // 't' 前缀：与鲸鱼素材的 id（'k' / 's' 等）区分开，日志与存储里一眼能看出这是待办条目
+    const id = 't' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8)
+    if (!seen.has(id)) return id
+  }
+}
+function todoMutate(fn) {
+  const st = readTodo()
+  const res = fn(st)
+  if (res && res.error) return { ok: false, error: res.error, todo: st }
+  if (!writeTodo(st)) return { ok: false, error: '写入失败', todo: readTodo() }
+  try { pushTodo() } catch (err) { logErr('[whale][todo] 推送待办失败', err && err.message) }
+  emitTodoChange()
+  return { ok: true, todo: st }
+}
+
 module.exports = {
   getConfig() {
     return readConfig()
   },
+  // —— 待办清单（设置页是唯一编辑面；挂件页只做勾选完成 / 设为专注，走 ipc 的 whale:todo） ——
+  todoGet() {
+    return readTodo()
+  },
+  // 输入框 maxlength 与条数上限：单一来源是 constants.js，设置页不必再存一份副本
+  todoLimits() {
+    return { textMax: TODO_TEXT_MAX, max: TODO_MAX }
+  },
+  todoAdd(text) {
+    const t = normTodoText(text)
+    if (!t) return { ok: false, error: '内容为空', todo: readTodo() }
+    return todoMutate((st) => {
+      if (st.items.length >= TODO_MAX) return { error: '待办条数已达上限（' + TODO_MAX + ' 条）' }
+      // 新条目插到最前：刚记下的事最可能需要马上动手
+      st.items.unshift({ id: newTodoId(st.items), text: t, done: false, at: Date.now(), doneAt: 0 })
+    })
+  },
+  todoRename(id, text) {
+    const key = String(id || '')
+    const t = normTodoText(text)
+    if (!t) return { ok: false, error: '内容为空', todo: readTodo() }
+    return todoMutate((st) => {
+      const it = st.items.find((x) => x.id === key)
+      if (!it) return { error: '条目不存在' }
+      it.text = t
+    })
+  },
+  todoSetDone(id, done) {
+    const key = String(id || '')
+    const want = done === true
+    return todoMutate((st) => {
+      const it = st.items.find((x) => x.id === key)
+      if (!it) return { error: '条目不存在' }
+      it.done = want
+      // 重复勾「完成」时保留首次完成时间，别把统计口径刷新成今天
+      it.doneAt = want ? (it.doneAt || Date.now()) : 0
+      if (want && st.focusId === key) st.focusId = ''
+    })
+  },
+  todoRemove(id) {
+    const key = String(id || '')
+    return todoMutate((st) => {
+      const i = st.items.findIndex((x) => x.id === key)
+      if (i < 0) return { error: '条目不存在' }
+      st.items.splice(i, 1)
+      if (st.focusId === key) st.focusId = ''
+    })
+  },
+  todoClearDone() {
+    return todoMutate((st) => {
+      st.items = st.items.filter((x) => !x.done)
+      if (st.focusId && !st.items.some((x) => x.id === st.focusId)) st.focusId = ''
+    })
+  },
+  // 设为 / 取消当前专注目标（id 传空串 = 直接取消）
+  todoFocus(id) {
+    const key = String(id || '')
+    return todoMutate((st) => {
+      if (!key) { st.focusId = ''; return }
+      const it = st.items.find((x) => x.id === key)
+      if (!it) return { error: '条目不存在' }
+      if (it.done) return { error: '已完成的条目不能设为专注目标' }
+      st.focusId = st.focusId === key ? '' : key
+    })
+  },
+  // 设置待办条目的预估番茄轮数（est）：0 = 未设置，1–99 有效
+  todoSetEst(id, est) {
+    const key = String(id || '')
+    const n = Math.max(0, Math.min(99, Math.round(Number(est) || 0)))
+    return todoMutate((st) => {
+      const it = st.items.find((x) => x.id === key)
+      if (!it) return { error: '条目不存在' }
+      it.est = n
+    })
+  },
+  // 专注统计汇总：series 只覆盖最近 days 天（默认 7），total 与图上柱对得上
+  focusStats(days) {
+    const n = Math.max(1, Math.min(366, Math.round(Number(days) || 7)))
+    const s = summarizeFocus(readFocus(), todayKey(), n)
+    return { series: s.series, today: s.today, total: s.total, streak: s.streak, days: n }
+  },
+  // 订阅待办变更，返回退订函数（设置页 onMounted 订阅、onUnmounted 退订）
+  onTodoChange(cb) {
+    if (typeof cb !== 'function') return function () {}
+    todoListeners.push(cb)
+    return function () {
+      const i = todoListeners.indexOf(cb)
+      if (i >= 0) todoListeners.splice(i, 1)
+    }
+  },
+  // 订阅专注统计变更（无载荷，收到后按当前窗口重算），返回退订函数
+  onFocusChange(cb) {
+    if (typeof cb !== 'function') return function () {}
+    focusListeners.push(cb)
+    return function () {
+      const i = focusListeners.indexOf(cb)
+      if (i >= 0) focusListeners.splice(i, 1)
+    }
+  },
+  emitTodoChange,
+  emitFocusChange,
   // 订阅配置变更，返回退订函数（设置页 onMounted 订阅、onUnmounted 退订）
   onConfigChange(cb) {
     if (typeof cb !== 'function') return function () {}
@@ -2596,6 +2744,9 @@ module.exports = {
     if (cfg.onTop !== prev.onTop) applyOnTop(cfg.onTop)
     if (cfg.usageMode !== prev.usageMode) resetBalanceCache()
     pushConfig()
+    // 「显示待办」刚打开时挂件手里还没有清单快照（pushInit 只在窗口创建时带一次），
+    // 补推一份，否则要等用户下次勾选/改清单才会出现内容
+    if (cfg.todoOn !== prev.todoOn) pushTodo()
     // 反向回推给设置页：saveConfig 是设置页自己调的，但设置页的 cfg 不一定等于落库结果 ——
     // 宿主 patchConfig 会做归一化（补齐 / 钳范围 / 清洗），不回推的话设置页手里的还是它自己拼的
     // 那份「未归一化」的值。取消订阅后再回推会打断「配置 → 订阅 → 回推」的闭环
@@ -3141,13 +3292,15 @@ module.exports = {
     const r = mergeLedgerHistory(rows)
     return { ok: true, path: filePath, imported: r.imported, invalid: invalid, kept: r.kept, from: r.from, to: r.to }
   },
-  // 按项清除本地数据：opts = { secrets, config, ledger, window, sounds, skins, bubbles, bubble }，为 true 的项才会被清除。
+  // 按项清除本地数据：opts = { secrets, config, ledger, window, sounds, skins, bubbles, bubble, todo }，为 true 的项才会被清除。
   // 各项覆盖的键（务必与新增存储键同步，否则会「清不干净」）：
   //   config  = whale:config + whale:models + whale:timer + whale:cnHolidays（节假日覆盖层属于设置）
   //   ledger  = whale:ledger + whale:codex + whale:dshUsage（用量类派生缓存与账本同源）
   //   window  = whale:window + whale:update + dsh 版本/查询标记/说明正文/自动刷新偏好 + dsh 诊断/转储/市场目录缓存
   //   secrets = whale:secrets（加密，含 API Key / 平台 Token / 模型密钥 / SMTP 凭据）
   //   sounds/skins/bubbles = 对应元信息键 + 磁盘文件
+  //   todo    = whale:todo + whale:focus（待办清单与专注统计合成一项：都是用户的长期记录，
+  //             清清单不该顺手抹掉专注历史、反之亦然，故由用户一次显式勾选、一次清两处）
   //   bubble  = 按压气泡「文案 + 配图」两处的组合语义：重置 config.bubble / config.bubbleOn（文案、队列、开关）
   //             + 清 whale:bubbles 磁盘配图。按压气泡数据天然分散在这里两处，用户要的是「整个功能回到默认」，
   //             故单列一项；它与 config（清整个配置）并非互斥，两个都勾只是多做一次同样的重置，无副作用。
@@ -3201,6 +3354,15 @@ module.exports = {
     if (o.bubbles) {
       // 气泡图没有「当前用哪张」的概念，删光即自动回退内置 rua.webp，不必改配置
       try { bubbles.clearAll() } catch (err) { logErr('[whale][settings] 清除自定义气泡图失败', err && err.message) }
+    }
+    // 待办与专注统计：同属用户的长期记录，但两者互相独立 —— 清了清单不该顺手抹掉专注历史，
+    // 反之亦然；所以合并成一项「待办与专注记录」一起清，由用户显式勾选。
+    if (o.todo) {
+      try { clearTodo() } catch (err) { logErr('[whale][settings] 清除待办失败', err && err.message) }
+      try { clearFocus() } catch (err) { logErr('[whale][settings] 清除专注统计失败', err && err.message) }
+      try { pushTodo() } catch (err) { logErr('[whale][settings] 推送空待办失败', err && err.message) }
+      emitTodoChange()
+      emitFocusChange()
     }
     // 按压气泡（文案 + 配图一起清）：重置 config.bubble / config.bubbleOn 到出厂默认 + 清磁盘配图。
     // 用 patchConfig 的按字段写回（而非删整个 config）——用户勾的可能只是「按压气泡」，
@@ -3265,6 +3427,7 @@ module.exports = {
       cleared: {
         secrets: !!o.secrets, config: !!o.config, ledger: !!o.ledger, window: !!o.window,
         sounds: !!o.sounds, skins: !!o.skins, bubbles: !!o.bubbles, bubble: !!o.bubble,
+        todo: !!o.todo,
       },
     }
   },
@@ -3289,6 +3452,12 @@ module.exports = {
     if (appliedList.indexOf('bubbles') >= 0) {
       try { sendToWidget('whale:bubbles', bubbles.getBubbleData()) } catch (err) { logErr('[whale][settings] 恢复后推送气泡失败', err && err.message) }
     }
+    // 待办恢复后推整份清单给挂件，并通知设置页重读快照；专注统计只影响设置页的图表
+    if (appliedList.indexOf('todo') >= 0) {
+      try { pushTodo() } catch (err) { logErr('[whale][settings] 恢复后推送待办失败', err && err.message) }
+      emitTodoChange()
+    }
+    if (appliedList.indexOf('focus') >= 0) emitFocusChange()
     const hit = appliedList.indexOf('config') >= 0 || appliedList.indexOf('window') >= 0
     if (hit) {
       resetBalanceCache()

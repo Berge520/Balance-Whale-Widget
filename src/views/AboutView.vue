@@ -1,6 +1,7 @@
 <script lang="ts" setup>
 import { reactive } from 'vue'
 import type { WhaleServices } from '../types/services'
+import { useFold } from '../composables/useFold'
 
 // 「关于与更新」整卡：模板 + 反馈折叠 + 插件市场 / 项目主页跳转。
 // 从设置页 App.vue 抽出。**更新检查的状态与 doCheckUpdate 保留在父级**——
@@ -29,7 +30,8 @@ const emit = defineEmits<{
 
 // 卡级折叠：与提醒 / 隐私 / 备份三卡统一为「默认收起、可展开」。本卡正文含版本信息 / 更新按钮 /
 // 结果行 / 反馈折叠，日常只在「查更新」时才展开，收起后只留标题与版本摘要
-const cardFold = reactive({ open: false })
+// 使用 useFold 持久化折叠状态到 localStorage，避免用户每次打开都要重新展开
+const cardFold = useFold('about', false)
 // 反馈入口是软性内容，与版本信息不同性质，收进折叠。默认折叠（展开态为 false）
 const aboutFolds = reactive({ feedback: false })
 

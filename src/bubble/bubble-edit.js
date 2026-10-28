@@ -65,7 +65,7 @@ export function modContentLocked(type) {
 }
 
 // ──────────────────────────────────────────────
-// 行×模块布局（spec §305 的 bubbleApplyRowLayout 同口径镜像）
+// 行×模块布局（docs/spec/06-storage.md 里 bubbleApplyRowLayout 的同口径镜像）
 // ──────────────────────────────────────────────
 // 上游把「行」表达为模块上的 row 键（行号 + 1），单模块行与图片行不带 row 键。
 // 编辑器内部用二维数组（rows[行][模块]）更好操作，落库前用本函数压平回带 row 键的 modules[]。

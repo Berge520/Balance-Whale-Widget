@@ -1,6 +1,7 @@
 <script lang="ts" setup>
 import { computed, reactive, ref, watch } from 'vue'
 import { msgCls, useFlash, type Flash } from '../composables/useFlash'
+import { useFold } from '../composables/useFold'
 import { barHeightOf } from '../utils/format'
 import type { CodexSummaryResult, CodexWindows, WhaleServices } from '../types/services'
 import UsageChart from '../components/UsageChart.vue'
@@ -38,7 +39,8 @@ const emit = defineEmits<{
 // 整卡折叠：宿主是同步扫文件（会话日志可能几十 MB），默认收起、首次展开才读，
 // 避免每次进开发者 Tab 都无条件付一次扫描成本。
 // loaded 保证收起态摘要只在「本会话已读过」之后才显示，折叠 = 不预读。
-const folds = reactive({ open: false, help: false })
+const folds = useFold('codex', false)
+const helpFold = reactive({ open: false })
 const loaded = ref(false)
 function toggle() {
   folds.open = !folds.open
@@ -210,8 +212,8 @@ function codexClearCache() {
       />
 
       <div class="fold">
-        <button class="link-btn utils-btn utils-secondary" @click="folds.help = !folds.help">{{ folds.help ? '收起说明' : '说明' }}</button>
-        <div v-if="folds.help" class="guide">
+        <button class="link-btn utils-btn utils-secondary" @click="helpFold.open = !helpFold.open">{{ helpFold.open ? '收起说明' : '说明' }}</button>
+        <div v-if="helpFold.open" class="guide">
           <p class="guide-use"><strong>统计口径：</strong>优先用 <code>total_token_usage</code> 的累计差值（单调递增，一次轮次写多条 <code>token_count</code> 也不会重复计数）；累计缺失时退回 <code>last_token_usage</code>。</p>
           <p class="guide-use"><strong>模型归属：</strong>按 <code>turn_context</code> 事件里的 <code>model</code> 归类，未标注的记为 <code>codex</code>。</p>
           <p class="guide-use"><strong>订阅窗口：</strong>ChatGPT 订阅的 Codex 会在 <code>token_count</code> 事件里带 <code>rate_limits</code> 快照（5h 与周两个窗口的已用% 与重置时间），字段名各版本不一致，已做多候选键容错；API-key 计费或没有订阅时日志里没有这份快照，这一行不显示。窗口是账号级状态，与上面的本地 token 统计各自独立。</p>

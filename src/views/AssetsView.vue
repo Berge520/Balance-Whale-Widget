@@ -12,6 +12,7 @@
 // ============================================================================
 import { computed, onMounted, onUnmounted, reactive, ref, watch, nextTick } from 'vue'
 import { msgCls, useFlash, type Flash } from '../composables/useFlash'
+import { useFold } from '../composables/useFold'
 import { assetSize, fetchAsDataUrl, fmtBytes, pad2, sharedSkinThumb } from '../utils/format'
 import SoundRow from '../components/SoundRow.vue'
 import DownloadBox from '../components/DownloadBox.vue'
@@ -280,7 +281,7 @@ const unusedSoundRoles = computed(() => {
 const unusedCount = computed(() => unusedSkinIds.value.length + unusedSoundRoles.value.length)
 
 // —— 折叠 / 目录 / 素材包 ——
-const assetsFold = reactive({ open: false })
+const assetsFold = useFold('assets', false)
 // 「资源概览 / 形象 / 音效 / 气泡图」四张卡都默认收起：一展开就是一行汇总的详解 + 三块网格 /
 // 六个槽位加 45 段清单 / 一屏气泡图，一次铺满整屏。默认收起时各自只留一行概览
 // （「共 N 张 · 另有 M 张可下载」/「已导入 n / 6 个槽位」/「已有 N 张」/「形象 N 张 · 合计 X」），
@@ -1573,7 +1574,7 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
           <!-- 概览只报有没有，不报名字：名字就在同一行的右侧（.sound-file），复述一遍纯属重复 -->
           <span class="asset-meta">
             <template v-if="soundMetaOf(r).length">已导入</template>
-            <template v-else>{{ (ALERT_SOUND_ROLES as string[]).indexOf(r) >= 0 ? '未导入（静音）' : '未导入（可选）' }}</template>
+            <template v-else>{{ (ALERT_SOUND_ROLES as string[]).indexOf(r) >= 0 ? '未导入（用内置音）' : '未导入（可选）' }}</template>
           </span>
           <!-- 「从共享库添加」：把共享音效库已下载的段挂到本槽位（可先试听）。
                只在本槽位还有没挂上的段时才显示 —— 全挂上了就没必要再开这个面板。
@@ -1784,7 +1785,7 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
       <p v-else-if="!sharedSoundQuery" class="hint">共享音效清单未拉到时这里为空，展开本卡会自动重拉一次。</p>
 
       <!-- 使用说明默认折叠：原先四行小字常驻卡尾，把六个槽位压到下面去了。
-           摘要只报「能干什么」，不重复上方每行状态（那些行里已经写着「已导入 / 未导入（静音）」） -->
+           摘要只报「能干什么」，不重复上方每行状态（那些行里已经写着「已导入 / 未导入（用内置音）」） -->
       <div class="fold">
         <button class="link-btn utils-btn utils-secondary" type="button" @click="soundHelpOpen = !soundHelpOpen">
           {{ soundHelpOpen ? '收起音效使用说明' : '音效使用说明' }}
@@ -1793,7 +1794,7 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
           <p class="hint">每槽位一段手导，再导入 = 替换；想加更多，用槽位头的「从共享库添加…」挂共享段，一起随机播放。</p>
           <p class="hint">共享库的段来自上游 QQ 群分享、不随插件包分发，改为按需从 GitHub 直链下载；下载后默认不参加任何槽位（不打扰），点开行勾选想让它响的槽位即可。</p>
           <p class="hint">加入播放后它<strong>不会顶掉</strong>你手导的那段：挂件每次触发会在「手导的那段 + 挂到本槽位的共享段」里<strong>随机选一段</strong>。一段能同时挂多个槽位，一个槽位也能同时挂多段。</p>
-          <p class="hint">提醒音留空 = 静音；播放跟随「挂件外观」的音效开关与音量。</p>
+          <p class="hint">提醒音留空时用内置提醒音，导入后换成你自己的；播放跟随「挂件外观」的音效开关与音量。</p>
           <p class="hint">支持 mp3 / wav / ogg，导入时可拖选片段试听（最长 10 秒），存为单声道 WAV。</p>
         </div>
       </div>

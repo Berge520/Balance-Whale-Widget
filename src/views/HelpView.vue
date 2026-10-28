@@ -32,7 +32,7 @@ const emit = defineEmits<{
 // 统一的消息态（Flash）：定义收口在 composables/useFlash.ts，各卡不再各持一份。
 
 // 使用说明 / 故障排查的折叠态（默认收起，点标题才展开）
-const widgetFolds = reactive({ help: false, trouble: false })
+const widgetFolds = reactive({ help: false, trouble: false, displayManager: false })
 // 诊断日志：两版都同步落盘（%TEMP%\whale-debug.log），插件进程被 uTools 结束也不丢。
 // 入口恒显示：打包版同样落盘，不再按开发者模式隐藏
 const diagReady = true
@@ -98,6 +98,19 @@ function openLogFile() {
         <p class="guide-use"><strong>常驻：</strong>退出到后台挂件保留；关闭 Ctrl+D 分离窗口会直接结束插件运行、挂件消失，分离后请用「最小化」；重进插件会自动重建，配置不丢。</p>
       </div>
     </div>
+    <!-- 自定义显示：如何恢复隐藏的卡片 -->
+    <div class="fold">
+      <button class="link-btn utils-btn utils-secondary" @click="widgetFolds.displayManager = !widgetFolds.displayManager">{{ widgetFolds.displayManager ? '收起' : '如何恢复隐藏的卡片？' }}</button>
+      <div v-if="widgetFolds.displayManager" class="guide">
+        <p class="guide-use">如果您不小心隐藏了某个设置项（Tab 或卡片），可以通过以下方式恢复：</p>
+        <ol class="guide-list">
+          <li>点击 Tab 栏右侧的 <strong>⚙ 图标</strong>（管理显示内容）</li>
+          <li>在弹出的"管理显示内容"窗口中，勾选需要显示的 Tab 或卡片</li>
+          <li>点击窗口底部的"恢复默认显示"按钮可一键恢复所有隐藏项</li>
+        </ol>
+        <p class="guide-use"><strong>提示：</strong>有三张核心卡片（DeepSeek 凭据、挂件窗口、挂件外观）不可隐藏，因为隐藏它们会导致核心功能无法使用。</p>
+      </div>
+    </div>
     <div v-if="diagReady" class="fold">
       <button class="link-btn utils-btn utils-secondary" @click="widgetFolds.trouble = !widgetFolds.trouble">{{ widgetFolds.trouble ? '收起挂件故障排查' : '挂件故障排查' }}</button>
       <div v-if="widgetFolds.trouble" class="guide">
@@ -153,6 +166,19 @@ function openLogFile() {
   max-height: 160px;
   overflow: auto;
   user-select: text;
+}
+
+/* 自定义显示：帮助文档中的有序列表 */
+.guide-list {
+  margin: 8px 0;
+  padding-left: 24px;
+  font-size: 13px;
+  line-height: 1.8;
+  color: var(--fg);
+}
+
+.guide-list li {
+  margin-bottom: 4px;
 }
 
 </style>

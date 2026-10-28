@@ -29,6 +29,7 @@ import { fileURLToPath } from 'node:url'
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 // 自检注入口：整体覆盖默认值（与 check-dead-settings 的 CDS_* 同思路）
 const APP = process.env.GSI_APP || path.join(root, 'src/App.vue')
+const DISPLAY_CONST = process.env.GSI_DISPLAY_CONST || path.join(root, 'src/constants/display.ts')
 const OUT = process.env.GSI_OUT || path.join(root, 'src/search-index.gen.ts')
 const argCheck = process.env.GSI_CHECK === '1' || process.argv.includes('--check')
 
@@ -104,9 +105,11 @@ function buildIndex() {
   }
   const cards = extractAll(appSrc, extraSrc, path.relative(root, APP))
 
-  // 与 SEARCH_INDEX 对齐：从 App.vue 抠出 `const SEARCH_INDEX = {...}` 的键集合
-  const block = appSrc.match(/const SEARCH_INDEX[^=]*=\s*\{([\s\S]*?)\n\}/)
-  if (!block) throw new Error('App.vue 里找不到 SEARCH_INDEX 定义')
+  // 与 SEARCH_INDEX 对齐：从 constants/display.ts 抠出 `export const SEARCH_INDEX = {...}` 的键集合
+  // （SEARCH_INDEX 已从 App.vue 移至 constants/display.ts，供 DisplayManager.vue 等组件共享）
+  const displaySrc = read(DISPLAY_CONST)
+  const block = displaySrc.match(/export const SEARCH_INDEX[^=]*=\s*\{([\s\S]*?)\n\}/)
+  if (!block) throw new Error('constants/display.ts 里找不到 SEARCH_INDEX 定义')
   const indexKeys = new Set()
   for (const m of block[1].matchAll(/^\s{2}([A-Za-z0-9_]+):\s*\{/gm)) indexKeys.add(m[1])
   // GSI_MIN_KEYS：样本仓库只造几个键，放宽「解析出过少键 = 解析规则失效」的护栏阈值

@@ -1,0 +1,21 @@
+12. **空 `catch` 分两类**：预期分支（Electron 可选 API 不存在、窗口已销毁、读存储失败回默认值）保留空 catch 静默降级；业务失败（网络、写存储、IPC、窗口创建、音效与命中测试初始化）一律 `logErr(...)` 留痕。唯一例外：页面检测不到宿主桥接的 `console.warn` 常显，保证生产环境也有线索。
+13. **`onPluginOut(isKill)` 语义**：挂件是常驻桌面的独立窗口，**任何时候都不在 `onPluginOut` 里 `destroyWidget()`**。曾按「`isKill===true` 才销毁」实现，结果**关闭已分离的设置窗口**（同样触发 `onPluginOut`）会把挂件一起关掉。进程真正结束时 uTools 会自行关闭本插件创建的窗口，无需我们销毁；窗口若被关闭/隐藏，`winAlive()` 判为失效或不可见，下一次 `ensureWidget()` 自动重建。`onPluginOut` 只保留一条 dev 日志（打印 `isKill`）。
+14. **`enterMode`（进入插件时显示哪些窗口）**：`both`（默认，设置窗 + 挂件）/ `widget`（显示挂件，设置窗自动收起）/ `settings`（只显示设置窗口）。显隐分两层，由 `onPluginEnter` 的 whale 分支按需编排：
+    - **主窗自不自动弹出**：`whale` feature 在 `plugin.json` 设 `mainHide:true`；它只阻止 uTools「自动弹出主搜索框」，对已显示 / 已分离的主窗无效。
+    - **挂件是否夺焦**：`createWidget(focusable)` 按模式决定（`focusable` 只能在创建时指定）；`ensureWidget({ focus })` 检测到与现有窗口不一致时销毁重建。
+    - `settings`：显式 `utools.showMainWindow()`，全程不创建挂件；
+    - `widget`：`ensureWidget({ focus: true })` —— 挂件 `focusable:true`，一显示就抢前台焦点，uTools 主窗随即失焦并按**原生行为自动隐藏**，不用任何隐藏窗口的 API；
+    - `both`：`ensureWidget({ focus: false })`（挂件不夺焦，主窗焦点不被抢走）后 250ms `utools.showMainWindow()`，使挂件与设置窗同时可见。
+    - **踩坑（已废弃的两种抑制主窗方案）**：① `utools.outPlugin()` 会把插件「退出到后台」，之后挂件菜单的「打开设置」(`showMainWindow`) 唤不回主窗，而 `enterMode` 仍是 `widget`，导致「再也进不去设置」；② `utools.hideMainWindow()` 会连带隐藏 `createBrowserWindow` 的窗口，且在 `onPluginEnter` 中先调会让随后的窗口创建与 `setTimeout` 回调不执行（表现为点插件后挂件不出现）。抑制主窗只能靠 `feature.mainHide` + 「夺焦 → 失焦自动隐藏」。
+    - `ensureWidget(opts)` 幂等：无存活窗口则创建；已有窗口且 `focusable` 与期望一致时，focus 模式 `show()` 夺焦、否则仅 `applyOnTop`/`moveTop`；`focusable` 与期望不一致则销毁重建。不传 `opts.focus` 时沿用当前窗口的 `focusable`（供 `toggleWidget` 等内部调用）。
+    - `widget` 模式下主窗唯一入口：挂件菜单底部的「打开设置」→ `whale:open-settings` → 先 `utools.showMainWindow()`；返回 `false`（主窗已被 uTools 收起，如挂件夺焦后插件退到后台）时再 `utools.redirect('余额挂件', '')` 重新进入插件——`onPluginEnter` 检测到 `action.from === 'redirect'`（官方类型定义写作 `reirect`，疑为文档笔误，两种拼写都兼容）后显式 `utools.showMainWindow()` 唤回主窗并直接 `return`，不触碰挂件。
+    - **feature 合并**：原 `whale-settings` feature 已删除，搜索面板现为 `whale` / `whale-toggle` / `whale-passthrough` 三条，**均设 `mainHide:true`**。为满足 uTools「每个功能的 cmds 建议 ≤ 5 个」，**未**把「小鲸鱼设置 / 余额挂件设置」并入 `whale.cmds`（沿用原 5 个：余额挂件 / 小鲸鱼 / 小鲸鱼余额 / DeepSeek余额 / whale）。因此设置页入口只剩：`enterMode = settings/both`，或挂件菜单的 redirect 兜底（`widget` 模式下）。redirect 分支是本插件唯一「不靠 mainHide 也能弹主窗」的路。
+
+15. **Windows 下显示器 `workArea` 不随任务栏显隐刷新**：`getPrimaryDisplay()/getDisplayNearestPoint()` 的 `workArea` 只反映**进程启动时**的状态（Electron 已知行为，`display-metrics-changed` 也不响应任务栏显隐，见 [electron#6312](https://github.com/electron/electron/issues/6312)）。所以「自动隐藏的任务栏此刻是弹出还是收起」不能看 workArea，只能看**光标**：`utools.getCursorScreenPoint()`（实时接口）—— 光标压到它那条边 3px 内 → 弹出；落在该边「厚度」条带内 → 维持；离开条带超过 400ms → 收起。方向/厚度仍读注册表 `StuckRects3`（缓存 60s）。workArea 只用于**启动时**区分「常显任务栏（有内缩 → 系统已排除）」与「自动隐藏 / 无任务栏」。详见第四节。
+
+16. **透明窗禁止 `win.setOpacity()`（Windows）**：本挂件是 `transparent:true` 的无边框分层透明窗，对它调 `win.setOpacity()` 会让**渲染层失效** —— 整窗不显示，再设回 `1.0` 也不恢复，只能销毁重建（症状：「0–100 任意透明度都看不见挂件」）。因此**透明度一律走页面 CSS**：JS 把 `--dshw-opacity`（0.2–1）写到 `document.documentElement`，由样式表消费；`widget.js` 里不得再出现窗口级透明度 API（已在 `applyOnTop` 旁留注释警示）。
+    - 配套坑：**不要给 `.dshwv-root` / `.dshwv-menu` 写内联 `opacity`**。菜单的显隐本身就是 `opacity:0/1`（`.dshwv-menu` 关闭态 0、`.dshwv-menu-open` 打开态 1），内联值优先级高于类规则，会盖掉关闭态，表现为「三点菜单关不掉」。正确做法是写成 CSS 变量参与相乘：`.dshwv-root { opacity: var(--dshw-opacity,1) }`、`.dshwv-menu.dshwv-menu-open { opacity: var(--dshw-opacity,1) }`（关闭态保持独立的 `opacity:0`）。
+
+17. **鼠标穿透总开关 + 悬停临时接管**：`passThroughOn`（配置项 `passThrough`）开启后挂件**恒穿透**（连鲸鱼本体也不接收），唯一可靠关闭入口是「切换鼠标穿透」指令（`plugin.json` feature，`mainHide`，可绑全局快捷键；`onPluginEnter` 里取反配置 + `pushConfig()` + `emitConfigChange()` + `utools.showNotification`）。为避免「点不动 = 坏了」的观感，穿透态额外提供**悬停临时接管**：借 `forward:true` 仍能收 mousemove，指针在鲸鱼或菜单按钮停留 `PASS_DWELL_MS`(1200ms) → 临时 `setIgnoreMouseEvents(false)`；离开 UI 满 `PASS_RELEASE_MS`(700ms) → 自动交回穿透。约束：① 定时器触发时用**最后一次已知指针位置**复核仍在鲸鱼上（指针沿屏幕边移出窗口后无 move 事件，否则会误接管）；② 拖拽期间不交回（`drag && drag.active` 时不启动交回定时器，且 `onDocPointerDown` 主动 `passReleaseCancel()`）；③ 穿透开关变化时**立即**下发一次 `setIgnoreMouse(true)`，不能等下一次 mousemove（鼠标可能正静止）；④ 接管中菜单按钮由「虚线低透明常显」切为实心常显（`dshwv-menu-btn-pass` 类）；⑤ 首次配置下发（`onInit`）不弹说明气泡（`passNoticeReady` 门控）。
+
+---

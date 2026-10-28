@@ -1,6 +1,7 @@
 <script lang="ts" setup>
 import { computed, reactive, ref } from 'vue'
 import { msgCls, useFlash, type Flash } from '../composables/useFlash'
+import { useFold } from '../composables/useFold'
 import type { BackupPreviewResult, WhaleServices } from '../types/services'
 
 // 备份与恢复整卡：状态 / 交互（导出、选择文件、勾选恢复项、恢复）全部内聚在本组件，
@@ -27,7 +28,9 @@ const backupBusy = ref(false)
 const backupFlash: Flash = useFlash()
 const backupConfirm = ref(false)
 const backupPreview = ref<BackupPreviewResult | null>(null)
-const backupPicks = reactive<Record<string, boolean>>({ config: true, ledger: true, window: true, timer: true, holidays: true, bubbles: true, secrets: true })
+const backupPicks = reactive<Record<string, boolean>>({ config: true, ledger: true, window: true, timer: true, holidays: true, bubbles: true, todo: true, secrets: true })
+// 「待办与专注记录」在用户心智里是一件事，故合成一个勾选项；底层仍是 whale:todo / whale:focus 两个键，
+// 恢复时按备份里实际有的分别写（见 backupApply）。这也与「数据与隐私」页清除侧的合并口径一致。
 const backupItems: Array<{ key: string; label: string; note: string }> = [
   { key: 'config', label: '挂件设置', note: '（同名覆盖；含按压气泡的文案与开关）' },
   { key: 'ledger', label: '账本用量记录', note: '（同日覆盖，保留最近 30 天）' },
@@ -35,12 +38,24 @@ const backupItems: Array<{ key: string; label: string; note: string }> = [
   { key: 'timer', label: '计时状态', note: '（重载插件后恢复）' },
   { key: 'holidays', label: '节假日表', note: '（联网更新的覆盖层，未更新过则无此项）' },
   { key: 'bubbles', label: '气泡图素材', note: '（按压气泡导入的自定义配图；导出时勾选「包含气泡图素材」才带）' },
+  { key: 'todo', label: '待办与专注记录', note: '（待办清单 + 近 90 天专注轮次，同名覆盖；备份里没有时无此项）' },
   { key: 'secrets', label: '凭据', note: '（API Key / 平台 Token / SMTP 密码，用备份密码解密）' },
 ]
-const backupHas = (key: string) => !!backupPreview.value?.has?.[key as 'config']
+// has 仍是两个键：合并项任一存在即可勾选
+const backupHas = (key: string) => {
+  const has = backupPreview.value?.has as Record<string, boolean> | undefined
+  if (!has) return false
+  if (key === 'todo') return !!(has.todo || has.focus)
+  return !!has[key]
+}
 const backupAnyItem = computed(() => backupItems.some((it) => backupPicks[it.key] && backupHas(it.key)))
-const backupItemLabel = (key: string) => (backupItems.find((i) => i.key === key) || { label: key }).label
-const backupNames = (list?: string[]) => (list || []).map(backupItemLabel).join('、')
+// 宿主回报的 applied / skipped 用的是底层键名（todo / focus），两者都映射到合并项的名称
+const backupItemLabel = (key: string) => {
+  const k = key === 'focus' ? 'todo' : key
+  return (backupItems.find((i) => i.key === k) || { label: key }).label
+}
+// 去重：todo 与 focus 同时恢复成功时，列表里只出现一次「待办与专注记录」
+const backupNames = (list?: string[]) => Array.from(new Set((list || []).map(backupItemLabel))).join('、')
 function backupExport() {
   if (backupBusy.value) return
   backupBusy.value = true
@@ -107,15 +122,24 @@ function backupApply() {
     const r = props.services.backupApply?.({
       config: backupPicks.config, ledger: backupPicks.ledger, window: backupPicks.window,
       timer: backupPicks.timer, holidays: backupPicks.holidays, bubbles: backupPicks.bubbles,
+      todo: backupPicks.todo && backupHas('todo'), focus: backupPicks.todo && backupHas('focus'),
       secrets: backupPicks.secrets, password: backupPassword.value,
     })
     const applied = (r && r.applied) || []
+    // 待办与专注在界面上合成一个勾选项，底层却是 whale:todo / whale:focus 两个键：
+    // 备份里只有其中一个（典型场景 —— 做过专注但清单已清空，导出侧「空清单不写」）时，
+    // 宿主会「一个进 applied、一个进 skipped」，两处都映射到同一个卡名，就会输出
+    // 「已恢复：待办与专注记录。备份里没有：待办与专注记录。」这种自相矛盾的话。
+    // 故：合并项只要有任一部分恢复成功，就不再把它算作「备份里没有」；两个都缺才报。
+    const MERGED_KEYS = ['todo', 'focus']
+    const anyMergedApplied = applied.some((k) => MERGED_KEYS.indexOf(k) >= 0)
+    const skipped = ((r && r.skipped) || []).filter((k) => !(MERGED_KEYS.indexOf(k) >= 0 && anyMergedApplied))
     if (!r || !r.ok) {
       backupFlash.err = true
       backupFlash.msg = '恢复失败：' + ((r && (r.errors || [])[0]) || (r && r.error) || '未知错误')
     } else {
       let msg = '已恢复：' + backupNames(applied) + '。'
-      if (r.skipped && r.skipped.length) msg += '备份里没有：' + backupNames(r.skipped) + '。'
+      if (skipped.length) msg += '备份里没有：' + backupNames(skipped) + '。'
       if (r.widgetRebuilt) msg += '挂件已按恢复的设置重建。'
       backupFlash.err = false
       if (r.errors && r.errors.length) { msg += r.errors.join('；'); backupFlash.err = true }
@@ -142,7 +166,7 @@ function backupCancelPick() {
 // 卡级折叠：本卡正文很长（一段安全说明 + 两个导出勾选 + 导出/导入按钮 + 导入预览区），
 // 日常只在「导出/导入」时才展开；与提醒 / 隐私 / 关于三卡统一为「默认收起、可展开」，
 // 收起后只留标题栏摘要（是否已读取备份待恢复）
-const cardFold = reactive({ open: false })
+const cardFold = useFold('backup', false)
 const cardSummary = computed(() => backupPreview.value ? '已读取备份，待恢复' : '导出 / 导入 JSON 备份')
 </script>
 

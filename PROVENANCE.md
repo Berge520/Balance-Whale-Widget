@@ -9,7 +9,8 @@
 | 范围 | 许可 |
 |---|---|
 | `src/`、`public/preload/`、`public/floating-*`、`scripts/`、`test/` 与文档 | **AGPL-3.0-only**（见 `LICENSE`）；移植自上游的部分另见 `LICENSE-MIT` |
-| `public/whale/**`、`public/logo.png` | **不适用上述许可**：随插件原样分发，仅用于运行本插件；不授予再许可，也不声明为本项目原创作品 |
+| `public/whale/**`（除本项目生成的内置提醒音 `alert-*.wav`）、`public/logo.png` | **不适用上述许可**：随插件原样分发，仅用于运行本插件；不授予再许可，也不声明为本项目原创作品 |
+| `public/whale/alert-{low,budget,peak,pass}.wav` | **AGPL-3.0-only**（本项目原创：正弦波合成，不含任何第三方素材，见第二节第 3 小节） |
 | `public/shared/**`、`resources/**`（可下载的共享素材与其缩略图） | **不适用上述许可**：来源见第二节第 4 小节（上游 QQ 群分享），同样按 as-is 提供、适用第四节 Takedown |
 
 这样划分的原因：代码可以明确授权，而美术素材的来源与权利状态往往无法百分之百举证 —— 与其给一个站不住的授权，不如如实标注范围，并承诺收到权利主张就处理（见第四节）。
@@ -49,6 +50,7 @@
 | 文件 | 说明 |
 |---|---|
 | `public/logo.png`（256×256） | uTools 插件列表图标：由 `DSniang1`（现为 `DSniang1.webp`）**等比缩放**而来（高质量重采样，已按像素比对核对） |
+| `public/whale/alert-low.wav` / `alert-budget.wav` / `alert-peak.wav` / `alert-pass.wav` | 四类提醒音的内置回落（低余额 / 预算 / 峰谷 / 穿透）：**本项目原创，正弦波合成**（22050Hz / 16-bit 单声道，带 8ms 起振与 50ms 收尾淡出），不含任何第三方素材，故按 AGPL-3.0-only 授权 |
 
 ### 4. 上游 QQ 群分享素材（可下载资源，不随包）
 
@@ -88,6 +90,7 @@
 - **PNG**（`public/logo.png`）：只有渲染必需的 `IHDR` / `pHYs` / `IDAT` / `IEND`，没有 `eXIf` / `iTXt` / `tEXt` / `zTXt` 这类文本与归属块（上游自 0.3.1 起已剥离文本与归属块，本项目沿用此口径）。
 - **WebP 动图**（`rua.webp`）：无损动 WebP，只有渲染必需的块，无 `EXIF` / `XMP ` / `ICCP` 元数据块（由原 `rua.gif` 转码而来，转码后无残留的 GIF 注释块）。
 - **MP3**（四个音效）：原先带 ID3v2.3 标签 —— `D1.mp3` / `D2.mp3` 为 `TXXX: Packed by Bilibili XCoder v2.0.2`，`Ya1.mp3` 为 `TXXX: 13367393`。**本项目已剥离**：只切掉 ID3 标签段，不重编码、不动音频帧数据，因此音质与时长完全不变；现在四个文件都是裸 MPEG 帧流，不含任何标签。
+- **WAV**（四个内置提醒音 `alert-*.wav`）：本项目脚本直接写 44 字节 RIFF 头 + PCM 采样数据，**只含 `fmt ` / `data` 两个块**，没有任何 `LIST` / `INFO` / `bext` 之类的元数据块（生成即无元数据，无需事后清理）。
 
 复核方式：解析 PNG 与 WebP 的块序列、扫描 MP3 文件头与尾部标签，确认无残留文本块。
 

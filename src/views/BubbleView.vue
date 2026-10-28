@@ -1,6 +1,7 @@
 <script lang="ts" setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { msgCls, useFlash } from '../composables/useFlash'
+import { useFold } from '../composables/useFold'
 import { cloneBubbleItems, isChoiceStep, setStepModules, stepLabel, stepModules } from '../composables/useBubble'
 import BubbleQueueEditor from '../components/BubbleQueueEditor.vue'
 import BubbleModPanel from '../components/BubbleModPanel.vue'
@@ -124,7 +125,7 @@ const editorCollapsed = ref(true)
 // 整卡折叠：本卡与「挂件外观」同属外观 Tab，且编辑器折起来后仍占一整屏，
 // 故再给一层卡级折叠（沿 dsh 卡的 .card-toggle 范式），默认展开、可收起。
 // 收起态摘要播报「开关 + 步骤数」，不让人以为折起来就把配置藏没了
-const cardFold = reactive({ open: true })
+const cardFold = useFold('bubble', true)
 const cardSummary = computed(() => {
   const steps = Array.isArray(items.value) ? items.value.length : 0
   return (bubbleOn.value ? '已开启' : '已关闭') + ` · ${steps} 个步骤`

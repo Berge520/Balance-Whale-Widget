@@ -1,6 +1,7 @@
 <script lang="ts" setup>
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { msgCls, useFlashShow } from '../composables/useFlash'
+import { useFold } from '../composables/useFold'
 import type { AlertRole, SoundRole, WhaleMailSecrets, WhaleServices } from '../types/services'
 
 // 「提醒与通知」整卡：四类自动提醒（峰谷切换 / 低余额 / 今日预算 / 余额大幅波动）+
@@ -155,23 +156,24 @@ function resetAlerts() {
 // 卡级折叠：本卡正文很长（四类自动提醒开关 + 计时 9 控件 + 通知渠道 / SMTP + 提醒文案 + 提醒音音量），
 // 日常只在「改提醒设置」时才逐段展开；与隐私 / 备份 / 关于三卡统一为「默认收起、可展开」，
 // 收起后只留标题与一行摘要，让「用量」组的其它卡上浮
-const cardFold = reactive({ open: false })
+// 使用 useFold 持久化折叠状态到 localStorage，避免用户每次打开都要重新展开
+const cardFold = useFold('notify', false)
 // 收起态摘要：播报四类自动提醒各开了几个，收起也能看出「现在会收到哪些提醒」
 const cardSummary = computed(() => {
   const on = [props.cfg.peakRemindOn, props.cfg.lowAlertOn, props.cfg.budgetOn, props.cfg.dropAlertOn].filter(Boolean).length
   return on ? `已开启 ${on}/4 类自动提醒` : '四类自动提醒均未开启'
 })
 // 提醒文案折叠：与上面的开关同属「提醒」主题，收在「提醒与通知」卡里，不再单独占「外观」页一张卡
-const alertFolds = reactive({ open: false })
+const alertFolds = useFold('alert', false)
 // 提醒音音量折叠：4 条滑块默认全「跟随全局」，多数人一次都不会拖，却常驻铺满卡片尾部。
 // 默认收起成一行摘要（「全部跟随全局（x%）」/「低余额 60% · 其余跟随全局」），点标题才铺开滑块 ——
 // 摘要在任何状态下都在播报当前音量口径，不会「藏了就等于没有」。纯展示态、不给父级
-const volFold = reactive({ open: false })
+const volFold = useFold('vol', false)
 // 摘要文案：全跟随 → 一行「全部跟随全局（x%）」；有独立项 → 「低余额 60% · 其余跟随全局（x%）」
 const volSummary = computed(() => {
-  const follow = '跟随全局（' + Math.round(alertVolShown(props.cfg.alertSoundRoles[0]) * 100) + '%）'
+  const follow = '跟随全局（' + Math.round(alertVolShown(props.alertSoundRoles[0]) * 100) + '%）'
   const parts: string[] = []
-  for (const r of props.cfg.alertSoundRoles as AlertRole[]) {
+  for (const r of props.alertSoundRoles as AlertRole[]) {
     const av = props.cfg.alertVols[r]
     if (av.volSet) parts.push(props.soundRoleLabel[r] + ' ' + Math.round(av.vol * 100) + '%')
   }
@@ -181,8 +183,8 @@ const volSummary = computed(() => {
 // 计时分区折叠：开关 4 个 + 时长 + 文案 + 休息快捷键共 9 个控件，多数人只在初次设一次，
 // 却把这卡的中段占满。默认收起：计时功能本身从挂件菜单进出，这里只是它的配置项，
 // 折起来能让下方的「低余额 / 预算 / 波动」提醒开关上浮（这几项才是本卡的主入口）。
-// 纯展示态、不给父级，故留组件内部
-const timerFold = reactive({ open: false })
+// 纯展示态、不给父级，故留组件内部。使用 useFold 持久化到 localStorage
+const timerFold = useFold('timer', false)
 // 与上次回填的内容比对，用于「未保存」提示。基线由父级 applyConfig 后经 syncAlertsBaseline 写入
 const alertsBaseline = ref<string | null>(null)
 const alertsDirty = computed(() => alertsBaseline.value !== null && JSON.stringify(props.cfg.alerts) !== alertsBaseline.value)
@@ -201,7 +203,7 @@ const mail = reactive({
 const mailPassSaved = ref(false)
 const mailTesting = ref(false)
 // SMTP 配置区的展开态。默认收起，点了按钮才展开（见 mailOpen）
-const mailFold = reactive({ open: false })
+const mailFold = useFold('mail', false)
 // 配置是否已齐全：服务器 / 发件人 / 收件人。只看「有没有填过」这个持久事实，
 // 不看本次测试成没成 —— 折叠态要能跨会话稳定重现，不依赖一次性的运行时结果。
 // **刻意不要求账号与授权码**：账号留空是合法用法（多数服务器直接拿发件人地址当账号，
@@ -359,7 +361,7 @@ watch(() => props.cfg.timerSec, syncTimerHms)
         <span v-if="!cardFold.open" class="card-sum">{{ cardSummary }}</span>
       </h2>
     </div>
-    <template v-if="cardFold.open">
+    <div v-if="cardFold.open">
 
     <label class="field row check">
       <span class="label">峰谷切换提醒 <em>（进入峰/谷时段时气泡提示，需开启思考气泡）</em></span>
@@ -373,7 +375,7 @@ watch(() => props.cfg.timerSec, syncTimerHms)
     <button class="link-btn utils-btn utils-secondary" type="button" @click="timerFold.open = !timerFold.open">
       {{ timerFold.open ? '收起计时设置' : '展开计时设置（通知 / 常驻 / 时长 / 到点提醒 / 休息）' }}
     </button>
-    <template v-if="timerFold.open">
+    <div v-if="timerFold.open" class="guide">
 
     <label class="field row check">
       <span class="label">计时到点通知 <em>（挂件菜单「计时」到点时弹系统通知）</em></span>
@@ -418,11 +420,37 @@ watch(() => props.cfg.timerSec, syncTimerHms)
       <input type="checkbox" v-model="timerBreakOn" />
     </label>
     <label v-if="timerBreakOn" class="field row">
-      <span class="label">休息时长</span>
+      <span class="label">短休时长</span>
       <input class="num" type="number" min="1" max="120" step="1" v-model.number="timerBreakMinEdit" @change="commitTimerBreak" />
       <span class="num-text">分钟</span>
     </label>
+
+    <!-- 番茄循环：短休/长休/每 N 轮/自动衔接。与上面的「休息快捷键」正交 —— 后者是手动按钮，
+         前者是计时结束后自动进入的休息轮。两者可单独使用也可组合 -->
+    <label class="field row check">
+      <span class="label">番茄循环 <em>（计时结束后自动进入休息，休息结束自动开始下一轮专注）</em></span>
+      <input type="checkbox" :checked="cfg.timerPomoOn" @change="emit('patch', { timerPomoOn: ($event.target as HTMLInputElement).checked })" />
+    </label>
+    <template v-if="cfg.timerPomoOn">
+      <label class="field row">
+        <span class="label">长休时长 <em>（每 N 轮专注后进入长休）</em></span>
+        <input class="num" type="number" min="1" max="60" step="1" :value="cfg.timerLongBreakMin"
+               @change="emit('patch', { timerLongBreakMin: Number(($event.target as HTMLInputElement).value) })" />
+        <span class="num-text">分钟</span>
+      </label>
+      <label class="field row">
+        <span class="label">每几轮进长休</span>
+        <input class="num" type="number" min="2" max="12" step="1" :value="cfg.timerLongEvery"
+               @change="emit('patch', { timerLongEvery: Number(($event.target as HTMLInputElement).value) })" />
+        <span class="num-text">轮</span>
+      </label>
+      <label class="field row check">
+        <span class="label">自动衔接下一轮 <em>（休息/专注结束后 1.5 秒自动开始下一轮，点任何按钮可取消）</em></span>
+        <input type="checkbox" :checked="cfg.timerAutoNext" @change="emit('patch', { timerAutoNext: ($event.target as HTMLInputElement).checked })" />
+      </label>
     </template>
+
+    </div>
 
     <label class="field row check">
       <span class="label">低余额预警 <em>（余额低于阈值时数字变红，并弹一次提醒气泡 + 每天一次系统通知）</em></span>
@@ -647,11 +675,12 @@ watch(() => props.cfg.timerSec, syncTimerHms)
         </div>
         <p class="hint">
           默认跟随「外观」页的全局音量；单独拖动某一类后即独立生效（不再跟随），
-          点「恢复跟随」回到随全局音量变化。提醒音的导入与静音（留空）在「资源」页。
+          点「恢复跟随」回到随全局音量变化。提醒音的导入与更换（留空用内置音）在「资源」页。
         </p>
       </div>
     </div>
-    </template>
+
+    </div>
   </section>
 </template>
 

@@ -1,0 +1,17 @@
+  - **「数据与隐私」→「备份与恢复」**：`backupExport`（默认不含凭据；勾凭据必须设密码，scrypt + AES-256-GCM 加密后才写盘。**「包含气泡图素材」独立可选、默认不勾**：勾了每张气泡图 base64 内嵌进 JSON，体积明显变大；按压气泡的**文案与开关随 `config` 进出，无需单独勾**。**待办与专注统计也不用勾**：非空才写 `data.todo` / `data.focus`，`includes.todo` / `includes.focus` 记条目数 / 天数，**空壳刻意不带**（「没有」≠「是空的」，后者会让用户以为恢复后被清空））/ `backupPick`（只解析预览、不写盘；`has.bubbles` 供预览区预勾「气泡图素材」，`has.todo` / `has.focus` 与导出侧对称、**按非空判定**）/ `backupApply`（按勾选项**同名覆盖**，账本走 `mergeLedgerHistory`；恢复「设置」/「窗口位置」重建挂件立即生效；恢复「气泡图素材」**先清后写** —— 整组清空再逐张写回，避免新旧混排或撞满 8 张上限；待办走 `writeTodo({items,focusId})`、专注走 `writeFocus({days})`，形状归一交给 `readTodo` / `readFocus`，写盘失败分别报「待办清单」/「专注统计」，不假报成功）/ `backupCancel`。「清除选中数据」二次确认列出**将清除哪些项**，并提示先导出备份。
+
+**卡片搜索**：Tab 分组后卡片多、大量 `.fold` 折叠，找一项得先猜组再翻折叠。故在 `.tab-bar` 内、Tab 行下方加搜索框（`.search-row` / `.search-input`，`type="search"` 自带清空叉），**只做卡片级检索**：命中哪张卡就把这张卡单独跨 Tab 渲染，不定位卡内控件。
+
+- **索引是静态的，不是实时 DOM 文本**：卡片 `v-if` 条件渲染，未激活 Tab 的卡不在 DOM，`.fold` 折叠区默认收起，DOM 里也读不到里面的字，所以**不能**抓 `textContent` 匹配。索引两层，逐项与模板 `data-search` 一一对应：
+  - **人工层 `SEARCH_INDEX`**（与模板同文件，改卡片顺手改这行）：每项 = `{label（卡片名）, tab（来源分组）, keys（同义词 / 别称 / 英文名）}`。「叫法映射」靠人工维护（「悬浮窗」→「挂件窗口」）。
+  - **全文层 `CARD_TEXT`**（`src/search-index.gen.ts`，构建期由 `scripts/gen-search-index.mjs` 生成，**手改无效**）：逐卡抽取 `<h2>` 卡头、`<button class="fold-title">` 画廊卡头、`<span class="label...">` 字段名，剥掉 fold-caret 箭头 / 标签 / `{{ }}` 插值 / 括号补充说明 / 引号后归一（小写 + 删空白）。guide/说明句与按钮文案噪声大，**不进索引**，`{{ }}` 是运行时数据，静态源码提取不到（已知边界）。
+- **匹配口径（多词 AND + 三档排序 + OR 兜底）**：先按空白拆词**再**逐词归一（`normSearch()` 删光空白 + 英文小写，归一后永远拆不开），**每词都命中**（AND）才算命中，按「标题 > 同义词 > 全文」三档排（同档保持 `SEARCH_INDEX` 声明序）。单词对目标串是子串包含，外加**反向放宽**：≥3 字的词还认「目标串的 2 字片段出现在词里」（「检查更新」可靠「更新」命中）；2 字词不做反向（「界面」到处命中，噪声盖过精度）。整句子串匹配会把「界面 深色」拼成「界面深色」而零命中（真实踩过）—— 拆词 AND 的由来。**AND 全灭不返回空**：降级 OR，任一词命中即收录、按命中词数排序（多打一个没收录的词不该得到空结果页）。
+- **守卫测试（`test/build-gates.test.mjs` 双闸 + `test/search-index.test.mjs`）**：①「索引 ↔ 锚点」一一对应（漏登记 → 搜不到且搜索态永不渲染；多登记 → 死链接，两向都拦）；②「keys 覆盖」——抠出每卡 `span.label` 字段主干，要求**存在任一 ≥2 字子串**出现在该卡 `label+keys` 里（弱可达），治「加字段忘了配词」。search-index 用临时样本模板测生成器（能提取 / 漏登记红 / `--check` 过期红 / 解析失效红，经 `GSI_APP` / `GSI_OUT` / `GSI_CHECK` / `GSI_MIN_KEYS` 注入），并钉住真实产物新鲜度与 App.vue 已接 `CARD_TEXT`。
+- **prebuild 闸门**：prebuild 最后一环 `gen-search-index.mjs --check` —— 重算索引与入库产物比对，模板改了没重新生成 → 构建失败，保证 `search-index.gen.ts` 永不陈旧（`build-gates.test.mjs` 契约钉住 prebuild 必须有这一环）。**改卡片时要连索引一起提交**：只改模板不带索引，下次 `npm run build` 当场红；只提交索引不带模板，`git log` 里这行 diff 看不出由来。
+- **`cardOn(tab, key)` 统一两种语义**：搜索态 → 只有命中的卡渲染（跨 Tab）；非搜索态 → 沿用 `activeTab === tab`。**全部卡片（含 `AccelView`）的 `v-if` 都改走这一个入口**，`<hr class="group-sep">` 也加 `!searchActive`（搜索态不显示分组分隔线）。
+- **来源标签**：搜索结果上方一行 `.search-hits` 列出每张命中卡的「分组 · 卡片名」（`cardTabLabel(key)`）—— 结果跨组混排，不标来源用户会找不到北。命中卡不带 Tab 高亮（`:class="{ 'tab-on': !searchActive && activeTab === t.key }"`）。
+- **点标签滚到卡片**：标签是 `<button>`（`@click="scrollToCard(k)"`），用 `el.scrollIntoView({behavior:'smooth', block:'start'})` 滚到视口顶部；选元素靠 `[data-search="key"]`（搜索态命中的卡已跨 Tab 渲染进 DOM）。吸顶 `.tab-bar` 会盖住卡头，在 `.card` 上设 `scroll-margin-top: 96px` 预留高度，**不在 JS 手算偏移**（改吸顶高度只动这一处 CSS）。
+- **退出搜索**：清空输入 / 点「清除」/ 按 `Esc`（`@keydown.esc="clearSearch"`）都调 `clearSearch()`；**点任一 Tab 标签也走它**（`@click="clearSearch(); activeTab = t.key"`）—— 搜索态下点分组 = 「不搜了，去看这一组」，免得被困在搜索态。
+- **空态**：`searchActive && !searchHits.length` 渲染 `.search-empty` 指引（提示匹配的是卡片标题与关键词，建议换更短 / 更常见的词），`activeTabDesc` 处改显「没有匹配的卡片，换个关键词试试」。
+
+类型声明见 `src/types/services.d.ts`（`WhaleServices` 挂到 `Window.services`），`npm run typecheck`（`vue-tsc --noEmit`）校验。

@@ -559,7 +559,7 @@ test('sectionBundles 对空输入给出 complete:false（调用方必须当 unkn
 
 // ── verifyActivation（装了 ≠ 生效：五态判定）──
 // 五态互斥且顺序敏感。下面逐态钉死，并单列两条**反向钉子** —— 它们防的是本仓库历史上
-// 栽过的两个坑：把「读不到」说成「没生效」（§694）、拿 entries 当已知清单（§688）。
+// 栽过的两个坑：把「读不到」说成「没生效」、拿 entries 当已知清单（见 docs/spec/10-settings-dsh.md「C2 判据踩坑」）。
 function treeOf(text) {
   const p = dump.parseDump(text)
   return { ok: true, at: 1000, unparsed: !p.sections.length, bundles: dump.sectionBundles(p), skipped: dump.parseSkipWarnings(text) }
@@ -614,15 +614,15 @@ test('verifyActivation：转储新于本次安装 → shadowed', () => {
 // 完成安装+转储会被判成 pending，把「树是新的、确实没装配」这种真 shadowed 说成「等重启」。
 // 这条同时守住 settings.js `activationOf` 里 `at` 取「发起时刻」的语义：
 // 若哪天有人改回取「转储返回时刻」，at 恒 > installAt，本测试不会失败，
-// 但真实链路的 pending 会静默失效 —— 故另有注释钉在 activationOf 与 spec §781。
+// 但真实链路的 pending 会静默失效 —— 故另有注释钉在 activationOf 与 docs/spec/10-settings-market.md。
 test('verifyActivation：at 与 installAt 相等 → 不算陈旧，判 shadowed（边界 < 而非 <=）', () => {
   const dumpRes = treeOf(['# == other', '- id: other', '  name: other'].join('\n'))
   assert.equal(dump.verifyActivation('dsh-whale-widget', dumpRes, 1000).state, 'shadowed')
 })
 
-// ⚠️ 反向钉子（§694）：读不到任何判据时必须 unknown，**绝不能**降级成 shadowed ——
+// ⚠️ 反向钉子（见 docs/spec/10-settings-dsh.md「C2 判据踩坑」）：读不到任何判据时必须 unknown，**绝不能**降级成 shadowed ——
 // 那等于凭空向用户断言「装失败了」。转储失败 / 解析不出分节 / 没有 npm 名，三种都要 unknown
-test('verifyActivation：读不到判据一律 unknown，绝不误报 shadowed（§694 反向钉子）', () => {
+test('verifyActivation：读不到判据一律 unknown，绝不误报 shadowed（反向钉子）', () => {
   const okTree = treeOf('# == pkg\n- id: a\n  name: a')
   // ① 转储失败
   assert.equal(dump.verifyActivation('x', { ok: false, error: '超时' }, 500).state, 'unknown')

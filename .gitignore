@@ -101,6 +101,10 @@ resources/manifest.json
 # .bak-strip/ 是市场文案（.trae/market/）的带版本备份：.trae/ 整体不入库，
 # 这里再放一份防换机器丢失，同样不进仓库
 .bak-strip/
+# Trae 导出的 HTML 分享包（内含一个 43.7MB 的 zip）。属本地产物，不进仓库。
+# 注意与上面的 .trae/ 是两个目录名 —— `.trae/` 的规则盖不住它，
+# 一旦 git add -A 就会把 43.7MB 的 blob 永久写进历史。
+.trae-html-share-packages/
 
 # ── 操作系统垃圾 ──
 # Windows

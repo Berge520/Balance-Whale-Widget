@@ -47,20 +47,28 @@ function writeSample(dir) {
     '  </section>',
     '</template>',
     '',
-    'const SEARCH_INDEX: Record<string, SearchItem> = {',
+  ].join('\n')
+  fs.writeFileSync(path.join(dir, 'App.vue'), app, 'utf8')
+  
+  // SEARCH_INDEX 已移至 constants/display.ts，样本也需要同步创建
+  const constantsDir = path.join(dir, 'constants')
+  fs.mkdirSync(constantsDir, { recursive: true })
+  const displayConst = [
+    'export type TabKey = "look"',
+    'export const SEARCH_INDEX: Record<string, { label: string; tab: TabKey; keys: string }> = {',
     '  alpha: { label: \'Alpha 标题\', tab: \'look\', keys: \'x\' },',
     '  beta: { label: \'Beta 标题\', tab: \'look\', keys: \'y\' },',
     '}',
     '',
   ].join('\n')
-  fs.writeFileSync(path.join(dir, 'App.vue'), app, 'utf8')
+  fs.writeFileSync(path.join(constantsDir, 'display.ts'), displayConst, 'utf8')
 }
 
 test('生成器：能从模板提取卡片文本并生成归一化索引', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsi-'))
   writeSample(dir)
   const out = path.join(dir, 'search-index.gen.ts')
-  run({ GSI_APP: path.join(dir, 'App.vue'), GSI_OUT: out })
+  run({ GSI_APP: path.join(dir, 'App.vue'), GSI_DISPLAY_CONST: path.join(dir, 'constants/display.ts'), GSI_OUT: out })
   const gen = fs.readFileSync(out, 'utf8')
   // h2 + label 主干被抽出、括号说明被剥掉、归一化（小写无空白）
   assert.match(gen, /alpha: "alpha标题音量"/, 'alpha 卡应含 h2 与 label 主干（括号说明剥掉）')
@@ -76,7 +84,7 @@ test('生成器：SEARCH_INDEX 与模板锚点不一致会红', () => {
   // 模板加一张 SEARCH_INDEX 没登记的卡
   const appPath = path.join(dir, 'App.vue')
   fs.appendFileSync(appPath, '<section class="card" data-search="ghost"><h2>幽灵</h2></section>\n')
-  const err = runFail({ GSI_APP: appPath, GSI_OUT: path.join(dir, 'out.ts') })
+  const err = runFail({ GSI_APP: appPath, GSI_DISPLAY_CONST: path.join(dir, 'constants/display.ts'), GSI_OUT: path.join(dir, 'out.ts') })
   assert.ok(err, '漏登记应导致非零退出')
   assert.match(String(err.stderr), /SEARCH_INDEX 未登记/)
   fs.rmSync(dir, { recursive: true, force: true })
@@ -86,7 +94,7 @@ test('生成器：--check 检出过期产物（模板改了没重新生成）', 
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsi-'))
   writeSample(dir)
   const out = path.join(dir, 'search-index.gen.ts')
-  const env = { GSI_APP: path.join(dir, 'App.vue'), GSI_OUT: out }
+  const env = { GSI_APP: path.join(dir, 'App.vue'), GSI_DISPLAY_CONST: path.join(dir, 'constants/display.ts'), GSI_OUT: out }
   run(env)
   run({ ...env, GSI_CHECK: '1' }) // 新鲜产物 → 通过
   // 改模板（登记了 SEARCH_INDEX 的键）但不重新生成 → --check 必须红
@@ -104,7 +112,11 @@ test('生成器：--check 检出过期产物（模板改了没重新生成）', 
 test('生成器：解析规则失效（模板里没有卡片锚点）会红而不是静默生成空索引', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gsi-'))
   fs.writeFileSync(path.join(dir, 'App.vue'), '<template><p>没有卡片</p></template>\n', 'utf8')
-  const err = runFail({ GSI_APP: path.join(dir, 'App.vue'), GSI_OUT: path.join(dir, 'out.ts') })
+  // 也需要创建一个空的 constants/display.ts，否则脚本会报找不到 SEARCH_INDEX
+  const constantsDir = path.join(dir, 'constants')
+  fs.mkdirSync(constantsDir, { recursive: true })
+  fs.writeFileSync(path.join(constantsDir, 'display.ts'), 'export const SEARCH_INDEX = {}\n', 'utf8')
+  const err = runFail({ GSI_APP: path.join(dir, 'App.vue'), GSI_DISPLAY_CONST: path.join(dir, 'constants/display.ts'), GSI_OUT: path.join(dir, 'out.ts') })
   assert.ok(err, '空模板应导致非零退出')
   assert.match(String(err.stderr), /没匹配到任何/)
   fs.rmSync(dir, { recursive: true, force: true })

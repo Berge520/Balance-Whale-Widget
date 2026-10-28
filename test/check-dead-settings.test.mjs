@@ -58,8 +58,9 @@ function envFor(repo, extra = {}) {
     CDS_ROOT: repo.root,
     CDS_CONSUMERS: 'public/preload/lib/a.js,b.vue',
     CDS_MIN_KEYS: '50',
-    // 默认压掉真实仓库的契约表（里面的键在样本仓库不存在，会整表误红）；
-    // 契约用例经 extra 覆盖成自己要的表
+    // 默认压掉真实仓库的白名单与契约表（里面的键在样本仓库不存在，会整表误红）；
+    // 白名单 / 契约用例经 extra 覆盖成自己要的表
+    CDS_ALLOW: '{}',
     CDS_EXPECT: '{}',
     ...extra,
   }

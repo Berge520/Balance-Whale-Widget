@@ -7,7 +7,7 @@
  *   · **不建快照**。「写前先备份」由调用方（settings.js）编排，因为备份是 E1 的职责，
  *     而「什么时候需要备份」是业务流程 —— 混在一起会让本模块无法被单独测试。
  *
- * ── 三条实测结论直接决定了本模块的实现（spec §10.3 第 ⑤ 段，v1.6.2 V1–V4）──
+ * ── 三条实测结论直接决定了本模块的实现（docs/spec/10-settings-history.md §10.3 第 ⑤ 段，v1.6.2 V1–V4）──
  *   V1：`disabled: true` 打**纯服务端 bundle**（cost-meter / modlens / mnemon…）可靠生效；
  *       打**带 client 入口的插件**（如 dsh-better-sidebar）**无效** —— 后者的加载入口在
  *       `package.json` 的 `dependencies` 里，patch 条目禁用不到它。

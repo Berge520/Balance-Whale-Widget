@@ -5,18 +5,20 @@
  *
  * 由 scripts/release.mjs 在 Release 建好后调用，也可以手动跑（需要先 gh release download）。
  *
- * 核对四件事，任一不过退出码非 0：
+ * 核对以下几件事，任一不过退出码非 0：
  *   1. plugin.json 在 zip 顶层（uTools 开发者工具要入口目录指向解压后的目录）
  *   2. plugin.json 的 version 与本次发布的版本一致（防 prebuild 同步漏掉 / 拿错产物）
  *   3. preload 关键文件在位（preload 不参与 Vite 打包，原样复制，缺了插件起不来）
  *   4. 内置形象素材包（skins-pack.whaleassets）在 Release 资产里
  *      （已移出插件包，靠它按需下载；漏了 = 下载形象功能 404）
  *      注：共享角色 / 音效自 v1.9.0 起改为 public/shared/ 单张直链（入库），不再是 Release 资产
+ *   5. zip 体积不超过 scripts/zip-limits.mjs 的上限（dist/ 混进陈年大件时四关全绿，只有体积能反映）
  */
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import path from 'node:path'
+import { MAX_ZIP_BYTES, MAX_ZIP_LABEL } from './zip-limits.mjs'
 
 const [zipDir, zipName, expectVersion] = process.argv.slice(2)
 if (!zipDir || !zipName || !expectVersion) {
@@ -51,6 +53,15 @@ if (strayZips.length) {
 }
 if (!existsSync(zipPath)) {
   console.error(`[verify-release-zip] ✗ 下载目录里没有 ${zipName}`)
+  process.exit(1)
+}
+
+// 体积先查（在解压之前）：超限说明 dist/ 里混进了陈年大件，再解压只是白费时间。
+// 与 check-zip-size.mjs（release.yml 打包后那一步）同一个上限，来源是 zip-limits.mjs。
+const zipBytes = statSync(zipPath).size
+if (zipBytes > MAX_ZIP_BYTES) {
+  const mb = (zipBytes / 1024 / 1024).toFixed(2)
+  console.error(`[verify-release-zip] ✗ ${zipName} 有 ${mb} MB，超过上限 ${MAX_ZIP_LABEL}（正常约 1.2–2.4MB）；先查 dist/ 下的陈年大件`)
   process.exit(1)
 }
 

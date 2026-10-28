@@ -102,6 +102,14 @@ export interface WhaleConfig {
   timerBubblePin: boolean
   // 气泡是否只显示计时（false = 计时中气泡照常显示余额/用量等全部内容）
   timerBubbleOnly: boolean
+  // 番茄循环：是否开启（短休/长休/每 N 轮/自动衔接）
+  timerPomoOn: boolean
+  // 长休时长（分钟，1–60，默认 15）
+  timerLongBreakMin: number
+  // 每几轮专注后进入长休（2–12，默认 4）
+  timerLongEvery: number
+  // 计时结束后是否自动开始下一轮（专注→休息→专注…）
+  timerAutoNext: boolean
   // 进入插件时显示哪些窗口：both=设置窗+挂件；widget=只显示挂件；settings=只显示设置窗
   enterMode: 'both' | 'widget' | 'settings'
   // 首次运行引导是否已结束（保存凭据或点「跳过」都置 true），之后不再弹
@@ -156,6 +164,12 @@ export interface WhaleConfig {
   mailTo: string
   mailFromName: string
   mailSubjectPrefix: string
+  // 专注记录：开关（挂件页按它决定倒计时走完是否上报 whale:focus）
+  focusOn: boolean
+  // 待办清单：是否在挂件菜单里显示待办分组（编辑面始终在设置页）
+  todoOn: boolean
+  // 每日专注目标（轮数，0 = 未设置/关闭，1–99 有效）。达成时弹一次提醒
+  focusGoal: number
 }
 
 // 按压气泡模型（上游「自定义泡泡」）：v 固定 1（结构版本）。items 是点击序列（首次 + 再次…），
@@ -565,14 +579,14 @@ export interface DshDumpResult {
   diff?: DshDumpDiff | null
   diffError?: string
   // 生效树里的「挂载名」三源快照，供 verifyActivation 判「装了是否生效」。
-  // ⚠️ 不能拿 entries 当已知清单：dump 的条目清单**不完整**（§688），只能采信 dsh 自己说了什么
+  // ⚠️ 不能拿 entries 当已知清单：dump 的条目清单**不完整**（见 docs/spec/10-settings-dsh.md「C2 判据踩坑」），只能采信 dsh 自己说了什么
   bundles?: DshDumpBundles
   // dsh 输出里「跳过了某个 profile bundle」的声明（最有价值的一态，见 verifyActivation）。
   // ⚠️ 与 layers/entries 同源于同一次转储；缺失表示 dsh 没报跳过，不是「没解析」
   skipped?: DshDumpSkip[]
 }
 
-// 生效树的挂载名快照。三源并查，任一命中即算已装配（§678-684 三个命名空间互不相通）
+// 生效树的挂载名快照。三源并查，任一命中即算已装配（见 docs/spec/10-settings-dsh.md 的「三个互不相通的命名空间」表）
 export interface DshDumpBundles {
   // 分节标题里的包名（如 dsh-better-sidebar，已剥 `patched by` 后缀、去 scope、小写）
   bundles: string[]
@@ -1026,7 +1040,7 @@ export interface DshMarketInstallResult {
   hostCompat?: DshHostCompatVerdict
   // 「装上了」≠「真的生效」：装完后拿生效树核对一次（见 preload/lib/dsh-dump.js 的 verifyActivation）。
   // ⚠️ dependencies 里的 npm 包名、profile bundles 的挂载名、patch 的 `- id:` 是**三个互不相通的
-  //    命名空间**（spec §678-684），只对包名比对会漏；故三源并查。
+  //    命名空间**（docs/spec/10-settings-dsh.md 的「三个互不相通的命名空间」表），只对包名比对会漏；故三源并查。
   // state 五态互斥，界面按顺序读，不要合并：
   //   · active   —— 生效树里认得它，本次安装确实进入了组装树
   //   · skipped  —— dsh 自己声明跳过了它（如 peerDependencies 不兼容），最有价值的一态
@@ -1153,8 +1167,63 @@ export interface ClearDataResult {
     bubbles: boolean
     // 按压气泡（文案 / 队列 / 开关重置为默认 + 配图清除）
     bubble: boolean
+    // 待办清单与专注记录（whale:todo + whale:focus 一起清）
+    todo: boolean
   }
   error?: string
+}
+
+// —— 待办清单（whale:todo） ——
+// 编辑面只有设置页；挂件页只做勾选完成 / 设为专注（走 ipc 的 whale:todo）。
+export interface TodoItem {
+  id: string
+  text: string
+  done: boolean
+  // 创建时间戳（epoch ms）
+  at: number
+  // 完成时间戳；未完成恒为 0
+  doneAt: number
+  // 预估番茄轮数（0 = 未设置，1–99 有效）
+  est: number
+  // 实际完成轮数（挂件专注结束时自动 +1）
+  rounds: number
+}
+export interface TodoState {
+  items: TodoItem[]
+  // 当前专注目标 id；空串 = 没设
+  focusId: string
+}
+export interface TodoLimits {
+  // 单条文本上限（字符）
+  textMax: number
+  // 总条数上限
+  max: number
+}
+export interface TodoMutateResult {
+  ok: boolean
+  // 操作后的整份清单（失败时也回传，界面据此回填）
+  todo: TodoState
+  error?: string
+}
+
+// —— 专注轮次统计（whale:focus） ——
+export interface FocusDayStat {
+  date: string
+  // 完成轮次
+  r: number
+  // 专注分钟
+  m: number
+}
+export interface FocusStatsResult {
+  // 最近 days 天（含今天，按日期升序），没有记录的天补 0
+  series: FocusDayStat[]
+  today: { r: number; m: number }
+  // series 窗口内的合计（与图上柱对得上）
+  total: { r: number; m: number }
+  // 连续有记录的天数；今天还没记录时从昨天开始数
+  streak: number
+  // 实际统计窗口天数（1..366）
+  days: number
 }
 
 export interface UsageHistoryResult {
@@ -1205,7 +1274,7 @@ export interface CalibrateResult {
 }
 
 // 音效槽位：press / release 是「音色」的按压与释放两段（有内置回落）；
-// low / budget / peak / pass 是四类提醒（低余额 / 今日预算 / 峰谷切换 / 鼠标穿透）各自的提醒音，留空即静音。
+// low / budget / peak / pass 是四类提醒（低余额 / 今日预算 / 峰谷切换 / 鼠标穿透）各自的提醒音，留空用内置提醒音。
 // 自己导入的段是「一段一槽位」（旧的多段数据只取第一段展示，见 App.vue 的 soundLabel）；
 // 共享音效库的段则按段自带 roles 挂到若干槽位，一个槽位因此可同时播「导入的 1 段 + 池里的 N 段」
 export type SoundRole = 'press' | 'release' | 'low' | 'budget' | 'peak' | 'pass'
@@ -1759,7 +1828,7 @@ export interface BackupPreviewResult {
   path?: string
   exportedAt?: string
   appVersion?: string
-  has?: { config: boolean; ledger: boolean; window: boolean; timer: boolean; holidays: boolean; bubbles: boolean; secrets: boolean }
+  has?: { config: boolean; ledger: boolean; window: boolean; timer: boolean; holidays: boolean; bubbles: boolean; todo: boolean; focus: boolean; secrets: boolean }
   error?: string
 }
 
@@ -1916,8 +1985,8 @@ export interface WhaleServices {
   getConfig(): WhaleConfig
   // 订阅配置变更（挂件菜单改设置时宿主广播过来），返回退订函数
   onConfigChange(cb: (cfg: WhaleConfig) => void): () => void
-  // 订阅导航指令（挂件菜单「气泡设置」→ 宿主唤窗并投递 target，设置页据此切 Tab 并展开目标卡）；
-  // 返回退订函数。target 目前只有 'bubble'（按压气泡卡），未知值前端忽略
+  // 订阅导航指令（挂件菜单「气泡设置」/「管理待办」→ 宿主唤窗并投递 target，设置页据此切 Tab 并展开目标卡）；
+  // 返回退订函数。target 目前有 'bubble'（按压气泡卡）与 'focus'（专注与待办卡），未知值前端忽略
   onNavigate(cb: (target: string) => void): () => void
   // 任务栏当前状态：visible = 正在占位（常显/自动隐藏已弹出）/ hidden = 已自动收起 / none = 未识别到
   getTaskbarState(): TaskbarState
@@ -2154,8 +2223,9 @@ export interface WhaleServices {
   exportUsageCsv(days?: number): UsageCsvResult
   importUsageCsv(): UsageCsvImportResult
   // 按项清除本地数据：true 的项才会被清除。
-  // bubble = 按压气泡「文案 + 配图」一起清（重置 config.bubble 并清 whale:bubbles），与 config 不互斥
-  clearAllData(opts?: { secrets?: boolean; config?: boolean; ledger?: boolean; window?: boolean; sounds?: boolean; skins?: boolean; bubbles?: boolean; bubble?: boolean }): ClearDataResult
+  // bubble = 按压气泡「文案 + 配图」一起清（重置 config.bubble 并清 whale:bubbles），与 config 不互斥；
+  // todo = 待办清单 + 专注记录一起清（whale:todo + whale:focus）
+  clearAllData(opts?: { secrets?: boolean; config?: boolean; ledger?: boolean; window?: boolean; sounds?: boolean; skins?: boolean; bubbles?: boolean; bubble?: boolean; todo?: boolean }): ClearDataResult
   ensureWidget(): WidgetResult
   showWidget(): WidgetResult
   getWidgetError(): string | null
@@ -2168,6 +2238,27 @@ export interface WhaleServices {
   // 试播按压气泡：把队列整份发给挂件真弹一次（只发不落盘，挂件那边会存引用，
   // 故调用方需先深拷贝）。items 经宿主 normBubble 归一化与截断；挂件未显示 / 队列为空时 ok:false
   bubblePreview(payload: { items: unknown[] }): { ok: boolean; error?: string }
+  // —— 待办清单：设置页是唯一编辑面，挂件页只做勾选 / 设为专注（走 ipc 的 whale:todo） ——
+  todoGet(): TodoState
+  // 输入框 maxlength 与条数上限（单一来源是宿主 constants.js）
+  todoLimits(): TodoLimits
+  // 写操作统一回 { ok, todo, error? }：todo 是操作后的整份清单，失败时也回传供界面回填
+  todoAdd(text: string): TodoMutateResult
+  todoRename(id: string, text: string): TodoMutateResult
+  todoSetDone(id: string, done: boolean): TodoMutateResult
+  todoRemove(id: string): TodoMutateResult
+  // 清掉全部已完成条目（专注目标若指向已完成条目会一并清空）
+  todoClearDone(): TodoMutateResult
+  // 设为 / 取消当前专注目标（id 传空串 = 直接取消；同 id 再点也等于取消）
+  todoFocus(id: string): TodoMutateResult
+  // 设置待办条目的预估番茄轮数（est）：0 = 未设置，1–99 有效
+  todoSetEst(id: string, est: number): TodoMutateResult
+  // 专注统计：series 只覆盖最近 days 天（默认 7），total 与图上柱对得上
+  focusStats(days?: number): FocusStatsResult
+  // 订阅待办变更（挂件勾选 / 本页写操作都会触发），回调带整份清单；返回退订函数
+  onTodoChange(cb: (todo: TodoState) => void): () => void
+  // 订阅专注统计变更（无载荷，收到后按当前窗口重算）；返回退订函数
+  onFocusChange(cb: () => void): () => void
   // 诊断日志（落盘于 %TEMP%\whale-debug.log，进程被 uTools 结束也不丢）
   getDebugLog(): DebugLogResult
   openLogFile(): { ok: boolean; path: string }
@@ -2248,7 +2339,7 @@ export interface WhaleServices {
   // 选择备份文件并解析预览（不写任何数据）
   backupPick(): BackupPreviewResult
   // 按勾选项恢复（同名覆盖）
-  backupApply(opts: { config?: boolean; ledger?: boolean; window?: boolean; timer?: boolean; holidays?: boolean; bubbles?: boolean; secrets?: boolean; password?: string }): BackupApplyResult
+  backupApply(opts: { config?: boolean; ledger?: boolean; window?: boolean; timer?: boolean; holidays?: boolean; bubbles?: boolean; todo?: boolean; focus?: boolean; secrets?: boolean; password?: string }): BackupApplyResult
   // 放弃本次选择
   backupCancel(): { ok: boolean }
   // —— 多厂商模型（余额 / 额度） ——

@@ -67,6 +67,12 @@ jobs:
           cd dist
           zip -qr "../balance-whale-widget-${GITHUB_REF_NAME}.zip" .
 
+      # 体积防线：打包是「dist 里有什么就打什么」，lint / typecheck / test / build 都不看体积。
+      # 历史事故：dist/resources/ 下废弃的 44MB 素材包被原样打进包，而四关全绿、Release 照发。
+      # 上限在 scripts/zip-limits.mjs（单一来源，verify-release-zip.mjs 复用同一值）。
+      - name: 校验 zip 体积
+        run: node scripts/check-zip-size.mjs "balance-whale-widget-${GITHUB_REF_NAME}.zip"
+
       # 建 Release 只挂 zip。内置形象包（skins-pack）**不在这里上传**：它在 .gitignore 里
       # 被排除，CI 从零检出根本拿不到文件（曾经把上传放进 CI，结果 gh release create
       # 直接报文件不存在）。该包由 scripts/release.mjs 在本地补传，随后 verify-release-zip.mjs

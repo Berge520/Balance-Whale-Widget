@@ -1,6 +1,7 @@
 <script lang="ts" setup>
 import { computed, reactive, ref } from 'vue'
 import { msgCls, useFlash, type Flash } from '../composables/useFlash'
+import { useFold } from '../composables/useFold'
 import { pad2 } from '../utils/format'
 import type { WhaleModel, WhaleModelRow, WhaleModelTemplate, WhaleServices } from '../types/services'
 
@@ -299,7 +300,7 @@ function removeModelRow(id: string) {
 
 // 整卡折叠：模型行 + 行内表单展开后很长，故给一层卡级折叠（沿 dsh 卡的 .card-toggle 范式），
 // 默认展开、可收起。收起态摘要播报「主显示模型 + 已配数量」，不让人以为折起来就看不到现状
-const cardFold = reactive({ open: true })
+const cardFold = useFold('models', true)
 const cardSummary = computed(() => {
   const main = props.models.find((m) => m.id === props.modelsMainId)
   const mainName = main ? main.name : (props.modelsMainId || 'DeepSeek')

@@ -5,7 +5,8 @@ const { MIN_SCALE, MAX_SCALE, BASE_MIN, BASE_CAP, BASE_MAX, WIN_PAD, WIDGET_AUTO
 const { execFileSync } = require('child_process')
 const { log, logErr } = require('./log')
 const { errMsg } = require('./util')
-const { clampNum, readConfig, readAnchor, writeAnchor, defaultAnchor, readTimer } = require('./store')
+const { clampNum, readConfig, readAnchor, writeAnchor, defaultAnchor, readTimer, readTodo, readFocus, todayKey } = require('./store')
+const { summarize: summarizeFocus } = require('./focus')
 const { getCachedBalance, getModelsPayload } = require('./api')
 const { getSoundData } = require('./sounds')
 const { getSkinData, getBuiltinData } = require('./skins')
@@ -752,11 +753,33 @@ function pushInit() {
     sharedSkins: getBuiltinData(),
     // 多厂商模型列表（含内置 DeepSeek 那条）+ 主显示模型
     models: getModelsPayload(),
+    // 待办清单：只在「显示待办」开启时推（关着时页面连分组都不建，少一份无用数据）
+    todo: cfg.todoOn ? readTodo() : null,
+    // 专注统计与每日目标：只在「专注记录」开启时推（与 FocusView 的显示条件一致）
+    focusStats: cfg.focusOn ? focusStatsPayload() : null,
   })
 }
 
 function pushConfig() {
   sendToWidget('whale:config', readConfig())
+}
+
+// 待办变更回推（设置页增删改、挂件页勾选/设专注都走这里）。
+// 与 pushConfig 分开：待办是独立存储键，改它不该顺带把整份配置再推一遍。
+function pushTodo() {
+  sendToWidget('whale:todo', readTodo())
+}
+
+// 专注统计回推（记录新一轮 / 设置页刷新时调用）。STAT_DAYS 与 FocusView.vue 保持一致
+const FOCUS_STATS_DAYS = 7
+function focusStatsPayload() {
+  const cfg = readConfig()
+  const state = readFocus()
+  const summary = summarizeFocus(state, todayKey(), FOCUS_STATS_DAYS)
+  return { summary, goal: cfg.focusGoal || 0 }
+}
+function pushFocusStats() {
+  sendToWidget('whale:focus-stats', focusStatsPayload())
 }
 
 // 实时缩放上下文：连续 __live 调用间缓存，避免每帧同步 IPC 读窗口状态
@@ -1054,6 +1077,8 @@ module.exports = {
   sendToWidget,
   pushInit,
   pushConfig,
+  pushTodo,
+  pushFocusStats,
   pushSnapped,
   clearLiveScaleCtx,
   queueLiveScale,

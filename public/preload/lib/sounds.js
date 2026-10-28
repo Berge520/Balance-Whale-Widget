@@ -21,8 +21,8 @@ const MAX_BYTES = 5 * 1024 * 1024
 const MIME = { mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', m4a: 'audio/mp4', flac: 'audio/flac' }
 
 // 音效槽位。press / release 是「音色」的两段（有内置回落，见挂件页 SOUND_FILES）；
-// low / budget / peak / pass 是四类提醒各自的提醒音 —— **没有内置回落，留空即静音**，
-// 不打扰是默认，想要声音才去导一段。
+// low / budget / peak / pass 是四类提醒各自的提醒音 —— 留空时回落到挂件页 ALERT_FALLBACK
+// 里的内置提醒音，所以默认是有声音的；想静音请关音效开关或把该类音量调到 0。
 // shared 是「共享音效库」的落地槽位：从 Release 下载的全集音效都进这里。它本身不是实播槽位，
 // 但每段带一组 roles（这段要参加哪些槽位的播放），getSoundData 据此把它拼进对应实播槽位。
 // 用户在设置页勾选某段要参加哪些槽位即可（见 setSharedRoles），无需把音频另存一份搬过去。
@@ -365,7 +365,7 @@ function installBuiltin(name, ext, buf) {
 }
 
 // 音频本体 → base64 data URL 数组（挂件随机取一条 new Audio(dataURL) 播放）。
-// 文件丢失（用户手动清理了 userData）时按缺失处理，挂件侧回退内置音色 / 提醒音静音。
+// 文件丢失（用户手动清理了 userData）时按缺失处理，挂件侧回退内置音色 / 内置提醒音。
 //
 // 每个实播槽位的列表 = 用户自己导入的那段（实播槽位是「一段一槽位」）+ 共享库里 roles 含该槽位的段。
 // 只拼「被挂上的」池段，不推整个池子：全集 45 段约 2.7MB base64，全推等于每次配置变更都搬一遍。

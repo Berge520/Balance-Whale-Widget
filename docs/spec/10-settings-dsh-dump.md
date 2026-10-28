@@ -1,0 +1,11 @@
+- **「dsh 配置转储」卡片 v1.6.2 新增**（「开发者」Tab，紧跟「dsh 故障诊断」之后）：**整卡默认收起**（`devFolds.dshDump`，走同一个 `toggleDevCard`），**首次展开才跑**（`devStatsLoaded.dshDump` 只置一次）—— 要起两次子进程（最坏 16s），不看不跑。卡片头右侧摘要（`dshDumpSummary`）三段：没读过「点击展开读取」、失败「读取失败」、有结论「N 层 · 差异 M 处」。按钮三枚：**「重新读取」**（`dshDumpRefresh()`，走缓存 —— TTL 内复用并回显「60 秒内已有结果，直接复用」）、**「强制重跑」**（`dshDumpRefresh(true)`，绕开缓存重跑）与**「复制转储信息」**（`dshDumpCopy()`，复制完整的分层 + 差异清单）。
+  - **⚠️ 缓存接线踩坑（v1.6.2 修复）**：原先只有两枚按钮且「重新读取」写死 `dshDumpRefresh(true)`，「重新诊断」同理 —— `force=true` 跳过缓存判定，**60s TTL 形同虚设**：连点两次照跑两遍完整扫描（诊断遍历 `node_modules`、转储 spawn 两次子进程），缓存写了没人读。现拆成「读缓存」与「强制重跑」两枚按钮，并把命中判定收敛进纯函数 `diagnostics.cacheHit(hit, ttl, now, {force, profile})`（转储多一项 `profile` 校验，避免切 profile 后读到上一棵树），由单测钉死 —— 这类接线错误只能靠可测判定函数防住。
+  - **profile 目前复用 `'web'` 默认**（`DSH_DUMP_PROFILE` 常量，与诊断卡同口径）：暂不做配置项，避免用户先填对 profile 才看得到东西。CLI 参数**一律显式拼 `--profile <n>`**（`bin.js` 只在首个 token 不以 `-` 开头且不是 `plugin` 时补 `--profile`，隐式依赖参数顺序会踩坑）。
+  - **同样是 Promise，同样先让出一帧**：`dumpDshConfig()` 与 `diagnoseDsh()` 同构（子进程 + 回调），故 `dshDumpRefresh` 也先 `window.setTimeout(() => dshDumpRefreshRun(force), 30)`；宿主侧 `settings.js` 加 **20s 兜底闸门**（比诊断的 15s 长 —— 两次 spawn 最坏 8s + 8s），Promise 必须 settle 的理由同诊断卡（否则按钮停在「读取中…」）。
+  - **D1 分层列表**（`.layer-list` / `.layer-item`，可折叠，默认展开）：每层一行「类型标签 + 来源名 + N 条目 / M 分节」。类型标签由 `dshDumpLayerCls` / `dshDumpLayerKindText` 给出：**基线**（灰）/ **包内层**（蓝，bundle 自带）/ **用户层**（橙，用户自写的 `cordis.patch.yml`，最该被看见）—— 色条走 `border-left-color`。**层数等于 dump 里的实际来源数**，不固定为五。
+  - **D2 差异列表**：`被改` 行用 `dshDumpChangedNote(e)` 摊开 `before → after`（只列真的变了的项：`禁用 否 → 是` / `config 字段 a,b → a,c`；两段都没变时说明包名或展示名不同）；`生效树新增` / `生效树移除` 只给 id + name（无比对物，**不加 hint**）。**默认树读取失败时降级**：只显示一行 `hint` 说明 `diffError`，分层列表照常展示。
+  - **条目名可能为空**（dump 里只有 id 没 name）：`dshDumpEntryLabel(e)` 退化成只显示 id，不留空白。
+  - **config 只显示字段名、绝不显示值**（值可能含密钥）：界面上与「复制」里都是如此，共用同一套口径函数。
+  - **未安装与读取失败分开说**（`isNotInstalled`）：`run()` 给的两条「未找到可用的 dsh（全局或插件目录都没有安装）」/「未找到 Node.js 可执行文件」被单列为 `notInstalled: true`，卡片给「先在『dsh』卡片里启动一次」的空态；**装了但没跑通**（超时 / 退出码非 0 / 输出不可解析）不引导重装，只说重试。判据落在 `run()` 的错误文案上 —— UI 拿不到 stdout，没有更可靠信号；故抽成纯函数单独钉单测。
+  - **卡内 `.fold`「说明」**（`diagnoseFolds.help`，默认收起）：逐条解释五个检查项的症状与处置（重复模块 / patch 条目 / dsh 端口 / 只读承诺），正文见「dsh 故障诊断」卡。
+  - **样式** `.layer-*` 一组：`.layer-head` 弹性换行（`.layer-kind` 小标签 + `.layer-name` 可换行 + `.layer-count` 右对齐）、`.layer-base` / `.layer-bundle` / `.layer-user` 三条左侧色条。

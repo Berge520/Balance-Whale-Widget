@@ -582,11 +582,11 @@ test('setTodayUsage：直接覆盖当天用量、负数/非法夹到 0、返回�
 test('readTimer：空存储 / 非对象回默认（mode off）', () => {
   db.delete(K.timer)
   const d = readTimer()
-  assert.deepEqual(d, { mode: 'off', running: false, paused: false, startAt: 0, endAt: 0, elapsed: 0, remain: 0, arg: '' })
+  assert.deepEqual(d, { mode: 'off', running: false, paused: false, startAt: 0, endAt: 0, elapsed: 0, remain: 0, arg: '', isBreak: false, back: 0, cycle: 0, cycleDate: '', breakLong: false })
 })
 
 test('readTimer：逐字段归一化 —— mode 白名单、布尔严格、数值钳负、arg 只认串', () => {
-  db.set(K.timer, { mode: 'bogus', running: 1, paused: 'yes', startAt: 'abc', endAt: '123', elapsed: -5, remain: '9', arg: 42 })
+  db.set(K.timer, { mode: 'bogus', running: 1, paused: 'yes', startAt: 'abc', endAt: '123', elapsed: -5, remain: '9', arg: 42, isBreak: 1, back: -5, cycle: -3, cycleDate: 'not-a-date', breakLong: 1 })
   const t = readTimer()
   assert.equal(t.mode, 'off') // 认不出回 off
   assert.equal(t.running, false) // 1 不算 true
@@ -596,6 +596,17 @@ test('readTimer：逐字段归一化 —— mode 白名单、布尔严格、数�
   assert.equal(t.elapsed, 0) // 负值钳到 0
   assert.equal(t.remain, 9)
   assert.equal(t.arg, '') // 非串回空
+  assert.equal(t.isBreak, false) // 只认严格 true
+  assert.equal(t.back, 0) // 负值钳到 0
+  assert.equal(t.cycle, 0) // 负值钳到 0
+  assert.equal(t.cycleDate, '') // 格式不对回空
+  assert.equal(t.breakLong, false) // 只认严格 true
+  db.set(K.timer, { mode: 'down', isBreak: true, back: '9', cycle: 3, cycleDate: '2026-10-28', breakLong: true })
+  assert.equal(readTimer().isBreak, true)
+  assert.equal(readTimer().back, 9) // 数字串可解析
+  assert.equal(readTimer().cycle, 3)
+  assert.equal(readTimer().cycleDate, '2026-10-28')
+  assert.equal(readTimer().breakLong, true)
   // 合法 mode 保留
   db.set(K.timer, { mode: 'down' })
   assert.equal(readTimer().mode, 'down')
@@ -608,7 +619,7 @@ test('readTimer：逐字段归一化 —— mode 白名单、布尔严格、数�
 
 test('writeTimer：落盘成功回 true 且可回读；失败回 false 不抛', () => {
   db.delete(K.timer)
-  const state = { mode: 'up', running: true, paused: false, startAt: 1000, endAt: 0, elapsed: 5, remain: 0, arg: 'x' }
+  const state = { mode: 'up', running: true, paused: false, startAt: 1000, endAt: 0, elapsed: 5, remain: 0, arg: 'x', isBreak: true, back: 1500, cycle: 2, cycleDate: '2026-10-28', breakLong: false }
   assert.equal(writeTimer(state), true)
   assert.deepEqual(readTimer(), state)
   const saved = globalThis.utools.dbStorage.setItem
@@ -733,6 +744,161 @@ test('writeAnchor：同时更新内存缓存与存储，成功回 true；失败�
   }
   db.delete(K.win)
   resetAnchorCache()
+})
+
+// ──────────────────────────────────────────────
+// 待办清单 / 专注统计（读写归一化）
+// ──────────────────────────────────────────────
+const {
+  readTodo, writeTodo, clearTodo, normTodoText,
+  readFocus, writeFocus, clearFocus,
+} = store
+const { TODO_TEXT_MAX, TODO_MAX } = constants
+
+test('normTodoText：折叠连续空白、trim、截到 TODO_TEXT_MAX', () => {
+  assert.equal(normTodoText('  写 \n\t 周报  '), '写 周报')
+  assert.equal(normTodoText(null), '')
+  assert.equal(normTodoText(42), '42')
+  assert.equal(normTodoText('x'.repeat(TODO_TEXT_MAX + 20)).length, TODO_TEXT_MAX)
+})
+
+test('readTodo：空存储 / 非对象回空清单（focusId 为空）', () => {
+  db.delete(K.todo)
+  assert.deepEqual(readTodo(), { items: [], focusId: '' })
+  db.set(K.todo, 'nope')
+  assert.deepEqual(readTodo(), { items: [], focusId: '' })
+  db.delete(K.todo)
+})
+
+test('readTodo：无文案 / 无 id / 非对象的条目丢弃，重复 id 只留第一条', () => {
+  db.set(K.todo, {
+    items: [
+      { id: 'a', text: '  写周报  ', at: 1000 },
+      { id: 'a', text: '重复 id 应被丢', at: 2000 },
+      { id: 'b', text: '   ' }, // 空文案
+      { text: '缺 id' },
+      null,
+      { id: 'c', text: '泡咖啡' },
+    ],
+  })
+  const s = readTodo()
+  assert.equal(s.items.length, 2)
+  assert.equal(s.items[0].text, '写周报')
+  assert.equal(s.items[0].id, 'a')
+  assert.equal(s.items[1].id, 'c')
+  db.delete(K.todo)
+})
+
+test('readTodo：at 缺失回落到当前时间；done 只认 === true；doneAt 仅在已完成时保留；est/rounds 钳到 0–99', () => {
+  const before = Date.now()
+  db.set(K.todo, {
+    items: [
+      { id: 'a', text: '没时间戳', at: 'abc' },
+      { id: 'b', text: '已完成', done: true, at: 1000, doneAt: 2000 },
+      { id: 'c', text: '未完成却带 doneAt', done: 1, at: 1000, doneAt: 2000 },
+      { id: 'd', text: '带预估', at: 1000, est: 5, rounds: 3 },
+      { id: 'e', text: '越界预估', at: 1000, est: -1, rounds: 999 },
+    ],
+  })
+  const s = readTodo()
+  const a = s.items.find((x) => x.id === 'a')
+  assert.ok(a.at >= before && a.at <= Date.now(), 'at 应回落到当前时间')
+  assert.equal(a.est, 0, '缺省 est 回 0')
+  assert.equal(a.rounds, 0, '缺省 rounds 回 0')
+  const b = s.items.find((x) => x.id === 'b')
+  assert.deepEqual([b.done, b.at, b.doneAt], [true, 1000, 2000])
+  const c = s.items.find((x) => x.id === 'c')
+  assert.deepEqual([c.done, c.doneAt], [false, 0], '1 不算完成，doneAt 归零')
+  const d = s.items.find((x) => x.id === 'd')
+  assert.deepEqual([d.est, d.rounds], [5, 3], '合法值保留')
+  const e = s.items.find((x) => x.id === 'e')
+  assert.deepEqual([e.est, e.rounds], [0, 99], '越界值钳到 0–99')
+  db.delete(K.todo)
+})
+
+test('readTodo：条数截到 TODO_MAX（顺序保持存储内顺序）', () => {
+  const items = []
+  for (let i = 0; i < TODO_MAX + 5; i++) items.push({ id: 'i' + i, text: 't' + i, at: 1 })
+  db.set(K.todo, { items })
+  const s = readTodo()
+  assert.equal(s.items.length, TODO_MAX)
+  assert.equal(s.items[0].id, 'i0')
+  assert.equal(s.items[TODO_MAX - 1].id, 'i' + (TODO_MAX - 1))
+  db.delete(K.todo)
+})
+
+test('readTodo：focusId 必须指向「未完成的现存条目」，悬空 / 已完成 / 空白一律清空', () => {
+  db.set(K.todo, { items: [{ id: 'a', text: '任务', at: 1 }, { id: 'b', text: '已做', done: true, at: 1 }], focusId: 'a' })
+  assert.equal(readTodo().focusId, 'a')
+  db.set(K.todo, { items: [{ id: 'a', text: '任务', at: 1 }], focusId: ' nope ' })
+  assert.equal(readTodo().focusId, '', '悬空指针要清空')
+  db.set(K.todo, { items: [{ id: 'b', text: '已做', done: true, at: 1 }], focusId: 'b' })
+  assert.equal(readTodo().focusId, '', '已完成条目不能当专注目标')
+  db.set(K.todo, { items: [{ id: 'a', text: '任务', at: 1 }], focusId: '  a  ' })
+  assert.equal(readTodo().focusId, 'a', 'id 两端空白应被裁掉后命中')
+  db.delete(K.todo)
+})
+
+test('writeTodo：落盘成功回 true 且可回读；失败回 false 不抛', () => {
+  db.delete(K.todo)
+  const state = { items: [{ id: 'a', text: '任务', done: false, at: 1, doneAt: 0, est: 4, rounds: 2 }], focusId: 'a' }
+  assert.equal(writeTodo(state), true)
+  assert.deepEqual(readTodo(), state)
+  const saved = globalThis.utools.dbStorage.setItem
+  globalThis.utools.dbStorage.setItem = () => { throw new Error('quota') }
+  try {
+    assert.equal(writeTodo(state), false)
+  } finally {
+    globalThis.utools.dbStorage.setItem = saved
+  }
+  db.delete(K.todo)
+})
+
+test('clearTodo：删除清单，回读到空；重复清除不抛', () => {
+  writeTodo({ items: [{ id: 'a', text: '任务', done: false, at: 1, doneAt: 0 }], focusId: '' })
+  clearTodo()
+  assert.deepEqual(readTodo(), { items: [], focusId: '' })
+  assert.doesNotThrow(() => clearTodo())
+})
+
+test('readFocus：空存储 / 非对象 / 缺 days 回空；非法日期键、非对象、全零天一律丢', () => {
+  db.delete(K.focus)
+  assert.deepEqual(readFocus(), { days: {} })
+  db.set(K.focus, 'nope')
+  assert.deepEqual(readFocus(), { days: {} })
+  db.set(K.focus, {
+    days: {
+      '2026-10-26': { r: 2, m: 50 },
+      '2026-10-25': { r: 0, m: 0 }, // 空壳不留
+      '2026-10-24': null,
+      'bad': { r: 1, m: 25 },
+      '2026-10-23': { r: -3, m: 'abc' }, // 归零 → 空壳
+      '2026-10-22': { r: 1.4, m: 25.6 }, // 取整
+    },
+  })
+  const s = readFocus()
+  assert.deepEqual(s.days['2026-10-26'], { r: 2, m: 50 })
+  assert.equal(s.days['2026-10-25'], undefined)
+  assert.equal(s.days['bad'], undefined)
+  assert.equal(s.days['2026-10-23'], undefined)
+  assert.deepEqual(s.days['2026-10-22'], { r: 1, m: 26 })
+  db.delete(K.focus)
+})
+
+test('writeFocus：落盘成功回 true 且可回读；失败回 false 不抛；clearFocus 后回空', () => {
+  db.delete(K.focus)
+  const state = { days: { '2026-10-26': { r: 1, m: 25 } } }
+  assert.equal(writeFocus(state), true)
+  assert.deepEqual(readFocus(), state)
+  const saved = globalThis.utools.dbStorage.setItem
+  globalThis.utools.dbStorage.setItem = () => { throw new Error('quota') }
+  try {
+    assert.equal(writeFocus(state), false)
+  } finally {
+    globalThis.utools.dbStorage.setItem = saved
+  }
+  clearFocus()
+  assert.deepEqual(readFocus(), { days: {} })
 })
 
 // ──────────────────────────────────────────────

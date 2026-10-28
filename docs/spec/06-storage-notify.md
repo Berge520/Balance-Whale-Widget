@@ -1,0 +1,31 @@
+## 六、存储结构（续）· 通知方式 / 额度 / 多厂商模型
+
+**通知方式**（通知渠道，`lib/notify.js`）：把原先散落在七八处（余额预警 / 预算 / 波动 / 模型低余额 / 峰谷与穿透切换 / 计时到点 / 更新提示）的 `utools.showNotification` **收口成统一出口** `notify(text, cfg)`，新增渠道只需加配置开关，调用方无需感知。两个渠道：**系统通知**（`cfg.notifySystemOn`，默认 true = 沿用旧行为）+ **邮件通知**（`cfg.notifyMailOn`，默认 false，需先配好 SMTP）。设置页「通知方式」管渠道总开关，上方各提醒开关管「哪几类要提醒」，两组正交。
+
+- **两条铁律**：① **免打扰时段由调用方判断**（`notifyDaily` / `notifyNow` / `notifyModelLow` 进入前就 `return`），统一出口不重复判断，否则「免打扰只静默系统通知、邮件却照发」：免打扰时段内邮件一并静默；② **邮件失败绝不影响主流程**：整条发送链丢进 Promise，错误只 `logErr` 留痕。提醒是副作用，不因 SMTP 不通就失败主流程。
+- **计时到点是例外**：由挂件页面发起（`whale:timer-done`），页面侧按 `timerNotifyOn || (timerMailOn && notifyMailOn)` 判断要不要发，两者是「或」：只开邮件渠道时也要能通知出去。页面只管「发不发」，走哪个渠道由宿主出口按配置决定。
+- **手写最小 SMTP 客户端**（`class SmtpClient`，Node `net` / `tls`）：只实现发一封信的命令流 EHLO → STARTTLS(可选) → AUTH LOGIN → MAIL/RCPT/DATA → QUIT。**不用 nodemailer**：preload 是 CommonJS 且不可压缩混淆，引第三方包要额外处理依赖打包；这里只需纯文本单收件人。`mailSecure`（默认 true）= `tls.connect` 直连 465；false = `net.connect` 明文握手，EHLO 响应含 `STARTTLS` 且端口非 25 时升级（升级会换 socket，**必须清掉旧缓冲与等待者**，否则残留数据会串行错位）。超时三重兜底：单步 `SMTP_STEP_MS` 8s、连接 `SMTP_TIMEOUT_MS` 15s、`sendMail` 另有总超时 guard，任一步卡死都不会让 Promise 永久挂起。
+  - **`read()` 返回的是「一次响应的全部行」，状态码只看 `last()`**。这是最易踩的坑：多行响应（EHLO 能力表、带提示的 `334`）首行 `250-xxx`、末行才是结论。早先 `feed()` 只 resolve 末行、丢掉前面行，`AUTH LOGIN` 拿到 `334 VXNlcm5hbWU6` 而校验期望 `334`，直接判失败，**所有需认证的服务器都发不出信**。判断能力关键字（如 STARTTLS）用 `has()` 扫全部行。
+  - **STARTTLS 的 `tls.connect` 不设 `rejectUnauthorized: false`**。写上它等于放弃证书校验，授权码会被中间人截走；`servername` 已按 `mailHost` 填好 SNI，证书不匹配就该报错让用户看见。（`hosts.js` 那个是另一回事：连的是 IP，Node 拿 IP 比证书名必然不符，属预期探测场景。）
+  - **`STARTTLS` 升级只看端口（非 25）与服务器能力表，不再重复判 `mailSecure`**：能走到这行说明用户已明确关了「SSL/TLS 直连」。端口统一由 `resolvePort(cfg)` 推导（`secure ? 465 : 587`，`mailPort` 有值则以它为准），`connect()`（是否裸 TLS）与 `send()`（是否 STARTTLS）**必须问同一函数**：早先两处各写 default（`useTls ? 465 : 587` 与固定 `587`），端口缺失 + `mailSecure` 为真时分叉：`connect()` 连 465 走裸 TLS，`send()` 却按 587 判 STARTTLS。`portHint(cfg)` 在端口与加密方式明显矛盾时（`secure` 配 587/25、或非 `secure` 配 465）附一句可读提示，不把 TLS 原始报错（如 `wrong version number`）甩给用户；**只提示、不改用户填的值**。
+  - **超时三处对齐**：`armTimeout(sock)` 给每个 socket 挂会话级空闲超时（`SMTP_TIMEOUT_MS` 15s），**STARTTLS 换 socket 后必须重挂**（`upgrade()` 里 `this.sock = next` 之后），否则旧 socket 监听已摘、TLS 阶段只剩 `read()` 的 8s 单步超时，推送大正文时无人兜底。`read()` 单步超时（`SMTP_STEP_MS` 8s）触发时**必须清空缓冲的 `lines`**：残留片段会被下一次 `cmd()` 的首个 `read()` 当成自己的应答，状态码错位（报「SMTP 2xx」这类怪错）。`upgrade()` 里摘除 `old` 监听后到 `next` 就绪之间，要在 `old` 补 `error` 兜底监听：否则该窗口期内 `old` 的错误（对端升级瞬间断连）会成 uncaught 打挂 preload。
+- **MIME 报文**：头部 CRLF，中文主题 / 发件人名走 RFC 2047（`=?UTF-8?B?...?=`），否则 7bit 通道乱码；正文 base64 + 76 字符折行，中英文与长链接都不会触发行长限制。邮件主题 = `cfg.mailSubjectPrefix` + 正文首句（超过 40 字截断加 `…`），`mailSubject(body)` 实现。
+- **凭据与配置分流**：SMTP 服务器 / 端口 / 账号 / **授权码**进 `whale:secrets.notifyMail`（加密存储），发件人 / 收件人 / 显示名 / 主题前缀进 `config`。授权码等同密码，跟 config 走会随备份明文导出。设置页 `mail` 表单与 `cfg` 分开维护，另有 `saveMailSecrets()`（授权码留空 = 沿用已存，回填掩码而非明文）与 `sendTestMail(mail)`（用传入配置发**不落库**的测试邮件，先验证再保存）两个 `window.services` 入口。**`sendTestMail` 入参必须同时带凭据与收件人字段**（`mailFrom` / `mailTo` / `mailFromName`，类型 `WhaleMailTestInput`）：两类字段分居两张表单，只传 `mail` 表单会让发件人变空串、被 `sendMail` 判「发件邮箱格式不正确」；宿主兜底：入参缺失回退读 `config`，仍为空则报「还没填发件人 / 收件人」。
+- **写入语义**：`writeSecrets` 整体重建，`notifyMail` 传 `undefined` 时沿用现值 ：这样「只恢复凭据」的备份恢复路径（不带该字段）不会把用户已存的 SMTP 授权码清空，口径同 `models`。
+
+**额度**（`config.quotaTotal/quotaReset` + `ledger.quotaUsed`）：给「资源包 / 订阅」这类**有总量、按周期重置**的额度做进度展示。配置只存**总量**与**重置周期**，已用不落配置、按周期从账本现算：`quotaReset` ∈ `never`（不重置，取 `ledger.quotaUsed`）/ `monthly`（每月，取本月 `history` 合计）/ `daily`（每日，取 `todayUsage`），由 `normQuotaReset` 归一化（非法值回 `monthly`）。`quotaTotal` 走 `clampNum(v,0,1e9,·)`，**0 = 未设置**（设置页只显示输入行、不显示进度条）。
+
+`ledger.quotaUsed` 是「不重置」口径的累计已用：**不能用 `history` 求和**（`history` 按 `historyKeepDays()` 天滚动删除，累计会越用越少），在账本单列一个只增不减字段：`recordLedgerUsage` 跨天归档时（写 `history[旧日期]` 之后、`todayUsage` 清零之前，顺序不能反）把当天用量并入 `quotaUsed`。`readLedger` 对老账本兜底为**现存 `history` 之和**，否则升级后「不重置」的累计反小于「本月累计」。`settings.usageDays` 把 `cumUsed = quotaUsed + todayUsage` 一并返回（当天还没归档，不加上会少一天）。
+
+额度**只做展示**：不参与余额、记账、预警与通知，改 `quotaTotal/quotaReset` 只走 `patchCfg` + `pushConfig()`，不触发重摆 / 重建 / 缓存清理。设置页 `quotaUsed` 是 computed（按 `quotaReset` 三选一），进度条 ≥90% 换暖色，`quotaTotal:0` 时不渲染。
+
+**多厂商模型**（`config.models` + `config.mainModelId` + `whale:secrets.models` + `whale:models`）：内置 DeepSeek 之外可再添加最多 9 个模型（`MODEL_MAX = 10`，**含内置那条**）。**存储三处拆分**，最易踩的地方：
+
+- **注册表进配置** `config.models`（`WhaleModel[]`，21 个字段：`id/tpl/name/kind/currency/auth/url/baseUrl/path/scale/usedUrl/usedPath/usedScale/usedPctPath/remainPctPath/remainPath/totalPath/resetPath/windows/lowAlertOn/lowAlertAmount`；`kind` ∈ `balance` / `quota` / `codex`，`windows` 只由模板预填、设置页不提供编辑）：它随备份走，必须按「配置四处同步铁律」处理：`defaultConfig()` / `readConfig()` / `writeConfig()` / `patchConfig()` 四处都要带 `models` 与 `mainModelId`。`patchConfig` 里 **`models` 必须先于 `mainModelId` 处理**，否则删主显示那个模型时 `normMainModelId` 还会在旧列表里找到它。
+- **密钥进加密存储** `whale:secrets.models`：`{ [模型 id]: key }`，一模型一份。模型 `id` 就是密钥槽位的键（`normModelId` 限 `[0-9A-Za-z_-]{1,40}`），设置页新增用 `freeModelId(base)` 防撞：撞了会互相覆盖。`writeSecrets` 是**整体重建**，所以 `settings.saveModel/removeModel` 必须先把 `apiKey/platformToken` 读出再一起写回，否则只改一个模型密钥会把 DeepSeek 的密钥一起清掉。
+- **运行时状态进新键** `whale:models`：余额/额度是查询结果不是配置，**不进备份**。备份恢复侧 `backup.js` 只恢复 `secrets` 时对 `models` 传 `undefined`（让 `writeSecrets` 沿用现值）：老备份没这字段，照旧整体重建会让一次「只恢复凭据」清空已存密钥。
+
+归一化在 `store.js`：`normModel(v)` 逐字段清洗，`pick(k)` 语义是「字段 `undefined` 回模板默认、显式空值以空值为准」：这样设置页「高级」清空某个路径能生效，不被模板默认值填回。`normModels` 按 `MODEL_MAX` 截断并丢弃重复 id；`normMainModelId(v, models)` 要求主显示是「内置 DeepSeek」或列表里存在的 id，否则回 `deepseek`（删主显示模型时自动回退靠的就是它）。
+
+**「今日已用」是估算**：本插件拦不到对话事件（DSH 版能力），今日已用只能按**相邻两次余额差**估算：`refreshModels` 在 `cur.date === today` 且本次余额更低时累加 `prevBalance - balance`，跨天重算。挂件上带 `~` 前缀标明是估算值，且**不写账本**（账本只服务 DeepSeek 的记账/趋势/预算）。
+---

@@ -1,7 +1,7 @@
 /*
  * 备份 / 恢复（CommonJS）。
  *
- *  - 导出：把「挂件设置 / 账本 / 窗口位置 / 计时」打包成一个 JSON 文件。
+ *  - 导出：把「挂件设置 / 账本 / 窗口位置 / 计时 / 待办与专注统计」打包成一个 JSON 文件。
  *  - 气泡图素材（whale:bubbles 的图片文件）：默认**不导出**（二进制会让 JSON 备份膨胀到几十 MB），
  *    勾选后才以 base64 内嵌进 JSON —— 给「不想再单独导一次素材包」的用户一个一次带走的口子。
  *  - 凭据（API Key / 平台 Token）默认**不导出**；勾选后必须设密码，用 scrypt 派生密钥 + AES-256-GCM
@@ -18,7 +18,7 @@ const { errMsg, stamp } = require('./util')
 const {
   readConfig, writeConfig, readSecrets, writeSecrets,
   readLedger, mergeLedgerHistory, readTimer, writeTimer,
-  readAnchor, writeAnchor,
+  readAnchor, writeAnchor, readTodo, writeTodo, readFocus, writeFocus,
 } = require('./store')
 const holidays = require('./holidays')
 const bubbles = require('./bubbles')
@@ -95,6 +95,14 @@ function exportBackup(opts) {
   // 节假日联网覆盖层：有才带（没更新过就不要往备份里塞一个空壳），无则 includes.holidays 为 false
   const holidaysSnap = holidays.snapshot()
   if (holidaysSnap) data.holidays = holidaysSnap
+  // 待办与专注统计：用户的长期记录，进备份；但空壳不带 —— 恢复时「备份里没有」与
+  // 「备份里是空的」语义不同，前者不该让用户误点后把现有清单清空（has.todo 由有无条目决定）
+  const todoSnap = readTodo()
+  const todoItems = todoSnap.items || []
+  if (todoItems.length) data.todo = todoSnap
+  const focusSnap = readFocus()
+  const focusDays = Object.keys(focusSnap.days || {}).length
+  if (focusDays) data.focus = focusSnap
   // 气泡图配图：可选带上（base64 内嵌 JSON）。一张都读不出来时按「没带」处理，不让备份里留个空数组
   let bubbleCount = 0
   let bubbleBytes = 0
@@ -130,6 +138,8 @@ function exportBackup(opts) {
       config: true, ledger: true, window: true, timer: true,
       holidays: !!holidaysSnap,
       bubbles: bubbleCount,
+      todo: todoItems.length,
+      focus: focusDays,
       secrets: withSecrets ? 'encrypted' : 'none',
     },
     data,
@@ -183,6 +193,10 @@ function pickBackup() {
       timer: !!d.timer && typeof d.timer === 'object',
       holidays: !!d.holidays && typeof d.holidays === 'object' && Array.isArray(d.holidays.dates) && d.holidays.dates.length > 0,
       bubbles: Array.isArray(d.bubbles) && d.bubbles.length > 0,
+      // 与导出侧对称：空清单 / 空统计不算「有」，避免用户勾了一项却只是把现有数据清空
+      todo: !!d.todo && typeof d.todo === 'object' && Array.isArray(d.todo.items) && d.todo.items.length > 0,
+      focus: !!d.focus && typeof d.focus === 'object' && d.focus.days && typeof d.focus.days === 'object'
+        && Object.keys(d.focus.days).length > 0,
       secrets: !!(d.secretsEnc && typeof d.secretsEnc === 'object' && d.secretsEnc.data),
     },
   }
@@ -202,7 +216,7 @@ function validAnchor(a) {
 }
 
 // ── 恢复：按勾选项「同名覆盖」写入 ──
-// opts = { config, ledger, window, timer, holidays, bubbles, secrets, password }
+// opts = { config, ledger, window, timer, holidays, bubbles, todo, focus, secrets, password }
 function applyBackup(opts) {
   const o = opts && typeof opts === 'object' ? opts : {}
   if (!pending) return { ok: false, error: '请先选择备份文件' }
@@ -295,6 +309,29 @@ function applyBackup(opts) {
         else fail('气泡图素材', '备份里的图片均无法写入')
         if (bad > 0) logErr('[whale][backup] 恢复气泡图有 ' + bad + ' 张失败（格式或体积不合法）')
       } catch (err) { fail('气泡图素材', errMsg(err)) }
+    }
+  }
+  if (want('todo')) {
+    // 待办：结构不可用 → skipped；写盘失败要报 error（同 config，不能假报成功）
+    const st = d.todo
+    if (!st || typeof st !== 'object' || !Array.isArray(st.items)) skipped.push('todo')
+    else {
+      try {
+        // 形状归一交给 readTodo：写入后所有读取方（挂件 / 设置页）都会拿到过滤过的清单
+        if (writeTodo({ items: st.items, focusId: String(st.focusId || '') })) applied.push('todo')
+        else fail('待办清单')
+      } catch (err) { fail('待办清单', errMsg(err)) }
+    }
+  }
+  if (want('focus')) {
+    const f = d.focus
+    if (!f || typeof f !== 'object' || !f.days || typeof f.days !== 'object') skipped.push('focus')
+    else {
+      try {
+        // 同上：readFocus 会按日期键与数值做归一，这里只判形状
+        if (writeFocus({ days: f.days })) applied.push('focus')
+        else fail('专注统计')
+      } catch (err) { fail('专注统计', errMsg(err)) }
     }
   }
   if (want('secrets')) {

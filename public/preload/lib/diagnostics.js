@@ -1,7 +1,7 @@
 /*
  * dsh 只读诊断（CommonJS）。
  *
- * 设计依据：docs/whale-widget-spec.md §5 / §11（dsh 只读诊断卡）。核心约束：
+ * 设计依据：docs/spec/05-ipc.md / docs/spec/11-build.md（dsh 只读诊断卡）。核心约束：
  *   1. **只读** —— detect 绝不写入任何文件（写入与恢复由「dsh 插件开关」卡负责）。
  *   2. **单项抛错不算整体失败** —— 每项独立 try/catch，失败只标记该项。
  *   3. **平台稳定优先** —— 按「平台语义依赖从零到有」分梯队：

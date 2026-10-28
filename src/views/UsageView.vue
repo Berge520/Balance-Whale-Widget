@@ -1,6 +1,7 @@
 <script lang="ts" setup>
 import { computed, reactive, ref, watch } from 'vue'
 import { msgCls, useFlash, type Flash } from '../composables/useFlash'
+import { useFold } from '../composables/useFold'
 import { barHeightOf } from '../utils/format'
 import UsageChart from '../components/UsageChart.vue'
 import type { LedgerDetailDay, LedgerDetailEntry, ModelUsageRow, WhaleServices } from '../types/services'
@@ -388,7 +389,7 @@ function applyHistory(h?: { days?: any[]; currency?: string; todayAdjust?: numbe
 // 整卡折叠：本卡是「用量」Tab 的首卡、也最长（口径 + 图表 + 汇总 + 明细 + 额度 + 单价），
 // 故给一层卡级折叠（沿 dsh 卡的 .card-toggle 范式），默认展开、可收起。
 // 收起态摘要播报「口径 + 保留天数」，图表等本就要展开才渲染的项不预读
-const cardFold = reactive({ open: true })
+const cardFold = useFold('usage', true)
 const cardSummary = computed(() => {
   const mode = props.cfg.usageMode === 'token' ? '实时·令牌' : '小鲸鱼记账'
   return `${mode} · 保留 ${props.cfg.historyKeepDays} 天`

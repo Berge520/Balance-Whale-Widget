@@ -3,10 +3,11 @@
  *
  * 悬浮窗（floating.html）与主窗宿主（services.js）之间的薄桥接层：
  *  - 接收宿主推送：whale:init / whale:balance / whale:config / whale:snapped / whale:sounds
- *              / whale:skin / whale:bubbles / whale:models
+ *              / whale:skin / whale:bubbles / whale:models / whale:todo / whale:focus-stats
  *              / whale:bubble-preview（设置页按压气泡试播）
  *              （另有本地推送 dark：preload 轮询 utools.isDarkColors() 检测 uTools 深浅色变化）
  *  - 向宿主上报：whale:ready / whale:show / whale:refresh / whale:config / whale:timer / whale:timer-done
+ *              / whale:todo / whale:focus
  *              / whale:drag-begin / whale:drag-move / whale:drag-end / whale:ignore-mouse
  *              / whale:open-settings（可带 { target } 直达某张设置卡，无载荷则只唤出主窗）
  *              / whale:models-refresh / whale:set-main-model / whale:hide-widget / whale:open-external
@@ -26,7 +27,7 @@ log('[whale][floating] preload 已加载', {
   logFile: LOG_FILE || '(仅控制台)',
 })
 
-const handlers = { init: [], balance: [], config: [], snapped: [], dsh: [], sounds: [], skin: [], bubbles: [], sharedSkins: [], models: [], dark: [], bubblePreview: [] }
+const handlers = { init: [], balance: [], config: [], snapped: [], dsh: [], sounds: [], skin: [], bubbles: [], sharedSkins: [], models: [], dark: [], bubblePreview: [], todo: [], focusStats: [] }
 
 function on(name, cb) {
   if (handlers[name] && typeof cb === 'function') handlers[name].push(cb)
@@ -57,6 +58,10 @@ ipcRenderer.on('whale:shared-skins', (event, data) => emit('sharedSkins', data))
 ipcRenderer.on('whale:models', (event, data) => emit('models', data))
 // 设置页「按压气泡试播」：把设置页当前编辑的泡泡队列发来真弹一次（items 已在宿主侧归一化）
 ipcRenderer.on('whale:bubble-preview', (event, data) => emit('bubblePreview', data))
+// 待办清单（权威状态由宿主维护：设置页增删改、挂件页勾选/设专注，改完都回推一份完整清单）
+ipcRenderer.on('whale:todo', (event, data) => emit('todo', data))
+// 专注统计与每日目标（宿主 whale:focus-stats 推送：{ summary, goal }）
+ipcRenderer.on('whale:focus-stats', (event, data) => emit('focusStats', data))
 
 // —— 深浅色跟随 uTools ——
 // 菜单/计时条等 UI 的深浅形态挂在 <html> 的 dark 类上（floating.css 消费）。判定源是
@@ -93,6 +98,10 @@ const api = {
   onModels(cb) { on('models', cb) },
   // 设置页「按压气泡试播」：真弹一次设置页正在编辑的泡泡队列（宿主 whale:bubble-preview 推送）
   onBubblePreview(cb) { on('bubblePreview', cb) },
+  // 待办清单（宿主 whale:todo 推送：整份 { items, focusId }，页面不做增量合并）
+  onTodo(cb) { on('todo', cb) },
+  // 专注统计与每日目标（宿主 whale:focus-stats 推送：{ summary, goal }）
+  onFocusStats(cb) { on('focusStats', cb) },
   // uTools 深浅色变化（preload 轮询检测后本地推送，不经主窗）
   onDark(cb) { on('dark', cb) },
   // 同步读取当前深浅态：preload 的首条 dark 推送早于页面注册回调，页面启动时用这里补齐初值
@@ -109,6 +118,13 @@ const api = {
   saveTimer(state) { send('whale:timer', state || null) },
   // 计时到点系统通知（页面已按「到点通知」开关判断是否调用）
   notifyTimerDone(text) { send('whale:timer-done', { text: String(text || '') }) },
+  // 待办轻操作：op = toggle（勾选/取消完成）| focus（设为/取消当前专注），只带 id
+  todoSend(payload) {
+    const p = payload && typeof payload === 'object' ? payload : {}
+    send('whale:todo', { op: String(p.op || ''), id: String(p.id || '') })
+  },
+  // 专注轮次上报（页面在倒计时到点、专注记录开着且不是休息轮时调用）
+  focusRound(minutes) { send('whale:focus', { minutes: Number(minutes) || 0 }) },
   // dsh（DeepSeek Harness）控制：action = status | start | stop | restart | update | open
   dsh(payload) {
     send('whale:dsh', typeof payload === 'string' ? { action: payload } : (payload || {}))

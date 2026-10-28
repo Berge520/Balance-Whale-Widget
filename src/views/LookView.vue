@@ -1,6 +1,7 @@
 <script lang="ts" setup>
 import { computed, reactive, ref, watch } from 'vue'
 import { msgCls, type Flash } from '../composables/useFlash'
+import { useFold } from '../composables/useFold'
 import type { HolidayStatus, SkinGallery, SkinMeta, SoundMeta, SoundRole, WhaleServices } from '../types/services'
 
 // 「挂件外观」整卡：大小 / 形象 / 深浅色 / 气泡与文案 / 音效，从设置页 App.vue 抽出。
@@ -87,7 +88,7 @@ const lookFolds = reactive({ bubble: false, sound: false })
 // 整卡折叠：本卡是「外观」Tab 的第一张、也是最长的一张（大小 / 形象 / 深浅色 + 气泡与文案 +
 // 音效三组），进 Tab 就要滚很久。标题即按钮、默认展开、可收起（沿 dsh 卡的 .card-toggle 范式）。
 // 收起态摘要播报「当前用的形象 + 音效口径」，避免折起来等于把现状藏了。
-const cardFold = reactive({ open: true })
+const cardFold = useFold('look', true)
 const cardSummary = computed(() => {
   const skin = props.cfg.skin === 'custom'
     ? (props.skinMeta ? '自定义 · ' + props.skinMeta.name : '自定义（未导入）')
@@ -347,7 +348,7 @@ const holidayNote = computed(() => {
           自定义音色：按压音 {{ soundLabel('press') }}<template v-if="soundsMeta.release.length"> · 释放音 {{ soundLabel('release') }}</template><template v-else> · 释放音未导入（松开时静音）</template>。
         </p>
         <p class="hint">
-          四类提醒音（低余额 / 预算 / 峰谷 / 穿透）留空 = 静音，不打扰是默认，
+          四类提醒音（低余额 / 预算 / 峰谷 / 穿透）留空时用内置提醒音，导入后换成你自己的，
           只在对应提醒真的弹出时响一次（系统通知不受影响）。各类提醒音的独立音量在「用量」页的「提醒与通知」里调。
         </p>
       </div>

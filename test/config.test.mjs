@@ -78,6 +78,13 @@ const PATCH_FIXTURES = {
   timerMode: { timerMode: 'down' }, timerSec: { timerSec: 300 }, timerAt: { timerAt: '06:07' },
   timerNote: { timerNote: '打个招呼' }, timerBreakMin: { timerBreakMin: 9 }, timerRemindSec: { timerRemindSec: 15 },
   timerBubblePin: { timerBubblePin: false }, timerBubbleOnly: { timerBubbleOnly: false },
+  // 番茄循环：默认 timerPomoOn=false，夹具取反；数值键给合法范围内的非默认值
+  timerPomoOn: { timerPomoOn: true }, timerLongBreakMin: { timerLongBreakMin: 20 },
+  timerLongEvery: { timerLongEvery: 6 }, timerAutoNext: { timerAutoNext: true },
+  // 专注记录 / 待办：默认 focusOn=false、todoOn=false，夹具各自取反
+  focusOn: { focusOn: true }, todoOn: { todoOn: true },
+  // 每日专注目标：默认 0（关闭），夹具给一个合法值
+  focusGoal: { focusGoal: 8 },
   guideDone: { guideDone: true }, dshNodeDir: { dshNodeDir: 'C:\\node' }, dshKeepAlive: { dshKeepAlive: true },
   dshPort: { dshPort: 4080 },
   dshRegistry: { dshRegistry: 'https://example.com/npm' }, dshVersion: { dshVersion: '1.2.3' },
@@ -112,6 +119,9 @@ const PATCH_FIXTURES = {
     models: [{ id: 'zzz', vendor: 'x', name: '测试模型', base: 'https://x.example', key: '' }],
     mainModelId: 'zzz',
   },
+  // 自定义显示：隐藏的 Tab 和卡片
+  hiddenTabs: { hiddenTabs: ['dev'] },
+  hiddenCards: { hiddenCards: ['help', 'about'] },
 }
 
 test('patchConfig 的逐键分支表覆盖全部配置键（加键必须同时加夹具）', () => {

@@ -491,6 +491,18 @@ html.dark ::-webkit-scrollbar-thumb:active {
   margin-bottom: 16px;
   /* 点搜索命中标签滚到卡片时，吸顶的 .tab-bar 会盖住卡头；预留它的高度让卡顶落在下方 */
   scroll-margin-top: var(--tab-bar-h, 96px);
+  /* Tab 切换时卡片淡入：提升界面流畅感，避免瞬间切换的生硬感 */
+  animation: card-fade-in 0.25s ease-out;
+}
+@keyframes card-fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 .card h2 {
   margin: 0 0 12px;
@@ -706,6 +718,18 @@ input[type='checkbox'] {
   background: var(--input-bg);
   font-size: 12px;
   line-height: 1.6;
+  /* 折叠展开过渡：淡入 + 轻微上移，让展开/收起更流畅 */
+  animation: fold-in 0.2s ease-out;
+}
+@keyframes fold-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 .guide-use {
   margin: 0;

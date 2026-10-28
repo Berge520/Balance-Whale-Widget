@@ -17,7 +17,7 @@ const UPDATE_FETCH_TIMEOUT_MS = 15000
 const UPDATE_CHECK_URL = 'https://ghfast.top/https://raw.githubusercontent.com/Berge520/Balance-Whale-Widget/refs/heads/main/package.json'
 // 当前插件版本。uTools 未提供读取插件自身版本的 API，此处由 scripts/sync-version.mjs
 // 在构建前从 package.json 的 version 自动写入，无需手动维护
-const PLUGIN_VERSION = '1.12.0'
+const PLUGIN_VERSION = '1.13.0'
 const UPDATE_TTL_MS = 12 * 3600 * 1000
 
 const MIN_SCALE = 0.6
@@ -337,6 +337,12 @@ const K = {
   win: 'whale:window',      // dbStorage：窗口锚点
   update: 'whale:update',   // dbStorage：上次检查更新结果缓存
   timer: 'whale:timer',     // dbStorage：计时状态（重建挂件后恢复）
+  // dbStorage：待办清单 { items: [{ id, text, done, at, doneAt }], focusId }。
+  // 与计时分开存：清单是长期数据（进备份），计时是易失的会话状态（只用于重建恢复）
+  todo: 'whale:todo',
+  // dbStorage：专注轮次统计 { days: { 'YYYY-MM-DD': { r, m } } }（r = 完成轮次，m = 专注分钟）。
+  // 只按天存两个数，不存每轮明细 —— 90 天窗口下明细会长到没必要，而界面只需要日柱与汇总
+  focus: 'whale:focus',
   dshVersions: 'whale:dshVersions', // dbStorage：dsh 可用版本列表缓存（查询结果，重载后仍可选用）
   // dbStorage：dsh 版本「查过没有」的标记。与 dshVersions 分开存：列表可能为空（上游下架），
   // 但「查过」这件事决定界面是否还要自动重查、按钮是否还挂着
@@ -385,6 +391,20 @@ const MODEL_STALE_MS = 5 * 60 * 1000
 // 计时到点留言的长度上限。宿主清洗、菜单输入框 maxLength（floating-page.js 的 TIMER_NOTE_MAX）
 // 与设置页输入框三处同值，改要一起改
 const TIMER_NOTE_MAX = 60
+// 待办单条文本长度上限（与 TIMER_NOTE_MAX 同值，输入框 maxLength 与宿主清洗两处同值）
+const TODO_TEXT_MAX = 60
+// 待办条数上限：只是防「整段粘贴/脚本灌库」的兜底，正常手写远到不了
+const TODO_MAX = 200
+// 专注轮次统计保留天数（固定 90 天，刻意不跟 historyKeepDays）：
+// 它只是「最近有没有在专注」的正反馈，窗口太长反而让界面变成一条平线
+const FOCUS_KEEP_DAYS = 90
+// 番茄循环：每 N 轮专注进入一次长休（2–12，默认 4）。与 TIMER_LONG_BREAK_DEFAULT 同组，
+// 改一处要同步 App.vue / floating-page.js（check-shared 校验三处同值）
+const TIMER_LONG_EVERY_DEFAULT = 4
+// 番茄循环：长休时长（1–60 分钟，默认 15）。短休复用 timerBreakMin（用户已配）
+const TIMER_LONG_BREAK_DEFAULT = 15
+// 每日专注目标上限（0 = 不设目标，1–99）。与 App.vue 的 FOCUS_GOAL_MAX 同值（check-shared 校验）
+const FOCUS_GOAL_MAX = 99
 
 // 内置厂商模板：选中后自动带好 URL / 认证 / 字段路径 / 币种，用户可再改。
 // 只收录「能用 API key 直接查到余额或订阅额度」的厂商 —— 其余厂商官方没有这类接口，
@@ -561,5 +581,11 @@ module.exports = {
   MODEL_FETCH_TIMEOUT_MS,
   MODEL_STALE_MS,
   TIMER_NOTE_MAX,
+  TODO_TEXT_MAX,
+  TODO_MAX,
+  FOCUS_KEEP_DAYS,
+  TIMER_LONG_EVERY_DEFAULT,
+  TIMER_LONG_BREAK_DEFAULT,
+  FOCUS_GOAL_MAX,
   MODEL_TEMPLATES,
 }

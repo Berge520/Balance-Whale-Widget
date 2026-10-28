@@ -1,7 +1,7 @@
 /*
  * dsh 配置转储（dump-config）读取与解析（CommonJS）。
  *
- * 设计依据：docs/whale-widget-spec.md §5 / §11（dsh 配置转储卡）。核心约束：
+ * 设计依据：docs/spec/05-ipc.md / docs/spec/11-build.md（dsh 配置转储卡）。核心约束：
  *   1. **一次性 CLI 读取** —— `node <bin.js> --profile <n> --dump-config` 是短命进程，
  *      **8s 超时**，超时按失败处理并留痕，绝不阻塞设置页。
  *   2. **只读缓存** —— 同 fingerprint + memo 模式，纯派生数据、不进备份。
@@ -420,7 +420,7 @@ function parseSkipWarnings(text) {
 // ⚠️ 为什么不能只比对「分节标题 == 包名」：本机实测 `dsh-better-sidebar` 已生效，但它的
 //    分节标题是 `# == dsh-better-sidebar, patched by …\cordis.patch.yml`，挂载 id 是
 //    `better-sidebar`（在 cordis.patch.yml 的 `- id: better-sidebar`）。只做精确相等
-//    会把这个**合法生效**的插件判成「未生效」—— 正是 §688 那类假阴性。
+//    会把这个**合法生效**的插件判成「未生效」—— 正是 docs/spec/10-settings-dsh.md「C2 判据踩坑」里那类假阴性。
 //    故必须先剥 `patched by` 后缀，并把条目 name / patch id 一并纳入比对。
 //
 // 归一化：去 `@scope/` 前缀、小写、去首尾空白。`@linxin666/dsh-web-all` 与 `dsh-web-all`
@@ -656,12 +656,12 @@ function summarizeDump(r) {
 // ──────────────────────────────────────────────
 // 背景：pnpm 退出码 0 + `profile/package.json` 出现依赖 + node_modules 版本正确，
 // **仍不等于**插件被 dsh 装进了生效树 —— 「装了」和「生效」是两个命名空间
-// （依赖名 ≠ bundles 挂载名 ≠ patch 组装 id，spec §678-684）。
+// （依赖名 ≠ bundles 挂载名 ≠ patch 组装 id，见 docs/spec/10-settings-dsh.md 的「三个互不相通的命名空间」表）。
 // 过去安装/更新只回读到「依赖在 + 版本对」，于是「装了但被 dsh 跳过」这类结果
 // 会被报成「已安装成功」，用户回头一看插件没出现 —— 这是「点了没反应」差评的主因。
 //
 // 本函数把结论落成**五态**，每态对应一句明确的用户可见措辞与下一步动作。
-// 判据全部来自 dsh 自己的输出（采信 dsh 说了什么，§689），不自己拼清单。
+// 判据全部来自 dsh 自己的输出（采信 dsh 说了什么，见 docs/spec/10-settings-dsh.md「C2 判据踩坑」），不自己拼清单。
 //
 // 入参是一个「dump 快照」描述对象（形如 collectDshDump 的返回，字段可缺省）：
 //   { ok, unparsed, at, bundles, skipped }
@@ -681,7 +681,7 @@ function summarizeDump(r) {
 //     skipped  : 装了但被 dsh 主动跳过（带 dsh 原文原因）—— 最有下一步动作价值的一态
 //     pending  : 已装，但 dump 陈旧（这份树反映安装前状态），重启 dsh 后才有结论
 //     shadowed : dump 有效，但生效树里找不到它（装了没被装配）
-//     unknown  : 任何判据都读不到 —— **绝不退化成 active**（§694 同型陷阱）
+//     unknown  : 任何判据都读不到 —— **绝不退化成 active**（见 docs/spec/10-settings-dsh.md「C2 判据踩坑」同型陷阱）
 //
 // ⚠️ 三处顺序不可换：
 //   1. **unknown 先判**：读不到时若往下走，会因「三源都没命中」误报 shadowed，

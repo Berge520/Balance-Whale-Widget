@@ -824,6 +824,9 @@ module.exports = {
   getBalance,
   getCachedBalance,
   resetBalanceCache,
+  // 通知：每日一次去重（用于目标达成等只需提醒一次的场景）与立即通知
+  notifyDaily,
+  notifyNow,
   // 纯函数，仅导出给单测：这几处取错值不会抛错，只会把余额显示错（见 test/api.test.mjs）
   pickBalanceInfo,
   pickPath,

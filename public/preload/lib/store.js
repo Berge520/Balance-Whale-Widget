@@ -4,7 +4,9 @@
 const {
   K, MIN_SCALE, MAX_SCALE, SCALE_STEPS, MODEL_MAX, MODEL_TEMPLATES, DEFAULT_MAIN_MODEL, LOW_ALERT_BY_CURRENCY,
   TOKEN_PRICE_DEFAULT, TOKEN_PRICE_MAX, TOKEN_RATE_MAX, TOKEN_PRICE_MODELS_MAX, TIMER_NOTE_MAX,
+  TODO_TEXT_MAX, TODO_MAX,
   NEWEST_VERSION, DSH_PORT_DEFAULT, SKIN_PACK_PREFIX_MAX,
+  TIMER_LONG_EVERY_DEFAULT, TIMER_LONG_BREAK_DEFAULT, FOCUS_GOAL_MAX,
 } = require('./constants')
 const { logErr } = require('./log')
 const { errMsg, isIpv4 } = require('./util')
@@ -730,7 +732,7 @@ function normAlertVols(v, dft) {
   return out
 }
 function defaultConfig() {
-  return { scale: 1.3, vol: 0.9, soundOn: true, soundSet: 'duck', usageMode: 'ledger', peakMode: 'default', peakRemindOn: true, bubbleOn: true, menuBtn: true, onTop: true, lowAlertOn: true, lowAlertAmount: LOW_ALERT_BY_CURRENCY.CNY, budgetOn: false, budgetAmount: 0, dropAlertOn: false, dropAlertAmount: 5, remindSec: 8, quietOn: false, quietFrom: '23:00', quietTo: '07:00', timeBubbleOn: true, updateCheckOn: false, dragLock: false, bubbleDwell: 5, dragLines: null, tapAdvance: false, enterMode: 'both', timerNotifyOn: true, timerMailOn: true, timerPersistOn: true, timerMode: 'off', timerSec: 1500, timerAt: '07:30', timerNote: '', timerBreakMin: 5, timerRemindSec: 8, timerBubblePin: true, timerBubbleOnly: true, guideDone: false, dshNodeDir: '', dshKeepAlive: false, dshPort: DSH_PORT_DEFAULT, dshRegistry: '', dshVersion: '', dshReinstall: false, dshNoOpen: true, dshMarketUrl: '', dshMarketMirror: true, dshMarketRegistry: '', dshMarketOfficial: false, dshExportCred: false, dshExportNoMod: true, avoidTaskbar: true, edgeTop: 0, edgeRight: 0, edgeBottom: 0, edgeLeft: 0, scrollGapOn: false, scrollGapPx: SCROLL_GAP_DEFAULT, snapMode: 'ratio', snapRatio: SNAP_RATIO_DEFAULT, opacity: 100, passThrough: false, skin: 'DSniang1', theme: 'default', uiMode: 'auto', bubble: normBubble(null, null, null), alerts: normAlerts(null), alertVols: normAlertVols(null), quotaTotal: 0, quotaReset: 'monthly', tokenPrice: normTokenPrice(null), historyKeepDays: HISTORY_KEEP_DEFAULT, models: [], mainModelId: DEFAULT_MAIN_MODEL, dshBackupKeep: DSB_KEEP_DEFAULT, ghAccelOn: false, ghAccelIps: normIps(null), ghAccelRefreshedAt: 0, ghAccelSrc: normGhAccelSrc(null), skinPackSrc: '', randomIncludeBuiltin: true, notifySystemOn: true, notifyMailOn: false, mailFrom: '', mailTo: '', mailFromName: '小鲸鱼余额挂件', mailSubjectPrefix: '[小鲸鱼余额挂件]' }
+  return { scale: 1.3, vol: 0.9, soundOn: true, soundSet: 'duck', usageMode: 'ledger', peakMode: 'default', peakRemindOn: true, bubbleOn: true, menuBtn: true, onTop: true, lowAlertOn: true, lowAlertAmount: LOW_ALERT_BY_CURRENCY.CNY, budgetOn: false, budgetAmount: 0, dropAlertOn: false, dropAlertAmount: 5, remindSec: 8, quietOn: false, quietFrom: '23:00', quietTo: '07:00', timeBubbleOn: true, updateCheckOn: false, dragLock: false, bubbleDwell: 5, dragLines: null, tapAdvance: false, enterMode: 'both', timerNotifyOn: true, timerMailOn: true, timerPersistOn: true, timerMode: 'off', timerSec: 1500, timerAt: '07:30', timerNote: '', timerBreakMin: 5, timerRemindSec: 8, timerBubblePin: true, timerBubbleOnly: true, timerPomoOn: false, timerLongBreakMin: TIMER_LONG_BREAK_DEFAULT, timerLongEvery: TIMER_LONG_EVERY_DEFAULT, timerAutoNext: false, focusOn: false, todoOn: false, focusGoal: 0, guideDone: false, dshNodeDir: '', dshKeepAlive: false, dshPort: DSH_PORT_DEFAULT, dshRegistry: '', dshVersion: '', dshReinstall: false, dshNoOpen: true, dshMarketUrl: '', dshMarketMirror: true, dshMarketRegistry: '', dshMarketOfficial: false, dshExportCred: false, dshExportNoMod: true, avoidTaskbar: true, edgeTop: 0, edgeRight: 0, edgeBottom: 0, edgeLeft: 0, scrollGapOn: false, scrollGapPx: SCROLL_GAP_DEFAULT, snapMode: 'ratio', snapRatio: SNAP_RATIO_DEFAULT, opacity: 100, passThrough: false, skin: 'DSniang1', theme: 'default', uiMode: 'auto', bubble: normBubble(null, null, null), alerts: normAlerts(null), alertVols: normAlertVols(null), quotaTotal: 0, quotaReset: 'monthly', tokenPrice: normTokenPrice(null), historyKeepDays: HISTORY_KEEP_DEFAULT, models: [], mainModelId: DEFAULT_MAIN_MODEL, dshBackupKeep: DSB_KEEP_DEFAULT, ghAccelOn: false, ghAccelIps: normIps(null), ghAccelRefreshedAt: 0, ghAccelSrc: normGhAccelSrc(null), skinPackSrc: '', randomIncludeBuiltin: true, notifySystemOn: true, notifyMailOn: false, mailFrom: '', mailTo: '', mailFromName: '小鲸鱼余额挂件', mailSubjectPrefix: '[小鲸鱼余额挂件]', hiddenTabs: [], hiddenCards: [] }
 }
 // dsh Web UI 监听端口（默认 3080）。
 // ⚠️ 为什么必须能配：3080 属于 Windows/Hyper-V 的「动态端口保留段」，被系统预留时
@@ -1032,6 +1034,18 @@ function readConfig() {
     timerRemindSec: p.timerRemindSec === 0 || p.timerRemindSec === 5 || p.timerRemindSec === 8 || p.timerRemindSec === 15 ? p.timerRemindSec : dft.timerRemindSec,
     timerBubblePin: p.timerBubblePin !== false,
     timerBubbleOnly: p.timerBubbleOnly !== false,
+    // 番茄循环：短休/长休/每 N 轮/自动衔接。默认全关，与 focusOn 正交 —— 专注记录只记轮数，
+    // 番茄循环管「轮与轮之间怎么休息、要不要自动接下一轮」。两者可单独使用也可组合
+    timerPomoOn: p.timerPomoOn === true,
+    timerLongBreakMin: Math.round(clampNum(p.timerLongBreakMin, 1, 60, dft.timerLongBreakMin)),
+    timerLongEvery: Math.round(clampNum(p.timerLongEvery, 2, 12, dft.timerLongEvery)),
+    timerAutoNext: p.timerAutoNext === true,
+    // 专注记录 / 待办：默认全关，不勾时挂件行为与未加这两个功能前完全一致。
+    // 专注记录只有一个开关：开着就「倒计时走完自动记一轮」，不再拆「是否自动记」
+    focusOn: p.focusOn === true,
+    todoOn: p.todoOn === true,
+    // 每日专注目标（轮数，0 = 未设置/关闭）。达成时弹一次提醒（notifyDaily kind='goal'）
+    focusGoal: Math.round(clampNum(p.focusGoal, 0, FOCUS_GOAL_MAX, 0)),
     // 首次运行引导是否已结束（点「开始使用」或「跳过」）——默认 false 表示还没走过引导。
     // 只认 true：老配置里没有这个键，若不这样归一，升级上来的老用户会被当成新装用户弹一次引导
     guideDone: p.guideDone === true,
@@ -1104,6 +1118,9 @@ function readConfig() {
     mailTo: typeof p.mailTo === 'string' ? p.mailTo.trim().slice(0, 200) : dft.mailTo,
     mailFromName: typeof p.mailFromName === 'string' ? p.mailFromName.trim().slice(0, 60) : dft.mailFromName,
     mailSubjectPrefix: typeof p.mailSubjectPrefix === 'string' ? p.mailSubjectPrefix.trim().slice(0, 60) : dft.mailSubjectPrefix,
+    // 自定义显示：隐藏的 Tab 和卡片列表（空数组 = 全部显示）。老配置没有这两个字段，归一化为空数组
+    hiddenTabs: Array.isArray(p.hiddenTabs) ? p.hiddenTabs.filter(k => typeof k === 'string') : [],
+    hiddenCards: Array.isArray(p.hiddenCards) ? p.hiddenCards.filter(k => typeof k === 'string') : [],
   }
 }
 function writeConfig(cfg) {
@@ -1152,6 +1169,13 @@ function writeConfig(cfg) {
       timerRemindSec: cfg.timerRemindSec === 0 || cfg.timerRemindSec === 5 || cfg.timerRemindSec === 8 || cfg.timerRemindSec === 15 ? cfg.timerRemindSec : 8,
       timerBubblePin: cfg.timerBubblePin !== false,
       timerBubbleOnly: cfg.timerBubbleOnly !== false,
+      timerPomoOn: cfg.timerPomoOn === true,
+      timerLongBreakMin: Math.round(clampNum(cfg.timerLongBreakMin, 1, 60, TIMER_LONG_BREAK_DEFAULT)),
+      timerLongEvery: Math.round(clampNum(cfg.timerLongEvery, 2, 12, TIMER_LONG_EVERY_DEFAULT)),
+      timerAutoNext: cfg.timerAutoNext === true,
+      focusOn: cfg.focusOn === true,
+      todoOn: cfg.todoOn === true,
+      focusGoal: Math.round(clampNum(cfg.focusGoal, 0, FOCUS_GOAL_MAX, 0)),
       guideDone: cfg.guideDone === true,
       dshNodeDir: typeof cfg.dshNodeDir === 'string' ? cfg.dshNodeDir.slice(0, 260) : '',
       dshKeepAlive: cfg.dshKeepAlive === true,
@@ -1201,6 +1225,9 @@ function writeConfig(cfg) {
       mailTo: String(cfg.mailTo || '').trim().slice(0, 200),
       mailFromName: String(cfg.mailFromName || '').trim().slice(0, 60),
       mailSubjectPrefix: String(cfg.mailSubjectPrefix || '').trim().slice(0, 60),
+      // 自定义显示：隐藏的 Tab 和卡片列表
+      hiddenTabs: Array.isArray(cfg.hiddenTabs) ? cfg.hiddenTabs.filter(k => typeof k === 'string') : [],
+      hiddenCards: Array.isArray(cfg.hiddenCards) ? cfg.hiddenCards.filter(k => typeof k === 'string') : [],
       updatedAt: new Date().toISOString(),
       })
   } catch (err) {
@@ -1267,6 +1294,16 @@ function patchConfig(patch) {
   }
   if (p.timerBubblePin !== undefined) cfg.timerBubblePin = !!p.timerBubblePin
   if (p.timerBubbleOnly !== undefined) cfg.timerBubbleOnly = !!p.timerBubbleOnly
+  // 番茄循环：四个新键，默认值方向与 defaultConfig 一致
+  if (p.timerPomoOn !== undefined) cfg.timerPomoOn = p.timerPomoOn === true
+  if (p.timerLongBreakMin !== undefined) cfg.timerLongBreakMin = Math.round(clampNum(p.timerLongBreakMin, 1, 60, cfg.timerLongBreakMin))
+  if (p.timerLongEvery !== undefined) cfg.timerLongEvery = Math.round(clampNum(p.timerLongEvery, 2, 12, cfg.timerLongEvery))
+  if (p.timerAutoNext !== undefined) cfg.timerAutoNext = p.timerAutoNext === true
+  // 专注记录 / 待办：两个独立开关，互不联动
+  if (p.focusOn !== undefined) cfg.focusOn = p.focusOn === true
+  if (p.todoOn !== undefined) cfg.todoOn = p.todoOn === true
+  // 每日专注目标（轮数，0 = 关闭）
+  if (p.focusGoal !== undefined) cfg.focusGoal = Math.round(clampNum(p.focusGoal, 0, FOCUS_GOAL_MAX, cfg.focusGoal))
   // 首次运行引导只允许单向置为「已完成」：写回 undefined 之外的任何值都按 bool 处理，
   // 但不提供「重新弹出引导」的入口，免得误触让老用户再走一遍
   if (p.guideDone !== undefined) cfg.guideDone = p.guideDone === true
@@ -1356,6 +1393,9 @@ function patchConfig(patch) {
   if (p.mailTo !== undefined) cfg.mailTo = String(p.mailTo || '').trim().slice(0, 200)
   if (p.mailFromName !== undefined) cfg.mailFromName = String(p.mailFromName || '').trim().slice(0, 60)
   if (p.mailSubjectPrefix !== undefined) cfg.mailSubjectPrefix = String(p.mailSubjectPrefix || '').trim().slice(0, 60)
+  // 自定义显示：隐藏的 Tab 和卡片列表（数组，非法值忽略保留原值）
+  if (p.hiddenTabs !== undefined) cfg.hiddenTabs = Array.isArray(p.hiddenTabs) ? p.hiddenTabs.filter(k => typeof k === 'string') : cfg.hiddenTabs
+  if (p.hiddenCards !== undefined) cfg.hiddenCards = Array.isArray(p.hiddenCards) ? p.hiddenCards.filter(k => typeof k === 'string') : cfg.hiddenCards
   // 写失败必须让调用方知道：writeConfig 是**返回 false 而不抛错**（见上面的注释），
   // 早先这里直接忽略返回值，于是全项目 13 个 patchConfig 调用点（设置页保存、hosts 表龄、
   // 保留份数…）都拿不到「没落盘」这件事 —— writeConfig 里辛苦加的 logErr 只落到了日志里，
@@ -1436,6 +1476,8 @@ function freshLedger() {
     budgetNotifiedOn: '',
     // 低余额预警已发过通知的日期（同上，两类提醒各自每天一次）
     lowNotifiedOn: '',
+    // 每日专注目标达成已发过通知的日期（同上）
+    focusGoalNotifiedOn: '',
     // 额度「不重置」口径的累计已用：跨天归档时把当天用量并入，账本滚动删除历史也不影响它
     quotaUsed: 0,
   }
@@ -1465,6 +1507,7 @@ function readLedger() {
     calibrateLog: pruneDetailLog(raw.calibrateLog),
     budgetNotifiedOn: typeof raw.budgetNotifiedOn === 'string' ? raw.budgetNotifiedOn : '',
     lowNotifiedOn: typeof raw.lowNotifiedOn === 'string' ? raw.lowNotifiedOn : '',
+    focusGoalNotifiedOn: typeof raw.focusGoalNotifiedOn === 'string' ? raw.focusGoalNotifiedOn : '',
     // 老账本没有 quotaUsed：用现存历史之和做起点，避免「不重置」的累计反而小于「本月累计」
     quotaUsed: typeof raw.quotaUsed === 'number' && isFinite(raw.quotaUsed)
       ? raw.quotaUsed
@@ -1583,7 +1626,7 @@ function calibrateTodayUsage(amount) {
 }
 // 每日提醒去重：预算 / 低余额两类系统通知各自每天最多一次（按日期字符串比较，跨天自动失效）。
 // 返回 true 表示本次调用认领了今天的提醒名额，可以发通知。
-const NOTICE_KEYS = { budget: 'budgetNotifiedOn', low: 'lowNotifiedOn' }
+const NOTICE_KEYS = { budget: 'budgetNotifiedOn', low: 'lowNotifiedOn', goal: 'focusGoalNotifiedOn' }
 function claimDailyNotice(kind) {
   const key = NOTICE_KEYS[kind] || NOTICE_KEYS.budget
   const led = readLedger()
@@ -1636,7 +1679,7 @@ function setTodayUsage(amount) {
 // 由悬浮窗在开始/停止/到点时上报；宿主只做落库，重建挂件后回推给页面恢复。
 // 传 null 表示清除（用户关掉「计时保存」开关时）。
 function readTimer() {
-  const dft = { mode: 'off', running: false, paused: false, startAt: 0, endAt: 0, elapsed: 0, remain: 0, arg: '' }
+  const dft = { mode: 'off', running: false, paused: false, startAt: 0, endAt: 0, elapsed: 0, remain: 0, arg: '', isBreak: false, back: 0, cycle: 0, cycleDate: '', breakLong: false }
   try {
     const t = utools.dbStorage.getItem(K.timer)
     if (t && typeof t === 'object') {
@@ -1649,6 +1692,14 @@ function readTimer() {
         elapsed: isFinite(Number(t.elapsed)) ? Math.max(0, Number(t.elapsed)) : 0,
         remain: isFinite(Number(t.remain)) ? Math.max(0, Number(t.remain)) : 0,
         arg: typeof t.arg === 'string' ? t.arg : '',
+        // 休息轮必须一起存：重载后恢复成专注轮会把休息记成专注，且「继续专注」会按休息时长重启
+        isBreak: t.isBreak === true,
+        back: isFinite(Number(t.back)) ? Math.max(0, Number(t.back)) : 0,
+        // 番茄循环：cycle = 本轮是第几个番茄（0 = 未开始/非番茄模式），cycleDate = 记录 cycle 的日期（YYYY-MM-DD，跨日归零），
+        // breakLong = 上一次休息是否为长休（用于每 N 轮判断下一轮是短休还是长休）
+        cycle: isFinite(Number(t.cycle)) ? Math.max(0, Math.round(Number(t.cycle))) : 0,
+        cycleDate: typeof t.cycleDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(t.cycleDate) ? t.cycleDate : '',
+        breakLong: t.breakLong === true,
       }
     }
   } catch (err) {}
@@ -1662,6 +1713,99 @@ function writeTimer(state) {
 }
 function clearTimer() {
   try { utools.dbStorage.removeItem(K.timer) } catch (err) { logErr('[whale][timer] 清除计时状态失败', err && err.message) }
+}
+
+// ──────────────────────────────────────────────
+// 待办清单
+// ──────────────────────────────────────────────
+// 结构：{ items: [{ id, text, done, at, doneAt }], focusId }。
+// 增删改只在设置页做，挂件页只做「勾选完成 / 设为当前专注」两种轻操作 ——
+// 悬浮窗没有好的输入环境（见 floating-page.js 的同类注释），把编辑留在设置页。
+// focusId 指向的条目被删除或勾完成后自动清空，不留悬空指针（挂件据此显示「当前任务」）。
+function normTodoText(v) {
+  return String(v == null ? '' : v).replace(/\s+/g, ' ').trim().slice(0, TODO_TEXT_MAX)
+}
+function normTodoId(v) {
+  return String(v == null ? '' : v).trim().slice(0, 40)
+}
+function normTodoItem(it, fallbackAt) {
+  if (!it || typeof it !== 'object') return null
+  const text = normTodoText(it.text)
+  const id = normTodoId(it.id)
+  if (!text || !id) return null
+  const at = isFinite(Number(it.at)) && Number(it.at) > 0 ? Math.round(Number(it.at)) : fallbackAt
+  const done = it.done === true
+  // doneAt 只在「已完成」时有意义；从完成改回未完成时一律归零，免得统计拿到脏时间
+  const doneAt = done && isFinite(Number(it.doneAt)) && Number(it.doneAt) > 0 ? Math.round(Number(it.doneAt)) : 0
+  // 预估番茄轮数（est）与实际完成轮数（rounds）：默认 0 = 未设置。est 由用户在设置页填，
+  // rounds 由挂件专注结束时自动 +1（仅当该条是当前 focusId 指向的条目）。
+  // 两者都 clamp 到 0–99：避免脏数据撑爆显示区，且与 FOCUS_GOAL_MAX 同量级便于对齐
+  const est = isFinite(Number(it.est)) ? Math.max(0, Math.min(99, Math.round(Number(it.est)))) : 0
+  const rounds = isFinite(Number(it.rounds)) ? Math.max(0, Math.min(99, Math.round(Number(it.rounds)))) : 0
+  return { id, text, done, at, doneAt, est, rounds }
+}
+function readTodo() {
+  const dft = { items: [], focusId: '' }
+  let raw = null
+  try { raw = utools.dbStorage.getItem(K.todo) } catch (err) {}
+  if (!raw || typeof raw !== 'object') return dft
+  const list = Array.isArray(raw.items) ? raw.items : []
+  const now = Date.now()
+  const items = []
+  const seen = new Set()
+  for (const it of list) {
+    const one = normTodoItem(it, now)
+    if (!one || seen.has(one.id)) continue // 重复 id 只留第一条：id 是勾选/专注的唯一凭据
+    seen.add(one.id)
+    items.push(one)
+    if (items.length >= TODO_MAX) break
+  }
+  // 悬空指针清空：专注目标必须是一条「还没完成」的现存条目
+  const fid = normTodoId(raw.focusId)
+  const focusId = fid && items.some((x) => x.id === fid && !x.done) ? fid : ''
+  return { items, focusId }
+}
+function writeTodo(state) {
+  try { utools.dbStorage.setItem(K.todo, state); return true } catch (err) {
+    logErr('[whale][todo] 写待办失败', err && err.message)
+    return false
+  }
+}
+function clearTodo() {
+  try { utools.dbStorage.removeItem(K.todo) } catch (err) { logErr('[whale][todo] 清除待办失败', err && err.message) }
+}
+
+// ──────────────────────────────────────────────
+// 专注轮次统计（按天聚合）
+// ──────────────────────────────────────────────
+// 结构：{ days: { 'YYYY-MM-DD': { r, m } } }，r = 完成轮次、m = 专注分钟。
+// 与「计时状态」不同：这是用户的长期记录，**进备份**（丢了等于抹掉专注历史）。
+// 裁剪窗口固定在 lib/focus.js 里做（FOCUS_KEEP_DAYS），这里只做形状归一。
+function readFocus() {
+  const dft = { days: {} }
+  let raw = null
+  try { raw = utools.dbStorage.getItem(K.focus) } catch (err) {}
+  if (!raw || typeof raw !== 'object' || !raw.days || typeof raw.days !== 'object') return dft
+  const days = {}
+  for (const k of Object.keys(raw.days)) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(k)) continue
+    const d = raw.days[k]
+    if (!d || typeof d !== 'object') continue
+    const r = Math.max(0, Math.round(Number(d.r) || 0))
+    const m = Math.max(0, Math.round(Number(d.m) || 0))
+    if (!r && !m) continue // 两个数都是 0 的天不留空壳
+    days[k] = { r, m }
+  }
+  return { days }
+}
+function writeFocus(state) {
+  try { utools.dbStorage.setItem(K.focus, state); return true } catch (err) {
+    logErr('[whale][focus] 写专注统计失败', err && err.message)
+    return false
+  }
+}
+function clearFocus() {
+  try { utools.dbStorage.removeItem(K.focus) } catch (err) { logErr('[whale][focus] 清除专注统计失败', err && err.message) }
 }
 
 // ──────────────────────────────────────────────
@@ -1752,6 +1896,13 @@ module.exports = {
   readTimer,
   writeTimer,
   clearTimer,
+  readTodo,
+  writeTodo,
+  clearTodo,
+  normTodoText,
+  readFocus,
+  writeFocus,
+  clearFocus,
   readModelState,
   writeModelState,
   dropModelState,

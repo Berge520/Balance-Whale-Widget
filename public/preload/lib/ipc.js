@@ -4,8 +4,13 @@
 const { ipcRenderer } = require('electron')
 const { log, logErr } = require('./log')
 const { errMsg } = require('./util')
-const { getBalance, refreshModels, getModelsPayload } = require('./api')
-const { readConfig, patchConfig, writeAnchor, writeTimer, clearTimer } = require('./store')
+const { getBalance, refreshModels, getModelsPayload, notifyDaily } = require('./api')
+const {
+  readConfig, patchConfig, writeAnchor, writeTimer, clearTimer,
+  readTodo, writeTodo, readFocus, writeFocus, todayKey,
+} = require('./store')
+const { recordRound, pruneFocus } = require('./focus')
+const { FOCUS_KEEP_DAYS } = require('./constants')
 const { notify } = require('./notify')
 // dsh 一族（dsh / dsh-market / dsh-export / dsh-backup / dsh-usage / ...）合计 300KB+。
 // 顶层 require 会把它压进每次 preload 加载的求值阶段（本模块在启动路径上必加载），
@@ -20,7 +25,7 @@ const dsh = new Proxy({}, {
   get(_t, key) { return dshOf()[key] },
 })
 const {
-  pushInit, sendToWidget, applyScaleToWindow, applyOnTop, pushConfig,
+  pushInit, sendToWidget, applyScaleToWindow, applyOnTop, pushConfig, pushTodo, pushFocusStats,
   winAlive, getWindow, queueLiveScale, widgetOrigin,
   widgetSide, spaceAround, usableArea, snapRect, flippedOf, setWidgetPos,
   syncTaskbarWatch, destroyWidget, ensureSkipTaskbar, show,
@@ -34,6 +39,19 @@ function emitConfigChange() {
   try {
     require('./settings').emitConfigChange()
   } catch (err) { logErr('[whale][ipc] 通知设置窗刷新失败', err && err.message) }
+}
+// 待办 / 专注统计变更回推设置页。与 emitConfigChange 同款惰性 require：
+// 设置窗没开时订阅者为空，emit 内部第一行就返回（这里仍会付一次 require 代价，
+// 但 settings 若已因打开设置窗加载过则直接复用，且这两个事件只在用户操作时触发）。
+function emitTodoChange() {
+  try {
+    require('./settings').emitTodoChange()
+  } catch (err) { logErr('[whale][ipc] 通知设置窗刷新待办失败', err && err.message) }
+}
+function emitFocusChange() {
+  try {
+    require('./settings').emitFocusChange()
+  } catch (err) { logErr('[whale][ipc] 通知设置窗刷新专注统计失败', err && err.message) }
 }
 
 // 把某个 scale 目标值落库 + 改窗口 + 全量广播。
@@ -317,6 +335,12 @@ function registerIpc() {
       elapsed: Math.max(0, Number(state.elapsed) || 0),
       remain: Math.max(0, Number(state.remain) || 0),
       arg: typeof state.arg === 'string' ? state.arg : '',
+      // 休息轮与番茄循环状态：必须一起存，否则重载后专注/休息判断会错乱
+      isBreak: state.isBreak === true,
+      back: isFinite(Number(state.back)) ? Math.max(0, Number(state.back)) : 0,
+      cycle: isFinite(Number(state.cycle)) ? Math.max(0, Math.round(Number(state.cycle))) : 0,
+      cycleDate: typeof state.cycleDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(state.cycleDate) ? state.cycleDate : '',
+      breakLong: state.breakLong === true,
     })
   })
 
@@ -325,6 +349,64 @@ function registerIpc() {
     const text = String((data && data.text) || '').slice(0, 200)
     if (!text) return
     notify(text, readConfig())
+  })
+
+  // 待办轻操作：挂件页只有「勾选完成 / 设为当前专注」两种（编辑一律在设置页做）。
+  // 与 whale:todo 的下行推送同名不同向：这里是子→父，父处理完再 pushTodo 回推权威状态。
+  ipcRenderer.on('whale:todo', (event, data) => {
+    const op = String((data && data.op) || '')
+    const id = String((data && data.id) || '')
+    if (!id || (op !== 'toggle' && op !== 'focus')) return
+    const st = readTodo()
+    const it = st.items.find((x) => x.id === id)
+    if (!it) return
+    if (op === 'toggle') {
+      it.done = !it.done
+      it.doneAt = it.done ? Date.now() : 0
+      // 勾完当前专注的那条：专注目标跟着清空，免得挂件一直显示「已完成的任务」
+      if (it.done && st.focusId === id) st.focusId = ''
+    } else {
+      if (it.done) return // 已完成的不给设为专注目标
+      st.focusId = st.focusId === id ? '' : id // 再点一次取消
+    }
+    if (!writeTodo(st)) return
+    pushTodo()
+    emitTodoChange()
+  })
+
+  // 专注轮次上报（页面到点后调用；不搭 whale:timer-done 的车 —— 那条被通知开关门控，
+  // 用户关了通知就统计不到，而统计与提醒是两件独立的事）
+  ipcRenderer.on('whale:focus', (event, data) => {
+    const minutes = Math.max(0, Math.min(1440, Math.round(Number(data && data.minutes) || 0)))
+    const key = todayKey()
+    const prev = readFocus()
+    const next = pruneFocus(recordRound(prev, key, minutes), key, FOCUS_KEEP_DAYS)
+    if (!writeFocus(next)) return
+    // 待办轮次递增：若当前有专注目标，对应条目的 rounds +1
+    const todoState = readTodo()
+    if (todoState.focusId) {
+      const item = todoState.items.find((x) => x.id === todoState.focusId)
+      if (item) {
+        item.rounds = (item.rounds || 0) + 1
+        writeTodo(todoState)
+        pushTodo()
+      }
+    }
+    // 每日目标达成提醒：只在「今日轮数首次达到目标」时弹一次（notifyDaily 去重）
+    const cfg = readConfig()
+    const goal = cfg.focusGoal || 0
+    if (goal > 0) {
+      const todayEntry = next.days && next.days[key]
+      const todayRounds = todayEntry ? Math.max(0, Math.round(Number(todayEntry.r) || 0)) : 0
+      const prevEntry = prev.days && prev.days[key]
+      const prevRounds = prevEntry ? Math.max(0, Math.round(Number(prevEntry.r) || 0)) : 0
+      // 从「未达成」跨入「已达成」的那一刻才提醒：避免重复弹窗
+      if (prevRounds < goal && todayRounds >= goal) {
+        notifyDaily(`今日专注目标已达成！完成 ${todayRounds} 轮`, cfg, 'goal')
+      }
+    }
+    emitFocusChange()
+    pushFocusStats()
   })
 
   // 悬浮页把自身错误转交宿主落盘：页面侧的 logErr 只能打 console，

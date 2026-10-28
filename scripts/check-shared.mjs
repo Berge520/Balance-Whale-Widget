@@ -423,6 +423,22 @@ const CHECKS = process.env.CS_CHECKS
       { file: APP_VUE, pick: jsNumber('const SCROLL_GAP_DEFAULT') },
     ],
   },
+  // 番茄循环默认值：长休时长（分钟）与每 N 轮进长休。宿主 constants.js 与设置页 App.vue 各一份，
+  // 改一处忘另一处会出现「设置页默认值与宿主不一致」的静默错位
+  {
+    name: '番茄循环长休时长默认 TIMER_LONG_BREAK_DEFAULT',
+    parts: [
+      { file: CONSTANTS, pick: jsNumber('const TIMER_LONG_BREAK_DEFAULT') },
+      { file: APP_VUE, pick: jsNumber('const TIMER_LONG_BREAK_DEFAULT') },
+    ],
+  },
+  {
+    name: '番茄循环每 N 轮长休默认 TIMER_LONG_EVERY_DEFAULT',
+    parts: [
+      { file: CONSTANTS, pick: jsNumber('const TIMER_LONG_EVERY_DEFAULT') },
+      { file: APP_VUE, pick: jsNumber('const TIMER_LONG_EVERY_DEFAULT') },
+    ],
+  },
   // 吸附区宽度（可用区宽/高的百分比）范围与默认值：宿主 store.js 与设置页各一份，
   // 设置页那份同时用在滑块上下限（:min / :max）上，改一处忘另一处会出现
   // 「滑块拖得到、宿主被 clamp」这类静默不一致
