@@ -9,7 +9,7 @@
  * 因此也顺带把「Python 构建脚本的产物」与「JS 解析器」钉在一起 —— 两边格式漂移会立刻暴露。
  * 不读该文件时用构造的字节覆盖各失败分支。
  */
-import test from 'node:test'
+import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import os from 'node:os'
@@ -27,6 +27,8 @@ const { SKIN_PACK_SKINS, SKIN_PACK_SHA256 } = constants
 // 之后再设也来得及 —— 覆盖整包失败分支的既有用例照常跑（它们不落盘）。
 const _store = new Map()
 const _TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'whale-skinpacks-test-'))
+// 本次的素材目录跑完即废。不删的话每轮 npm test 在 %TEMP% 里攒一个 whale-skinpacks-test-*
+after(() => { fs.rmSync(_TMP, { recursive: true, force: true }) })
 globalThis.utools = {
   getPath: () => _TMP,
   dbStorage: {

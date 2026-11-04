@@ -14,7 +14,7 @@
  * 需要 utools 桩：backup.js → store.js → log.js 都直接用 utools（dbStorage / dbCryptoStorage / getPath）。
  * 注意测试侧不能引用裸 utools（ESLint 的 test glob 只给 globals.node），统一走 globalThis.utools。
  */
-import test from 'node:test'
+import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -112,6 +112,8 @@ test('结构不对的密文块报「没有可用的凭据」，不外泄底层�
 // 这里只把 showOpenDialog 指到一个临时文件，pending 就由生产代码自己装配。
 // （pending 是模块私有，任何「直接造 pending」的写法都测不到真实契约。）
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'whale-backup-'))
+// 本次的备份样本目录跑完即废。不删的话每轮 npm test 在 %TEMP% 里攒一个 whale-backup-*
+after(() => { fs.rmSync(tmpDir, { recursive: true, force: true }) })
 let seq = 0
 function stage(data) {
   const p = path.join(tmpDir, 'b' + (++seq) + '.json')
@@ -170,6 +172,41 @@ test('applyBackup：未勾选的项不写、备份里缺的项记 skipped', () =
   assert.deepEqual(r2.applied, ['config'])
   assert.deepEqual(r2.skipped, ['timer'])
   assert.deepEqual(r2.errors, [])
+})
+
+test('applyBackup：专注统计恢复要连会话明细一起写回，不能只恢复按天汇总', () => {
+  store.delete('whale:focus')
+  stage({
+    focus: {
+      days: { '2026-10-26': { r: 2, m: 50 } },
+      sessions: [
+        { d: '2026-10-26', t: 1000, m: 25, todoId: 'a', todoText: '周报' },
+        { d: '2026-10-26', t: 2000, m: 25 },
+      ],
+    },
+  })
+  const r = applyBackup({ focus: true })
+  assert.deepEqual(r.applied, ['focus'])
+  // 读回真实落盘结果：明细缺了，恢复后「专注记录」列表就是空的（按天柱状图还在，问题很隐蔽）。
+  // 老备份只有 {d,t,m}，落盘时按 v2 补齐（会话是唯一事实源，天表由它派生）
+  const back = store.get('whale:focus')
+  assert.equal(back.v, 2)
+  assert.equal(back.sessions.length, 2)
+  assert.equal(back.sessions[0].todoText, '周报')
+  assert.ok(back.sessions.every((s) => s.id && s.k === 'down'))
+  assert.deepEqual(back.days, { '2026-10-26': { r: 2, m: 50 } })
+  store.delete('whale:focus')
+})
+
+test('applyBackup：只带按天汇总的老备份（早期版本不记明细）也能恢复', () => {
+  store.delete('whale:focus')
+  stage({ focus: { days: { '2026-10-01': { r: 3, m: 75 } }, sessions: [] } })
+  const r = applyBackup({ focus: true })
+  assert.deepEqual(r.applied, ['focus'])
+  assert.equal(store.get('whale:focus').v, 2)
+  // 没有明细可派生 → 老聚合原样保留，别让恢复把历史柱状图抹平
+  assert.deepEqual(store.get('whale:focus').days, { '2026-10-01': { r: 3, m: 75 } })
+  store.delete('whale:focus')
 })
 
 test('applyBackup：凭据密码错时报错且不写任何东西（AES-GCM 拦下）', () => {

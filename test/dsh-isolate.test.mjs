@@ -52,7 +52,8 @@ test('applyBatchDisable：一次把多条改成 disabled: true，只动那几行
   // 只有 cost-meter 的 disabled 行从 false 变 true：其余行逐字不变
   const want = REAL_PATCH.replace('  disabled: false', '  disabled: true')
   assert.equal(r.text, want)
-  assert.deepEqual(r.plans, [{ id: 'cost-meter', action: 'update', line: 15, was: false }])
+  // blocks = 该 id 在 patch 里命中的段数（p02 起同 id 多段会全部处理，故 plans 带上段数）
+  assert.deepEqual(r.plans, [{ id: 'cost-meter', action: 'update', line: 15, was: false, blocks: 1 }])
 })
 
 test('applyBatchDisable：已禁用的条目如实报 noop，不假装改过', () => {
@@ -237,6 +238,18 @@ test('candidatesOf：dump 条目在没给状态时 disabled 为 undefined（未�
   const items = I.candidatesOf({ patchItems: [], pluginIds: ['foo'] })
   assert.equal(items[0].disabled, undefined)
   assert.equal(items[0].inPatch, false)
+})
+
+test('candidatesOf：表达式行标记会带进候选（界面据此提示市场不会覆盖）', () => {
+  const items = I.candidatesOf({
+    patchItems: [
+      { id: 'plain', disabled: false, lineIndex: 0, hasConfig: false, disabledExpr: false },
+      { id: 'expr', disabled: true, lineIndex: 2, hasConfig: false, disabledExpr: true },
+      // settings 映射后的字段名也要认（`expression`）
+      { id: 'mapped', disabled: true, line: 5, hasConfig: false, expression: true },
+    ],
+  })
+  assert.deepEqual(items.map((i) => [i.id, i.expression]), [['plain', false], ['expr', true], ['mapped', true]])
 })
 
 test('candidatesOf：去重、容忍空值', () => {

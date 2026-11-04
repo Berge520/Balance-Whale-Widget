@@ -1,7 +1,7 @@
 /*
  * 悬浮窗窗口管理（CommonJS）：创建/销毁/几何/缩放/向子窗推送数据。
  */
-const { MIN_SCALE, MAX_SCALE, BASE_MIN, BASE_CAP, BASE_MAX, WIN_PAD, WIDGET_AUTOSHOW_MS, K } = require('./constants')
+const { MIN_SCALE, MAX_SCALE, BASE_MIN, BASE_CAP, BASE_MAX, WIN_PAD, WIDGET_AUTOSHOW_MS, TODO_MAX, FOCUS_STATS_DAYS, K } = require('./constants')
 const { execFileSync } = require('child_process')
 const { log, logErr } = require('./log')
 const { errMsg } = require('./util')
@@ -9,7 +9,7 @@ const { clampNum, readConfig, readAnchor, writeAnchor, defaultAnchor, readTimer,
 const { summarize: summarizeFocus } = require('./focus')
 const { getCachedBalance, getModelsPayload } = require('./api')
 const { getSoundData } = require('./sounds')
-const { getSkinData, getBuiltinData } = require('./skins')
+const { getSkinData, getSharedManifest } = require('./skins')
 const { getBubbleData } = require('./bubbles')
 
 // ipc.js 依赖 widget.js（取 show / destroyWidget 等），故这里不能顶层 require 它，否则成环。
@@ -295,6 +295,39 @@ function repositionFromAnchor() {
 const WATCH_MS = 250
 let watchTimer = null
 let watchSig = ''
+// 兜底显示的定时器句柄（createWidget 里排，WIDGET_AUTOSHOW_MS 后触发）。
+// 必须持句柄：窗口被销毁重建时若不取消，旧定时器虽被 winAlive() 挡住不会误显示，
+// 但它会白占一个 WIDGET_AUTOSHOW_MS 的计时并让句柄无法回收。destroyWidget / 插件退出时一并清。
+let autoShowTimer = null
+function clearAutoShow() {
+  if (autoShowTimer) { clearTimeout(autoShowTimer); autoShowTimer = null }
+}
+// 「子窗 ready 消息丢了」的兜底 init 推送定时器（createWidget 的加载完成回调里排）。
+// 必须持句柄、并在页面真的就绪（pushInit 被调用）时撤销：真机日志显示一次「打开挂件」
+// init 会被推两遍 —— ready 一遍、300ms 兜底又一遍，而 init 里带的是整池素材（共享角色池
+// 实测 52MB base64），等于把最贵的一次搬运做两次。
+// 光靠「pushInit 里撤销」不够：真机 14:09 那次的时序是 ready(+138ms) 先到、创建回调
+// (+549ms) 后到，撤销撤的是空句柄，回调随后照样把兜底排上 —— 所以要配合下面的 initPushed。
+// 为什么仍然不在 pushInit 开头「见过标志就直接 return」：页面自己重新加载后会再发一次 ready
+// 来要配置，那种去重会把那次也吞掉，挂件就永远停在空白。
+const INIT_FALLBACK_MS = 300
+let initFallbackTimer = null
+// 本窗口的 init 是否已经推过（页面 ready 到过一遍）。
+// 只用于「晚到的创建回调还要不要排兜底」：真机日志里回调比 ready 晚了 400ms，
+// 那种时序下 pushInit 的撤销动作撤的是个空句柄，回调随后又把兜底排上，同一个窗口仍推两遍。
+// 注意不能在 pushInit 内部用这个标志去重 —— 页面重新加载后会再发 ready 来要配置，
+// 吞掉那次挂件就永远空白。
+let initPushed = false
+function clearInitFallback() {
+  if (initFallbackTimer) { clearTimeout(initFallbackTimer); initFallbackTimer = null }
+}
+function scheduleInitFallback() {
+  clearInitFallback()
+  initFallbackTimer = setTimeout(function () {
+    initFallbackTimer = null
+    try { pushInit() } catch (err) { logErr('[whale][widget] 兜底 init 推送失败', err && err.message) }
+  }, INIT_FALLBACK_MS)
+}
 // 上一次「由宿主按锚点摆出来的」位置。判 `moved` 不能拿上一 tick 的位置当基准：
 // 用户拖拽期间位置一直在变，等拖完（此刻位置与上一 tick 不同）任务栏状态再变，
 // moved 就会把这次重摆当成「用户还在拖」而吞掉；把基准改成「上次吸附落点」，
@@ -491,6 +524,25 @@ function applyOnTop(onTop) {
   try { if (onTop && win.moveTop) win.moveTop() } catch (err) {}
 }
 
+// 置顶「静默失效」的补救：每次调用都无条件把配置要的位重申一遍。
+// 为什么要有这一条：WS_EX_TOPMOST 只会在「Windows 重新登记窗口样式」时被顺带冲掉
+// （真机看到的带动者：指针进出鲸鱼 → setIgnoreMouseEvents 重写 GWL_EXSTYLE），
+// 而冲掉之后没有任何东西会把它安回来 —— applyOnTop 只挂在配置变更上，用户没改配置就
+// 永远不会再跑一次（真机取证：onTop=true，窗口实测 ex=0x08080020，TOPMOST 位没了，
+// 表现就是「置顶开关明明开着，挂件却被别的窗户压住」）。
+// 为什么不用 win.isAlwaysOnTop() 做「不一致才修」的守卫（这是被真机否证过的弯路）：
+// 同一时刻 Win32 实测 topmost=False，宿主却报 isAlwaysOnTop()=true —— 它返回的是
+// Electron 自己记的缓存位，不是窗口实时样式，守卫会被它骗成永远「跳过」，等于没修。
+// 那会不会抖？不会：本函数只由「已经改过窗口样式」的路径带着跑，而那些路径各自有去重
+// （穿透切换只在值真变时下发，show()/开菜单本身就低频），一次 SetWindowPos 也不重绘。
+function ensureOnTop() {
+  if (!winAlive()) return
+  const onTop = readConfig().onTop !== false
+  try { win.setAlwaysOnTop(onTop, 'screen-saver') } catch (err) {
+    logErr('[whale][widget] 重申置顶失败', err && err.message)
+  }
+}
+
 // 重新声明「不在任务栏显示」。
 // 为什么必须补：skipTaskbar 虽是创建期选项，但窗口以 focusable:false 建时，Windows 下
 // 任务栏隐藏有一半靠这个状态的「隐含效果」；运行时一旦 setFocusable(true)（菜单借焦点，
@@ -512,6 +564,55 @@ function ensureSkipTaskbar() {
     logErr('[whale][widget] setSkipTaskbar 调用失败', err && err.message)
     return false
   }
+}
+
+// 重复下发当前的鼠标穿透态（含 forward 钩子）。
+// 真机实证：窗口卡在 WS_EX_TRANSPARENT(0x20) 时页面拿不到任何鼠标事件 —— 悬停不出 ☰、
+// 点击/右键全无响应；外部清掉 0x20 立即恢复。Electron 在 Windows 上把 forward:true 实现为
+// 一条转发鼠标消息的钩子，而窗口失焦 / 被遮挡 / 切换 focusable 时钩子可能被摘掉，
+// WS_EX_TRANSPARENT 这个样式位却留在窗口上：页面再也收不到 pointermove，而页面的悬停接管
+// 全靠 pointermove 驱动 → 永远出不来（页面侧另有一条低频光标探测看门狗，见 floating-page.js）。
+// 样式位本身也会被上述调用重登记时冲掉（页面缓存以为还是穿透、于是不再下发）。
+// 故凡是重登记样式的路径都顺手把当前穿透态重新装一遍：值没变也要重发，这正是「重申」的意义。
+// 缓存未建立 / 缓存属于旧窗口时跳过（新窗口应由页面重新下发，不能沿用旧窗口的值）。
+function reassertIgnoreMouse() {
+  if (!winAlive() || ignoreMouseVal === null || ignoreMouseWin !== win) return
+  try {
+    win.setIgnoreMouseEvents(ignoreMouseVal, { forward: true })
+  } catch (err) {
+    ignoreMouseVal = null // 下发失败别把错值留在缓存里，否则下一次也不会重试
+    logErr('[whale][widget] 重申鼠标穿透失败', err && err.message)
+  }
+}
+
+// 窗口样式的统一重申入口：置顶 + 不在任务栏。
+// 为什么合在一处：这几位在 Windows 上是**同一次「重新登记窗口样式」里一起掉的**
+// （setFocusable / show / moveTop / setIgnoreMouseEvents 都会触发），所以凡是触发过这类
+// 调用的路径，都要把几位一起安回来；分开放的话迟早只记得其中一个
+// （事实就是：skipTaskbar 早就有 ensureSkipTaskbar 兜着，置顶一直没人管，于是静默失效）。
+// 新增「会重登记样式」的调用时改这里，别在调用点抄一遍。
+function ensureWindowStyles() {
+  if (!winAlive()) return
+  reassertIgnoreMouse()
+  ensureOnTop()
+  ensureSkipTaskbar()
+}
+
+// 悬停穿透：鼠标移到挂件外的透明留白时放开点击，让点击落到挂件底下的窗户上。
+// 值没变就不下发 —— 页面在鼠标移动时高频上报，重复调用纯属浪费（这条去重原先在 ipc.js，
+// 挪过来是因为「下发穿透」本身会让 Windows 重新登记窗口样式，紧跟着重申样式才修得到位）。
+// 缓存按窗口实例失效：窗口重建后新窗口默认不穿透，必须重新下发一次。
+let ignoreMouseWin = null
+let ignoreMouseVal = null
+function applyIgnoreMouse(ignore) {
+  if (!winAlive()) { ignoreMouseWin = null; ignoreMouseVal = null; return }
+  if (win !== ignoreMouseWin) { ignoreMouseWin = win; ignoreMouseVal = null }
+  const want = !!ignore
+  if (want === ignoreMouseVal) return
+  ignoreMouseVal = want
+  // 真正下发在 reassertIgnoreMouse（ensureWindowStyles 的第一步）：setIgnoreMouseEvents
+  // 会重登记窗口样式，置顶 / 任务栏必须紧跟着重申，所以统一走这一条出口
+  ensureWindowStyles()
 }
 
 // 注意：窗口级 win.setOpacity() 在 Windows 上不能用于本挂件——本窗口是
@@ -568,14 +669,14 @@ function ensureWidgetInner(opts) {
       // 已可见：默认仅置顶（避免抢走设置窗口焦点）；focus 模式或无法探知时补 show()
       if (wantFocus || visible === null) { try { win.show() } catch (err) {} }
       try { if (win.moveTop) win.moveTop() } catch (err) {}
-      ensureSkipTaskbar() // show()/moveTop() 会重新登记窗口样式，任务栏图标可能在此冒出来
+      ensureWindowStyles() // show()/moveTop() 会重新登记窗口样式，任务栏图标和置顶位都可能在此冒/掉
       return win
     }
     // 刚创建不久：可能仍在显示过程中，先 show() 一次，避免误判为「被隐藏」而重建
     if (Date.now() - winCreatedAt < 300) {
       try { win.show() } catch (err) {}
       try { if (win.moveTop) win.moveTop() } catch (err) {}
-      ensureSkipTaskbar()
+      ensureWindowStyles()
       return win
     }
     log('[whale][widget] 挂件引用存活但不可见，销毁重建')
@@ -598,6 +699,7 @@ function createWidget(focusable) {
   const onTop = cfg.onTop !== false
   log('[whale][widget] createBrowserWindow', { url, size, x: pos.x, y: pos.y, preload: 'preload/floating.js', onTop })
   let created = false
+  initPushed = false // 新窗口：兜底资格重新生效（上一个窗口推过 init 不算在这上面）
   try {
     win = utools.createBrowserWindow(url, {
       width: size,
@@ -648,9 +750,12 @@ function createWidget(focusable) {
       try { applySizeBounds() } catch (err) {}
       try { win.show() } catch (err) {}
       try { applyOnTop(readConfig().onTop !== false) } catch (err) {}
-      ensureSkipTaskbar() // show() 之后补一次，防止 uTools 在显示阶段重置窗口样式
-      // 兜底：即使子窗 ready 消息丢失，加载完成后也推一次初始数据
-      setTimeout(function () { try { pushInit() } catch (err) {} }, 300)
+      ensureWindowStyles() // show() 之后补一次，防止 uTools 在显示阶段重置窗口样式（置顶 + 任务栏）
+      // 兜底：即使子窗 ready 消息丢失，加载完成后也推一次初始数据。
+      // 页面一旦发来 ready（走 pushInit）这个定时器就被撤销，不会两遍；
+      // 反过来（真机那种时序：ready 先到、回调晚 400ms 才到）这里就不能再排 ——
+      // 那时 pushInit 的撤销已经撤了个空句柄，再排等于同一个窗口推两遍 init + 搬两遍整池
+      if (!initPushed) scheduleInitFallback()
     })
     created = true // 窗口已成功创建，后续设置失败不应丢弃该引用
     winFocusable = wantFocus
@@ -662,12 +767,19 @@ function createWidget(focusable) {
     // 但页面若因资产缺失、JS 报错、preload 未加载等原因始终没就绪，窗口会永远不可见 ——
     // 那比「闪一下」糟得多。给一个充裕的兜底（页面真的异常时早该到了），
     // 由 winAlive() 保证那时窗口没被销毁重建过
-    setTimeout(function () {
+    autoShowTimer = setTimeout(function () {
+      autoShowTimer = null
       if (!winAlive()) return
-      try { if (typeof win.isVisible !== 'function' || !win.isVisible()) win.show() } catch (err) {}
+      try {
+        if (typeof win.isVisible !== 'function' || !win.isVisible()) win.show()
+      } catch (err) {}
+      // show() 会让 Windows 重新登记窗口样式；这条路径本来就罕见（页面没就绪），
+      // 不补重申的话坏状态会一直挂着，直到用户鼠标进出挂件才被顺带修好
+      ensureWindowStyles()
     }, WIDGET_AUTOSHOW_MS)
     setWidgetError('')
     syncTaskbarWatch() // 挂件就位后开始跟随任务栏显隐（「自动避让任务栏」关掉则不轮询）
+    scheduleMidnightRefresh() // 零点把「今日」统计换成新的一天
     // 注意：uTools 返回的定制窗口「不包含 BrowserWindow / webContents 实例事件」，
     // 因此这里不能用 win.webContents.on('did-fail-load') 等；错误只能靠创建回调与 try/catch。
   } catch (err) {
@@ -685,7 +797,11 @@ function destroyWidget() {
     try { win.hide() } catch (err) {}
   }
   win = null
+  // 兜底显示定时器属于「上一个窗口」：重建后的窗口会自己排新的，旧的必须撤销
+  clearAutoShow()
+  clearInitFallback() // 同上：旧窗口的兜底不能让它在销毁后又推一次 init（新页面有自己的 ready）
   clearLiveScaleCtx()
+  clearMidnightRefresh() // 窗口没了，跨零点刷新也没人收；下次创建时重排
   // 必须一起清拖拽冻结态：窗口没了，页面侧 `drag` 也随之消失，再没有任何路径会调 dragEnd 来解冻。
   // 若留着 dragFrozen=true，重建后的新窗口从出生起就是冻结的 —— 之后滚轮/设置页改大小
   // 全被 applyScaleToWindow 拦下并记进 dragPendingScale（永远等不到 drag-end 来补做），
@@ -696,6 +812,21 @@ function destroyWidget() {
   // 不复位的话该请求被去重吞掉，挂件要等满 WIDGET_AUTOSHOW_MS 兜底才出现（体感像「卡了一下」）。
   callResetWidgetShown()
   syncTaskbarWatch() // 窗口没了 → 停掉任务栏轮询
+}
+
+// 插件进程真正结束时的统一清理（services.js 的 onPluginOut(isKill) 调，与 stopOnQuit 并列）。
+// **不销毁窗口**（uTools 自己会收，见 services.js 那里的注释），只收拾本模块持有的宿主侧定时器：
+//   1. 任务栏轮询（250ms）—— 进程不退时它会一直跑
+//   2. 兜底显示定时器 —— WIDGET_AUTOSHOW_MS 内退出的话还在计时
+//   3. 实时缩放的一帧槽位（rAF + setTimeout 竞速）
+// 为什么值得单独写：这几处此前只散落在各自的「停止条件」里（destroyWidget / need=false），
+// 插件退出走的不是那些路径，句柄就留在原地。改成集中一处，往后新增定时器只需往这里补一行。
+function dispose() {
+  if (watchTimer) { clearInterval(watchTimer); watchTimer = null }
+  clearAutoShow()
+  clearInitFallback()
+  clearMidnightRefresh()
+  cancelLiveScaleSlot()
 }
 
 // 切换挂件显隐（供「切换挂件」指令 / 全局快捷键调用），返回切换后的可见状态
@@ -715,6 +846,10 @@ function toggleWidget() {
 function show() {
   if (!winAlive()) return
   try { win.show() } catch (err) {}
+  // 显示这一步同样会让 Windows 重新登记样式：创建期安好的置顶位可能就在这一下掉掉，
+  // 而「页面就绪后自己 show()」是每次打开挂件都会走的，不补这一次的话
+  // 置顶只能靠创建期那一次运气。
+  ensureWindowStyles()
 }
 
 function sendToWidget(channel) {
@@ -732,32 +867,60 @@ function sendToWidget(channel) {
 
 
 function pushInit() {
+  // 页面已经就绪（这条就是它发来的 ready 触发的）→ 撤销「ready 丢了」的兜底，
+  // 免得同一个窗口把整份 init（含几十 MB 素材）再搬一遍；同时记下「这个窗口推过了」，
+  // 让晚到的创建回调不再排兜底（真机时序：ready 比回调早 400ms）
+  clearInitFallback()
+  initPushed = true
   const cfg = readConfig()
   const anchor = readAnchor()
-  sendToWidget('whale:init', {
+  const space = widgetSpace()
+  const balance = getCachedBalance()
+  const timer = cfg.timerPersistOn ? readTimer() : null
+  const sounds = getSoundData()
+  const skin = getSkinData()
+  const bubbles = getBubbleData()
+  const models = getModelsPayload()
+  const todo = cfg.todoOn ? readTodo() : null
+  const focusStats = cfg.focusOn ? focusStatsPayload() : null
+  const payload = {
     config: cfg,
     anchor: { hAnchor: anchor.hAnchor, vAnchor: anchor.vAnchor, flipped: flippedOf(anchor) },
     // 挂件到工作区上下边缘的空白：页面据此决定菜单向上还是向下展开（屏幕外的留白放不下菜单）
-    space: widgetSpace(),
-    balance: getCachedBalance(),
+    space: space,
+    balance: balance,
     // 计时状态：仅当「计时保存」开启时恢复（关闭时不回推，页面按默认清空处理）
-    timer: cfg.timerPersistOn ? readTimer() : null,
+    timer: timer,
     // 自定义音效本体（base64 data URL；无自定义时两段均为 null）
-    sounds: getSoundData(),
+    sounds: sounds,
     // 自定义挂件形象本体（base64 data URL；未导入时为空串，页面回退内置形象）
-    skin: getSkinData(),
+    skin: skin,
     // 自定义气泡图片本体（base64 data URL 数组；空数组时页面回退内置 rua.webp）
-    bubbles: getBubbleData(),
-    // 已装「官方可下载形象」本体（base64 data URL 数组）：台词 v2 randimg 段的「共享角色图池」。
-    // 与 bubbles 分开推：randimg 抽的是共享角色的形象图，不是用户自定义气泡图
-    sharedSkins: getBuiltinData(),
+    bubbles: bubbles,
     // 多厂商模型列表（含内置 DeepSeek 那条）+ 主显示模型
-    models: getModelsPayload(),
+    models: models,
     // 待办清单：只在「显示待办」开启时推（关着时页面连分组都不建，少一份无用数据）
-    todo: cfg.todoOn ? readTodo() : null,
+    todo: todo,
+    // 待办条数上限：页面在提交前先判一次（满额时宿主会静默丢弃 add），
+    // 单一来源仍是 constants.js 的 TODO_MAX，页面不再抄一份副本
+    todoMax: TODO_MAX,
     // 专注统计与每日目标：只在「专注记录」开启时推（与 FocusView 的显示条件一致）
-    focusStats: cfg.focusOn ? focusStatsPayload() : null,
-  })
+    focusStats: focusStats,
+  }
+  sendToWidget('whale:init', payload)
+  // 共享角色图池（台词 randimg 段的图）不并进 init，而且只推**清单**不推本体：
+  // 整池本体实测 39MB 原图 / 52MB base64，读盘 + base64 + 跨进程克隆全压在 init 的同步段里，
+  // 正是「打开挂件卡一下」的大头（宿主与子窗还各常驻一份）。改推清单后首帧只搬几百字节，
+  // 本体由页面抽到哪张按 id 单张来要（whale:randimg → whale:randimg-data）。
+  // 通道仍排在 init 之后：让首帧先出画面
+  queueSharedSkinsPush()
+}
+
+function queueSharedSkinsPush() {
+  setTimeout(function () {
+    if (!winAlive()) return
+    sendToWidget('whale:shared-skins', getSharedManifest())
+  }, 0)
 }
 
 function pushConfig() {
@@ -770,8 +933,7 @@ function pushTodo() {
   sendToWidget('whale:todo', readTodo())
 }
 
-// 专注统计回推（记录新一轮 / 设置页刷新时调用）。STAT_DAYS 与 FocusView.vue 保持一致
-const FOCUS_STATS_DAYS = 7
+// 专注统计回推（记录新一轮 / 设置页刷新时调用）。窗口真源在 constants.FOCUS_STATS_DAYS
 function focusStatsPayload() {
   const cfg = readConfig()
   const state = readFocus()
@@ -780,6 +942,24 @@ function focusStatsPayload() {
 }
 function pushFocusStats() {
   sendToWidget('whale:focus-stats', focusStatsPayload())
+}
+
+// 跨零点刷新：挂件「今日 N 轮 / 分钟」是宿主按 todayKey() 算好的快照，零点后不重推
+// 就会一直显示昨天的数字（页面自己不会跨日重算）。只排「到下一个本地零点 +1s」一次，
+// 触发后重排 —— 不用 setInterval：改系统时间 / 夏令时下 24h 轮询会逐渐漂移。
+let midnightTimer = null
+function clearMidnightRefresh() {
+  if (midnightTimer) { clearTimeout(midnightTimer); midnightTimer = null }
+}
+function scheduleMidnightRefresh() {
+  clearMidnightRefresh()
+  const d = new Date()
+  d.setHours(24, 0, 1, 0)
+  midnightTimer = setTimeout(function () {
+    midnightTimer = null
+    try { pushFocusStats() } catch (err) { logErr('[whale][widget] 跨零点刷新专注统计失败', err && err.message) }
+    scheduleMidnightRefresh()
+  }, Math.max(1000, d.getTime() - Date.now()))
 }
 
 // 实时缩放上下文：连续 __live 调用间缓存，避免每帧同步 IPC 读窗口状态
@@ -1007,7 +1187,7 @@ function applyScaleToWindow(scale, persist) {
       win.setPosition(rx, ry)
     }
     try { if (typeof win.setResizable === 'function') win.setResizable(false) } catch (err) {}
-    ensureSkipTaskbar() // setResizable 也会让 Windows 重新登记窗口样式，一并补声明
+    ensureWindowStyles() // setResizable 也会让 Windows 重新登记窗口样式，置顶和任务栏两位一起补
     // 读回校验：尺寸未按预期变化时报警（历史上曾因 setBounds 参数 NaN 静默失败）
     try {
       const after = win.getBounds()
@@ -1067,11 +1247,16 @@ module.exports = {
   winAlive,
   getWindow,
   applyOnTop,
+  ensureOnTop,
   ensureSkipTaskbar,
+  ensureWindowStyles,
+  applyIgnoreMouse,
   applySizeBounds,
   getWidgetError,
   ensureWidget,
   destroyWidget,
+  // 插件退出时的定时器统一清理（不销毁窗口），services.js 的 onPluginOut(isKill) 调
+  dispose,
   toggleWidget,
   show,
   sendToWidget,

@@ -12,7 +12,7 @@
  * CDS_CONSUMERS / CDS_MIN_KEYS / CDS_ALLOW / CDS_EXPECT），真实构建不设这些变量，
  * 走脚本内置默认值，行为与注入前完全一致。
  */
-import test from 'node:test'
+import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -27,8 +27,12 @@ const SCRIPT = path.join(ROOT, 'scripts', 'check-dead-settings.mjs')
 // 每个用例一座临时仓库，目录结构只需覆盖脚本读取的部分：
 //   public/preload/lib/store.js（defaultConfig 定义方）+ 若干消费方文件。
 // 键与读点用循环生成，保证超过 CDS_MIN_KEYS 护栏（真实仓库 88 个键，护栏 50）。
+// 每个用例一座临时仓库，跑完统一删（见下面的 after）：不删的话每轮 npm test
+// 在 %TEMP% 里攒十几个 whale-cds-selftest-*
+const tmpRoots = []
 function makeRepo(deadKeys, { comments = false } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'whale-cds-selftest-'))
+  tmpRoots.push(root)
   const lib = path.join(root, 'public', 'preload', 'lib')
   fs.mkdirSync(lib, { recursive: true })
   const keys = []
@@ -69,6 +73,10 @@ function envFor(repo, extra = {}) {
 function runScript(env) {
   return spawnSync(process.execPath, [SCRIPT], { env, encoding: 'utf8' })
 }
+
+after(() => {
+  for (const root of tmpRoots) fs.rmSync(root, { recursive: true, force: true })
+})
 
 test('基线：干净样本必须全绿', () => {
   const { root } = makeRepo([])

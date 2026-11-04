@@ -1,5 +1,5 @@
 <script lang="ts" setup>
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { msgCls, useFlash } from '../composables/useFlash'
 import { useFold } from '../composables/useFold'
 import { cloneBubbleItems, isChoiceStep, setStepModules, stepLabel, stepModules } from '../composables/useBubble'
@@ -80,6 +80,8 @@ function pushUndo(editKey: string) {
   mergeTimer = window.setTimeout(() => { lastEditKey = '' }, MERGE_MS)
 }
 function undo() {
+  // 先把待落盘的模块改动落地（它自带 pushUndo），再弹撤销栈，否则撤销会把未落盘的编辑一起吞掉
+  flushMods()
   const prev = undoStack.value.pop()
   if (!prev) return
   resetConfirm.value = false
@@ -89,6 +91,8 @@ function undo() {
   editing.value = null
 }
 function redo() {
+  // 同 undo：先落地待落盘改动，免得重做把还没写库的编辑覆盖掉
+  flushMods()
   const next = redoStack.value.pop()
   if (!next) return
   resetConfirm.value = false
@@ -114,6 +118,8 @@ onMounted(() => window.addEventListener('keydown', onUndoKey))
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onUndoKey)
   if (mergeTimer !== undefined) window.clearTimeout(mergeTimer)
+  // 切 Tab 会卸载本卡：待落盘的模块改动必须在这里补写，否则最后一次输入直接丢失
+  flushMods()
 })
 
 // —— 试播：把当前队列整份发给挂件真弹一次（宿主 bubblePreview → whale:bubble-preview）——
@@ -125,7 +131,7 @@ const editorCollapsed = ref(true)
 // 整卡折叠：本卡与「挂件外观」同属外观 Tab，且编辑器折起来后仍占一整屏，
 // 故再给一层卡级折叠（沿 dsh 卡的 .card-toggle 范式），默认展开、可收起。
 // 收起态摘要播报「开关 + 步骤数」，不让人以为折起来就把配置藏没了
-const cardFold = useFold('bubble', true)
+const cardFold = useFold('bubble', false)
 const cardSummary = computed(() => {
   const steps = Array.isArray(items.value) ? items.value.length : 0
   return (bubbleOn.value ? '已开启' : '已关闭') + ` · ${steps} 个步骤`
@@ -208,6 +214,8 @@ function onResetQueue() {
 // 避免「父级草稿 + 子级草稿」两份状态互相打架。
 const editing = ref<{ idx: number; side: number } | null>(null)
 function onQueueEdit(payload: { idx: number; side: number }) {
+  // 换编辑对象前先落地上一个泡的待落盘改动，否则合并窗口到点时会按新 editing 写到这个泡上
+  flushMods()
   flash.msg = ''
   flash.err = false
   resetConfirm.value = false
@@ -223,11 +231,16 @@ function setEditSide(side: number) {
   const cur = editing.value
   if (!cur) return
   if (cur.side === side) return
+  // 切侧同样要落地：目标从 (idx, 旧 side) 变成 (idx, 新 side)，迟到回抛会写到另一侧
+  flushMods()
   editing.value = { idx: cur.idx, side }
   flash.msg = ''
   flash.err = false
 }
-function closeEditor() { editing.value = null }
+function closeEditor() {
+  flushMods()
+  editing.value = null
+}
 
 // 编辑器标题：'第 N 次点击'。并列泡的 A / B 由面板内的 chip 指示，标题不再缀后缀（避免重复）
 const editingTitle = computed(() => {
@@ -254,15 +267,36 @@ const editingSides = computed(() => {
 const bubbleLib = computed<any[]>(() => (props.cfg?.bubble && Array.isArray(props.cfg.bubble.lib) ? props.cfg.bubble.lib : []))
 
 // 泡内容回抛：用 setStepModules 把新 modules 写回该步该侧，再整份 items 落盘。
-// editKey 带上「哪一步哪一侧」：换泡 / 换侧重开合并窗口，不把两个泡的改动并成一步
+// 面板里的内容字段走 @input（逐键回抛），每敲一个字就整份 items 落盘一次太重（宿主要归一化
+// 整个 bubble 再写 dbStorage）。这里把 250ms 内的连续回抛合成一次，只落最后一份。
+// 合并期间 props.cfg.bubble.items 不变 → 面板的 rows 不会被回填打断，打字不会丢字符。
+// 所有会「换编辑对象 / 读 items / 卸载本卡」的入口都先 flushMods()，否则迟到的回抛会写到
+// 切过去的新泡上（下面用的是**当前** editing）。
+const MOD_MERGE_MS = 250
+let modPending: any[] | null = null
+let modTarget: { idx: number; side: number } | null = null
+let modTimer: number | undefined
+
+function flushMods() {
+  if (modTimer !== undefined) { window.clearTimeout(modTimer); modTimer = undefined }
+  const mods = modPending
+  const t = modTarget
+  modPending = null
+  modTarget = null
+  if (!mods || !t) return
+  const cur = items.value[t.idx]
+  if (cur === undefined) return
+  pushUndo('mod:' + t.idx + ':' + t.side)
+  const next = items.value.map((s: any, k: number) => (k === t.idx ? setStepModules(s, t.side, mods) : s))
+  emit('patch', { bubble: { items: next } })
+}
 function onModChange(mods: any[]) {
   const e = editing.value
   if (!e) return
-  const cur = items.value[e.idx]
-  if (cur === undefined) return
-  pushUndo('mod:' + e.idx + ':' + e.side)
-  const next = items.value.map((s: any, k: number) => (k === e.idx ? setStepModules(s, e.side, mods) : s))
-  emit('patch', { bubble: { items: next } })
+  modPending = mods
+  modTarget = { idx: e.idx, side: e.side }
+  if (modTimer !== undefined) window.clearTimeout(modTimer)
+  modTimer = window.setTimeout(() => { flushMods() }, MOD_MERGE_MS)
 }
 // 模块库回抛：lib 是 cfg.bubble 上独立的一份，与 items 并列，直接整份覆盖
 function onLibChange(lib: any[]) {
@@ -322,7 +356,7 @@ onMounted(() => {
          可折叠：编辑器带队列 + 模块库两层长列表，看开关 / 文案的人不必每次都滚过它。
          折叠按钮用 .fold + .link-btn 的既有范式；默认折叠，点「展开编辑器」才铺开 -->
     <div class="fold">
-      <button class="link-btn utils-btn utils-secondary" type="button" @click="editorCollapsed = !editorCollapsed">
+      <button class="link-btn utils-btn utils-secondary fold-toggle" type="button" :aria-expanded="!editorCollapsed" @click="editorCollapsed = !editorCollapsed">
         {{ editorCollapsed ? '展开编辑器（队列与模块）' : '收起编辑器' }}
       </button>
       <template v-if="!editorCollapsed">

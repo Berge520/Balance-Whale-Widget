@@ -420,9 +420,40 @@ test('fetchModelBalance 业务报错：200 但 body 报错 → 提炼原文，�
 test('fetchModelBalance codex 型：不发请求，走本地统计', async () => {
   const s = stubFetch(() => { throw new Error('不应发请求') })
   try {
-    // 无 utools 桩时 codexSummary 会失败 —— 只要它是 ok:false 而非抛错即可
+    // 本地统计读的是真实 ~/.codex（或 $CODEX_HOME）：机器上装了 Codex 就 ok:true、没装才 ok:false。
+    // 这条只关心「不抛错、不走网络」，别把 ok 的取值钉死在测试机的环境上（否则装了 Codex 的机器必红）
     const r = await fetchModelBalance({ kind: 'codex' }, '')
-    assert.equal(r.ok, false)
+    assert.equal(typeof r.ok, 'boolean')
     assert.equal(s.calls.length, 0)
   } finally { s.restore() }
+})
+
+// ──────────────────────────────────────────────
+// 免打扰结束时刻（补发定时器排在这一刻）
+// ──────────────────────────────────────────────
+const at = (y, mo, d, h, mi) => new Date(y, mo, d, h, mi, 0, 0).getTime()
+const hhmm = (ms) => {
+  const d = new Date(ms)
+  return String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0')
+}
+const quiet = (from, to) => ({ quietOn: true, quietFrom: from, quietTo: to })
+
+test('quietEndAt：未开启 / 起止相同 / 不在时段内都返回 0', () => {
+  assert.equal(api.quietEndAt({ quietOn: false, quietFrom: '00:00', quietTo: '23:00' }, at(2026, 9, 31, 10, 0)), 0)
+  assert.equal(api.quietEndAt(quiet('07:00', '07:00'), at(2026, 9, 31, 10, 0)), 0)
+  assert.equal(api.quietEndAt(quiet('09:00', '12:00'), at(2026, 9, 31, 8, 0)), 0)
+  assert.equal(api.quietEndAt(quiet('09:00', '12:00'), at(2026, 9, 31, 12, 0)), 0) // to 那一刻已出时段
+})
+
+test('quietEndAt：同日时段回到当天 to', () => {
+  assert.equal(hhmm(api.quietEndAt(quiet('09:00', '12:00'), at(2026, 9, 31, 10, 30))), '12:00')
+})
+
+test('quietEndAt：跨午夜时段按当前所处一段回 07:00 / 次日 07:00', () => {
+  // 凌晨 02:00：这一段结束在「今天」的 07:00
+  assert.equal(hhmm(api.quietEndAt(quiet('23:00', '07:00'), at(2026, 9, 31, 2, 0))), '07:00')
+  // 深夜 23:30：已过 23:00，结束在「明天」的 07:00
+  const end = api.quietEndAt(quiet('23:00', '07:00'), at(2026, 9, 31, 23, 30))
+  assert.equal(hhmm(end), '07:00')
+  assert.equal(new Date(end).getDate(), 1, '要跨到次日')
 })

@@ -84,7 +84,7 @@ function marketSearch() {
     <p class="hint">开启后每次呼出插件自动检查一次（12 小时内最多一次），发现新版本会弹出系统通知。</p>
 
     <div class="fold">
-      <button class="link-btn utils-btn utils-secondary" @click="aboutFolds.feedback = !aboutFolds.feedback">
+      <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="aboutFolds.feedback" @click="aboutFolds.feedback = !aboutFolds.feedback">
         {{ aboutFolds.feedback ? '收起反馈与建议' : '反馈与建议' }}
       </button>
       <div v-show="aboutFolds.feedback" class="guide">

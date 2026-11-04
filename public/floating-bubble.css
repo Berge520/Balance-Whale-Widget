@@ -67,6 +67,46 @@
   }
   .dshwv-bubble.dshwv-bubble-open .dshwv-text { opacity: 1; transition: opacity .16s ease .36s, transform .3s ease; }
   .dshwv-root.dshwv-left .dshwv-text { transform: translate(-50%, -50%) scaleX(-1) }
+  /* ===== 未至之境 HUD =====
+     外圈与文字角标都是纯装饰：不参与命中、不改气泡几何；只在 fantasy 主题下显示。
+     外圈与主描边同路径、更粗（26 vs 18），主路径盖住内侧，只露出约 4px 青色辉光。 */
+  .dshwv-bubble .dshwv-bshape-hud { display: none; }
+  .dshwv-theme-fantasy .dshwv-bubble .dshwv-bshape-hud {
+    display: block;
+    fill: none;
+    stroke: #39FFD1;
+    stroke-width: 26;
+    opacity: 0;
+    /* 气泡打开时通用规则会给所有 svg path 开 visiblePainted；外圈必须显式锁死，
+       否则会把点击区扩出去 4px，破坏原有命中几何 */
+    pointer-events: none;
+    transition: opacity .2s ease;
+  }
+  .dshwv-theme-fantasy .dshwv-bubble.dshwv-bubble-open .dshwv-bshape-hud { opacity: .28; }
+  .dshwv-theme-fantasy .dshwv-bubble svg {
+    filter: drop-shadow(0 0 calc(var(--dshw-u) * 10) rgba(58,123,255,.35));
+  }
+  .dshwv-theme-fantasy .dshwv-bubble-open .dshwv-text::before,
+  .dshwv-theme-fantasy .dshwv-bubble-open .dshwv-text::after {
+    content: '';
+    position: absolute;
+    width: calc(var(--dshw-u) * 16);
+    height: calc(var(--dshw-u) * 16);
+    pointer-events: none;
+    opacity: .65;
+  }
+  .dshwv-theme-fantasy .dshwv-bubble-open .dshwv-text::before {
+    top: calc(var(--dshw-u) * -14);
+    left: calc(var(--dshw-u) * -14);
+    border-top: 1px solid #39FFD1;
+    border-left: 1px solid #39FFD1;
+  }
+  .dshwv-theme-fantasy .dshwv-bubble-open .dshwv-text::after {
+    bottom: calc(var(--dshw-u) * -14);
+    right: calc(var(--dshw-u) * -14);
+    border-bottom: 1px solid #39FFD1;
+    border-right: 1px solid #39FFD1;
+  }
   /* 三行字号（与渲染器 src/bubble/bubble-render.js 的 BUBBLE_FONT 必须一致：CSS 是未缩小时的默认值，
      渲染器只在超框时才写行内 calc(var(--dshw-u) * N) 覆盖） */
   .dshwv-label { font-size: calc(var(--dshw-u) * 72); font-weight: 600; letter-spacing: .06em; }
@@ -85,6 +125,27 @@
   }
   .dshwv-amount.dshwv-low { color: #e0433f; }
   .dshwv-hint.dshwv-low { color: #e0433f; }
+  /* 余额变动动效：下降闪红+微抖，上升闪绿+微弹。动画结束后由 JS 移除类名。
+     与 .dshwv-low 共存时低余额的红色优先（变动动画 1.2s 后自动退场，低余额常驻）。 */
+  @keyframes dshwv-shake-down {
+    0% { transform: translateY(0); }
+    15% { transform: translateY(3px); color: #e0433f; }
+    30% { transform: translateY(-2px); }
+    45% { transform: translateY(2px); }
+    60% { transform: translateY(-1px); }
+    75% { color: #e0433f; }
+    100% { transform: translateY(0); color: inherit; }
+  }
+  @keyframes dshwv-bounce-up {
+    0% { transform: translateY(0); }
+    20% { transform: translateY(-4px); color: #2fa24c; }
+    40% { transform: translateY(1px); }
+    60% { transform: translateY(-2px); }
+    75% { color: #2fa24c; }
+    100% { transform: translateY(0); color: inherit; }
+  }
+  .dshwv-amount.dshwv-flash-down { animation: dshwv-shake-down 1.2s ease; }
+  .dshwv-amount.dshwv-flash-up { animation: dshwv-bounce-up 1.2s ease; }
   /* 泡泡模块行容器：与三行结构互斥（渲染器 applyRows 开关 display）。
      行本身无字号，模块自带行内字号；链接模块单独开 pointer-events（text 容器整体关掉了）
      并可点，点击处理由宿主页面按 dataset.url 接 */
@@ -148,3 +209,17 @@
   .dshwv-rgb-indigo,    .dshwv-bgrgb-indigo    { background-image: linear-gradient(90deg,#4e54c8,#8f94fb,#4e54c8); }
   .dshwv-rgb-blaze,     .dshwv-bgrgb-blaze     { background-image: linear-gradient(90deg,#ff512f,#dd2476,#ff512f); }
   .dshwv-rgb-amber,     .dshwv-bgrgb-amber     { background-image: linear-gradient(90deg,#f7971e,#ffd200,#f7971e); }
+
+  /* 下班倒计时：沿用主体字号，只给数字加一点字距；最后 30 / 10 分钟轻微变色 / 呼吸，
+     不弹窗、不响铃。root 上的 dshwv-offwork 类由浮动页的 offwork 开关控制，
+     near 两个类只会在倒计时接管「常规三行」时存在（切到计时/提醒/自定义泡泡会摘掉） */
+  .dshwv-root.dshwv-offwork .dshwv-amount { letter-spacing: .02em; }
+  .dshwv-root.dshwv-offwork-soon .dshwv-amount { color: #d9821a; }
+  .dshwv-root.dshwv-offwork-imminent .dshwv-amount {
+    color: #d9821a;
+    animation: dshwv-offwork-pulse 1.8s ease-in-out infinite;
+  }
+  @keyframes dshwv-offwork-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .62; } }
+  @media (prefers-reduced-motion: reduce) {
+    .dshwv-root.dshwv-offwork-imminent .dshwv-amount { animation: none; }
+  }

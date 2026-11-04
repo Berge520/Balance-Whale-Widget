@@ -189,6 +189,9 @@ function candidatesOf(opts) {
       // 界面上表现为「这一条没有行号」。界面上显示的是 1 基行号，故 lineIndex 要 +1。
       line: lineNoOf(it),
       hasConfig: !!it.hasConfig,
+      // disabled 由 `!!js` 表达式决定（不是字面量）：界面据此提示「市场不会覆盖它」。
+      // 两种入参都认：parsePatch 的原始字段是 `disabledExpr`，settings 映射后叫 `expression`
+      expression: !!(it.disabledExpr || it.expression),
       source: 'patch',
       // 已在用户 patch 里的条目**无条件**归 'patched'：它是用户自己写进去或本插件写进去的，
       // 与它属于哪个 bundle 无关（实测 cost-meter / modlens 都同时是第三方 bundle）

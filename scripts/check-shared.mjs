@@ -181,6 +181,36 @@ function historyKeepFromObject(marker) {
   }
 }
 
+// 下班倒计时默认值三处副本：offwork.js 的 DEFAULTS（宿主 / 构建源）、App.vue 的
+// OFFWORK_DEFAULTS（设置页归一用）、floating-page.js 的 OFFWORK_DEFAULTS（OffworkCore
+// 缺失时的兜底）。三处形态几乎一致，唯一差异是 offwork.js 用 Object.freeze 包住 days
+// 数组，故统一抠成「start,end,days,showSec,weekendOn,paydayOn,paydayDay」再比对。
+function offworkDefaults(marker) {
+  return (src, file) => {
+    const body = jsLiteral(marker)(src, file)
+    const str = (key) => {
+      const m = body.match(new RegExp(key + "\\s*:\\s*'([^']*)'")) ||
+        body.match(new RegExp(key + '\\s*:\\s*"([^"]*)"'))
+      if (!m) throw new Error(`${file} 里「${marker}」没有 ${key}`)
+      return m[1]
+    }
+    const num = (key) => {
+      const m = body.match(new RegExp(key + '\\s*:\\s*(-?[\\d.]+)'))
+      if (!m) throw new Error(`${file} 里「${marker}」没有 ${key}`)
+      return m[1]
+    }
+    const bool = (key) => {
+      const m = body.match(new RegExp(key + '\\s*:\\s*(true|false)'))
+      if (!m) throw new Error(`${file} 里「${marker}」没有 ${key}`)
+      return m[1]
+    }
+    // days 在 offwork.js 里是 `Object.freeze([...])`，另两处是裸数组
+    const days = body.match(/days\s*:\s*(?:Object\.freeze\()?\[([^\]]*)\]\)?/)
+    if (!days) throw new Error(`${file} 里「${marker}」没有 days`)
+    return [str('start'), str('end'), days[1], bool('showSec'), bool('weekendOn'), bool('paydayOn'), num('paydayDay')].join(',')
+  }
+}
+
 // 内置音色两组（按压 / 释放）的文件路径同样是两份副本：挂件页是 `SOUND_FILES` 对象（真正播放用），
 // 设置页「挂件外观 → 音色」的试听用 `BUILTIN_SOUND_FILES` 数组（落在 App.vue，以 prop 下传 LookView）。
 // 两边形态不同，统一抽成「排序后逗号连接」的 ./whale/*.mp3 路径再比对 —— 改一处忘另一处会让试听
@@ -320,6 +350,8 @@ const WINDOW_VIEW = 'src/views/WindowView.vue'
 // dsh 一族的设置页常量随整套逻辑抽到了 useDsh composable（见 src/composables/useDsh.ts），
 // MAX_BATCH / NEWEST_VERSION 两项的抠取路径指向这里；DEFAULT_DSH_PORT 仍留 App.vue（cfg 初始化消费）
 const USE_DSH = 'src/composables/useDsh.ts'
+// 专注统计窗口 / 保留上限的设置页副本在 FocusView（柱图 STAT_DAYS / 热力图 HEAT_DAYS）
+const FOCUS_VIEW = 'src/views/FocusView.vue'
 
 const CHECKS = process.env.CS_CHECKS
   ? JSON.parse(process.env.CS_CHECKS).map((c) => ({
@@ -349,6 +381,16 @@ const CHECKS = process.env.CS_CHECKS
     parts: [
       { file: CONSTANTS, pick: jsLiteral('const LOW_ALERT_BY_CURRENCY =') },
       { file: APP_VUE, pick: jsLiteral('LOW_ALERT_DEFAULT') },
+    ],
+  },
+  // 下班倒计时默认值（见 offworkDefaults 注释）。三处都改才算改：设置页归一、页面兜底、
+  // 宿主/构建源任何一处漏改，都会让「新装 / 升级 / OffworkCore 加载失败」三种路径显示不同的默认上下班时间。
+  {
+    name: '下班倒计时默认值 OFFWORK_DEFAULTS',
+    parts: [
+      { file: 'public/preload/lib/offwork.js', pick: offworkDefaults('const DEFAULTS =') },
+      { file: APP_VUE, pick: offworkDefaults('const OFFWORK_DEFAULTS =') },
+      { file: FLOATING_PAGE, pick: offworkDefaults('var OFFWORK_DEFAULTS =') },
     ],
   },
   {
@@ -437,6 +479,16 @@ const CHECKS = process.env.CS_CHECKS
     parts: [
       { file: CONSTANTS, pick: jsNumber('const TIMER_LONG_EVERY_DEFAULT') },
       { file: APP_VUE, pick: jsNumber('const TIMER_LONG_EVERY_DEFAULT') },
+    ],
+  },
+  // 快捷时长四档默认值：宿主 constants / 设置页 / 挂件页各一份数组副本。
+  // 任一文件漏改，用户看到的默认 chips 就会和宿主归一化结果不一致
+  {
+    name: '快捷时长四档默认 TIMER_PRESETS_DEFAULT',
+    parts: [
+      { file: CONSTANTS, pick: jsLiteral('const TIMER_PRESETS_DEFAULT') },
+      { file: APP_VUE, pick: jsLiteral('const TIMER_PRESETS_DEFAULT') },
+      { file: FLOATING_PAGE, pick: jsLiteral('var TIMER_PRESETS_DEFAULT') },
     ],
   },
   // 吸附区宽度（可用区宽/高的百分比）范围与默认值：宿主 store.js 与设置页各一份，
@@ -598,6 +650,24 @@ const CHECKS = process.env.CS_CHECKS
       { file: CONSTANTS, pick: jsNumber('const TIMER_NOTE_MAX') },
       { file: FLOATING_PAGE, pick: jsNumber('var TIMER_NOTE_MAX') },
       { file: APP_VUE, pick: jsNumber('const TIMER_NOTE_MAX') },
+    ],
+  },
+  // 专注统计窗口：宿主 constants 是真源（widget.js / settings.js 都 require 它），
+  // 设置页拿不到 preload 常量，FocusView 留 STAT_DAYS 一份副本（柱图与明细共用）。
+  // 两边不一致会出现「柱图 7 根、明细却列 14 天」——多出来的天没有分组头数字。
+  {
+    name: '专注统计窗口 FOCUS_STATS_DAYS',
+    parts: [
+      { file: CONSTANTS, pick: jsNumber('const FOCUS_STATS_DAYS') },
+      { file: FOCUS_VIEW, pick: jsNumber('const STAT_DAYS') },
+    ],
+  },
+  // 专注保留上限：热力图窗口取宿主保留上限（再长也没有数据），设置页副本 HEAT_DAYS 同值
+  {
+    name: '专注保留上限 FOCUS_KEEP_DAYS',
+    parts: [
+      { file: CONSTANTS, pick: jsNumber('const FOCUS_KEEP_DAYS') },
+      { file: FOCUS_VIEW, pick: jsNumber('const HEAT_DAYS') },
     ],
   },
   // 共享角色清单（36 张）：宿主 constants.js 的 SHARED_SKIN_PACK_SKINS（对象数组，含 sha256）

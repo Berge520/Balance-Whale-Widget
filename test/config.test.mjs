@@ -78,6 +78,8 @@ const PATCH_FIXTURES = {
   timerMode: { timerMode: 'down' }, timerSec: { timerSec: 300 }, timerAt: { timerAt: '06:07' },
   timerNote: { timerNote: '打个招呼' }, timerBreakMin: { timerBreakMin: 9 }, timerRemindSec: { timerRemindSec: 15 },
   timerBubblePin: { timerBubblePin: false }, timerBubbleOnly: { timerBubbleOnly: false },
+  // 快捷时长四档：默认 [15,25,45,60]，夹具给一组全不同的合法值
+  timerPresets: { timerPresets: [10, 20, 30, 40] },
   // 番茄循环：默认 timerPomoOn=false，夹具取反；数值键给合法范围内的非默认值
   timerPomoOn: { timerPomoOn: true }, timerLongBreakMin: { timerLongBreakMin: 20 },
   timerLongEvery: { timerLongEvery: 6 }, timerAutoNext: { timerAutoNext: true },
@@ -85,7 +87,15 @@ const PATCH_FIXTURES = {
   focusOn: { focusOn: true }, todoOn: { todoOn: true },
   // 每日专注目标：默认 0（关闭），夹具给一个合法值
   focusGoal: { focusGoal: 8 },
-  guideDone: { guideDone: true }, dshNodeDir: { dshNodeDir: 'C:\\node' }, dshKeepAlive: { dshKeepAlive: true },
+  // 下班倒计时八键：默认关闭 / 09:00–18:00 / 周一至周五 / 显示秒 / 发薪日 10 号
+  offworkOn: { offworkOn: true }, offworkStart: { offworkStart: '08:30' },
+  offworkEnd: { offworkEnd: '19:00' }, offworkDays: { offworkDays: [0, 6] },
+  offworkShowSec: { offworkShowSec: false }, offworkWeekendOn: { offworkWeekendOn: true },
+  offworkPaydayOn: { offworkPaydayOn: true }, offworkPaydayDay: { offworkPaydayDay: 25 },
+  guideDone: { guideDone: true },
+  dshNodeDir: { dshNodeDir: 'C:\\node' }, dshKeepAlive: { dshKeepAlive: true },
+  // 以管理员身份启动（默认 false，夹具取 true 才算「改过」）
+  dshElevated: { dshElevated: true },
   dshPort: { dshPort: 4080 },
   dshRegistry: { dshRegistry: 'https://example.com/npm' }, dshVersion: { dshVersion: '1.2.3' },
   dshReinstall: { dshReinstall: true }, dshNoOpen: { dshNoOpen: false },
@@ -96,7 +106,13 @@ const PATCH_FIXTURES = {
   edgeBottom: { edgeBottom: 13 }, edgeLeft: { edgeLeft: 14 }, scrollGapOn: { scrollGapOn: true },
   scrollGapPx: { scrollGapPx: 33 }, snapMode: { snapMode: 'off' }, snapRatio: { snapRatio: 40 },
   opacity: { opacity: 66 }, passThrough: { passThrough: true }, skin: { skin: 'custom' },
-  theme: { theme: 'dark' }, uiMode: { uiMode: 'light' },
+  theme: { theme: 'dark' }, uiMode: { uiMode: 'light' }, bgMode: { bgMode: 'deep' },
+  bootIntroOn: { bootIntroOn: true }, bootIntroClean: { bootIntroClean: true },
+  bgMediaId: { bgMediaId: 'mabc' }, bgScrim: { bgScrim: 20 }, bgBlur: { bgBlur: 8 },
+  bgVignette: { bgVignette: 60 }, bgFit: { bgFit: 'contain' }, bgFocusX: { bgFocusX: 30 },
+  bgFocusY: { bgFocusY: 70 }, bgZoom: { bgZoom: 120 },
+  bgBrightness: { bgBrightness: 110 }, bootIntroSource: { bootIntroSource: 'css' },
+  bootIntroMediaId: { bootIntroMediaId: 'mxyz' },
   // 拖拽台词：默认 null（用内置文案），随便给一条非空串即可判为「改过」
   bubbleDwell: { bubbleDwell: 12 }, dragLines: { dragLines: ['改过的拖拽台词'] }, tapAdvance: { tapAdvance: true },
   // 新按压气泡模型：默认 { v:1, on:false, items:[], lib:[] ... }，随便开一个总开关即可判为「改过」
@@ -112,6 +128,7 @@ const PATCH_FIXTURES = {
   skinPackSrc: { skinPackSrc: 'https://example.com/' },
   randomIncludeBuiltin: { randomIncludeBuiltin: false },
   notifySystemOn: { notifySystemOn: false }, notifyMailOn: { notifyMailOn: true },
+  debugTools: { debugTools: true },
   mailFrom: { mailFrom: 'a@b.c' }, mailTo: { mailTo: 'd@e.f' },
   mailFromName: { mailFromName: '改过的发件名' }, mailSubjectPrefix: { mailSubjectPrefix: '[改]' },
   // models / mainModelId 必须一起给：mainModelId 指向不存在的 id 会被判失效回默认
@@ -119,9 +136,15 @@ const PATCH_FIXTURES = {
     models: [{ id: 'zzz', vendor: 'x', name: '测试模型', base: 'https://x.example', key: '' }],
     mainModelId: 'zzz',
   },
-  // 自定义显示：隐藏的 Tab 和卡片
+  // 自定义显示：隐藏的 Tab 和卡片 + Tab 顺序 + 置顶卡片
   hiddenTabs: { hiddenTabs: ['dev'] },
   hiddenCards: { hiddenCards: ['help', 'about'] },
+  tabOrder: { tabOrder: ['help', 'dev'] },
+  pinnedCards: { pinnedCards: ['models', 'notify'] },
+  // 卡片自定义顺序 / 每卡默认折叠 / 折叠记忆开关：前两者默认空对象，后者默认 true
+  cardOrder: { cardOrder: { usage: ['models', 'notify'] } },
+  foldDefaults: { foldDefaults: { look: false } },
+  foldRemember: { foldRemember: false },
 }
 
 test('patchConfig 的逐键分支表覆盖全部配置键（加键必须同时加夹具）', () => {
@@ -229,6 +252,97 @@ test('timerAt 必须是合法的 24 小时时刻（99:99 曾能一路写进配�
   assert.equal(patchConfig({ timerAt: '06:07' }).timerAt, '06:07')
   assert.equal(patchConfig({ timerAt: '6:07' }).timerAt, '06:07')
   assert.equal(patchConfig({ timerAt: '23:59' }).timerAt, '23:59')
+})
+
+test('timerPresets 归一化：固定 4 档、1–600 分钟、缺项补默认、多项截断', () => {
+  clearCfg()
+  assert.deepEqual(readConfig().timerPresets, [15, 25, 45, 60], '默认应为四档 15/25/45/60')
+  // 合法值原样保留（取整后）
+  let cfg = patchConfig({ timerPresets: [5, 30, 90, 120] })
+  assert.deepEqual(cfg.timerPresets, [5, 30, 90, 120])
+  // 越界夹到 1–600、小数取整、非法项回该位置默认（挂件把每档都渲染成按钮，不能出现 0 分 / NaN）
+  cfg = patchConfig({ timerPresets: [0, 601, 12.6, 'abc'] })
+  assert.deepEqual(cfg.timerPresets, [1, 600, 13, 60])
+  // 缺项补默认、多项截掉：永远 4 个，挂件 chips 不会换行或变少
+  cfg = patchConfig({ timerPresets: [10, 20] })
+  assert.deepEqual(cfg.timerPresets, [10, 20, 45, 60])
+  cfg = patchConfig({ timerPresets: [10, 20, 30, 40, 50] })
+  assert.deepEqual(cfg.timerPresets, [10, 20, 30, 40])
+  // 非数组不写入（保持现值）——与 tabOrder / pinnedCards 同一条坑
+  cfg = patchConfig({ timerPresets: '15,25' })
+  assert.deepEqual(cfg.timerPresets, [10, 20, 30, 40])
+})
+
+test('tabOrder 归一化：去空串 / 去重 / 只留字符串 / 上限 32 条', () => {
+  clearCfg()
+  // 去空串与纯空白、去重（保留首次出现的位置）、非字符串一律丢
+  let cfg = patchConfig({ tabOrder: ['dev', '', '  ', 'help', 'dev', 3, null, 'dev'] })
+  assert.deepEqual(cfg.tabOrder, ['dev', 'help'])
+  // 首尾空白会被 trim
+  cfg = patchConfig({ tabOrder: [' dev ', '\thelp\n'] })
+  assert.deepEqual(cfg.tabOrder, ['dev', 'help'])
+  // 条数上限 32：超出部分截掉（防手改配置塞出超长数组）
+  const many = Array.from({ length: 50 }, (_, i) => `t${i}`)
+  cfg = patchConfig({ tabOrder: many })
+  assert.equal(cfg.tabOrder.length, 32)
+  // 非数组不写入（保持现值）；空数组 = 恢复默认顺序
+  cfg = patchConfig({ tabOrder: 'dev' })
+  assert.equal(cfg.tabOrder.length, 32, '非数组应保持现值')
+  cfg = patchConfig({ tabOrder: [] })
+  assert.deepEqual(cfg.tabOrder, [])
+})
+
+test('pinnedCards 归一化：与 tabOrder 同一套口径（去空 / 去重 / 上限 32 / 非数组不写）', () => {
+  clearCfg()
+  let cfg = patchConfig({ pinnedCards: ['models', '', '  ', 'notify', 'models', 5, null] })
+  assert.deepEqual(cfg.pinnedCards, ['models', 'notify'])
+  cfg = patchConfig({ pinnedCards: [' models ', '\tnotify\n'] })
+  assert.deepEqual(cfg.pinnedCards, ['models', 'notify'])
+  const many = Array.from({ length: 50 }, (_, i) => `c${i}`)
+  assert.equal(patchConfig({ pinnedCards: many }).pinnedCards.length, 32)
+  // 非数组不写入（保持现值）——与 tabOrder 同一条坑：传字符串曾被当成空数组清空
+  assert.equal(patchConfig({ pinnedCards: 'models' }).pinnedCards.length, 32)
+  assert.deepEqual(patchConfig({ pinnedCards: [] }).pinnedCards, [])
+  // 与 tabOrder 互不干扰：置顶不改分组顺序，分组顺序也不改置顶
+  cfg = patchConfig({ pinnedCards: ['usage'], tabOrder: ['help'] })
+  assert.deepEqual(cfg.pinnedCards, ['usage'])
+  assert.deepEqual(cfg.tabOrder, ['help'])
+})
+
+test('cardOrder 归一化：只留字符串 / 去空去重 / 空组丢弃 / 组数与组内长度都有上限', () => {
+  clearCfg()
+  let cfg = patchConfig({ cardOrder: { usage: ['models', '', '  ', 'notify', 'models', 5, null] } })
+  assert.deepEqual(cfg.cardOrder, { usage: ['models', 'notify'] })
+  // 空数组的组直接丢弃，不留「这组自定义过」的假记录
+  cfg = patchConfig({ cardOrder: { usage: [], look: ['pageVisual'] } })
+  assert.deepEqual(cfg.cardOrder, { look: ['pageVisual'] })
+  // 组内上限 64
+  const many = Array.from({ length: 80 }, (_, i) => `c${i}`)
+  assert.equal(patchConfig({ cardOrder: { usage: many } }).cardOrder.usage.length, 64)
+  // 组数上限 16
+  const tabs = {}
+  for (let i = 0; i < 30; i++) tabs[`t${i}`] = ['a']
+  assert.equal(Object.keys(patchConfig({ cardOrder: tabs }).cardOrder).length, 16)
+  // 非对象 / 数组不写入（保持现值），与 tabOrder / pinnedCards 同一条坑
+  cfg = patchConfig({ cardOrder: { usage: ['models'] } })
+  assert.deepEqual(patchConfig({ cardOrder: 'usage' }).cardOrder, { usage: ['models'] })
+  assert.deepEqual(patchConfig({ cardOrder: ['usage'] }).cardOrder, { usage: ['models'] })
+  assert.deepEqual(patchConfig({ cardOrder: {} }).cardOrder, {})
+})
+
+test('foldDefaults / foldRemember 归一化：值必须布尔、非布尔不写入、缺键按开启', () => {
+  clearCfg()
+  assert.equal(readConfig().foldRemember, true, 'foldRemember 默认开')
+  let cfg = patchConfig({ foldDefaults: { look: false, usage: 'no', '  ': true, models: true } })
+  assert.deepEqual(cfg.foldDefaults, { look: false, models: true }, '非布尔值与空键要剔掉')
+  // 非对象不写入（保持现值）
+  cfg = patchConfig({ foldDefaults: { look: false } })
+  assert.deepEqual(patchConfig({ foldDefaults: true }).foldDefaults, { look: false })
+  assert.deepEqual(patchConfig({ foldDefaults: [] }).foldDefaults, { look: false })
+  // foldRemember 只认布尔：字符串 / 数字都不翻面
+  assert.equal(patchConfig({ foldRemember: false }).foldRemember, false)
+  assert.equal(patchConfig({ foldRemember: 'false' }).foldRemember, false)
+  assert.equal(patchConfig({ foldRemember: true }).foldRemember, true)
 })
 
 test('patchConfig 写失败时抛错（不让调用方以为保存成功）', () => {

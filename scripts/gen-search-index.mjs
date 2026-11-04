@@ -55,6 +55,8 @@ function extractCardText(segment) {
   // 画廊类卡片（assetsSkins / assetsSounds 等）不用 h2，卡头是 <button class="fold-title">，
   // 内部还嵌着折叠箭头 span，一并剥掉
   for (const m of segment.matchAll(/<button class="fold-title[^"]*"[^>]*>([\s\S]*?)<\/button>/g)) raws.push(m[1])
+  // 卡内分区标题（h3.card-sub）：合并卡只剩一个卡头 h2，子块靠这些标题词保住检索命中
+  for (const m of segment.matchAll(/<h3[^>]*class="card-sub"[^>]*>([\s\S]*?)<\/h3>/g)) raws.push(m[1])
   for (const m of segment.matchAll(/<span class="label[^"]*">([\s\S]*?)<\/span>/g)) raws.push(m[1])
   return raws
     .map((s) => s
@@ -74,18 +76,22 @@ function extractCardText(segment) {
     .filter((s) => s.length >= 2)
 }
 
-// 按模板里的 <section ... data-search="key"> 切片，逐卡提取
+// 按模板里的 <section ... data-search="key"> 切片，逐卡提取。
+// 切片边界取**任意 <section> 起点**：合并卡这类「有卡头但不带 data-search」的容器也要截断，
+// 否则它的 h2 会漏进上一张卡的索引文本（表现：搜「待办」命中「DeepSeek 凭据」）。
 function extractAll(appSrc, extraSrc, fileLabel) {
   const src = appSrc + '\n' + extraSrc
   const noComment = src.replace(/<!--[\s\S]*?-->/g, '')
   const sections = []
-  for (const m of noComment.matchAll(/<section\b[^>]*data-search="([A-Za-z0-9_]+)"[^>]*>/g)) {
-    sections.push({ key: m[1], start: m.index + m[0].length })
+  for (const m of noComment.matchAll(/<section\b[^>]*>/g)) {
+    const km = m[0].match(/data-search="([A-Za-z0-9_]+)"/)
+    sections.push({ key: km ? km[1] : '', start: m.index + m[0].length, at: m.index })
   }
-  if (!sections.length) throw new Error(`${fileLabel}: 没匹配到任何 data-search 卡片锚点，解析规则可能已失效`)
+  if (!sections.some((s) => s.key)) throw new Error(`${fileLabel}: 没匹配到任何 data-search 卡片锚点，解析规则可能已失效`)
   const out = {}
   for (let i = 0; i < sections.length; i++) {
-    const seg = noComment.slice(sections[i].start, sections[i + 1] ? sections[i + 1].start : undefined)
+    if (!sections[i].key) continue
+    const seg = noComment.slice(sections[i].start, sections[i + 1] ? sections[i + 1].at : undefined)
     const texts = extractCardText(seg)
     if (!texts.length) throw new Error(`${fileLabel}: 卡「${sections[i].key}」没提取到任何文本，解析规则可疑`)
     out[sections[i].key] = texts

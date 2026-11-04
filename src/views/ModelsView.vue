@@ -274,9 +274,22 @@ async function refreshModelRows(ids?: string[]) {
   modelsFlash.msg = ''
   modelsFlash.err = false
   try {
-    await props.services.refreshModels?.(ids && ids.length ? ids : null, true)
+    const r = await props.services.refreshModels?.(ids && ids.length ? ids : null, true)
+    // 宿主逐条查询，单条失败只写进该模型自己的 error、整批照样 resolve；
+    // 所以「已刷新」不能只看没抛异常 —— 还得看回传的失败清单，否则用户看不出哪几个没查到。
+    if (!r) {
+      modelsFlash.err = true
+      modelsFlash.msg = '刷新失败：宿主 API 不可用'
+      return
+    }
     emit('reload')
-    modelsFlash.msg = '已刷新'
+    const errs = r.errors || []
+    if (!errs.length) {
+      modelsFlash.msg = '已刷新'
+      return
+    }
+    modelsFlash.err = true
+    modelsFlash.msg = errs.length + ' 个模型查询失败：' + errs.map((e) => e.name + '（' + e.error + '）').join('；')
   } catch (err: any) {
     modelsFlash.err = true
     modelsFlash.msg = '刷新失败：' + String(err?.message || err)
@@ -300,7 +313,7 @@ function removeModelRow(id: string) {
 
 // 整卡折叠：模型行 + 行内表单展开后很长，故给一层卡级折叠（沿 dsh 卡的 .card-toggle 范式），
 // 默认展开、可收起。收起态摘要播报「主显示模型 + 已配数量」，不让人以为折起来就看不到现状
-const cardFold = useFold('models', true)
+const cardFold = useFold('models', false)
 const cardSummary = computed(() => {
   const main = props.models.find((m) => m.id === props.modelsMainId)
   const mainName = main ? main.name : (props.modelsMainId || 'DeepSeek')
@@ -452,11 +465,13 @@ defineExpose({ closeModelForm })
               <input v-model="modelForm.resetPath" placeholder="usage.resetTime" />
             </label>
           </div>
-          <label v-if="modelForm.kind !== 'codex'" class="field row check">
-            <span class="label">低余额提醒 <em>（低于阈值时弹系统通知，每模型每天一次；额度类看剩余百分比）</em></span>
+          <!-- 低余额提醒只对「余额类」实现：额度类（百分比）与 Codex 既不弹系统通知，挂件也不会变红，
+               所以这两类不显示开关，免得用户设了阈值却永远等不到提醒 -->
+          <label v-if="modelForm.kind === 'balance'" class="field row check">
+            <span class="label">低余额提醒 <em>（余额低于阈值时弹系统通知，每模型每天一次）</em></span>
             <input type="checkbox" v-model="modelForm.lowAlertOn" />
           </label>
-          <label v-if="modelForm.kind !== 'codex' && modelForm.lowAlertOn" class="field row">
+          <label v-if="modelForm.kind === 'balance' && modelForm.lowAlertOn" class="field row">
             <span class="label">提醒阈值</span>
             <input class="num" type="number" min="0" step="any" v-model.number="modelForm.lowAlertAmount" />
             <span class="num-text">{{ modelForm.currency === 'USD' ? '美元' : '元' }}</span>

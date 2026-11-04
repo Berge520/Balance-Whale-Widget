@@ -1,5 +1,5 @@
 {
-  "version": "1.13.0",
+  "version": "1.14.0",
   "main": "index.html",
   "preload": "preload/services.js",
   "logo": "logo.png",
@@ -32,6 +32,35 @@
       "cmds": [
         "切换鼠标穿透",
         "鼠标穿透"
+      ]
+    },
+    {
+      "code": "whale-refresh",
+      "explain": "立即刷新 DeepSeek 余额（可绑定全局快捷键）",
+      "mainHide": true,
+      "cmds": [
+        "刷新余额",
+        "更新余额"
+      ]
+    },
+    {
+      "code": "whale-timer",
+      "explain": "开始/暂停计时器（可绑定全局快捷键）",
+      "mainHide": true,
+      "cmds": [
+        "计时器",
+        "番茄钟",
+        "开始计时",
+        "暂停计时"
+      ]
+    },
+    {
+      "code": "whale-focus",
+      "explain": "显示今日专注统计摘要（可绑定全局快捷键）",
+      "mainHide": true,
+      "cmds": [
+        "专注统计",
+        "今日专注"
       ]
     }
   ]

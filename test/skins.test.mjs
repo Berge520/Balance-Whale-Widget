@@ -503,4 +503,163 @@ test('removeSkins：空数组直接返回，不误清数据', () => {
   assert.equal(listSkins().items.length, 1)
 })
 
+// ── 共享角色图池：清单 + 按需单张（getSharedManifest / getSharedImage）──────
+// 口径变更（此前是 getBuiltinData 一次读完整池推给子窗）：真机那池有 39MB 原图 / 52MB base64，
+// 读盘 + base64 + 跨进程克隆全压在「打开挂件」的同步段里（≈230ms），并在两个进程各常驻一份。
+// 现在宿主只推清单（几百字节），页面抽到哪张再单独要那一张。于是钉四条：
+//  1. 清单一条图片字节都不读，载荷长度只与张数成正比、与体积无关；
+//  2. 清单顺序 = 画廊顺序里的 builtin 子集（randimg 的 imgs 下标 1 起算指向它，不能漂）；
+//  3. 单张只能按 id 取「官方可下载」的图：用户自建图既不在池里、也不许被子窗要走；
+//  4. 清单进缓存（随池子内容变化失效），单张**不**进缓存 —— 页面已有 LRU，宿主再存一份
+//     就是把「整池常驻」换个名字搬回来。
+
+// 一张够大的图，用来证明「清单没读本体」：读一次会明显计入计数
+const BIG = Buffer.concat([PNG, Buffer.alloc(4096, 7)])
+
+function countFs(method) {
+  const real = fs[method]
+  const box = { n: 0 }
+  fs[method] = function (...args) { box.n++; return real.apply(fs, args) }
+  box.restore = () => { fs[method] = real }
+  return box
+}
+
+test('getSharedManifest：只给元信息，一张图片本体都不读、载荷里不含 base64', () => {
+  reset()
+  importBuffer('DSniang2.webp', 'webp', BIG, null, 0, 'DSniang2', true)
+  importBuffer('DSniang3.webp', 'webp', BIG, null, 0, 'DSniang3', true)
+  const reads = countFs('readFileSync')
+  let manifest
+  try { manifest = skins.getSharedManifest() } finally { reads.restore() }
+  assert.equal(reads.n, 0, '清单不该读图片本体（整池读盘就是当年那 44ms + 52MB）')
+  // 新导入的项 unshift 到画廊最前，所以池子顺序是 [DSniang3, DSniang2]
+  assert.deepEqual(manifest.map((x) => x.id), ['DSniang3', 'DSniang2'])
+  assert.equal(manifest[0].ext, 'webp')
+  assert.equal(manifest[0].size, BIG.length, 'size 要带上：页面按字节预算决定预取与淘汰')
+  assert.ok(!JSON.stringify(manifest).includes('base64'), '清单里不许混进 data URL')
+})
+
+test('getSharedManifest：清单顺序就是画廊顺序的 builtin 子集（randimg 下标据此算）', () => {
+  reset()
+  const mine = importBuffer('mine.webp', 'webp', PNG, null)          // 用户自建：不进池
+  importBuffer('DSniang2.webp', 'webp', PNG, null, 0, 'DSniang2', true)
+  const s3 = importBuffer('DSniang3.webp', 'webp', PNG, null, 0, 'DSniang3', true)
+  assert.deepEqual(skins.getSharedManifest().map((x) => x.id), ['DSniang3', 'DSniang2'])
+  // 挪顺序 → 下标语义跟着变（设置页面板写的「1 = 池里第 1 张」必须与挂件抽的一致）
+  skins.moveSkin(s3.id, 'top')
+  assert.deepEqual(skins.getSharedManifest().map((x) => x.id), ['DSniang3', 'DSniang2'], '已在最前，顺序不动')
+  skins.moveSkin(mine.id, 'top')
+  assert.deepEqual(skins.getSharedManifest().map((x) => x.id), ['DSniang3', 'DSniang2'], '自建图进不进池，挪它不该改变池内相对顺序')
+})
+
+test('getSharedManifest：第二次调用走缓存，不再逐张 stat 文件', () => {
+  reset()
+  importBuffer('DSniang2.webp', 'webp', PNG, null, 0, 'DSniang2', true)
+  importBuffer('DSniang3.webp', 'webp', PNG, null, 0, 'DSniang3', true)
+  const first = skins.getSharedManifest()
+  assert.equal(first.length, 2)
+  const stats = countFs('statSync')
+  const reads = countFs('readFileSync')
+  let again
+  try { again = skins.getSharedManifest() } finally { stats.restore(); reads.restore() }
+  assert.deepEqual(again, first, '缓存命中时应返回同一份清单')
+  assert.equal(stats.n, 0, '清单已缓存，size 不必重新 stat')
+  assert.equal(reads.n, 0)
+})
+
+test('导入官方形象后 getSharedManifest 立刻反映新增（缓存必须失效）', () => {
+  reset()
+  importBuffer('DSniang2.webp', 'webp', PNG, null, 0, 'DSniang2', true)
+  assert.equal(skins.getSharedManifest().length, 1)
+  importBuffer('DSniang3.webp', 'webp', PNG, null, 0, 'DSniang3', true)
+  assert.equal(skins.getSharedManifest().length, 2, '刚下载的那张要马上进池，否则挂件抽不到')
+})
+
+test('删除形象后 getSharedManifest 立刻反映减少（缓存必须失效）', () => {
+  reset()
+  importBuffer('DSniang2.webp', 'webp', PNG, null, 0, 'DSniang2', true)
+  importBuffer('DSniang3.webp', 'webp', PNG, null, 0, 'DSniang3', true)
+  assert.equal(skins.getSharedManifest().length, 2)
+  skins.removeSkin('DSniang2')
+  assert.deepEqual(skins.getSharedManifest().map((x) => x.id), ['DSniang3'], '删掉的图不该还留在池里被抽到')
+})
+
+test('清除全部形象后 getSharedManifest 返回空池', () => {
+  reset()
+  importBuffer('DSniang2.webp', 'webp', PNG, null, 0, 'DSniang2', true)
+  assert.equal(skins.getSharedManifest().length, 1)
+  skins.clearAll()
+  assert.deepEqual(skins.getSharedManifest(), [])
+})
+
+// 回归：旧实现是 `fs.rmdirSync(dir)` + 空 catch —— 目录非空必抛 ENOTEMPTY，错误被吞，
+// 结果是「清除全部自定义形象」只清了「当前形象」元信息，图片文件全留在磁盘当孤儿
+// （用户以为删干净了，磁盘却一直涨）。这里直接盯文件系统，不看返回值。
+test('clearAll 真的删掉图片文件与目录（不只清元数据）', () => {
+  reset()
+  const a = importBuffer('a.webp', 'webp', PNG, null)
+  const b = importBuffer('b.png', 'png', PNG, null)
+  const dir = path.join(TMP, 'whale-skins')
+  assert.ok(fs.existsSync(path.join(dir, a.id + '.webp')), '前置：第一张文件已落盘')
+  assert.ok(fs.existsSync(path.join(dir, b.id + '.png')), '前置：第二张文件已落盘')
+  skins.clearAll()
+  assert.equal(fs.existsSync(path.join(dir, a.id + '.webp')), false, '第一张原图必须被删掉')
+  assert.equal(fs.existsSync(path.join(dir, b.id + '.png')), false, '第二张原图必须被删掉')
+  assert.equal(fs.existsSync(dir), false, '目录本身也必须递归删除（非空目录不能只 rmdir）')
+})
+
+test('getSharedImage：按 id 取到本体 data URL，与画廊里那张文件一致', () => {
+  reset()
+  importBuffer('DSniang2.webp', 'webp', BIG, null, 0, 'DSniang2', true)
+  const url = skins.getSharedImage('DSniang2')
+  assert.match(url, /^data:image\/webp;base64,/, '扩展名决定 MIME，页面 img.src 直接可用')
+  assert.equal(url.split(',')[1], BIG.toString('base64'))
+})
+
+test('getSharedImage：用户自建形象取不到（不在随机池里，也不许被子窗要走）', () => {
+  reset()
+  const mine = importBuffer('mine.webp', 'webp', BIG, null)
+  assert.ok(fs.existsSync(path.join(TMP, 'whale-skins', mine.id + '.webp')), '文件确实在，取不到是策略而非缺文件')
+  assert.equal(skins.getSharedImage(mine.id), '')
+})
+
+test('getSharedImage：未知 id / 脏 id 都回空串，不报错也不读池外的文件', () => {
+  reset()
+  importBuffer('DSniang2.webp', 'webp', BIG, null, 0, 'DSniang2', true)
+  assert.equal(skins.getSharedImage('no-such-id'), '')
+  // id 会拼进文件名，子窗传来的值一律先过字符集校验
+  assert.equal(skins.getSharedImage('../../settings'), '')
+  assert.equal(skins.getSharedImage('DSniang2/../../x'), '')
+  assert.equal(skins.getSharedImage(''), '')
+  assert.equal(skins.getSharedImage(undefined), '')
+  assert.equal(skins.getSharedImage({ id: 'DSniang2' }), '')
+})
+
+test('getSharedManifest：文件已经不在的那张不进清单（下标要指向真拿得到的图）', () => {
+  reset()
+  importBuffer('DSniang2.webp', 'webp', BIG, null, 0, 'DSniang2', true)
+  const ok = importBuffer('DSniang3.webp', 'webp', BIG, null, 0, 'DSniang3', true)
+  fs.unlinkSync(path.join(TMP, 'whale-skins', 'DSniang2.webp'))
+  assert.deepEqual(skins.getSharedManifest().map((x) => x.id), [ok.id],
+    '缺文件的项跳过 —— 与旧版整池推送「读不到就不进池」的口径一致')
+})
+
+test('getSharedImage：文件被用户手动清掉时回空串，并作废清单缓存（下次推送不再带这张死图）', () => {
+  reset()
+  importBuffer('DSniang2.webp', 'webp', BIG, null, 0, 'DSniang2', true)
+  assert.equal(skins.getSharedManifest().length, 1, '建清单时文件还在')
+  fs.unlinkSync(path.join(TMP, 'whale-skins', 'DSniang2.webp'))
+  assert.equal(skins.getSharedImage('DSniang2'), '')
+  assert.deepEqual(skins.getSharedManifest(), [], '要不到图说明清单过期了，重建时要把它剔掉')
+})
+
+test('getSharedImage：单张不进缓存（页面已有 LRU，宿主再存一份就是整池常驻换个名字）', () => {
+  reset()
+  importBuffer('DSniang2.webp', 'webp', BIG, null, 0, 'DSniang2', true)
+  assert.ok(skins.getSharedImage('DSniang2'))
+  const reads = countFs('readFileSync')
+  try { skins.getSharedImage('DSniang2') } finally { reads.restore() }
+  assert.equal(reads.n, 1, '第二次仍要现读：宿主侧不保留图片本体')
+})
+
 test.after(() => { fs.rmSync(TMP, { recursive: true, force: true }) })

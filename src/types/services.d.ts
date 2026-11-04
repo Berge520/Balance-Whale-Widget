@@ -67,9 +67,31 @@ export interface WhaleConfig {
   // 挂件形象：内置形象 id（见 SkinId）/ 'custom' 用户导入（图片复制进本地数据目录）
   skin: SkinId
   // 气泡配色主题（颜色走挂件页面 CSS 变量）
-  theme: 'default' | 'dark' | 'sakura'
+  theme: 'default' | 'dark' | 'sakura' | 'fantasy'
   // 界面深浅色（设置页与挂件面板共用）：auto 跟 uTools isDarkColors / 手动固定 light / dark
-  uiMode: 'auto' | 'light' | 'dark'
+  uiMode: 'auto' | 'light' | 'dark' | 'fantasy'
+  // 背景氛围（浅色 / 深色 / 未至之境都生效）：off 关闭 / deep 深海光晕 / aurora 极光 / stars 星海 / mist 薄雾 / polar 极夜 / warm 暖光 / video 鲸鱼娘视频壁纸（按需下载）/ custom 用户导入媒体
+  bgMode: 'off' | 'deep' | 'aurora' | 'stars' | 'mist' | 'polar' | 'warm' | 'video' | 'custom'
+  // 自定义背景媒体 id（media 库）；空 = 未选
+  bgMediaId: string
+  // 背景媒体调节（video / custom 生效）：遮罩 0–80%，模糊 0–20px，亮度 50–120%
+  bgScrim: number
+  bgBlur: number
+  bgBrightness: number
+  // 暗角强度 0–100
+  bgVignette: number
+  // 自定义媒体构图：cover 铺满裁切 / contain 完整显示；焦点 0–100；缩放 100–130%
+  bgFit: 'cover' | 'contain'
+  bgFocusX: number
+  bgFocusY: number
+  bgZoom: number
+  // 设置页启动片头：每次插件进程启动后首次打开设置页自动播一次；默认关闭，挂件不参与
+  bootIntroOn: boolean
+  // 片头来源：auto 跟随背景（有视频就用）/ media 指定片头视频 / css 纯 HUD
+  // 纯净播放：片头期间隐藏所有 Tab 与卡片，只留动画层
+  bootIntroClean: boolean
+  bootIntroSource: 'auto' | 'media' | 'css'
+  bootIntroMediaId: string
   // 按压气泡模型（上游「自定义泡泡」形态）：on 开启时挂件改走它；
   // 与顶层交互项（tapAdvance / bubbleDwell / dragLines）各管各，仅本模型生效时用
   bubble: WhaleBubble
@@ -110,6 +132,8 @@ export interface WhaleConfig {
   timerLongEvery: number
   // 计时结束后是否自动开始下一轮（专注→休息→专注…）
   timerAutoNext: boolean
+  // 挂件计时组快捷时长四档（分钟，每档 1–600，固定 4 个）：设置页可改，挂件 chips 直接读
+  timerPresets: number[]
   // 进入插件时显示哪些窗口：both=设置窗+挂件；widget=只显示挂件；settings=只显示设置窗
   enterMode: 'both' | 'widget' | 'settings'
   // 首次运行引导是否已结束（保存凭据或点「跳过」都置 true），之后不再弹
@@ -117,6 +141,9 @@ export interface WhaleConfig {
   // DeepSeek Harness（dsh，开发者）：自定义 Node.js 目录（''=自动探测）/ 退出后是否保留进程
   dshNodeDir: string
   dshKeepAlive: boolean
+  // 以管理员身份启动 dsh（仅 Windows 生效）。开启后每次启动都会弹 UAC：
+  // 运行中的进程无法就地提权，只能 runas 拉起新实例再结束旧实例（见 dsh.js 的 startMode）
+  dshElevated: boolean
   // dsh Web UI 监听端口（默认 3080 = DSH_PORT_DEFAULT）。落在系统动态保留段被占用时可改，
   // 宿主把它透传给 `dsh web --port <n>`；改动需重启 dsh 才生效
   dshPort: number
@@ -158,6 +185,8 @@ export interface WhaleConfig {
   // 通知渠道：系统通知（默认开）+ 邮件通知（默认关，需先在「提醒与通知」卡里配好 SMTP）
   notifySystemOn: boolean
   notifyMailOn: boolean
+  // 调试工具总开关（默认关）：只有「开发者」Tab 里可见，开启后才显示到点提醒演练与旧数据注入入口
+  debugTools: boolean
   // 邮件通知的非敏感字段（发件人/收件人/发件人显示名/主题前缀）；
   // SMTP 服务器、账号与授权码属于凭据，走 saveMailSecrets 进加密存储，不在这里
   mailFrom: string
@@ -170,6 +199,16 @@ export interface WhaleConfig {
   todoOn: boolean
   // 每日专注目标（轮数，0 = 未设置/关闭，1–99 有效）。达成时弹一次提醒
   focusGoal: number
+  // 下班倒计时（v1.14.0）：独立可开关的挂件展示形态。offworkDays 用 Date.getDay() 编号
+  // （0 = 周日 … 6 = 周六），默认 [1,2,3,4,5]；跨日班由「下班时间 <= 上班时间」判定
+  offworkOn: boolean
+  offworkStart: string
+  offworkEnd: string
+  offworkDays: number[]
+  offworkShowSec: boolean
+  offworkWeekendOn: boolean
+  offworkPaydayOn: boolean
+  offworkPaydayDay: number
 }
 
 // 按压气泡模型（上游「自定义泡泡」）：v 固定 1（结构版本）。items 是点击序列（首次 + 再次…），
@@ -394,6 +433,10 @@ export interface CodexSummaryResult {
   home?: string
   sessions?: number
   changed?: number
+  // 超大（> 32MB）被跳过的会话文件数
+  skipped?: number
+  // 本轮预算（文件数 / 字节数）用尽，剩余文件下一轮补扫
+  deferred?: boolean
   todayTokens?: number
   monthTokens?: number
   totalTokens?: number
@@ -617,6 +660,9 @@ export interface DshPatchItem {
   line: number
   // 条目下除 disabled 外还有内容（config 等）
   hasConfig: boolean
+  // disabled 是 `!!js` 表达式而非字面量：状态由 dsh 在组合时求值，
+  // 市场不会写字面量覆盖它（点了「启用」也可能不变化，界面据此解释）
+  expression?: boolean
 }
 
 export interface DshPatchListResult {
@@ -645,6 +691,10 @@ export interface DshPatchToggleResult {
   backedUp?: boolean
   snapshot?: string
   needsRestart?: boolean
+  // 表达式段的启用被保留（市场不覆盖 `!!js`）：changed 可能为 false，或仅为清理字面量段
+  expression?: boolean
+  // 面向用户的说明（目前只在 expression 场景给出，界面应优先展示它）
+  message?: string
 }
 
 // dsh 配置快照（E1 的 whale-dsh-backup/<时间戳>/）
@@ -814,6 +864,8 @@ export interface DshIsolateCandidate {
   line: number
   // 条目下除 disabled 外还有 config 等子块
   hasConfig: boolean
+  // disabled 由 `!!js` 表达式决定（不是字面量）
+  expression?: boolean
   // 'patched' | 'third' | 'core' —— 分组用的档位（见 dsh-isolate.tierOfBundle）。
   // 'patched' = 已在用户 patch 里 / 'third' = 第三方插件 / 'core' = dsh 官方框架节点。
   // ⚠️ 只用于界面分组与默认折叠，**不是**权限或安全边界
@@ -1091,6 +1143,19 @@ export interface DshMarketUninstallResult {
   message?: string
   snapshot?: string
   needsRestart?: boolean
+  // 卸载（remove: true）成功后顺带清理的 patch 残留条目结论。
+  // ⚠️ 清理失败**不代表卸载失败** —— 包确实卸掉了，回滚只会让用户把刚删的插件装回来，
+  //    所以失败只在这里如实回报（ok:false + error），由界面提示「可手动清理」。
+  patchCleanup?: DshMarketPatchCleanup
+}
+
+export interface DshMarketPatchCleanup {
+  ok: boolean
+  // 删掉的条目段数（同 id 多段时算多段）
+  removed: number
+  // 本次尝试清理的条目 id
+  ids: string[]
+  error?: string
 }
 
 // 一条「已装 vs 目录」的版本比对结果。
@@ -1112,6 +1177,11 @@ export interface DshMarketUpdateEntry {
   state: 'update' | 'current' | 'unknown'
   // 判定依据：'realized' = 比实装版本；'range' = 退回比声明范围；'none' = 无法比对
   basis: 'realized' | 'range' | 'none'
+  // true = 它比目录版本旧，但只是 profile 里的**普通依赖**（不是 bundle）——
+  // 市场的更新通道装不了它，所以宿主把 state 打回 'current'（不报可更新），
+  // 同时保留 latest / installed 供界面说明「有新版本，但市场更新不了」。
+  // （对齐上游 dsh-market #793；三条证据任一成立即算插件，不确定一律算插件）
+  notAPlugin?: boolean
 }
 
 export interface DshMarketCheckUpdatesResult {
@@ -1122,6 +1192,8 @@ export interface DshMarketCheckUpdatesResult {
   entries: DshMarketUpdateEntry[]
   updates: number
   unknown: number
+  // 有新版但只是普通依赖（不是插件）的条数 —— 它们**不计入 updates**，见 DshMarketUpdateEntry.notAPlugin
+  notAPlugin?: number
   checked: number
 }
 
@@ -1187,6 +1259,18 @@ export interface TodoItem {
   est: number
   // 实际完成轮数（挂件专注结束时自动 +1）
   rounds: number
+  // 这条待办自己的计时方式：'down' 倒计时 / 'up' 正计时 / '' 不计时（挂件点「开始」按它启动）
+  tm: 'down' | 'up' | ''
+  // 倒计时分钟数（1–600；tm 不是 'down' 时无意义）
+  mins: number
+  remindOn: boolean
+  remindKind: 'once' | 'daily' | 'weekdays' | 'weekly'
+  remindAt: number
+  remindDow: number
+  // 两套提醒幂等位：remindedFor = 挂件气泡已展示到的到点时刻；
+  // notifiedFor = 系统通知/邮件已处理到的到点时刻（老数据缺省时按 remindedFor 回填）
+  remindedFor: number
+  notifiedFor: number
 }
 export interface TodoState {
   items: TodoItem[]
@@ -1224,6 +1308,33 @@ export interface FocusStatsResult {
   streak: number
   // 实际统计窗口天数（1..366）
   days: number
+  // 今天每条待办的专注轮次：{ [todoId]: 轮数 }
+  todayByTodo: Record<string, number>
+}
+
+// 一次完成的专注会话（「专注记录」列表用）
+export interface FocusSession {
+  // 明细主键（宿主生成，同 id 去重 —— 页面重复上报同一轮不会记两条）
+  id: string
+  // 会话归属的本地日期（YYYY-MM-DD），跨零点时与 t 的 UTC 日期可能不同
+  d: string
+  // 开始时刻（毫秒）
+  s: number
+  // 结束时刻（毫秒）：走完是预定终点，中途放弃是按下按钮那一刻
+  t: number
+  // 这一段投入的分钟数
+  m: number
+  // 计时方式：down 倒计时 / up 正计时 / at 定时
+  k: 'down' | 'up' | 'at'
+  // 休息轮（两轮之间的缓冲）：1 = 是
+  b?: number
+  // 中途放弃：1 = 是
+  a?: number
+  // 算不算「一轮」：宿主按唯一口径派生（倒计时走完、非休息、非放弃），页面只读不自己数
+  round?: number
+  // 完成时挂在哪个待办上（任务删除后仍保留当时快照）
+  todoId?: string
+  todoText?: string
 }
 
 export interface UsageHistoryResult {
@@ -1421,7 +1532,7 @@ export interface SharedPackDownloadResult {
 
 // 素材包下载进度快照（三条资源卡片共用一条只读通道，见宿主 lib/download-progress.js）
 export interface DownloadProgress {
-  // 'skins' | 'shared-skins' | 'shared-sounds'
+  // 'skins' | 'shared-skins' | 'shared-sounds' | 'bg-video'
   pack: string
   // connect / download / verify / install / done / failed
   phase: string
@@ -1436,6 +1547,82 @@ export interface DownloadProgress {
   bytes: number
   // 最后一次更新的时间戳（读侧据此忽略过期的终态）
   at: number
+}
+
+// 「未至之境」视频壁纸状态（CC BY-NC-SA 4.0，按需下载，仅设置页使用）
+export interface BgVideoStatus {
+  ok: boolean
+  installed: boolean
+  // 本地文件字节数（未下载为 0）；size 是预期体积
+  bytes: number
+  size: number
+  // 还留着上一版 2.58s 短片段（whale-blink-loop.mp4）：UI 据此提示「更新为完整版」
+  legacy: boolean
+  license: string
+  author: string
+  source: string
+  licenseUrl: string
+  error?: string
+}
+
+export interface BgVideoData {
+  ok: boolean
+  dataUrl?: string
+  bytes?: number
+  error?: string
+}
+
+export interface BgVideoDownloadResult {
+  ok: boolean
+  skipped?: boolean
+  bytes?: number
+  source?: string
+  error?: string
+}
+
+// 背景 / 片头媒体库（用户导入的图片 / 视频）
+export interface MediaItem {
+  id: string
+  name: string
+  ext: string
+  type: 'image' | 'video'
+  size: number
+  at: number
+  // 图片缩略图 data URL（设置页 canvas 生成）；视频为空
+  thumb?: string
+}
+
+export interface MediaList {
+  ok: boolean
+  items: MediaItem[]
+  error?: string
+}
+
+export interface MediaPickResult {
+  ok: boolean
+  canceled?: boolean
+  error?: string
+  name?: string
+  ext?: string
+  type?: 'image' | 'video'
+  size?: number
+  filePath?: string
+  // 图片预览用；视频不返回内容
+  dataUrl?: string
+}
+
+export interface MediaImportResult {
+  ok: boolean
+  item?: MediaItem
+  error?: string
+}
+
+export interface MediaDataResult {
+  ok: boolean
+  dataUrl?: string
+  type?: 'image' | 'video'
+  size?: number
+  error?: string
 }
 
 export interface SkinImportResult {
@@ -1590,6 +1777,11 @@ export interface DshStatus {
   exitCode: number | null
   exitAt: number
   keepAlive: boolean
+  // 以管理员身份启动：配置值 / 本次运行是否提权 / 宿主是否已是管理员 / 正在等 UAC 结果
+  elevated: boolean
+  runElevated: boolean
+  admin: boolean
+  elevating: boolean
   url: string
   port: number
   // 实际生效的 Node.js 目录与版本
@@ -1993,6 +2185,8 @@ export interface WhaleServices {
   getVersion(): string
   checkUpdate(force?: boolean): Promise<UpdateCheckResult>
   openExternal(url: string): boolean
+  // 打开系统「动画效果 / 减少动态效果」设置页（Windows 10 轻松使用→显示 / Win11 辅助功能→视觉效果）
+  openSystemAnimationSettings(): { ok: boolean; uri?: string; error?: string }
   // 让 uTools 底座跳「插件应用市场」并搜索关键词；返回 false 表示底座不支持，需调用方兜底
   redirectToMarket(keyword: string): boolean
   // __live: 拖动滑块中的实时预览，只改窗口几何，不写存储
@@ -2082,6 +2276,27 @@ export interface WhaleServices {
   // 素材包下载进度快照：只读内存、零副作用，供设置页下载期间 1Hz 轮询。
   // 返回 null 表示从未下载过；下载结束后快照仍保留终态一小段时间（含命中源与体积）
   downloadProgress(): DownloadProgress | null
+  // —— 「未至之境」视频壁纸（CC BY-NC-SA 4.0，用户主动下载，不随包分发） ——
+  bgVideoStatus(): BgVideoStatus
+  // 下载并校验（jsDelivr / ghfast / raw 候选链），进度走 downloadProgress（pack='bg-video'）
+  bgVideoDownload(): Promise<BgVideoDownloadResult>
+  // 设置页背景层用：读成 data URL（渲染进程转 blob），挂件不读
+  bgVideoData(): BgVideoData
+  bgVideoRemove(): { ok: boolean; error?: string }
+  // 启动片头消费式标记：每次插件进程启动后第一次调用返回 true，之后 false。
+  // 「预览片头」不调用它，用户主动重看不受影响。
+  bootIntroConsume(): boolean
+  // 本次插件进程是否已经自动播过片头（只读；预览不改变它）
+  bootIntroHasPlayed(): boolean
+  // —— 背景 / 片头媒体库（用户导入的图片 / 视频，文件落 userData/whale-media） ——
+  mediaList(): MediaList
+  mediaPick(kind: 'image' | 'video'): MediaPickResult
+  mediaImport(opts: { filePath: string; name?: string; thumb?: string }): MediaImportResult
+  // 删除；若正被背景/片头引用，宿主会把对应配置退回安全默认值并广播
+  mediaRemove(id: string): { ok: boolean; configChanged?: boolean; error?: string }
+  // 设置页背景层 / 片头用：data URL；视频按需读一次
+  mediaData(id: string): MediaDataResult
+  mediaClearAll(): { ok: boolean; configChanged?: boolean; error?: string }
   // 设置共享库某段「参加哪些槽位的播放」（file 是共享库里那段的文件名；传空数组 = 从所有槽位摘掉）。
   // 取代旧的「选用到某槽位」：不再搬副本，改在池里那段上记槽位，故同一段可同时属于多个槽位
   setSharedRoles(file: string, roles: SoundRole[]): { ok: boolean; file?: string; roles?: SoundRole[]; error?: string }
@@ -2103,8 +2318,11 @@ export interface WhaleServices {
   assetsApply(opts: { skins?: boolean; sounds?: boolean; bubbles?: boolean }): AssetsApplyResult
   // 放弃本次选择
   assetsCancel(): { ok: boolean }
-  // Codex 本地会话统计：读 ~/.codex/sessions 下的 rollout JSONL，按天/模型聚合
-  codexSummary(): CodexSummaryResult
+  // Codex 本地会话统计：读 ~/.codex/sessions 下的 rollout JSONL，按天/模型聚合。
+  // 宿主侧是异步扫描（切片让出事件循环），此入口 await 一次真实扫描（「刷新」按钮用）
+  codexSummary(): Promise<CodexSummaryResult>
+  // 同步取最近一次快照（可能过期 / 首帧为 null，且会顺手在后台补一次，绝不阻塞）
+  codexSummaryCached(): CodexSummaryResult | null
   clearCodexCache(): void
   // dsh 本地用量统计：读 $DSH_HOME（默认 ~/.dsh）下 dsh-usage 的账本与会话投影缓存，按天/模型聚合
   dshUsageSummary(): DshUsageResult
@@ -2234,6 +2452,8 @@ export interface WhaleServices {
   resetWidgetPosition(): WidgetResult
   copyText(text: string): boolean
   redirectHotKeySetting(cmdLabel?: string): boolean
+  // 读取指令当前绑定的全局快捷键（uTools 8.0 起；未绑定或旧版本返回空串）
+  getCmdHotKey(cmdLabel?: string): string
   isWidgetVisible(): boolean
   // 试播按压气泡：把队列整份发给挂件真弹一次（只发不落盘，挂件那边会存引用，
   // 故调用方需先深拷贝）。items 经宿主 normBubble 归一化与截断；挂件未显示 / 队列为空时 ok:false
@@ -2247,14 +2467,27 @@ export interface WhaleServices {
   todoRename(id: string, text: string): TodoMutateResult
   todoSetDone(id: string, done: boolean): TodoMutateResult
   todoRemove(id: string): TodoMutateResult
+  // 撤回最近一次 todoRemove：宿主只保留最近删除的一条内存快照（原位置 / 全部字段 / 是否专注目标）。
+  // 过期后（又删了一条 / 插件重启）返回 ok:false，error 给用户看的说明
+  todoUndoRemove(id: string): TodoMutateResult
   // 清掉全部已完成条目（专注目标若指向已完成条目会一并清空）
   todoClearDone(): TodoMutateResult
   // 设为 / 取消当前专注目标（id 传空串 = 直接取消；同 id 再点也等于取消）
   todoFocus(id: string): TodoMutateResult
   // 设置待办条目的预估番茄轮数（est）：0 = 未设置，1–99 有效
   todoSetEst(id: string, est: number): TodoMutateResult
+  // 设置待办条目自己的计时方式与倒计时分钟数（挂件点「开始」按它启动）
+  todoSetTimer(id: string, tm: 'down' | 'up' | '', mins: number): TodoMutateResult
+  todoSetDue(id: string, remind: { remindOn: boolean; remindKind: 'once' | 'daily' | 'weekdays' | 'weekly'; remindAt: number; remindDow: number }): TodoMutateResult
+  // 调试工具（config.debugTools 打开后才生效；UI 只在该开关下渲染入口）：
+  // 立即对指定条目走一次「到点投递」（通知 + 气泡，不写幂等位）
+  debugTodoDue(id: string): { ok: boolean; error?: string; todo?: TodoState; id?: string; dueAt?: number }
+  // 注入旧数据：remindedFor/notifiedFor=0 的重复提醒 + pinnedCards 含 focus 与 timer + 幽灵媒体项
+  debugInjectLegacy(): { ok: boolean; error?: string; todo?: TodoState; todoId?: string; ghostId?: string }
   // 专注统计：series 只覆盖最近 days 天（默认 7），total 与图上柱对得上
   focusStats(days?: number): FocusStatsResult
+  // 最近 days 天（默认 7）的专注会话明细，按时间倒序
+  focusSessions(days?: number): FocusSession[]
   // 订阅待办变更（挂件勾选 / 本页写操作都会触发），回调带整份清单；返回退订函数
   onTodoChange(cb: (todo: TodoState) => void): () => void
   // 订阅专注统计变更（无载荷，收到后按当前窗口重算）；返回退订函数
@@ -2266,7 +2499,7 @@ export interface WhaleServices {
   openDir(dir: string): { ok: boolean; path: string }
   // 素材落盘目录（形象 / 音效 / 气泡各一个）：设置页「资源」页展示位置并提供「打开」按钮。
   // 路径由宿主拼（只有它知道 userData 在哪），设置页只展示、不自己拼
-  dataDirs(): { skins: string; sounds: string; bubbles: string }
+  dataDirs(): { skins: string; sounds: string; bubbles: string; media: string }
   // DeepSeek Harness（dsh）：状态与 启动/重启/结束/更新/打开页面
   dshStatus(): DshStatus
   // 轻量进度（只回命令行与日志尾部，不探端口）。安装/更新这类长跑操作期间前端 1Hz 轮询它
@@ -2357,7 +2590,9 @@ export interface WhaleServices {
   // 用给定条目直接验证（不落库）：key 省略时取该模型已保存的密钥
   testModel(model: Partial<WhaleModel>, key?: string): Promise<ModelBalanceResult>
   // 刷新余额/额度（ids 省略 = 全部；force=false 时跳过刚拉过的）
-  refreshModels(ids?: string[] | null, force?: boolean): Promise<{ ok: boolean }>
+  // errors = 本轮查询失败的模型清单：宿主逐条查询，单条失败只记进该模型的 error、整批仍 resolve，
+  // 所以「已刷新」不能只看没抛异常，还要看这份清单
+  refreshModels(ids?: string[] | null, force?: boolean): Promise<{ ok: boolean; errors?: { id: string; name: string; error: string }[] }>
 }
 
 declare global {

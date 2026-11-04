@@ -1,5 +1,5 @@
 <script lang="ts" setup>
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import {
   BUBBLE_IMG_SCALE_MAX, BUBBLE_LINES_MAX, BUBBLE_LIB_MAX,
   BUBBLE_MOD_TYPES, BUBBLE_PRESET_COLORS, BUBBLE_QUICK_MODS, BUBBLE_ROW_MAX,
@@ -236,6 +236,59 @@ function boolPatch(ri: number, mi: number, key: string, e: Event) {
   patchMod(ri, mi, { [key]: on ? true : undefined })
 }
 
+// —— 内容字段（文本 / 链接地址 / 显示文字）——
+// 这三处与样式字段不同：宿主 normBubbleMod 对空 text / 空 url 是**整条模块丢弃**（空模块渲染
+// 出来就是个空泡）。若清空就写进 rows 再回抛，回填后模块从 rows 里消失、输入框跟着被销毁 ——
+// 用户只是想把旧内容删掉重打，却在敲第一个字符前就丢了输入框。
+// 故空值**不写进 rows、也不回抛**：只让输入框自己空着，停手 250ms 仍为空才把输入框还原成上一次
+// 的内容并提示。这样中间的空态既不进本地草稿也不进宿主，不会触发模块被丢。
+// 「显示文字」允许为空（渲染侧回落成链接本身），走 allowEmpty 分支照常回抛。
+const EMPTY_MS = 250
+const lastGood = new Map<string, string>()
+let emptyTimer: number | undefined
+let emptyPending: { el: HTMLInputElement; id: string } | null = null
+
+function restoreEmpty() {
+  if (emptyTimer !== undefined) { window.clearTimeout(emptyTimer); emptyTimer = undefined }
+  const p = emptyPending
+  emptyPending = null
+  if (!p) return
+  // 停手期间输入框已经被别处回填（或已随面板卸载）就不再插手
+  if (!p.el.isConnected || p.el.value.trim()) return
+  const good = lastGood.get(p.id)
+  if (!good) return
+  p.el.value = good
+  say('内容不能为空，已恢复上一次的内容', true)
+}
+
+function contentPatch(ri: number, mi: number, key: string, e: Event, allowEmpty = false) {
+  const el = e.target as HTMLInputElement
+  const v = String(el.value)
+  const id = ri + ':' + mi + ':' + key
+  // 基线：第一次动这个字段时 rows 里还是上一次的好值（emptyMod 保证新建模块自带非空默认）
+  if (!lastGood.has(id)) {
+    const cur = String(rows.value[ri]?.[mi]?.[key] ?? '')
+    if (cur.trim()) lastGood.set(id, cur)
+  }
+  if (v.trim()) lastGood.set(id, v)
+  if (!v.trim() && !allowEmpty) {
+    // 空态只停在输入框里：rows 保持上一次的内容，宿主那边模块不会消失
+    emptyPending = { el, id }
+    if (emptyTimer !== undefined) window.clearTimeout(emptyTimer)
+    emptyTimer = window.setTimeout(() => { restoreEmpty() }, EMPTY_MS)
+    return
+  }
+  if (emptyTimer !== undefined) { window.clearTimeout(emptyTimer); emptyTimer = undefined }
+  emptyPending = null
+  if (v.trim()) flash.msg = ''
+  push(setModule(rows.value, ri, mi, { [key]: v }))
+}
+
+onBeforeUnmount(() => {
+  if (emptyTimer !== undefined) { window.clearTimeout(emptyTimer); emptyTimer = undefined }
+  emptyPending = null
+})
+
 // —— random 模块的句池（lines）编辑 ——
 // 用换行分隔的多行文本最省事：每行一句，空行丢弃，超上限截断
 function linesText(m: any): string {
@@ -424,12 +477,16 @@ function previewModPick(m: any): Record<string, unknown> | null {
   return o
 }
 // 峰谷模块的动态配色：渲染器不知道该取峰还是谷，这里固定按「峰」态预览（可见性最好）
+// 底色跑马灯 peakBgRgb 必须一起传：默认模板把峰态做成「白字压 rouge 底」，
+// 漏传就只有白字没有底 —— 预览里整个模块隐形（真机不隐形，浮窗 bubbleModStyle 传了它，
+// 两边不一致会让用户以为真机也是这样）。改这里须与 floating-page.js 的 bubbleModStyle 对齐
 function previewModStyle(m: any): Record<string, string> | null {
   if (m?.type !== 'peak') return null
   const o: Record<string, string> = {}
   if (m.peakColor) o.color = m.peakColor
   if (m.peakRgb) o.rgb = m.peakRgb
   if (m.peakBg) o.bg = m.peakBg
+  if (m.peakBgRgb) o.bgRgb = m.peakBgRgb
   return o
 }
 
@@ -525,18 +582,18 @@ const HELP: Record<string, string> = {
               <label v-if="m.type === 'text'" class="bmp-f">
                 <span>文本</span>
                 <input type="text" :value="m.text" :maxlength="BUBBLE_TEXT_MAX"
-                       @input="textPatch(ri, mi, 'text', $event, true)" />
+                       @input="contentPatch(ri, mi, 'text', $event)" />
               </label>
 
               <label v-else-if="m.type === 'link'" class="bmp-f">
                 <span>链接地址</span>
                 <input type="text" :value="m.url" placeholder="https://…"
-                       @input="textPatch(ri, mi, 'url', $event, true)" />
+                       @input="contentPatch(ri, mi, 'url', $event)" />
               </label>
               <label v-if="m.type === 'link'" class="bmp-f">
                 <span>显示文字</span>
                 <input type="text" :value="m.text" placeholder="留空则显示链接本身"
-                       @input="textPatch(ri, mi, 'text', $event, true)" />
+                       @input="contentPatch(ri, mi, 'text', $event, true)" />
               </label>
 
               <label v-else-if="m.type === 'random'" class="bmp-f bmp-f-col">
@@ -796,7 +853,7 @@ const HELP: Record<string, string> = {
         <div class="bmp-add-head">
           <span class="bmp-add-label">新起一行加模块：</span>
           <button class="utils-btn utils-outline utils-xs" type="button"
-                  @click="libOpen = !libOpen">模块库（{{ lib.length }} / {{ BUBBLE_LIB_MAX }}）</button>
+                  :aria-expanded="libOpen" @click="libOpen = !libOpen">模块库（{{ lib.length }} / {{ BUBBLE_LIB_MAX }}）</button>
         </div>
         <div class="bmp-quick">
           <button v-for="q in BUBBLE_QUICK_MODS" :key="q.type" class="utils-btn utils-secondary utils-xs"

@@ -4,7 +4,7 @@
  *  - 导出：把「挂件设置 / 账本 / 窗口位置 / 计时 / 待办与专注统计」打包成一个 JSON 文件。
  *  - 气泡图素材（whale:bubbles 的图片文件）：默认**不导出**（二进制会让 JSON 备份膨胀到几十 MB），
  *    勾选后才以 base64 内嵌进 JSON —— 给「不想再单独导一次素材包」的用户一个一次带走的口子。
- *  - 凭据（API Key / 平台 Token）默认**不导出**；勾选后必须设密码，用 scrypt 派生密钥 + AES-256-GCM
+ *  - 凭据（API Key / 平台 Token / 各模型密钥 / 邮件 SMTP 凭据）默认**不导出**；勾选后必须设密码，用 scrypt 派生密钥 + AES-256-GCM
  *    加密后才写入文件（文件里没有明文，密码不落盘，忘记密码就无法解密）。
  *  - 导入：先解析出预览（导出时间 / 插件版本 / 包含项），由设置页勾选要恢复的项，再按「同名覆盖」写入。
  *    「按压气泡」的文案 / 队列在 config.bubble 里，跟着「挂件设置」一起进出；气泡图配图走本文件的 bubbles 项。
@@ -102,7 +102,8 @@ function exportBackup(opts) {
   if (todoItems.length) data.todo = todoSnap
   const focusSnap = readFocus()
   const focusDays = Object.keys(focusSnap.days || {}).length
-  if (focusDays) data.focus = focusSnap
+  const focusSessions = (focusSnap.sessions || []).length
+  if (focusDays || focusSessions) data.focus = focusSnap
   // 气泡图配图：可选带上（base64 内嵌 JSON）。一张都读不出来时按「没带」处理，不让备份里留个空数组
   let bubbleCount = 0
   let bubbleBytes = 0
@@ -195,8 +196,12 @@ function pickBackup() {
       bubbles: Array.isArray(d.bubbles) && d.bubbles.length > 0,
       // 与导出侧对称：空清单 / 空统计不算「有」，避免用户勾了一项却只是把现有数据清空
       todo: !!d.todo && typeof d.todo === 'object' && Array.isArray(d.todo.items) && d.todo.items.length > 0,
-      focus: !!d.focus && typeof d.focus === 'object' && d.focus.days && typeof d.focus.days === 'object'
-        && Object.keys(d.focus.days).length > 0,
+      // 与导出侧对称：空清单 / 空统计不算「有」，避免用户勾了一项却只是把现有数据清空。
+      // 专注统计天表与会话明细任一非空都算有（只留明细的老数据也要能恢复）
+      focus: !!d.focus && typeof d.focus === 'object' && (
+        (!!d.focus.days && typeof d.focus.days === 'object' && Object.keys(d.focus.days).length > 0)
+        || (Array.isArray(d.focus.sessions) && d.focus.sessions.length > 0)
+      ),
       secrets: !!(d.secretsEnc && typeof d.secretsEnc === 'object' && d.secretsEnc.data),
     },
   }
@@ -325,11 +330,14 @@ function applyBackup(opts) {
   }
   if (want('focus')) {
     const f = d.focus
-    if (!f || typeof f !== 'object' || !f.days || typeof f.days !== 'object') skipped.push('focus')
+    const hasDays = !!f && typeof f === 'object' && !!f.days && typeof f.days === 'object'
+    const hasSessions = !!f && typeof f === 'object' && Array.isArray(f.sessions) && f.sessions.length > 0
+    if (!hasDays && !hasSessions) skipped.push('focus')
     else {
       try {
-        // 同上：readFocus 会按日期键与数值做归一，这里只判形状
-        if (writeFocus({ days: f.days })) applied.push('focus')
+        // 同上：writeFocus 会过一遍 focus.withDerived —— 会话按形状清洗、天表按会话重新派生，
+        // 这里只判形状。会话明细必须一起写回：只恢复按天汇总的话，「专注记录」列表会凭空变空
+        if (writeFocus({ days: hasDays ? f.days : {}, sessions: hasSessions ? f.sessions : [] })) applied.push('focus')
         else fail('专注统计')
       } catch (err) { fail('专注统计', errMsg(err)) }
     }

@@ -18,7 +18,7 @@ import SoundRow from '../components/SoundRow.vue'
 import DownloadBox from '../components/DownloadBox.vue'
 import type {
   AssetsApplyResult, AssetsExportResult, AssetsPreviewResult, BubbleMeta, DownloadProgress,
-  SharedSkinList, SharedSoundItem, SharedSoundList, SkinGallery, SkinMeta, SkinPackList,
+  MediaItem, SharedSkinList, SharedSoundItem, SharedSoundList, SkinGallery, SkinMeta, SkinPackList,
   SoundMeta, SoundRole, AlertRole, WhaleServices,
 } from '../types/services'
 
@@ -62,6 +62,12 @@ const props = defineProps<{
   legacyBuiltinSkins: string[]
   // 共享角色的 id + 展示名（清单里没 name，靠这份常量把 id 翻成中文名）
   sharedSkinPackSkins: Array<{ id: string; name: string }>
+  // 置顶卡 key 列表（来自父级 cfg.pinnedCards）：本组 4 张卡的置顶标记只能在这里挂 class ——
+  // 它们的根节点在本组件模板里，父级 :class 透传只会落到外层容器，够不到单张卡。
+  // 位置搬运由父级 syncPinned() 在 DOM 层统一做（在这 4 张卡仍是 .pin-scope 的祖先下）
+  pinned: string[]
+  // 清除数据 / 概览清空会从外部改动媒体库；父级自增此值让本卡重拉列表
+  mediaRefreshTick: number
 }>()
 
 const emit = defineEmits<{
@@ -91,6 +97,8 @@ const emit = defineEmits<{
   (e: 'remove-bubble', id: string): void
   (e: 'clear-unused'): void
   (e: 'clear-assets'): void
+  // 背景/片头媒体导入或删除：父级据此重读当前自定义背景（宿主删除当前媒体时已回退配置）
+  (e: 'media-changed'): void
   // 皮肤挑选态 / 操作说明折叠 / 内置音色试听：父级持有共享状态
   (e: 'clear-picked'): void
   (e: 'toggle-skin-hint'): void
@@ -99,6 +107,11 @@ const emit = defineEmits<{
   (e: 'refresh-skin'): void
   (e: 'refresh-bubbles'): void
 }>()
+
+// 卡片置顶标记：与父级 cardCls() 同口径（只负责竖条样式，位置由父级的 syncPinned 搬）
+function pinCls(key: string) {
+  return { 'card-pinned': props.pinned.includes(key) }
+}
 
 const services = computed(() => props.services)
 
@@ -278,7 +291,6 @@ const unusedSoundRoles = computed(() => {
   }
   return out
 })
-const unusedCount = computed(() => unusedSkinIds.value.length + unusedSoundRoles.value.length)
 
 // —— 折叠 / 目录 / 素材包 ——
 const assetsFold = useFold('assets', false)
@@ -288,12 +300,48 @@ const assetsFold = useFold('assets', false)
 // 用户扫一眼就知道有多少、有没有待下载的，需要挑 / 下载 / 打包再点开（一个折叠换整页清爽）。
 // 合并前「音效」的折叠态在父级（assetFolds.sounds），合并后与其余统一收进这里 ——
 // 四张卡都是「私有折叠 + 搜索命中强制展开」的同一套，父级不必再持一份副本。
-const galleryFolds = reactive({ overview: false, skins: false, sounds: false, bubbles: false })
-function galleryOpen(key: 'overview' | 'skins' | 'sounds' | 'bubbles') {
-  // 搜索态下强制展开：命中的卡如果还收着，用户搜到了却看不到内容（还以为没搜到）。
-  // 与折叠态无关，只是「搜索时一律铺开」。
-  return props.searchActive || galleryFolds[key]
+type GalleryKey = 'overview' | 'media' | 'skins' | 'sounds' | 'bubbles'
+// 五张资源卡的折叠态统一走 useFold：只有接进来，「管理显示内容」里的
+// 「默认展开/收起」与「记住上次状态」开关对它们才生效（否则一直是私有内存态）
+const galleryFoldStates: Record<GalleryKey, ReturnType<typeof useFold>> = {
+  overview: useFold('assetsOverview', false),
+  media: useFold('assetsMedia', false),
+  skins: useFold('assetsSkins', false),
+  sounds: useFold('assetsSounds', false),
+  bubbles: useFold('assetsBubbles', false),
 }
+// 保留 galleryFolds[key] 的读写写法（本文件有多处动态键访问），
+// 用 getter/setter 转给各自的 useFold 实例
+const galleryFolds = reactive<Record<GalleryKey, boolean>>({
+  get overview() { return galleryFoldStates.overview.open },
+  set overview(v: boolean) { galleryFoldStates.overview.open = v },
+  get media() { return galleryFoldStates.media.open },
+  set media(v: boolean) { galleryFoldStates.media.open = v },
+  get skins() { return galleryFoldStates.skins.open },
+  set skins(v: boolean) { galleryFoldStates.skins.open = v },
+  get sounds() { return galleryFoldStates.sounds.open },
+  set sounds(v: boolean) { galleryFoldStates.sounds.open = v },
+  get bubbles() { return galleryFoldStates.bubbles.open },
+  set bubbles(v: boolean) { galleryFoldStates.bubbles.open = v },
+})
+// 搜索期间用户手动收起的卡（覆盖「搜索一律展开」的默认）。
+// 为什么单记一份：原先标题点击只翻转 galleryFolds，而 galleryOpen 在搜索态恒返回 true，
+// 于是点了既没有收起效果（无反馈），又悄悄改掉了折叠态，清空搜索后卡片会莫名收起/展开。
+// 搜索一结束就清空这份覆盖值，回到用户自己那套折叠态
+const searchFoldClosed = reactive<Partial<Record<GalleryKey, boolean>>>({})
+function galleryOpen(key: GalleryKey) {
+  // 搜索态默认强制展开：命中的卡如果还收着，用户搜到了却看不到内容（还以为没搜到）；
+  // 用户点过标题的才按覆盖值收起
+  return props.searchActive ? !searchFoldClosed[key] : galleryFolds[key]
+}
+function toggleGallery(key: GalleryKey) {
+  if (props.searchActive) { searchFoldClosed[key] = !searchFoldClosed[key]; return }
+  galleryFolds[key] = !galleryFolds[key]
+}
+watch(() => props.searchActive, (on) => {
+  if (on) return
+  for (const k of Object.keys(searchFoldClosed)) delete searchFoldClosed[k as GalleryKey]
+})
 // 「可下载形象 / 可下载音效」两段各自的折叠态（卡级折叠之下的第二层）。
 // 默认收起：这两段是「上游有、按需下载」的长列表（36 张缩略图 / 45 段清单），
 // 日常挑图 / 配槽位用的是上段（我的形象 / 我的音效），下段只在真要补下载时才展开。
@@ -303,17 +351,25 @@ const dlFolds = reactive({ skins: false, sounds: false })
 // 下载类动作（卡头「下载剩余 N 张 / 段」、单张点缩略图、新手引导「去挑形象」）会往这两段里
 // 写进度 / 亮 flash，所以触发前先把对应段展开 —— 否则用户点了下载却看不见任何反馈（进度藏在收起段里）。
 function openDl(key: 'skins' | 'sounds') { dlFolds[key] = true }
-// 分区小标题：命中 2 张以上才显示，搜索只命中单卡时不出现分隔线（纯噪音）。
+// 分区小标题「我的素材」：本组命中 2 张以上才显示，搜索只命中单卡时不出现分隔线（纯噪音）。
 // 合并后「形象」「音效」两张卡都横跨「我的素材」与「下载素材」两区（上段是本机的、下段是可下载的），
-// 按各自的主增量统一归到「下载素材」组。
-const MINE_CARDS = ['assetsOverview', 'assetsBubbles']
-const DOWNLOAD_CARDS = ['assetsSkins', 'assetsSounds']
-function showSection(group: 'mine' | 'download') {
-  const keys = group === 'mine' ? MINE_CARDS : DOWNLOAD_CARDS
-  return keys.filter((k) => props.cardOn('assets', k)).length >= 2
+// 按各自的主增量统一归到「下载素材」，所以「我的素材」只剩前两张。
+const MINE_CARDS = ['assetsOverview', 'assetsMedia', 'assetsBubbles']
+function showSection() {
+  const mine = MINE_CARDS.filter((k) => props.cardOn('assets', k))
+  if (mine.length < 2) return false
+  // 搜索态下置顶不参与排序（App.vue#syncPinned 在搜索态直接 return），标题照常显示
+  if (props.searchActive) return true
+  // 「我的素材」卡被置顶时不出标题：置顶卡用负 order 排在本组最前、紧跟在「📌 置顶」那行下面，
+  // 标题只能插在两者之间，把置顶块割裂成两段（置顶卡被一条分隔线隔开、看着像别人的卡）
+  return !mine.some((k) => props.pinned.includes(k))
 }
+// 媒体卡展开时补拉一次（清除数据 / 概览清理都可能从外部改掉文件）
+watch(() => galleryOpen('media'), (open) => { if (open) refreshMedia() })
+watch(() => props.mediaRefreshTick, () => refreshMedia())
+
 const assetsFlash: Flash = useFlash()
-const dataDirs = ref<{ skins: string; sounds: string; bubbles: string } | null>(null)
+const dataDirs = ref<{ skins: string; sounds: string; bubbles: string; media: string } | null>(null)
 const dataDirsOpen = ref(false)
 function toggleDataDirs() {
   dataDirsOpen.value = !dataDirsOpen.value
@@ -335,6 +391,174 @@ function openDataDir(p: string) {
     assetsFlash.err = true
     assetsFlash.msg = '打开目录失败：' + String(err?.message || err)
   }
+}
+
+// —— 背景 / 片头媒体库 ——
+// 导入的图片/视频；图片缩略图在设置页 canvas 生成后交给宿主落盘，视频不抽帧。
+const mediaItems = ref<MediaItem[]>([])
+const unusedMediaIds = computed(() => mediaItems.value.filter((m) =>
+  m.id !== props.cfg.bgMediaId && m.id !== props.cfg.bootIntroMediaId))
+const unusedCount = computed(() =>
+  unusedSkinIds.value.length + unusedSoundRoles.value.length + unusedMediaIds.value.length)
+const mediaFlash: Flash = useFlash()
+const mediaBusy = ref(false)
+const mediaConfirmId = ref('')
+let mediaConfirmTimer = 0
+const mediaTotalBytes = computed(() => mediaItems.value.reduce((n, m) => n + (Number(m.size) || 0), 0))
+const hasAnyAssets = computed(() => props.hasAssets || mediaItems.value.length > 0)
+function refreshMedia() {
+  try {
+    const r = services.value.mediaList?.()
+    mediaItems.value = r && r.ok ? (r.items || []) : []
+  } catch (err) { mediaItems.value = [] }
+}
+function mediaNameOf(id: string) {
+  return mediaItems.value.find((m) => m.id === id)?.name || ''
+}
+function mediaUsageLabel(it: MediaItem) {
+  const tags = []
+  if (props.cfg.bgMode === 'custom' && props.cfg.bgMediaId === it.id) tags.push('背景使用中')
+  if (props.cfg.bootIntroSource === 'media' && props.cfg.bootIntroMediaId === it.id) tags.push('片头使用中')
+  return tags.join(' · ')
+}
+// 图片缩略图：cover 裁成 320×180，webp 体积小；失败就返回空串（宿主仍可导入，只是无预览）
+function makeMediaThumb(dataUrl: string): Promise<string> {
+  return new Promise((resolve) => {
+    const img = new Image()
+    img.onload = () => {
+      try {
+        const w = 320
+        const h = 180
+        const c = document.createElement('canvas')
+        c.width = w
+        c.height = h
+        const ctx = c.getContext('2d')
+        if (!ctx) { resolve(''); return }
+        const scale = Math.max(w / img.width, h / img.height)
+        const dw = img.width * scale
+        const dh = img.height * scale
+        ctx.drawImage(img, (w - dw) / 2, (h - dh) / 2, dw, dh)
+        resolve(c.toDataURL('image/webp', 0.8))
+      } catch (err) { resolve('') }
+    }
+    img.onerror = () => resolve('')
+    img.src = dataUrl
+  })
+}
+async function importMedia(kind: 'image' | 'video') {
+  if (mediaBusy.value) return
+  mediaBusy.value = true
+  mediaFlash.msg = ''
+  mediaFlash.err = false
+  try {
+    const picked = services.value.mediaPick?.(kind)
+    if (!picked) { mediaFlash.err = true; mediaFlash.msg = '宿主未提供媒体导入'; return }
+    if (picked.canceled) return
+    if (!picked.ok || !picked.filePath) {
+      mediaFlash.err = true
+      mediaFlash.msg = picked.error || '选择文件失败'
+      return
+    }
+    const thumb = kind === 'image' && picked.dataUrl ? await makeMediaThumb(picked.dataUrl) : ''
+    const r = services.value.mediaImport?.({ filePath: picked.filePath, name: picked.name, thumb })
+    if (!r || !r.ok) {
+      mediaFlash.err = true
+      mediaFlash.msg = '导入失败：' + ((r && r.error) || '未知错误')
+      return
+    }
+    refreshMedia()
+    mediaFlash.msg = `已导入「${r.item?.name || picked.name || '媒体'}」`
+  } catch (err: any) {
+    mediaFlash.err = true
+    mediaFlash.msg = '导入失败：' + String(err?.message || err)
+  } finally {
+    mediaBusy.value = false
+  }
+}
+function removeMedia(it: MediaItem) {
+  mediaFlash.msg = ''
+  mediaFlash.err = false
+  // 删除是破坏性操作：第一次点只进入确认态，第二次才真删
+  if (mediaConfirmId.value !== it.id) {
+    mediaConfirmId.value = it.id
+    if (mediaConfirmTimer) window.clearTimeout(mediaConfirmTimer)
+    mediaConfirmTimer = window.setTimeout(() => { mediaConfirmId.value = ''; mediaConfirmTimer = 0 }, 4000)
+    mediaFlash.msg = mediaUsageLabel(it)
+      ? '这段媒体正在使用，再点一次「确认删除」会同时回退背景 / 片头'
+      : '再点一次「确认删除」'
+    return
+  }
+  mediaConfirmId.value = ''
+  if (mediaConfirmTimer) { window.clearTimeout(mediaConfirmTimer); mediaConfirmTimer = 0 }
+  try {
+    const r = services.value.mediaRemove?.(it.id)
+    if (!r || !r.ok) {
+      mediaFlash.err = true
+      mediaFlash.msg = '删除失败：' + ((r && r.error) || '未知错误')
+      return
+    }
+    refreshMedia()
+    mediaFlash.msg = `已删除「${it.name}」` + (r.configChanged ? '；已回退正在使用它的背景 / 片头' : '')
+    emit('media-changed')
+  } catch (err: any) {
+    mediaFlash.err = true
+    mediaFlash.msg = '删除失败：' + String(err?.message || err)
+  }
+}
+function useMediaAsBackground(it: MediaItem) {
+  emit('patch', { bgMode: 'custom', bgMediaId: it.id })
+  mediaFlash.msg = `已设为背景：「${it.name}」`
+  mediaFlash.err = false
+}
+function useMediaAsIntro(it: MediaItem) {
+  if (it.type !== 'video') return
+  emit('patch', { bootIntroOn: true, bootIntroSource: 'media', bootIntroMediaId: it.id })
+  mediaFlash.msg = `已设为片头：「${it.name}」`
+  mediaFlash.err = false
+}
+// 媒体预览：图片显示大图，视频用带控件的 <video> 直接播；关闭时回收 blob URL
+const mediaPreview = ref<{ item: MediaItem; url: string } | null>(null)
+const mediaPreviewBusy = ref(false)
+let mediaPreviewOwnsUrl = false
+async function previewMedia(it: MediaItem) {
+  if (mediaPreviewBusy.value) return
+  mediaPreviewBusy.value = true
+  try {
+    const r = services.value.mediaData?.(it.id)
+    if (!r || !r.ok || !r.dataUrl) {
+      mediaFlash.err = true
+      mediaFlash.msg = '预览失败：' + ((r && r.error) || '读不到媒体文件')
+      return
+    }
+    closeMediaPreview()
+    let url = r.dataUrl
+    try {
+      const blob = await (await fetch(r.dataUrl)).blob()
+      url = URL.createObjectURL(blob)
+      mediaPreviewOwnsUrl = true
+    } catch (err) { /* fetch(data:) 失败时退回 data URL */ }
+    mediaPreview.value = { item: it, url: url }
+  } catch (err: any) {
+    mediaFlash.err = true
+    mediaFlash.msg = '预览失败：' + String(err?.message || err)
+  } finally {
+    mediaPreviewBusy.value = false
+  }
+}
+function closeMediaPreview() {
+  if (mediaPreviewOwnsUrl && mediaPreview.value?.url) {
+    try { URL.revokeObjectURL(mediaPreview.value.url) } catch (err) {}
+  }
+  mediaPreviewOwnsUrl = false
+  mediaPreview.value = null
+}
+function onMediaPreviewKey(e: KeyboardEvent) {
+  if (e.key === 'Escape' && mediaPreview.value) closeMediaPreview()
+}
+// 概览卡的「清除全部素材」也会清媒体；本组件常挂载，清完补拉一次列表
+function onClearAssetsClick() {
+  emit('clear-assets')
+  setTimeout(refreshMedia, 0)
 }
 
 const assetsPack = ref<AssetsPreviewResult | null>(null)
@@ -852,6 +1076,7 @@ function needDeleteConfirm(key: string): boolean {
     return true
   }
   if (removeConfirmTimer) { clearTimeout(removeConfirmTimer); removeConfirmTimer = null }
+  if (mediaConfirmTimer) { window.clearTimeout(mediaConfirmTimer); mediaConfirmTimer = 0 }
   removeConfirmId.value = null
   return false
 }
@@ -1004,9 +1229,19 @@ function stopBuiltinAudio() {
 // —— 下载进度（宿主内存快照，轮询） ——
 const dlProgress = ref<DownloadProgress | null>(null)
 let dlTickTimer = 0
+// 终态（done / failed）后的清场定时器。原先「留 8 秒再清」只写在 dlTick 里，
+// 而 dlTick 一进终态就自己停掉了轮询 —— 没人再调它，进度盒于是永久挂在页面上
+let dlClearTimer = 0
 const DL_TICK_MS = 250
 const DL_DONE_KEEP_MS = 8000
 const DL_CLOCK_SLACK_MS = 2000
+function dlScheduleClear() {
+  if (dlClearTimer) return
+  dlClearTimer = window.setTimeout(() => {
+    dlClearTimer = 0
+    dlProgress.value = null
+  }, DL_DONE_KEEP_MS)
+}
 function dlTick() {
   let s: DownloadProgress | null = null
   try {
@@ -1017,7 +1252,15 @@ function dlTick() {
     s = null
   }
   dlProgress.value = s
-  if (!s || s.phase === 'done' || s.phase === 'failed') dlTickStop()
+  if (!s) { dlTickStop(); return }
+  if (s.phase === 'done' || s.phase === 'failed') {
+    // 终态不会再变，停轮询；但结果要留一会儿让人看清，到点再清场
+    dlTickStop()
+    dlScheduleClear()
+    return
+  }
+  // 进行中：撤掉上一轮残留的清场定时器（8 秒内连着下第二张时会撞上），否则它到点会把这次的进度抹掉
+  if (dlClearTimer) { window.clearTimeout(dlClearTimer); dlClearTimer = 0 }
 }
 function dlTickStart() {
   dlTick()
@@ -1060,9 +1303,12 @@ onMounted(() => {
   refreshSkinPacks()
   refreshSharedSkins()
   refreshSharedSounds()
-  dlTick()
+  refreshMedia()  // 用 dlTickStart 而不是单次 dlTick：下载可能在别的页（如新手引导「去挑形象」）就开始了，
+  // 只取一次快照的话进度会定格在打开设置页那一刻，看起来像卡住不动
+  dlTickStart()
   document.addEventListener('click', onDocClickForRndMenu)
   document.addEventListener('keydown', onKeydownCloseRndMenu)
+  document.addEventListener('keydown', onMediaPreviewKey)
   window.addEventListener('scroll', onScrollCloseRndMenu, true)
 })
 // 两张下载大清单（共享形象 / 共享音效）与内置资源卡默认收起，展开才去拉私有数据。
@@ -1083,10 +1329,14 @@ watch(
 )
 onUnmounted(() => {
   dlTickStop()
+  if (dlClearTimer) { window.clearTimeout(dlClearTimer); dlClearTimer = 0 }
   stopBuiltinAudio()
   if (removeConfirmTimer) { clearTimeout(removeConfirmTimer); removeConfirmTimer = null }
+  if (mediaConfirmTimer) { window.clearTimeout(mediaConfirmTimer); mediaConfirmTimer = 0 }
   document.removeEventListener('click', onDocClickForRndMenu)
   document.removeEventListener('keydown', onKeydownCloseRndMenu)
+  document.removeEventListener('keydown', onMediaPreviewKey)
+  closeMediaPreview()
   window.removeEventListener('scroll', onScrollCloseRndMenu, true)
 })
 
@@ -1094,19 +1344,22 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
 </script>
 
 <template>
-  <div>
+  <div class="assets-scope">
     <!-- [资源] 素材集中管理，按「素材从哪来」分两区：
          · 我的素材 —— 导进来 / 下回来、落在本机、能删能用的那些（概览 · 气泡图）
          · 下载素材 —— 上游有、按需从 GitHub 拉的目录（形象 · 音效）
          「形象」「音效」两张卡都横跨两区（上段是本机的、下段是可下载的），按各自的主增量归到「下载素材」。
-         分区标题只在两张以上卡片命中时显示（搜索命中单卡时分隔线纯属噪音）。
-         与「挂件外观」分工：那边只选「用哪个」，这里管「导了什么、占多大、要不要删、换机器怎么带走」 -->
-    <div v-if="showSection('mine')" class="assets-section">我的素材</div>
-    <section v-if="cardOn('assets', 'assetsOverview')" class="card" data-search="assetsOverview">
+         分区标题只在两张以上卡片命中时显示（搜索命中单卡时分隔线纯属噪音）；
+         这两张卡被置顶时也不显示（置顶卡紧贴「📌 置顶」那行，标题插在中间会割裂置顶块）。
+         与「挂件外观」分工：那边只选「用哪个」，这里管「导了什么、占多大、要不要删、换机器怎么带走」。
+         分区标题直接写在模板里：置顶只改 CSS order、不搬节点，普通卡保持模板顺序，
+         置顶卡（负 order）自然排到标题之上，标题无需再按 DOM 位置校正。 -->
+    <div v-if="showSection()" class="assets-section">我的素材</div>
+    <section v-if="cardOn('assets', 'assetsOverview')" class="card" :class="pinCls('assetsOverview')" data-search="assetsOverview">
       <div class="card-head">
         <!-- 整卡可折叠（默认收起）：与「形象」「音效」「气泡图」三张卡同一套「私有折叠 + 搜索命中强制展开」。
              概览本身只有一行汇总（张数 / 体积），日常扫一眼就够，详细介绍与「数据目录 / 素材包」两个折叠都收起来 -->
-        <button class="fold-title" type="button" @click="galleryFolds.overview = !galleryFolds.overview">
+        <button class="fold-title" type="button" :aria-expanded="galleryOpen('overview')" @click="toggleGallery('overview')">
           <span class="fold-caret">{{ galleryOpen('overview') ? '▾' : '▸' }}</span>
           资源概览
         </button>
@@ -1114,7 +1367,7 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
           <button class="export-btn utils-btn utils-outline" type="button" :disabled="!unusedCount" @click="emit('clear-unused')">
             清除未使用{{ unusedCount ? `（${unusedCount}）` : '' }}
           </button>
-          <button class="export-btn utils-btn utils-outline" type="button" :disabled="!hasAssets" @click="emit('clear-assets')">清除全部素材</button>
+          <button class="export-btn utils-btn utils-outline" type="button" :disabled="!hasAnyAssets" @click="onClearAssetsClick">清除全部素材</button>
         </div>
       </div>
       <!-- 收起态挂一行汇总：卡头的「清除未使用（N）」只报数量，这行把「共多少张 / 多大」补齐，不铺开也不丢信息 -->
@@ -1129,13 +1382,13 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
         </span>
       </label>
       <p class="hint">
-        「清除未使用」只删当前设置不会用到的素材（画廊里没在用形象、已关掉的提醒音等），正在使用的一律保留；
+        「清除未使用」只删当前设置不会用到的素材（画廊里没在用形象、已关掉的提醒音、没在用的背景/片头媒体等），正在使用的一律保留；
         「清除全部素材」把导入的形象、气泡图与音效全删掉，形象 / 音色一并回退为内置（与「数据」页勾「导入的素材」是同一操作）。
         两者都只动素材，不影响其它设置。
       </p>
 
       <div class="fold">
-        <button class="link-btn utils-btn utils-secondary" @click="toggleDataDirs()">
+        <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="dataDirsOpen" @click="toggleDataDirs()">
           {{ dataDirsOpen ? '收起数据目录' : '数据目录（导入 / 下载的素材存在哪）' }}
         </button>
         <div v-if="dataDirsOpen" class="guide">
@@ -1158,13 +1411,18 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
             <code class="dir-path" :title="dataDirs.bubbles">{{ dataDirs.bubbles }}</code>
             <button class="export-btn utils-btn utils-outline" type="button" @click="openDataDir(dataDirs.bubbles)">打开</button>
           </div>
+          <div class="field row" v-if="dataDirs && dataDirs.media">
+            <span class="label">背景/片头</span>
+            <code class="dir-path" :title="dataDirs.media">{{ dataDirs.media }}</code>
+            <button class="export-btn utils-btn utils-outline" type="button" @click="openDataDir(dataDirs.media)">打开</button>
+          </div>
           <p v-if="dataDirsOpen && !dataDirs" class="hint">宿主未提供数据目录信息。</p>
           <p v-if="assetsFlash.msg" class="msg" :class="msgCls(assetsFlash)">{{ assetsFlash.msg }}</p>
         </div>
       </div>
 
       <div class="fold">
-        <button class="link-btn utils-btn utils-secondary" @click="assetsFold.open = !assetsFold.open">
+        <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="assetsFold.open" @click="assetsFold.open = !assetsFold.open">
           {{ assetsFold.open ? '收起素材包' : '素材包（换机器一次带走）' }}
         </button>
         <div v-if="assetsFold.open" class="guide">
@@ -1209,14 +1467,63 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
       </template>
     </section>
 
+    <!-- [资源] 背景与片头媒体：用户导入的图片/视频，背景层与启动片头共用 -->
+    <section v-if="cardOn('assets', 'assetsMedia')" class="card" :class="pinCls('assetsMedia')" data-search="assetsMedia">
+      <div class="card-head">
+        <button class="fold-title" type="button" :aria-expanded="galleryOpen('media')" @click="toggleGallery('media')">
+          <span class="fold-caret">{{ galleryOpen('media') ? '▾' : '▸' }}</span>
+          背景与片头
+        </button>
+        <div class="head-actions">
+          <button class="export-btn utils-btn utils-outline" type="button" :disabled="mediaBusy" @click="importMedia('image')">导入图片</button>
+          <button class="export-btn utils-btn utils-outline" type="button" :disabled="mediaBusy" @click="importMedia('video')">导入视频</button>
+        </div>
+      </div>
+      <p v-if="!galleryOpen('media')" class="hint">
+        背景/片头媒体 {{ mediaItems.length }} / 20 项 · 合计 {{ fmtBytes(mediaTotalBytes) }}
+      </p>
+      <template v-if="galleryOpen('media')">
+        <p class="hint">
+          已用 {{ mediaItems.length }} / 20 项 · 合计 {{ fmtBytes(mediaTotalBytes) }}。图片 ≤10MB，视频 ≤10MB；文件复制进本地数据目录，不联网。图片用于背景，视频可用于背景或启动片头。背景/片头媒体不随素材包导出，换机器请打开数据目录单独备份。
+        </p>
+        <p v-if="mediaFlash.msg" class="msg" :class="msgCls(mediaFlash)">{{ mediaFlash.msg }}</p>
+        <p v-if="!mediaItems.length" class="hint">还没有导入。点右上角「导入图片 / 导入视频」。</p>
+        <div v-else class="media-list">
+          <div v-for="it in mediaItems" :key="it.id" class="media-row">
+            <span class="media-thumb">
+              <img v-if="it.thumb" :src="it.thumb" alt="" />
+              <span v-else class="media-kind">{{ it.type === 'video' ? '视频' : '图片' }}</span>
+            </span>
+            <span class="media-info">
+              <span class="media-name">{{ it.name }}</span>
+              <span class="media-meta">
+                {{ it.type === 'video' ? '视频' : '图片' }} · {{ assetSize(it) }}
+                <template v-if="mediaUsageLabel(it)"> · {{ mediaUsageLabel(it) }}</template>
+              </span>
+            </span>
+            <span class="media-actions">
+              <button class="export-btn utils-btn utils-outline" type="button" :disabled="mediaPreviewBusy" @click="previewMedia(it)">预览</button>
+              <button class="export-btn utils-btn utils-outline" type="button" @click="useMediaAsBackground(it)">用作背景</button>
+              <button v-if="it.type === 'video'" class="export-btn utils-btn utils-outline" type="button" @click="useMediaAsIntro(it)">设为片头</button>
+              <button class="export-btn utils-btn utils-danger" type="button" @click="removeMedia(it)">{{ mediaConfirmId === it.id ? '确认删除' : '删除' }}</button>
+            </span>
+          </div>
+        </div>
+        <p class="hint">
+          当前背景：{{ cfg.bgMode === 'custom' ? (mediaNameOf(cfg.bgMediaId) || '未选择 / 已丢失') : '未使用自定义媒体' }}
+          · 当前片头：{{ cfg.bootIntroSource === 'media' ? (mediaNameOf(cfg.bootIntroMediaId) || '未选择 / 已丢失') : '未指定媒体' }}
+        </p>
+      </template>
+    </section>
+
     <!-- [资源] 形象：本机所有可用的形象统一在一张卡里管。三个来源（用户导入 / 随包内置 / 上游共享）
          此前是三张彼此割裂的卡（「导入的形象」在「我的素材」、「内置资源与下载源」寄在音色卡里、
          「共享形象」在「下载素材」），但它们的产物其实是**同一处** —— 都落进 skins 画廊（内置 / 共享打
          builtin 标记，故不占「导入」的 20 张配额）。合并后：上段「我的形象」= 已落盘的（导入 + 已下载），
          下段「可下载形象」= 上游有、还没落盘的（随包 1 张 + 共享 36 张）。用户不必再猜「我那张在哪张卡里」 -->
-    <section v-if="cardOn('assets', 'assetsSkins')" class="card" data-search="assetsSkins">
+    <section v-if="cardOn('assets', 'assetsSkins')" class="card" :class="pinCls('assetsSkins')" data-search="assetsSkins">
       <div class="card-head">
-        <button class="fold-title" type="button" @click="galleryFolds.skins = !galleryFolds.skins; rndMenu = ''; emit('clear-picked')">
+        <button class="fold-title" type="button" :aria-expanded="galleryOpen('skins')" @click="toggleGallery('skins'); rndMenu = ''; emit('clear-picked')">
           <span class="fold-caret">{{ galleryOpen('skins') ? '▾' : '▸' }}</span>
           形象
         </button>
@@ -1416,7 +1723,11 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
                       :title="skinPackInstalled[s.id] ? `${skinPackLabel(s.id)}（已下载，点选用）`
                         : `${skinPackLabel(s.id)}（未下载，点一下下载，下完自动切到这张）`"
                       @click="doSkinPackCell(s.id)">
-                <img class="skin-cell-img" :src="skinPackThumb(s.id)" :alt="skinPackLabel(s.id)" />
+                <!-- 缩略图是随包文件（./whale-pack/thumbs/<id>.webp），打包漏文件 / 解压不全时同样会 404，
+                     与上下两段一样要给出「预览加载失败」而不是留一块空白格 -->
+                <img v-if="!thumbBroken['p-' + s.id]" class="skin-cell-img" :src="skinPackThumb(s.id)"
+                     :alt="skinPackLabel(s.id)" @error="onThumbError('p-' + s.id)" />
+                <span v-else class="skin-cell-broken">预览加载失败</span>
               </button>
               <span v-if="!skinPackInstalled[s.id]" class="skin-cell-badge">下载</span>
               <!-- 名字与警示标签二选一：两个都贴 bottom:0，同时渲染会叠在一起看不清。
@@ -1483,11 +1794,11 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
 
     <!-- [资源] 导入的气泡图：点小鲸鱼抽到「动图组」时随机显示一张。
          与形象不同 —— 没有「当前用哪张」（有图就随机抽，删光即回退内置动图），所以没有「使用中」标记与置顶 -->
-    <section v-if="cardOn('assets', 'assetsBubbles')" class="card" data-search="assetsBubbles">
+    <section v-if="cardOn('assets', 'assetsBubbles')" class="card" :class="pinCls('assetsBubbles')" data-search="assetsBubbles">
       <div class="card-head">
         <!-- 整卡可折叠（默认收起）：与「形象」「音效」两张合并卡同一套「私有折叠 + 搜索命中强制展开」。
              气泡图卡只有一屏图（最多 8 张）加导入按钮，日常点鲸鱼就会看到，不必常驻铺开 -->
-        <button class="fold-title" type="button" @click="galleryFolds.bubbles = !galleryFolds.bubbles">
+        <button class="fold-title" type="button" :aria-expanded="galleryOpen('bubbles')" @click="toggleGallery('bubbles')">
           <span class="fold-caret">{{ galleryOpen('bubbles') ? '▾' : '▸' }}</span>
           导入的气泡图
         </button>
@@ -1538,12 +1849,12 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
          共享卡是「先选段、再勾它参加哪些槽位」——同一份 roles 数据两套入口，6 个 chip 还在 45 行里重复 45 次。
          合并后：上段「我的音效」= 六个槽位各一段手导 + 挂在本槽的共享段；下段「可下载音效」= 上游 45 段
          （点行展开 6 个槽位 chip，功能零损失，噪音只在展开的那一行里）。 -->
-    <section v-if="cardOn('assets', 'assetsSounds')" class="card" data-search="assetsSounds">
+    <section v-if="cardOn('assets', 'assetsSounds')" class="card" :class="pinCls('assetsSounds')" data-search="assetsSounds">
       <div class="card-head">
         <!-- 整卡可折叠（默认收起）：六个槽位 + 45 段清单一次铺满整屏，只有真要导入 / 替换 / 下载时才需要。
              标题即开关；收起态在下方挂一行概览，不会「藏了就等于没有」。
-             折叠态是本组件私有（galleryFolds），搜索命中时 galleryOpen 一律返回 true 强制展开 -->
-        <button class="fold-title" type="button" @click="galleryFolds.sounds = !galleryFolds.sounds; soundPickOpen = ''">
+             折叠态是本组件私有（galleryFolds），搜索命中时默认强制展开（见 galleryOpen） -->
+        <button class="fold-title" type="button" :aria-expanded="galleryOpen('sounds')" @click="toggleGallery('sounds'); soundPickOpen = ''">
           <span class="fold-caret">{{ galleryOpen('sounds') ? '▾' : '▸' }}</span>
           音效
         </button>
@@ -1752,9 +2063,9 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
           <p v-else class="hint">共享音效库暂时是空的 —— 卡头按钮若显示「下载剩余 N 段」，点它把音效拉回来。</p>
 
           <div class="fold" v-if="sharedSoundPendingItems.length">
-            <button class="link-btn utils-btn utils-secondary" type="button"
-                    @click="sharedSoundPendingOpen = !sharedSoundPendingOpen">
-              未下载 {{ sharedSoundPendingItems.length }} 段<span class="fold-caret">{{ sharedSoundPendingOpen ? '▾' : '▸' }}</span>
+            <button class="link-btn utils-btn utils-secondary fold-toggle" type="button"
+                    :aria-expanded="sharedSoundPendingOpen" @click="sharedSoundPendingOpen = !sharedSoundPendingOpen">
+              未下载 {{ sharedSoundPendingItems.length }} 段
             </button>
             <template v-if="sharedSoundPendingOpen">
               <div class="shs-row" v-for="it in sharedSoundPendingItems" :key="'shs-' + it.id">
@@ -1787,7 +2098,7 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
       <!-- 使用说明默认折叠：原先四行小字常驻卡尾，把六个槽位压到下面去了。
            摘要只报「能干什么」，不重复上方每行状态（那些行里已经写着「已导入 / 未导入（用内置音）」） -->
       <div class="fold">
-        <button class="link-btn utils-btn utils-secondary" type="button" @click="soundHelpOpen = !soundHelpOpen">
+        <button class="link-btn utils-btn utils-secondary fold-toggle" type="button" :aria-expanded="soundHelpOpen" @click="soundHelpOpen = !soundHelpOpen">
           {{ soundHelpOpen ? '收起音效使用说明' : '音效使用说明' }}
         </button>
         <div v-if="soundHelpOpen" class="guide">
@@ -1801,6 +2112,20 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
       <p v-if="soundFlash.msg" class="msg" :class="msgCls(soundFlash)">{{ soundFlash.msg }}</p>
       </template>
     </section>
+
+    <Teleport to="body">
+      <div v-if="mediaPreview" class="media-preview-mask" @click.self="closeMediaPreview">
+        <div class="media-preview-box" role="dialog" aria-modal="true" :aria-label="`预览 ${mediaPreview.item.name}`">
+          <div class="media-preview-head">
+            <span class="media-preview-name">{{ mediaPreview.item.name }}</span>
+            <button class="export-btn utils-btn utils-secondary" type="button" @click="closeMediaPreview">关闭</button>
+          </div>
+          <video v-if="mediaPreview.item.type === 'video'" class="media-preview-media"
+                 :src="mediaPreview.url" controls autoplay muted playsinline></video>
+          <img v-else class="media-preview-media" :src="mediaPreview.url" alt="" />
+        </div>
+      </div>
+    </Teleport>
   </div>
 </template>
 
@@ -1811,8 +2136,17 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
    ★ 本组件此前漏了这一步（样式标签是空的 `<style scoped />`），而 App.vue 内联的规则
      带的是 App 的哈希、匹配不上本组件渲染的元素 —— 症状是整卡样式失效：画廊网格无尺寸、
      棋盘格底 / 悬停操作条 / 角标全丢，素材包与共享音效的进度条塌成空白。这里一次性补齐。 */
-/* 分区小标题（「我的素材」/「下载素材」）：横线 + 小字，把卡分成「本机已有 / 上游待下载」两组。
-   只在同组命中 2 张以上时渲染（见 showSection），搜索只命中单卡时不会突兀地出现一条分割线 */
+/* 置顶作用域：本组 5 张卡都在这个外包容器里，父级 App 只给**容器**写 order，
+   容器内部同样用 flex 列 + 卡根 order 排置顶卡（卡片节点不搬 —— 真机事故见 App.vue
+   syncPinned 注释：搬 v-if 节点会让 Vue 丢锚点，切 Tab 后旧卡残留 / 重复）。 */
+.assets-scope {
+  display: flex;
+  flex-direction: column;
+}
+/* 分区小标题（「我的素材」）：横线 + 小字，把卡分成「本机已有 / 上游待下载」两组。
+   只在同组命中 2 张以上时渲染（见 showSection），搜索只命中单卡时不会突兀地出现一条分割线。
+   位置就写在模板里（在卡之前）：置顶只改 order、不搬节点，普通卡保持模板顺序，
+   置顶卡用负 order 排到标题之上即可，标题不需要再按 DOM 位置校正。 */
 .assets-section {
   display: flex;
   align-items: center;
@@ -1854,10 +2188,9 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
 .fold-title:hover {
   color: var(--fg);
 }
-/* 箭头单独占位，展开 / 收起时标题不会左右横跳 */
+/* 箭头单独占位，展开 / 收起时标题不会左右横跳（字号 / 字重 / 颜色走 main.css 的全局 .fold-caret） */
 .fold-caret {
   width: 1em;
-  font-size: 12px;
 }
 .head-actions {
   display: flex;
@@ -2625,5 +2958,110 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
 }
 .skin-cell-add-txt {
   font-size: 11px;
+}
+/* 背景/片头媒体列表：缩略图 + 名称/体积/使用状态 + 右侧操作 */
+.media-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 10px 0;
+}
+.media-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px;
+  border: 1px solid var(--card-border);
+  border-radius: 8px;
+  background: var(--track);
+}
+.media-thumb {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 96px;
+  height: 54px;
+  overflow: hidden;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.2);
+}
+.media-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.media-kind {
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+.media-info {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.media-name {
+  overflow: hidden;
+  font-size: 13px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.media-meta {
+  font-size: 11px;
+  color: var(--fg-faint);
+}
+.media-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+}
+@media (max-width: 520px) {
+  .media-row { flex-wrap: wrap; }
+  .media-actions { width: 100%; justify-content: flex-start; }
+}
+/* 媒体预览弹层：Teleport 到 body；z-index 与设置页弹窗同档，避免被卡片裁切 */
+.media-preview-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(0, 0, 0, 0.68);
+}
+.media-preview-box {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-width: min(920px, 92vw);
+  max-height: 92vh;
+  padding: 12px;
+  border: 1px solid var(--card-border);
+  border-radius: 10px;
+  background: var(--bar-bg);
+  color: var(--fg);
+}
+.media-preview-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.media-preview-name {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+}
+.media-preview-media {
+  max-width: 100%;
+  max-height: 72vh;
+  object-fit: contain;
+  border-radius: 6px;
+  background: #000;
 }
 </style>

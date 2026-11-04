@@ -10,10 +10,10 @@
  */
 const fs = require('fs')
 const path = require('path')
-const os = require('os')
 const { K } = require('./constants')
 const { logErr } = require('./log')
 const { errMsg } = require('./util')
+const { dataDir } = require('./data-dir')
 
 // Chromium 可直接解码的音频格式；flac/m4a 也支持但对话框里主要引导 mp3/wav/ogg
 const OK_EXT = ['mp3', 'wav', 'ogg', 'm4a', 'flac']
@@ -39,10 +39,7 @@ const ROLE_LABEL = {
 let dataCache = null
 
 function soundsDir() {
-  let base = ''
-  try { base = utools.getPath('userData') } catch (err) {}
-  if (!base) base = os.tmpdir()
-  return path.join(base, 'whale-sounds')
+  return dataDir('whale-sounds')
 }
 
 // 音频体积（读取时派生，不落存储）：设置页「自定义素材」卡片要显示占多大；文件缺失回 0
@@ -318,9 +315,12 @@ function setSharedRoles(file, roles) {
 }
 
 // 清除全部自定义音效：音频文件 + 元信息 + 读取缓存（供设置页「清除选中数据」调用）。
-// 整个目录一并删掉（含改名遗留的旧文件），删不动（被占用）也不影响清除结果
+// 整个目录一并删掉（含改名遗留的旧文件）；删不动（比如文件被播放器占用）不影响清除结果，
+// 但必须 logErr 留痕 —— 否则「清了但磁盘还在」这种情况永远查不到原因（与 skins.js 对齐）
 function clearAll() {
-  try { fs.rmSync(soundsDir(), { recursive: true, force: true }) } catch (err) {}
+  try { fs.rmSync(soundsDir(), { recursive: true, force: true }) } catch (err) {
+    logErr('[whale][sounds] 清除音效文件失败', err && err.message)
+  }
   try { utools.dbStorage.removeItem(K.sounds) } catch (err) { logErr('[whale][sounds] 清除音效信息失败', err && err.message) }
   dataCache = null
   return { ok: true }

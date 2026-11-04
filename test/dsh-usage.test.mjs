@@ -225,7 +225,9 @@ test('会话口径：tokenUsage 有效时按会话创建日聚合，calls 取 se
   assert.equal(r.turnsLabel, '轮')
   assert.equal(r.totalTokens, 200 + 50 + 80)
   assert.equal(r.todayTokens, 0) // 记在昨天
-  assert.equal(r.monthTokens, 330)
+  // 「昨天」可能跨月（每月 1 号）：那种情况下本月口径就是 0，别把用例钉死成 330
+  const sameMonth = yesterday.slice(0, 7) === localDay(0).slice(0, 7)
+  assert.equal(r.monthTokens, sameMonth ? 330 : 0)
   assert.equal(r.turns, 4)
   assert.equal(r.reasonTokens, 9)
   assert.match(r.note, /按会话缓存聚合/)

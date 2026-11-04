@@ -9,7 +9,7 @@
  *
  * 样本经 CS_ROOT / CS_CHECKS 注入；真实构建不设这两个变量，走脚本内置的 CHECKS。
  */
-import test from 'node:test'
+import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -20,8 +20,12 @@ import { fileURLToPath } from 'node:url'
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const SCRIPT = path.join(ROOT, 'scripts', 'check-shared.mjs')
 
+// 每个用例一座临时样本仓库，跑完统一删（见下面的 after）：不删的话每轮 npm test
+// 在 %TEMP% 里攒十几个 whale-cs-selftest-*
+const tmpRoots = []
 function makeRepo(files) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'whale-cs-selftest-'))
+  tmpRoots.push(root)
   for (const [rel, content] of Object.entries(files)) {
     const p = path.join(root, rel)
     fs.mkdirSync(path.dirname(p), { recursive: true })
@@ -36,6 +40,10 @@ function runScript({ root, checks }) {
     encoding: 'utf8',
   })
 }
+
+after(() => {
+  for (const root of tmpRoots) fs.rmSync(root, { recursive: true, force: true })
+})
 
 // 一条「两文件取同一 marker」的最小用例
 const twoWay = (name, marker, fileA, fileB, kind = 'number') => ({

@@ -13,7 +13,16 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import notify from '../public/preload/lib/notify.js'
 
-const { buildMail, mailSubject, mimeHeaderText, mailAddress, resolvePort, portHint, SmtpClient, _setNetForTest } = notify
+const { buildMail, mailSubject, mimeHeaderText, mailAddress, resolvePort, portHint, SmtpClient, _setNetForTest, notifyTimer, _setSendersForTest } = notify
+
+function installSenders() {
+  const calls = { system: [], mail: [] }
+  _setSendersForTest({
+    system: (text) => calls.system.push(text),
+    mail: (cfg, text) => calls.mail.push(text),
+  })
+  return calls
+}
 
 // ──────────────────────────────────────────────
 // 端口 / 加密方式推导
@@ -168,4 +177,41 @@ test('connect：端口按 resolvePort 走，mailSecure=false 连 587', async () 
   } finally {
     _setNetForTest(null) // 还原，避免影响其它用例
   }
+})
+
+// ──────────────────────────────────────────────
+// 计时到点：按计时页自己的两个开关分发渠道
+// ──────────────────────────────────────────────
+test('notifyTimer：channels 缺省时退回全局开关（与旧行为一致）', () => {
+  const calls = installSenders()
+  try {
+    notifyTimer('到点', { notifySystemOn: true, notifyMailOn: true })
+    assert.equal(calls.system.length, 1)
+    assert.equal(calls.mail.length, 1)
+    notifyTimer('到点', { notifySystemOn: false, notifyMailOn: false })
+    assert.equal(calls.system.length, 1)
+    assert.equal(calls.mail.length, 1)
+  } finally { _setSendersForTest(null) }
+})
+
+test('notifyTimer：channels 只发计时页要的渠道，但渠道总开关仍最高优先', () => {
+  const calls = installSenders()
+  try {
+    notifyTimer('到点', { notifySystemOn: true, notifyMailOn: true }, { system: true, mail: false })
+    assert.equal(calls.system.length, 1)
+    assert.equal(calls.mail.length, 0)
+    // 渠道总开关关着：计时页就算开着也不发
+    notifyTimer('到点', { notifySystemOn: false, notifyMailOn: false }, { system: true, mail: true })
+    assert.equal(calls.system.length, 1)
+    assert.equal(calls.mail.length, 0)
+  } finally { _setSendersForTest(null) }
+})
+
+test('notifyTimer：空文案不发，返回实际分发结果', () => {
+  const calls = installSenders()
+  try {
+    assert.deepEqual(notifyTimer('   ', { notifySystemOn: true, notifyMailOn: true }, { system: true, mail: true }), { system: false, mail: false })
+    assert.equal(calls.system.length, 0)
+    assert.deepEqual(notifyTimer('到点', { notifySystemOn: true, notifyMailOn: false }, { system: true, mail: true }), { system: true, mail: false })
+  } finally { _setSendersForTest(null) }
 })

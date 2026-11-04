@@ -72,7 +72,18 @@ const MIRROR_REGISTRIES = [
 const MIRROR_REGISTRY = MIRROR_REGISTRIES[0].url
 // 抓取超时。官方源单次实测要 52–99s，竞速时**不能**让慢源把整次加载拖住 ——
 // 竞速下这个值只用于「兜底取消」，最慢源等满就放弃（快源早返回了）。
+// ⚠️ 镜像源的 tarball **不吃**这个总时限（见下面 BODY_* 的停滞看门狗）：目录包 1–3MB，
+//    国内镜像抖动到几十 KB/s 时 15s 一刀切会把仍在传字节的下载杀掉（上游 b766e2a 实测）。
 const FETCH_TIMEOUT_MS = 15000
+// 镜像 tarball 的「停滞看门狗」：只有**多久没有新字节**才判死，链路慢但一直在走就允许。
+// 头部（响应开始）仍用 15s —— 头是一次性到达的，固定预算合适；体则可能持续很久。
+const BODY_STALL_TIMEOUT_MS = 15000
+// 整体上限：看门狗只看「暂停」，一个每 15s 吐一个字节的镜像能永远拖住读取，故留兜底。
+// 10 分钟约是最慢实测全量下载的 7 倍；超过它还没完就是坏了，不是慢。
+const BODY_TOTAL_CEILING_MS = 10 * 60 * 1000
+// tarball 体积上限。目录包实测约 1–4MB；256MB 是几十年余量，同时硬性封住内存
+// （整包先缓冲再解析，异常镜像以线速灌垃圾时不能让它把进程撑死）。
+const MAX_TAR_BYTES = 256 * 1024 * 1024
 // 内存缓存 TTL：目录每天才刷新一次，60s 足够挡住「反复点刷新」
 const CACHE_TTL_MS = 60 * 1000
 // 目录体积上限：防止被异常响应（或被劫持的镜像）撑爆内存。实测最大约 4.4MB，给 16MB 余量
@@ -537,6 +548,18 @@ function admitPrerelease(opts, lo, t) {
   if (!lo || !lo[3] || !lo[3].length) return false // 声明没写 prerelease → 不收 prerelease 目标
   return lo[0] === t[0] && lo[1] === t[1] && lo[2] === t[2]
 }
+// 「同一 comparator 串里的上界」——`>=0.1.5 <0.3` / `>=0.1.7-rc <2` /
+// `>=0.2.0-rc.0 <0.3` 是 connector 插件族的常见写法（上游 a4febfa 实测）。
+// 只判 `>=` 下界会把 0.4.0 当成「在范围内」，而 dsh 宿主自己的门按整串合取明确拒绝 ——
+// 市场放行、宿主拒装，正是我们要消除的双结论矛盾。
+// 上界只吃 `<` / `<=`；部分版本（`<0.3`）按 node-semver 零填充（等价 `<0.3.0`），
+// parseVer 已按 [0,3,0] 解析，直接比即可。认不出上界时保守放行（与整条认不出同口径）。
+function upperBoundAllows(rest, target) {
+  const ub = String(rest == null ? '' : rest).match(/<(=?)\s*(\S+)/)
+  if (!ub) return true
+  if (!parseVer(ub[2])) return true
+  return ub[1] === '=' ? cmpVer(target, ub[2]) <= 0 : cmpVer(target, ub[2]) < 0
+}
 // range 支持：`^x.y.z` / `~x.y.z` / `x.y.z` / `>=x.y.z` / `||` 复合范围 / `*` / `latest` / 空。
 // 认不出的形态一律返回 true（= 落在范围内 = 不报更新）—— 保守优先，宁可漏报。
 function rangeAllows(range, target, opts) {
@@ -591,17 +614,21 @@ function rangeAllows(range, target, opts) {
   }
   // >=x.y.z / >x.y.z
   //   带 prerelease 的目标同样受准入门约束（`>=0.1.7` 不收 `0.2.0-rc.1`）。
+  //   ⚠️ 同一串里可能还带 `<` / `<=` 上界（`>=0.1.5 <0.3`）：npm 对 comparator 串是合取，
+  //      漏掉上界会把 0.4.0 判成「在范围内」（上游 a4febfa 的核心修复）。
   const ge = r.match(/^>=\s*(\S+)/)
   if (ge) {
     const lop = parseVer(ge[1])
     if (admitPrerelease(opts, lop, t) === false) return false
-    return cmpVer(target, ge[1]) >= 0
+    if (cmpVer(target, ge[1]) < 0) return false
+    return upperBoundAllows(r.slice(ge[0].length), target)
   }
   const gt = r.match(/^>\s*(\S+)/)
   if (gt) {
     const lop = parseVer(gt[1])
     if (admitPrerelease(opts, lop, t) === false) return false
-    return cmpVer(target, gt[1]) > 0
+    if (cmpVer(target, gt[1]) <= 0) return false
+    return upperBoundAllows(r.slice(gt[0].length), target)
   }
   // 裸版本（含 `1.2`、`1` 这类简写）—— 按 npm 语义只有**完全相同**才算落在范围内
   const bare = parseVer(r)
@@ -699,6 +726,103 @@ function updateState(depVersion, catalogVersion, realized) {
   }
 }
 
+// ── 纯函数：这个依赖到底是不是「更新通道能更新的插件」（对齐上游 dsh-market #793）──
+//
+// 背景：dsh 的更新通道装的是 **BUNDLE**（profile 里 `dsh.profile.bundles` 列出的那些挂载物）。
+// 而 profile 的 dependencies 里除了 bundle，还常混着**纯依赖** —— 只带 `bin` 的 CLI、
+// 被别的插件拉进来的库。它们也出现在目录里、也能比出版本差，于是过去会被列成「可更新」；
+// 用户点下去，装上去的东西依然不会被 dsh 当插件加载，看起来就像「更新把插件弄坏了」。
+// 代价极不对称：**误删一条提议只是少提示一次（用户还能手动更新），误留一条提议会让用户白折腾一次**
+// —— 所以所有不确定都判「是插件」，宁可多留。
+//
+// 三条独立证据，任一成立即「是插件」：
+//   ① 包自己的 package.json 里有 `dsh` 字段（bundle manifest 的标志）
+//   ② profile 的 `dsh.profile.bundles` 名单里列了它
+//   ③ 用户 patch 里有条目按它的名字加载它
+// 三条都拿不到确切否定（文件读不到 / 名单读不到 / patch 读不到）时同样判「是插件」。
+//
+// 参数（全部由调用方采好，本模块不做 IO）：
+//   name     —— 要判的依赖名（profile dependencies 里的键，可能是完整包名或短名）
+//   info     —— { manifest: null | {}（读不到 / 不存在为 null）, hasDshField: boolean }
+//               manifest 为 null 表示「读不到」→ 不确定；{} 表示「读到了、没有 dsh 字段」
+//   bundles  —— null（读不到名单）/ string[]（名单里的名字，可能带版本后缀或路径）
+//   patchIds —— null（读不到 patch）/ string[]（用户 patch 里的条目 id）
+function isUpdatablePlugin(name, info, bundles, patchIds) {
+  const n = String(name == null ? '' : name).trim()
+  // 没有名字就没法判 —— 交回调用方按「不确定」处理（这里也判是插件，保守）
+  if (!n) return true
+  const ii = info && typeof info === 'object' ? info : {}
+  const names = candidateNames(n)
+
+  // ① manifest 有 dsh 字段
+  if (ii.manifest === null || ii.manifest === undefined) {
+    // 读不到 manifest（包目录不存在 / package.json 坏了）→ 不确定 → 是插件
+    return true
+  }
+  if (ii.hasDshField === true) return true
+
+  // ② bundles 名单列出它。读不到名单 → 不确定 → 是插件
+  if (!Array.isArray(bundles)) return true
+  for (let i = 0; i < bundles.length; i++) {
+    const b = String(bundles[i] == null ? '' : bundles[i]).trim()
+    if (!b) continue
+    // bundles 里的写法可能是包名，也可能带版本后缀（`x@1.2.3`）/ 子路径（`x/dist`），
+    // 只取标识包名的那一段再比 —— 与 dependencies 键同口径。
+    // ⚠️ 两侧都要过 candidateNames：依赖名可能是短名而名单写的是 `@scope/x`（或反过来），
+    //    只归一名单一侧会漏命中 → 真插件被误判成纯依赖、提议被删掉
+    const bare = bundleBaseName(b)
+    if (!bare) continue
+    const bn = candidateNames(bare)
+    for (let k = 0; k < bn.length; k++) if (names.indexOf(bn[k]) >= 0) return true
+  }
+
+  // ③ 用户 patch 里有条目按名加载它。读不到 patch → 不确定 → 是插件
+  if (!Array.isArray(patchIds)) return true
+  for (let i = 0; i < patchIds.length; i++) {
+    const id = String(patchIds[i] == null ? '' : patchIds[i]).trim()
+    if (!id) continue
+    if (names.indexOf(id) >= 0) return true
+  }
+  // 三条都拿到了确切否定 —— 这才是「纯依赖」
+  return false
+}
+
+// 一个依赖名在「bundles / patch 条目」里可能出现的全部写法：
+//   完整包名（`@scope/x`）、去 scope 的短名（`x`）、以及 `@scope/x/子路径` 的包名部分。
+// 与 matchInstalledBySpec 同一套「完整名优先、短名兜底」的思路 —— 界面与宿主必须同口径，
+// 否则会出现「卡片说可更新、宿主说不是插件」这种自相矛盾。
+function candidateNames(name) {
+  const n = String(name == null ? '' : name).trim()
+  const out = []
+  if (!n) return out
+  out.push(n)
+  // `@scope/x/sub` 形态：包名只到第二段
+  const parts = n.split('/')
+  if (n.charAt(0) === '@' && parts.length > 2) out.push(parts[0] + '/' + parts[1])
+  const slash = n.indexOf('/')
+  const short = slash >= 0 ? n.slice(slash + 1) : n
+  if (short && short !== n) out.push(short)
+  return out
+}
+
+// bundles 条目的「包名部分」。实测名单里的写法是纯包名，但也可能带 `@版本`、
+// 带子路径（`x/dist/index.js`）—— 只会出现这一种分隔，去掉尾巴即可。
+// ⚠️ 不能用 lastIndexOf('@')：作用域包 `@scope/x` 的首字符就是 `@`，会把它整段切掉。
+function bundleBaseName(s) {
+  let v = String(s == null ? '' : s).trim()
+  if (!v) return ''
+  const hash = v.indexOf('#')
+  if (hash >= 0) v = v.slice(0, hash)
+  // 版本分隔符只认「非首字符」的 `@`
+  const at = v.indexOf('@', 1)
+  if (at > 0) v = v.slice(0, at)
+  // 子路径：作用域包要跳过第一段（`@scope/x/dist` 的包名是 `@scope/x`）
+  const parts = v.split('/')
+  const keep = v.charAt(0) === '@' ? 2 : 1
+  if (parts.length > keep) v = parts.slice(0, keep).join('/')
+  return v.trim()
+}
+
 // ── 抓取 ──
 
 // 读响应体，带体积上限。超限直接抛 —— 被劫持/异常的响应不该进内存。
@@ -706,6 +830,104 @@ async function readBody(res) {
   const buf = Buffer.from(await res.arrayBuffer())
   if (buf.length > MAX_BYTES) throw new Error('目录超过体积上限（' + buf.length + ' 字节）')
   return buf
+}
+
+// 读 tarball 体：按「有没有新字节」而不是「总共给了多久」判死。
+//
+// ⚠️ 为什么不能用 AbortSignal.timeout 一刀切：目录包 1–3MB，15s 内拉完需要几十到上百 KB/s；
+//    国内镜像抖动到 17–40 KB/s 时链路明明还在传字节，却被总时限杀掉，于是目录退到官方源
+//    （默认关）→ 屏幕空白或干等一分钟（上游 b766e2a 的真实事故）。
+//    这里只对「连续 BODY_STALL_TIMEOUT_MS 没有新数据」判死，另加整体上限兜底。
+// ⚠️ 单测替身只提供 arrayBuffer（没有流式 body）时退回整块读，仍保留体积上限。
+function readBodyStall(res, what, opts) {
+  const name = String(what || '目录包')
+  const o = opts && typeof opts === 'object' ? opts : {}
+  // 单测要能用毫秒级时限跑完整流程，故三个阈值都可注入；生产路径不传，用上面的常量
+  const stallMs = Number.isFinite(o.stallMs) ? o.stallMs : BODY_STALL_TIMEOUT_MS
+  const totalMs = Number.isFinite(o.totalMs) ? o.totalMs : BODY_TOTAL_CEILING_MS
+  const maxBytes = Number.isFinite(o.maxBytes) ? o.maxBytes : MAX_TAR_BYTES
+  if (!res || !res.body || typeof res.body.getReader !== 'function') {
+    return Promise.resolve(res.arrayBuffer()).then((raw) => {
+      const buf = Buffer.from(raw)
+      if (buf.length > maxBytes) throw new Error(name + ' 超过体积上限（' + buf.length + ' 字节）')
+      return buf
+    })
+  }
+  const reader = res.body.getReader()
+  return new Promise((resolve, reject) => {
+    const chunks = []
+    let received = 0
+    let settled = false
+    let stallTimer = null
+    const finish = (err, buf) => {
+      if (settled) return
+      settled = true
+      if (stallTimer) clearTimeout(stallTimer)
+      clearTimeout(ceiling)
+      try { reader.cancel().catch(() => {}) } catch (e) {}
+      if (err) reject(err)
+      else resolve(buf)
+    }
+    const ceiling = setTimeout(() => {
+      finish(new Error(name + ' 整体下载超过 ' + Math.round(totalMs / 60000)
+        + ' 分钟（已收到 ' + received + ' 字节）'))
+    }, totalMs)
+    const armStall = () => {
+      if (stallTimer) clearTimeout(stallTimer)
+      stallTimer = setTimeout(() => {
+        finish(new Error(name + ' 连续 ' + Math.round(stallMs / 1000)
+          + ' 秒没有收到新数据（已收到 ' + received + ' 字节）'))
+      }, stallMs)
+    }
+    const step = () => {
+      reader.read().then((r) => {
+        if (settled) return
+        if (r.done) { finish(null, Buffer.concat(chunks, received)); return }
+        const v = r.value
+        if (!v) { step(); return }
+        chunks.push(Buffer.from(v))
+        received += v.byteLength === undefined ? v.length : v.byteLength
+        if (received > maxBytes) {
+          finish(new Error(name + ' 超过体积上限（' + maxBytes + ' 字节）'))
+          return
+        }
+        armStall()
+        step()
+      }, (err) => {
+        // ⚠️ AbortError 原样透传：DOMException 不是 Error 的子类，包成 new Error 会丢掉
+        //    name，loadCatalog 就认不出「别人先赢了」，把输家记成失败（error 文案里全是噪声）
+        if (err && err.name === 'AbortError') finish(err)
+        else finish(err instanceof Error ? err : new Error(String(err)))
+      })
+    }
+    armStall()
+    step()
+  })
+}
+
+// 等「响应头」到达：头部是一次性到达的，固定预算合适；到了就清掉定时器，
+// 把体交给 readBodyStall 的停滞看门狗（不能继续用同一个 timeout signal，否则体会被一起掐断）。
+// raceSignal 是竞速控制器：别的来源胜出时要能把这条也 abort 掉（清理输家），
+// 但它**不参与** 15s 全局计时 —— 镜像源由本函数自己的头部 / 停滞 / 整体三道时限兜住。
+function fetchHeaders(url, fetchImpl, raceSignal) {
+  const ctrl = new AbortController()
+  const onRaceAbort = () => ctrl.abort()
+  if (raceSignal) raceSignal.addEventListener('abort', onRaceAbort, { once: true })
+  const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS)
+  return fetchImpl(url, { signal: ctrl.signal }).then((res) => {
+    clearTimeout(timer)
+    return {
+      res: res,
+      done: () => {
+        clearTimeout(timer)
+        if (raceSignal) raceSignal.removeEventListener('abort', onRaceAbort)
+      },
+    }
+  }, (err) => {
+    clearTimeout(timer)
+    if (raceSignal) raceSignal.removeEventListener('abort', onRaceAbort)
+    throw err
+  })
 }
 
 // gzip 魔数（1f 8b）。用来区分「镜像真的坏了」与「宿主 undici 污染了全局 fetch」——
@@ -771,35 +993,45 @@ function untarOne(buf, wanted) {
 async function loadFromMirror(registry, fetchImpl, signal) {
   const reg = String(registry || MIRROR_REGISTRY).replace(/\/+$/, '')
   const metaUrl = reg + '/' + MIRROR_PKG + '/latest'
-  const metaRes = await fetchImpl(metaUrl, { signal: signal || AbortSignal.timeout(FETCH_TIMEOUT_MS) })
-  if (!metaRes.ok) throw new Error('镜像元数据 HTTP ' + metaRes.status)
-  const meta = JSON.parse(await metaRes.text())
-  const tarball = meta && meta.dist && meta.dist.tarball
-  if (!tarball) throw new Error('镜像元数据里没有 dist.tarball')
-  // ⚠️ tarball 的 URL 由 registry 元数据给出，可能指向它自己的 CDN。
-  // 只允许 http(s) —— 不接受元数据把我们带去任意第三方主机
-  const tb = String(tarball)
-  if (!/^https?:\/\//i.test(tb)) throw new Error('镜像 tarball 地址不合法')
-  const tarRes = await fetchImpl(tb, { signal: signal || AbortSignal.timeout(FETCH_TIMEOUT_MS) })
-  if (!tarRes.ok) throw new Error('镜像 tarball HTTP ' + tarRes.status)
-  const gz = Buffer.from(await tarRes.arrayBuffer())
-  if (gz.length > MAX_BYTES) throw new Error('镜像 tarball 超过体积上限')
-  // ⚠️ 宿主 undici 污染守卫（上游 dsh-market #742，2026-09 修）：宿主进程若已加载 undici 8
-  //    （`web_fetch` 这类工具会触发），Node 22 的**全局 fetch** 会把 gzip 体的 content-encoding
-  //    丢掉、且不再自动解压 —— 于是这里拿到的仍是 gzip 原始字节，gunzipSync 直接抛
-  //    「incorrect header check」。现象与「镜像坏了」一模一样，光看报错分不出是谁的锅。
-  //    只在这一步判定并标注，不改链路：Node 24 + 无 undici 8 的环境实测正常（见下）。
-  //    真踩上时的解法是绕开全局 fetch 自带解压（与上游同路），改起来动静大，故只留痕。
-  if (!isGzip(gz)) {
-    const hint = '响应体不是 gzip（前两字节 0x' + gz.slice(0, 2).toString('hex') + '）'
-      + '，疑似宿主 undici 污染全局 fetch（Node ' + process.version + '，上游 #742）'
-    logErr('[whale][dsh-market] 镜像 tarball 解压前置校验失败', hint)
-    throw new Error('镜像 tarball ' + hint)
+  // ⚠️ 镜像源已从全局 15s 竞速计时里豁免（见 loadCatalog），所以每个请求都要自带时限：
+  //    头部 15s（fetchHeaders），体走停滞看门狗（readBodyStall）。这样慢但一直在传的
+  //    tarball 不会被杀掉，而真正卡死的连接仍会在 15s 内出局。
+  const meta = await fetchHeaders(metaUrl, fetchImpl, signal)
+  try {
+    if (!meta.res.ok) throw new Error('镜像元数据 HTTP ' + meta.res.status)
+    const body = JSON.parse(await meta.res.text())
+    const tarball = body && body.dist && body.dist.tarball
+    if (!tarball) throw new Error('镜像元数据里没有 dist.tarball')
+    // ⚠️ tarball 的 URL 由 registry 元数据给出，可能指向它自己的 CDN。
+    // 只允许 http(s) —— 不接受元数据把我们带去任意第三方主机
+    const tb = String(tarball)
+    if (!/^https?:\/\//i.test(tb)) throw new Error('镜像 tarball 地址不合法')
+    const tar = await fetchHeaders(tb, fetchImpl, signal)
+    try {
+      if (!tar.res.ok) throw new Error('镜像 tarball HTTP ' + tar.res.status)
+      const gz = await readBodyStall(tar.res, '镜像 tarball')
+      // ⚠️ 宿主 undici 污染守卫（上游 dsh-market #742，2026-09 修）：宿主进程若已加载 undici 8
+      //    （`web_fetch` 这类工具会触发），Node 22 的**全局 fetch** 会把 gzip 体的 content-encoding
+      //    丢掉、且不再自动解压 —— 于是这里拿到的仍是 gzip 原始字节，gunzipSync 直接抛
+      //    「incorrect header check」。现象与「镜像坏了」一模一样，光看报错分不出是谁的锅。
+      //    只在这一步判定并标注，不改链路：Node 24 + 无 undici 8 的环境实测正常（见下）。
+      //    真踩上时的解法是绕开全局 fetch 自带解压（与上游同路），改起来动静大，故只留痕。
+      if (!isGzip(gz)) {
+        const hint = '响应体不是 gzip（前两字节 0x' + gz.slice(0, 2).toString('hex') + '）'
+          + '，疑似宿主 undici 污染全局 fetch（Node ' + process.version + '，上游 #742）'
+        logErr('[whale][dsh-market] 镜像 tarball 解压前置校验失败', hint)
+        throw new Error('镜像 tarball ' + hint)
+      }
+      const unpacked = zlib.gunzipSync(gz)
+      const text = untarOne(unpacked, 'package/plugins.json')
+      if (!text) throw new Error('镜像 tarball 里没有 plugins.json')
+      return text
+    } finally {
+      tar.done()
+    }
+  } finally {
+    meta.done()
   }
-  const tar = zlib.gunzipSync(gz)
-  const text = untarOne(tar, 'package/plugins.json')
-  if (!text) throw new Error('镜像 tarball 里没有 plugins.json')
-  return text
 }
 
 // 按用户配置列出**要参与竞速的来源集合**。
@@ -866,8 +1098,16 @@ async function loadCatalog(opts) {
   const failures = []
   // 每个来源一个 controller，胜出后统一 abort 剩下的
   const ctrls = sources.map(() => new AbortController())
-  // 兜底：最慢的源不许超过 FETCH_TIMEOUT_MS（快源早就返回了，慢源等满即弃）
-  const timer = setTimeout(() => { for (const c of ctrls) c.abort() }, FETCH_TIMEOUT_MS)
+  // 兜底：URL 类来源（custom / official）不许超过 FETCH_TIMEOUT_MS（快源早就返回了，慢源等满即弃）。
+  // ⚠️ mirror **不在此列**：tarball 可能仍在下字节，由 loadFromMirror 自带的停滞看门狗收尾
+  //    （头部 15s / 停滞 15s / 整体 10min / 256MB）。否则慢镜像会被 15s 一刀切掉，
+  //    而链路其实还在传（上游 b766e2a 的真实事故）。
+  const timer = setTimeout(() => {
+    sources.forEach((s, i) => {
+      if (s.kind === 'mirror') return
+      try { ctrls[i].abort() } catch (e) {}
+    })
+  }, FETCH_TIMEOUT_MS)
 
   let settled = false
   const payload = await new Promise((resolve) => {
@@ -1066,6 +1306,9 @@ module.exports = {
   rangeAllows,
   lowerBoundOf,
   updateState,
+  // 「这个依赖是不是能走更新通道的插件」（对齐上游 #793）。纯函数，IO 全在调用方
+  isUpdatablePlugin,
+  bundleBaseName,
   buildSources,
   loadCatalog,
   // 回源 registry 查官方最新版（目录是每日快照，比它新；只在用户点击时调）
@@ -1073,4 +1316,6 @@ module.exports = {
   clearCache,
   peekCache,
   _untarOne: untarOne,
+  // 停滞看门狗只给单测用（生产路径只经 loadFromMirror 调用），故加下划线前缀
+  _readBodyStall: readBodyStall,
 }

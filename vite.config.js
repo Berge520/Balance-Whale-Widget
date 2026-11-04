@@ -80,28 +80,42 @@ function copyPublicExceptSkip(outDir) {
   }
 }
 
-// src/bubble/bubble-render.js 是悬浮窗与设置页共享的气泡渲染器单一来源。悬浮窗页面是
-// file:// 下的普通 script（不能用 ES module），所以构建时用 esbuild 把它打成 IIFE：
-// dist/bubble-render.js 挂全局 window.BubbleRender，floating.html 在 floating-page.js 之前加载。
+// 两份悬浮窗共享的纯逻辑源码，构建期用 esbuild 打成 IIFE（悬浮窗页面是 file:// 下的普通
+// script，不能用 ES module）：
+//   · src/bubble/bubble-render.js → dist/bubble-render.js（全局 BubbleRender）
+//   · public/preload/lib/offwork.js → dist/offwork-core.js（全局 OffworkCore）
+//     —— 时间算法与宿主共用同一份源码（宿主 require 同一文件做配置归一）。
+// floating.html 在两份正常页面脚本之前加载它们。
 // esbuild 取 Vite 的传递依赖（node_modules 顶层提升副本），不单独进 package.json。
 // 不压缩：与 dist 里其他原样文件一致，标识符不混淆便于排障（注释会被 esbuild 剥掉，源文件保留）。
 // 放 closeBundle 而非 writeBundle：watch 模式下每次重建都会触发，产物始终跟源文件同步。
-function buildBubbleRenderIife(outDir) {
+function buildSharedIife(outDir) {
   return {
-    name: 'whale-build-bubble-render',
+    name: 'whale-build-shared-iife',
     apply: 'build',
     async closeBundle() {
       const esbuild = await import('esbuild')
       const path = await import('node:path')
-      await esbuild.build({
-        entryPoints: [path.resolve(process.cwd(), 'src/bubble/bubble-render.js')],
-        outfile: path.resolve(process.cwd(), outDir, 'bubble-render.js'),
-        bundle: true,
-        format: 'iife',
-        globalName: 'BubbleRender',
-        minify: false,
-        logLevel: 'silent',
-      })
+      await Promise.all([
+        esbuild.build({
+          entryPoints: [path.resolve(process.cwd(), 'src/bubble/bubble-render.js')],
+          outfile: path.resolve(process.cwd(), outDir, 'bubble-render.js'),
+          bundle: true,
+          format: 'iife',
+          globalName: 'BubbleRender',
+          minify: false,
+          logLevel: 'silent',
+        }),
+        esbuild.build({
+          entryPoints: [path.resolve(process.cwd(), 'public/preload/lib/offwork.js')],
+          outfile: path.resolve(process.cwd(), outDir, 'offwork-core.js'),
+          bundle: true,
+          format: 'iife',
+          globalName: 'OffworkCore',
+          minify: false,
+          logLevel: 'silent',
+        }),
+      ])
     },
   }
 }
@@ -115,7 +129,7 @@ export default defineConfig({
     vue(),
     copyPublicExceptSkip('dist'),
     copyResourcesExceptSkip('dist'),
-    buildBubbleRenderIife('dist'),
+    buildSharedIife('dist'),
   ],
   base: './'
 })

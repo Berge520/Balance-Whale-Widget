@@ -358,23 +358,53 @@ function sendMailAsync(cfg, text) {
 }
 
 function sendSystemAsync(text) {
-  try { notifySystem(text) } catch (err) { logErr('[whale][notify] 系统通知异常', err && err.message) }
+  try { return notifySystem(text) } catch (err) { logErr('[whale][notify] 系统通知异常', err && err.message); return false }
 }
 
-// 所有提醒的统一出口：按配置把一条文案分发到各渠道。
+// 所有提醒的统一出口：按配置把一条文案分发到各渠道，并返回**实际送达了哪些渠道**。
 // cfg.notifySystemOn 默认开（沿用旧行为）；cfg.notifyMailOn 默认关（需要用户先配 SMTP）。
-// 计时到点由页面侧再包一层 timerNotifyOn / timerMailOn，这里不再单独判。
+// 调用方（待办到点）要靠这个返回值决定要不要写幂等位 —— 系统通知真弹出去了才算送达；
+// 邮件是异步的，这里只统计「已发起」：失败只 logErr，不能因此每 30s 重发一封。
 function notify(text, cfg) {
   const t = String(text == null ? '' : text).trim()
-  if (!t) return
+  if (!t) return { system: false, mail: false }
   const c = cfg && typeof cfg === 'object' ? cfg : {}
-  if (c.notifySystemOn !== false) sendSystemAsync(t)
-  if (c.notifyMailOn === true) sendMailAsync(c, t)
+  const wantSystem = c.notifySystemOn !== false
+  const wantMail = c.notifyMailOn === true
+  const system = wantSystem ? sendSystemAsync(t) === true : false
+  if (wantMail) sendMailAsync(c, t)
+  return { system, mail: wantMail }
 }
 
-// 只给单测用的假 socket 注入（见文件头 netImpl 注释）
+// 计时到点的通知：页面把这一轮的两个开关一起带上来（channels.system / channels.mail）。
+// 与 notify() 的区别：计时看的是 TimerView 里的 timerNotifyOn / timerMailOn，
+// 不看全局 notifySystemOn / notifyMailOn；但渠道总开关仍最高优先 —— 设置页写着
+// 「关闭后所有自动提醒与计时都不再弹窗」，计时不能绕过它。
+// channels 缺省（老页面 / 老宿主）时退回全局开关，保持旧行为。
+let senders = { system: sendSystemAsync, mail: sendMailAsync }
+
+function notifyTimer(text, cfg, channels) {
+  const t = String(text == null ? '' : text).trim()
+  if (!t) return { system: false, mail: false }
+  const c = cfg && typeof cfg === 'object' ? cfg : {}
+  const hasCh = !!channels && typeof channels === 'object'
+  const wantSystem = hasCh ? channels.system === true : c.notifySystemOn !== false
+  const wantMail = hasCh ? channels.mail === true : c.notifyMailOn === true
+  const system = wantSystem && c.notifySystemOn !== false
+  const mail = wantMail && c.notifyMailOn === true
+  if (system) senders.system(t)
+  if (mail) senders.mail(c, t)
+  return { system, mail }
+}
+
+// 只给单测用的假 socket / 渠道注入（见文件头 netImpl 注释）
 function _setNetForTest(impl) {
   netImpl = impl || net
 }
+function _setSendersForTest(impl) {
+  senders = impl && typeof impl === 'object'
+    ? { system: impl.system || sendSystemAsync, mail: impl.mail || sendMailAsync }
+    : { system: sendSystemAsync, mail: sendMailAsync }
+}
 
-module.exports = { notify, sendMail, mailSubject, notifySystem, mailConfig, sendMailAsync, buildMail, mimeHeaderText, mailAddress, resolvePort, portHint, SmtpClient, _setNetForTest }
+module.exports = { notify, notifyTimer, sendMail, mailSubject, notifySystem, mailConfig, sendMailAsync, buildMail, mimeHeaderText, mailAddress, resolvePort, portHint, SmtpClient, _setNetForTest, _setSendersForTest }

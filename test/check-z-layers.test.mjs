@@ -8,7 +8,7 @@
  * 样本经注入环境变量喂进脚本（CZL_ROOT / CZL_FILES / CZL_ALLOW），
  * 真实构建不设这些变量，走脚本内置默认值。
  */
-import test from 'node:test'
+import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -28,8 +28,12 @@ const TABLE = `:root {
 .a { z-index: var(--z-whale-root); }
 `
 
+// 每个用例一座临时样式表仓库，跑完统一删（见文末 after）：不删的话每轮 npm test
+// 在 %TEMP% 里攒十几个 whale-czl-selftest-*
+const tmpRoots = []
 function makeRepo(cssFiles) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'whale-czl-selftest-'))
+  tmpRoots.push(root)
   for (const [rel, content] of Object.entries(cssFiles)) {
     const p = path.join(root, rel)
     fs.mkdirSync(path.dirname(p), { recursive: true })
@@ -49,6 +53,10 @@ function runScript(repo, extra = {}) {
     encoding: 'utf8',
   })
 }
+
+after(() => {
+  for (const root of tmpRoots) fs.rmSync(root, { recursive: true, force: true })
+})
 
 test('基线：层段表 + 变量引用必须全绿', () => {
   const repo = makeRepo({ 'public/floating.css': TABLE })

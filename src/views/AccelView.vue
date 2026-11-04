@@ -1,6 +1,7 @@
 <script lang="ts" setup>
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { msgCls, useFlash, type Flash } from '../composables/useFlash'
+import { useFold } from '../composables/useFold'
 import type { GhAccelOpLog, GhAccelTrace, GhAccelVerifyResult, WhaleServices } from '../types/services'
 
 // GitHub 加速（hosts 方案）整块功能：状态 / 开关 / IP 表 / 连接检测 / 操作日志。
@@ -65,6 +66,10 @@ const ghAccelStale = computed(() => {
 })
 // hosts 实际状态（读文件现算，不依赖配置意图）；null = 还没查过
 const ghAccelActual = ref<{ on: boolean; broken?: boolean; degraded?: boolean; active: string[]; hostsPath: string } | null>(null)
+// 读 hosts 实际状态失败的原因（空串 = 没失败 / 还没读）。
+// 之前 catch 是空的：宿主 API 抛错或不存在时 ghAccelActual 永远是 null，
+// 「实际状态」就永久停在「读取中…」—— 用户以为在加载，实际早就失败了，且没有任何提示
+const ghAccelLoadErr = ref('')
 // 块之外已存在的目标域名条目（其它工具也写 hosts；本插件的块写在最前，会压过它们）
 const ghAccelConflicts = ref<Array<{ domain: string; ip: string; line: string; writer?: string }>>([])
 // 冲突条目里认出「是哪类工具写的」的那些结论（去重后用、号连起来）；全认不出时为空串，
@@ -100,14 +105,14 @@ const ghAccelSrcFold = ref(false)
 // 而它对多数用户是「配一次就不再动」的功能。默认收起来只留一行标题，
 // 帮助 Tab 的其它卡（使用帮助 / 关于与更新）不再被它挤到屏幕外。
 // 与本文件其它 xFold 同约定：true = 内容展开，false = 收起（初值即默认折叠）
-const ghAccelCardFold = ref(false)
+const ghAccelCardFold = useFold('ghAccel', false)
 // 「是否已经加载过」：整卡折叠时不发任何请求（读 hosts、扫冲突、拉源表清单），
 // 首次展开才加载一次。用独立布尔而不是复用 ghAccelCardFold —— 折叠/展开会来回切，
 // 已经拿到的数据没必要丢掉重取（读 hosts 是异步 IO + 扫全文件冲突，不便宜）。
 const ghAccelLoaded = ref(false)
 function toggleGhAccelCard() {
-  ghAccelCardFold.value = !ghAccelCardFold.value
-  if (!ghAccelCardFold.value || ghAccelLoaded.value) return
+  ghAccelCardFold.open = !ghAccelCardFold.open
+  if (!ghAccelCardFold.open || ghAccelLoaded.value) return
   ghAccelLoaded.value = true
   refreshGhAccel()
   // 社区源表清单（渲染「源表优先级」用）只随版本变化，拉一次就够
@@ -209,7 +214,12 @@ watch(
 )
 
 async function refreshGhAccel() {
-  if (!api.value.ghAccelStatus) return
+  if (!api.value.ghAccelStatus) {
+    // preload 缺这个方法时不能静默 return：否则界面永远停在「读取中…」
+    ghAccelLoadErr.value = '当前宿主版本不支持读取 hosts 状态'
+    return
+  }
+  ghAccelLoadErr.value = ''
   try {
     // 宿主读 hosts 走异步 fs（同进程直调，同步读会冻住渲染线程），故这里必须 await
     const s = await api.value.ghAccelStatus()
@@ -217,7 +227,11 @@ async function refreshGhAccel() {
     ghAccelConflicts.value = (await api.value.ghAccelScanConflicts?.()) || []
     ghAccelTrace.value = api.value.ghAccelTrace?.() || null
     pullGhAccelOps() // 日志与状态同一处刷新：切到帮助 Tab / 操作结束后都能看到最新记录
-  } catch (err) {}
+  } catch (err) {
+    // 失败必须落到界面上：空 catch 会让「实际状态」永久显示「读取中…」，
+    // 用户误以为还在加载，折叠摘要也只能回落到配置意图（看起来「已开启」，实际 hosts 可能没写）
+    ghAccelLoadErr.value = err instanceof Error ? err.message : String(err || '未知错误')
+  }
 }
 // 开关绑定 cfg.ghAccelOn（意图），实际生效与否由 hosts 文件现算；失败/取消时开关回弹
 // 拉取宿主操作日志。start 在操作开始时调（拿到 running 那条，日志区能实时显示「正在干什么」），
@@ -336,6 +350,20 @@ function ghAccelSourceHost(url: string) {
 function srcCode(url: string) {
   return 'community:' + url
 }
+// 「真正参与候选链」的源编码集合：只认 cfg.ghAccelSrc.sources 里写了的项。
+// **不能用 splitOrder().urls 判参与** —— 那是「渲染顺序」，末尾已把全部已知源补齐，
+// 拿它判会让集合恒含全部源：新加的自定义源一进列表就显示成已勾选，
+// 「默认不参与、勾选后才生效」的语义在 UI 上完全失效（勾选框永远勾着，用户看不出没启用）。
+// 宿主 normSources 对自定义源同样不自动补齐，两边口径一致
+function chainSrcSet() {
+  const arr: string[] = (props.cfg.ghAccelSrc || {}).sources || []
+  const out = new Set<string>()
+  for (const s of arr) {
+    if (typeof s !== 'string' || !s) continue
+    out.add(s.startsWith('community:') ? s : srcCode(s)) // 兼容旧配置里的裸 URL
+  }
+  return out
+}
 // 直接由已存的 order / sources 两个字段推导出「来源 key 顺序」与「源表 URL 顺序」两段，
 // 未出现的项按默认顺序补到末尾，与宿主 normSrcOrder / normSources 同口径。
 // 来源顺序读 order（旧配置里这个键不存在 → 走默认顺序补全，与升级前一致），
@@ -392,7 +420,7 @@ const ghAccelSrcRows = computed<GhAccelSrcRow[]>(() => {
     })
     // 社区源表的内部顺序只在它开启时才有意义，收起时不给用户多看的行
     if (k !== 'community' || !on('community')) return
-    const inChain = new Set(urls.map(srcCode))
+    const inChain = chainSrcSet()
     urls.forEach((u, j) => {
       const meta = ghAccelSourceList.value.find((s) => s.url === u)
       const isCustom = !!(meta && meta.custom)
@@ -408,8 +436,10 @@ const ghAccelSrcRows = computed<GhAccelSrcRow[]>(() => {
           : '人工维护的静态快照',
         // 内置源恒参与；自定义源只在写进 sources 时才参与 —— 这正是「默认不参与」的实现
         on: isCustom ? inChain.has(srcCode(u)) : true,
-        up: j > 0,
-        down: j < urls.length - 1,
+        // 未参与的自定义源位置没有意义（sources 里不存它的位置，启用后会落到末尾），
+        // 禁用上下移，免得用户拖动后看到「没反应」以为坏了
+        up: j > 0 && (!isCustom || inChain.has(srcCode(u))),
+        down: j < urls.length - 1 && (!isCustom || inChain.has(srcCode(u))),
         custom: isCustom,
         enabled: isCustom ? inChain.has(srcCode(u)) : true,
       })
@@ -418,10 +448,19 @@ const ghAccelSrcRows = computed<GhAccelSrcRow[]>(() => {
   return rows
 })
 async function loadGhAccelSources() {
-  if (!api.value.ghAccelSources) return
-  const r = await api.value.ghAccelSources()
-  ghAccelSourceList.value = (r && r.all) || []
-  if (r && r.max) ghAccelSrcMax.value = r.max
+  if (!api.value.ghAccelSources) {
+    ghAccelSrcMsg.value = '当前宿主版本不支持读取源表清单'
+    return
+  }
+  try {
+    const r = await api.value.ghAccelSources()
+    ghAccelSourceList.value = (r && r.all) || []
+    if (r && r.max) ghAccelSrcMax.value = r.max
+  } catch (err) {
+    // 调用方（首次展开 / 添加 / 删除）都不接异常：抛出去会变成 unhandled rejection，
+    // 界面表现为「添加」按钮恢复可点却没有任何提示，用户只会重复点
+    ghAccelSrcMsg.value = '读取源表清单失败：' + (err instanceof Error ? err.message : String(err || '未知错误'))
+  }
 }
 // 上移 / 下移：两类行共用一个实现 —— 都在同一段（来源 key 段 / 源表 URL 段）内换位，
 // 换完把两段按固定次序拼回 sources（key 段在前、URL 段在后，顺序信息各自保留）
@@ -453,8 +492,18 @@ function moveGhAccelRow(i: number, dir: -1 | 1) {
   // 为什么不能像原来那样把 keys 也塞进 sources：宿主读的是 cfg.ghAccelSrc.order 与
   // cfg.ghAccelSrc.sources 两个独立字段（见 hosts.normSrcOrder / normSources），
   // 塞进 sources 里的 'doh' / 'community' 只会被当未知 URL 过滤掉，真正生效的 order
-  // 恒为 undefined → 一律退回默认顺序，用户怎么点上移下移都不生效
-  emit('patch', { ghAccelSrc: { order: keys, sources: urls.map(srcCode) } })
+  // 恒为 undefined → 一律退回默认顺序，用户怎么点上移下移都不生效。
+  // 写回时**只保留本来就参与的源**（外加全部内置源）：urls 是渲染顺序、含所有已知源，
+  // 直接 map 会把没勾选的自定义源一起写进 sources —— 用户只是拖了下顺序，
+  // 未启用的源却默默开始参与拉取（每次刷新白多一轮网络往返）
+  const inChain = chainSrcSet()
+  const custom = new Set(ghAccelSourceList.value.filter((s) => s.custom).map((s) => s.url))
+  emit('patch', {
+    ghAccelSrc: {
+      order: keys,
+      sources: urls.filter((u) => !custom.has(u) || inChain.has(srcCode(u))).map(srcCode),
+    },
+  })
 }
 // 新增自定义源：**合法性交给宿主判定**（http(s) 绝对 URL、去重、上限），前端只负责把
 // 结果如实告诉用户。落盘后重新拉一次清单，拿到宿主校验后的真实列表再渲染 ——
@@ -506,13 +555,17 @@ async function removeGhAccelSource(url: string) {
   }
 }
 // 启用 / 停用某个自定义源 = 把它的编码（'community:<url>'）加进 / 移出 sources。
-// 只动 sources、不动 customSources：源还留在列表里，用户可以随时再勾回来；
-// 顺序沿用现有 urls 段（默认在末尾），用户可再点上移调优先级
+// 只动 sources、不动 customSources：源还留在列表里，用户可以随时再勾回来。
+// **基线必须是「当前真正参与」的集合**（chainSrcSet），不能拿 splitOrder().urls ——
+// 后者含全部已知源，勾一个自定义源会把其它没勾的一起写进 sources（勾一个等于全勾上）
 function toggleGhAccelSource(url: string, want: boolean) {
   const { urls } = splitOrder()
+  const inChain = chainSrcSet()
+  const isCustom = (u: string) => !!ghAccelSourceList.value.find((s) => s.url === u && s.custom)
+  const base = urls.filter((u) => !isCustom(u) || inChain.has(srcCode(u)))
   const next = want
-    ? (urls.includes(url) ? urls : urls.concat([url]))
-    : urls.filter((u) => u !== url)
+    ? (base.includes(url) ? base : base.concat([url]))
+    : base.filter((u) => u !== url)
   emit('patch', { ghAccelSrc: { sources: next.map(srcCode) } })
 }
 // 勾选后先按新意图落 config，再交给 toggleGhAccel 真正去写 / 删 hosts；
@@ -796,18 +849,21 @@ watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = nu
       <span>GitHub 加速</span>
       <!-- 折叠时把「已生效 / 未生效」透出来：收起来也要能一眼确认 accelerated 状态，
            否则用户必须展开才知道加速开着没有（这正是整卡折叠最大的信息损失）。
-           数据没加载过时按配置意图显示，避免露一个空的「读取中…」 -->
-      <span v-if="!ghAccelCardFold" class="gh-accel-sum">
-        <span class="gh-accel-sum-state" :class="ghAccelActual ? (ghAccelActual.on ? 'on' : 'off') : (cfg.ghAccelOn ? 'on' : 'off')">
-          {{ ghAccelActual ? (ghAccelActual.on ? '已生效（' + ghAccelActual.active.length + ' 个域名）' : '未生效') : (cfg.ghAccelOn ? '已开启' : '未开启') }}
+           数据没加载过时按配置意图显示，避免露一个空的「读取中…」；
+           但读取失败时不能再冒充配置意图（那会让用户以为「已开启」就真的生效了） -->
+      <span v-if="!ghAccelCardFold.open" class="gh-accel-sum">
+        <span class="gh-accel-sum-state" :class="ghAccelActual ? (ghAccelActual.on ? 'on' : 'off') : (ghAccelLoadErr ? 'off' : (cfg.ghAccelOn ? 'on' : 'off'))">
+          {{ ghAccelActual
+            ? (ghAccelActual.on ? '已生效（' + ghAccelActual.active.length + ' 个域名）' : '未生效')
+            : (ghAccelLoadErr ? '状态读取失败' : (cfg.ghAccelOn ? '已开启' : '未开启')) }}
         </span>
       </span>
-      <span class="gh-accel-caret">{{ ghAccelCardFold ? '▾' : '▸' }}</span>
+      <span class="gh-accel-caret">{{ ghAccelCardFold.open ? '▾' : '▸' }}</span>
     </h2>
-    <div v-if="ghAccelCardFold">
+    <div v-if="ghAccelCardFold.open">
     <!-- 原理说明默认折叠：卡片首屏只留标题 + 开关 + 实时进度，降低普通用户的理解成本 -->
     <div class="fold">
-      <button class="link-btn utils-btn utils-secondary" @click="ghAccelIntroFold = !ghAccelIntroFold">
+      <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="ghAccelIntroFold" @click="ghAccelIntroFold = !ghAccelIntroFold">
         {{ ghAccelIntroFold ? '收起说明' : '这是什么 / 有什么影响' }}
       </button>
       <div v-if="ghAccelIntroFold" class="guide">
@@ -844,8 +900,15 @@ watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = nu
       <span class="ver" v-if="ghAccelActual">
         {{ ghAccelActual.on ? '已生效（' + ghAccelActual.active.length + ' 个域名）' : '未生效' }}
       </span>
+      <span class="ver err" v-else-if="ghAccelLoadErr">读取失败</span>
       <span class="ver" v-else>读取中…</span>
     </label>
+    <!-- 读取失败必须显式说清楚，并给就近的重试入口：失败时上面的状态要么是「读取失败」，
+         要么是「读到了状态、但后续（冲突扫描等）失败」—— 后者也要提醒它可能不是最新 -->
+    <p v-if="ghAccelLoadErr" class="msg err">
+      读取 hosts 实际状态失败：{{ ghAccelLoadErr }}<template v-if="ghAccelActual">（上方显示的可能不是最新状态）</template>
+      <button class="link-btn utils-btn utils-secondary" @click="refreshGhAccel">重试</button>
+    </p>
     <label class="field row">
       <span class="label">上次刷新</span>
       <span class="ver">{{ ghAccelAgeText() }}</span>
@@ -901,7 +964,7 @@ watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = nu
     <!-- GitHub 加速日志：一次操作（开启/关闭/刷新/校验/检测）= 一条，默认只留一行摘要，点开看步骤。
          数据来自宿主的操作日志环形缓冲（内存态）+ 最近一次 IP 获取的来源追踪 -->
     <div class="fold">
-      <button class="link-btn utils-btn utils-secondary" @click="toggleGhAccelLog">
+      <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="ghAccelLogFold" @click="toggleGhAccelLog">
         {{ ghAccelLogFold ? '收起 GitHub 加速日志' : 'GitHub 加速日志' + (ghAccelOps.length ? '（' + ghAccelOps.length + '）' : '') }}
       </button>
       <div v-if="ghAccelLogFold" class="guide">
@@ -970,7 +1033,7 @@ watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = nu
       </div>
     </div>
     <div class="fold">
-      <button class="link-btn utils-btn utils-secondary" @click="ghAccelIpsFold = !ghAccelIpsFold">
+      <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="ghAccelIpsFold" @click="ghAccelIpsFold = !ghAccelIpsFold">
         {{ ghAccelIpsFold ? '收起 IP 表编辑' : '编辑 IP 表' }}
       </button>
       <div v-if="ghAccelIpsFold" class="guide">
@@ -1001,7 +1064,7 @@ watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = nu
       </div>
     </div>
     <div class="fold">
-      <button class="link-btn utils-btn utils-secondary" @click="ghAccelSrcFold = !ghAccelSrcFold">
+      <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="ghAccelSrcFold" @click="ghAccelSrcFold = !ghAccelSrcFold">
         {{ ghAccelSrcFold ? '收起获取方式' : '获取方式（高级）' }}
       </button>
       <div v-if="ghAccelSrcFold" class="guide">
@@ -1030,7 +1093,7 @@ watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = nu
               <span class="gh-order-idx">{{ i + 1 }}</span>
               <span class="gh-order-name">
                 <strong>{{ r.label }}</strong>
-                <span class="hint">{{ r.kind === 'source' ? '同一域名被多个源覆盖时，取排最前那个源给的 IP' : r.desc }}</span>
+                <span class="hint">{{ r.kind === 'src' ? r.desc : (r.custom ? r.desc : '同一域名被多个源覆盖时，取排最前那个源给的 IP') }}</span>
               </span>
             </span>
             <span class="gh-move">
@@ -1209,6 +1272,10 @@ watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = nu
 .gh-accel .ver {
   font-size: 13px;
   color: var(--fg-dim);
+}
+/* 读取失败要能被一眼看到（与成功/未生效的灰色区分开） */
+.gh-accel .ver.err {
+  color: var(--err);
 }
 /* .btn-row 骨架已收进 main.css（单一来源），这里不再留副本 */
 /* 执行中的按钮要同时满足「看得出被禁用」和「看得出在动」：

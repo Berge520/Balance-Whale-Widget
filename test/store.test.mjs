@@ -29,7 +29,7 @@ globalThis.utools = {
 const require = createRequire(import.meta.url)
 const { K } = require('../public/preload/lib/constants.js')
 
-const { normTokenPrice, normUiMode, QUOTE_TEXT_KEYS, DRAG_LINES_DEFAULT, normLineList } = store
+const { normTokenPrice, normUiMode, normTheme, normBgMode, QUOTE_TEXT_KEYS, DRAG_LINES_DEFAULT, normLineList, defaultConfig, patchConfig } = store
 const { TOKEN_PRICE_DEFAULT, TOKEN_PRICE_MAX, TOKEN_RATE_MAX } = constants
 
 test('normTokenPrice 缺字段回落默认值，开关只认 true', () => {
@@ -91,17 +91,52 @@ test('QUOTE_TEXT_KEYS：报时四池（time / timeEarly / timeMorning / timeEve�
   }
 })
 
-test('normUiMode 只认 light/dark，其余（含缺省与非法）一律回 auto', () => {
+test('normUiMode 只认 auto/light/dark/fantasy，其余（含缺省与非法）一律回 auto', () => {
   assert.equal(normUiMode('light'), 'light')
   assert.equal(normUiMode('dark'), 'dark')
+  assert.equal(normUiMode('fantasy'), 'fantasy')
   assert.equal(normUiMode('auto'), 'auto')
   assert.equal(normUiMode(undefined), 'auto')
   assert.equal(normUiMode(null), 'auto')
   assert.equal(normUiMode(''), 'auto')
   // 非法值不做就近猜测：配坏了顶多回默认行为（跟 uTools），不会莫名其妙变成另一个手动档
   assert.equal(normUiMode('Light'), 'auto')
+  assert.equal(normUiMode('Fantasy'), 'auto')
   assert.equal(normUiMode('system'), 'auto')
   assert.equal(normUiMode(123), 'auto')
+})
+
+test('normBgMode 只认 off/deep/aurora/video/custom，其余回 off', () => {
+  assert.equal(normBgMode('off'), 'off')
+  assert.equal(normBgMode('deep'), 'deep')
+  assert.equal(normBgMode('aurora'), 'aurora')
+  assert.equal(normBgMode('stars'), 'stars')
+  assert.equal(normBgMode('mist'), 'mist')
+  assert.equal(normBgMode('polar'), 'polar')
+  assert.equal(normBgMode('warm'), 'warm')
+  assert.equal(normBgMode('video'), 'video')
+  assert.equal(normBgMode('custom'), 'custom')
+  for (const bad of [undefined, null, '', 'Deep', 'light', 123]) {
+    assert.equal(normBgMode(bad), 'off')
+  }
+})
+
+test('启动片头默认关闭，patch 只认 true，非法值回 false', () => {
+  db.delete(K.config)
+  assert.equal(defaultConfig().bootIntroOn, false)
+  assert.equal(patchConfig({ bootIntroOn: true }).bootIntroOn, true)
+  assert.equal(patchConfig({ bootIntroOn: 'yes' }).bootIntroOn, false)
+  assert.equal(patchConfig({ bootIntroOn: 1 }).bootIntroOn, false)
+})
+
+test('normTheme 只认 default/dark/sakura/fantasy，其余回 default', () => {
+  assert.equal(normTheme('default'), 'default')
+  assert.equal(normTheme('dark'), 'dark')
+  assert.equal(normTheme('sakura'), 'sakura')
+  assert.equal(normTheme('fantasy'), 'fantasy')
+  for (const bad of [undefined, null, '', 'Fantasy', 'light', 123]) {
+    assert.equal(normTheme(bad), 'default')
+  }
 })
 
 // ──────────────────────────────────────────────
@@ -169,10 +204,16 @@ test('normBubbleMod：认不出的 type 丢；空 text / 空 random 丢（同 no
   assert.equal(normBubbleMod({ type: 'random', lines: [] }), null)
   assert.equal(normBubbleMod({ type: 'link', url: '  ' }), null)
   assert.equal(normBubbleMod(null), null)
-  // 认得出的 text 落 text 键并 trim
+  // 认得出的 text 落 text 键，且**保留原串**（不 trim）：设置页逐键回抛，trim 会把刚敲的
+  // 尾部空格吃掉，「hello world」永远打不出空格；纯空白仍按空内容丢掉（上一行已断言）
   const m = normBubbleMod({ type: 'text', text: '  嗨  ' })
-  assert.equal(m.text, '嗨')
+  assert.equal(m.text, '  嗨  ')
   assert.equal(m.type, 'text')
+  // link：地址照旧 trim；显示文字保留原串，纯空白存空串（渲染侧回落成链接本身）
+  const lk = normBubbleMod({ type: 'link', url: '  https://a.b  ', text: ' 点 我 ' })
+  assert.equal(lk.url, 'https://a.b')
+  assert.equal(lk.text, ' 点 我 ')
+  assert.equal(normBubbleMod({ type: 'link', url: 'https://a.b', text: '   ' }).text, '')
 })
 
 test('normBubbleMod：size 压到 1–50 取整，bold/italic/ul 只认 === true，rgb 只认 18 项白名单', () => {
@@ -582,11 +623,11 @@ test('setTodayUsage：直接覆盖当天用量、负数/非法夹到 0、返回�
 test('readTimer：空存储 / 非对象回默认（mode off）', () => {
   db.delete(K.timer)
   const d = readTimer()
-  assert.deepEqual(d, { mode: 'off', running: false, paused: false, startAt: 0, endAt: 0, elapsed: 0, remain: 0, arg: '', isBreak: false, back: 0, cycle: 0, cycleDate: '', breakLong: false })
+  assert.deepEqual(d, { mode: 'off', running: false, paused: false, startAt: 0, endAt: 0, elapsed: 0, remain: 0, arg: '', isBreak: false, back: 0, cycle: 0, cycleDate: '', span: 0 })
 })
 
 test('readTimer：逐字段归一化 —— mode 白名单、布尔严格、数值钳负、arg 只认串', () => {
-  db.set(K.timer, { mode: 'bogus', running: 1, paused: 'yes', startAt: 'abc', endAt: '123', elapsed: -5, remain: '9', arg: 42, isBreak: 1, back: -5, cycle: -3, cycleDate: 'not-a-date', breakLong: 1 })
+  db.set(K.timer, { mode: 'bogus', running: 1, paused: 'yes', startAt: 'abc', endAt: '123', elapsed: -5, remain: '9', arg: 42, isBreak: 1, back: -5, cycle: -3, cycleDate: 'not-a-date', span: -1 })
   const t = readTimer()
   assert.equal(t.mode, 'off') // 认不出回 off
   assert.equal(t.running, false) // 1 不算 true
@@ -600,13 +641,13 @@ test('readTimer：逐字段归一化 —— mode 白名单、布尔严格、数�
   assert.equal(t.back, 0) // 负值钳到 0
   assert.equal(t.cycle, 0) // 负值钳到 0
   assert.equal(t.cycleDate, '') // 格式不对回空
-  assert.equal(t.breakLong, false) // 只认严格 true
-  db.set(K.timer, { mode: 'down', isBreak: true, back: '9', cycle: 3, cycleDate: '2026-10-28', breakLong: true })
+  assert.equal(t.span, 0) // 负跨度钳到 0
+  db.set(K.timer, { mode: 'down', isBreak: true, back: '9', cycle: 3, cycleDate: '2026-10-28', span: '7200000' })
   assert.equal(readTimer().isBreak, true)
   assert.equal(readTimer().back, 9) // 数字串可解析
   assert.equal(readTimer().cycle, 3)
   assert.equal(readTimer().cycleDate, '2026-10-28')
-  assert.equal(readTimer().breakLong, true)
+  assert.equal(readTimer().span, 7200000) // 数字串可解析，定时跨度保留
   // 合法 mode 保留
   db.set(K.timer, { mode: 'down' })
   assert.equal(readTimer().mode, 'down')
@@ -619,7 +660,7 @@ test('readTimer：逐字段归一化 —— mode 白名单、布尔严格、数�
 
 test('writeTimer：落盘成功回 true 且可回读；失败回 false 不抛', () => {
   db.delete(K.timer)
-  const state = { mode: 'up', running: true, paused: false, startAt: 1000, endAt: 0, elapsed: 5, remain: 0, arg: 'x', isBreak: true, back: 1500, cycle: 2, cycleDate: '2026-10-28', breakLong: false }
+  const state = { mode: 'up', running: true, paused: false, startAt: 1000, endAt: 0, elapsed: 5, remain: 0, arg: 'x', isBreak: true, back: 1500, cycle: 2, cycleDate: '2026-10-28', span: 0 }
   assert.equal(writeTimer(state), true)
   assert.deepEqual(readTimer(), state)
   const saved = globalThis.utools.dbStorage.setItem
@@ -751,7 +792,7 @@ test('writeAnchor：同时更新内存缓存与存储，成功回 true；失败�
 // ──────────────────────────────────────────────
 const {
   readTodo, writeTodo, clearTodo, normTodoText,
-  readFocus, writeFocus, clearFocus,
+  readFocus, writeFocus, clearFocus, syncTodoRounds,
 } = store
 const { TODO_TEXT_MAX, TODO_MAX } = constants
 
@@ -789,15 +830,15 @@ test('readTodo：无文案 / 无 id / 非对象的条目丢弃，重复 id 只�
   db.delete(K.todo)
 })
 
-test('readTodo：at 缺失回落到当前时间；done 只认 === true；doneAt 仅在已完成时保留；est/rounds 钳到 0–99', () => {
+test('readTodo：at 缺失回落到当前时间；done 只认 === true；doneAt 仅在已完成时保留；est/rounds 钳到 0–99；tm/mins 有默认', () => {
   const before = Date.now()
   db.set(K.todo, {
     items: [
       { id: 'a', text: '没时间戳', at: 'abc' },
       { id: 'b', text: '已完成', done: true, at: 1000, doneAt: 2000 },
       { id: 'c', text: '未完成却带 doneAt', done: 1, at: 1000, doneAt: 2000 },
-      { id: 'd', text: '带预估', at: 1000, est: 5, rounds: 3 },
-      { id: 'e', text: '越界预估', at: 1000, est: -1, rounds: 999 },
+      { id: 'd', text: '带预估', at: 1000, est: 5, rounds: 3, tm: 'up', mins: 30 },
+      { id: 'e', text: '越界预估', at: 1000, est: -1, rounds: 999, tm: 'nope', mins: 9999 },
     ],
   })
   const s = readTodo()
@@ -805,14 +846,17 @@ test('readTodo：at 缺失回落到当前时间；done 只认 === true；doneAt 
   assert.ok(a.at >= before && a.at <= Date.now(), 'at 应回落到当前时间')
   assert.equal(a.est, 0, '缺省 est 回 0')
   assert.equal(a.rounds, 0, '缺省 rounds 回 0')
+  assert.deepEqual([a.tm, a.mins], ['down', 25], '缺省计时方式按「倒计时 25 分钟」')
   const b = s.items.find((x) => x.id === 'b')
   assert.deepEqual([b.done, b.at, b.doneAt], [true, 1000, 2000])
   const c = s.items.find((x) => x.id === 'c')
   assert.deepEqual([c.done, c.doneAt], [false, 0], '1 不算完成，doneAt 归零')
   const d = s.items.find((x) => x.id === 'd')
   assert.deepEqual([d.est, d.rounds], [5, 3], '合法值保留')
+  assert.deepEqual([d.tm, d.mins], ['up', 30], '合法计时参数保留')
   const e = s.items.find((x) => x.id === 'e')
   assert.deepEqual([e.est, e.rounds], [0, 99], '越界值钳到 0–99')
+  assert.deepEqual([e.tm, e.mins], ['down', 600], '非法 tm 回落 down，mins 钳到 1–600')
   db.delete(K.todo)
 })
 
@@ -841,7 +885,7 @@ test('readTodo：focusId 必须指向「未完成的现存条目」，悬空 / �
 
 test('writeTodo：落盘成功回 true 且可回读；失败回 false 不抛', () => {
   db.delete(K.todo)
-  const state = { items: [{ id: 'a', text: '任务', done: false, at: 1, doneAt: 0, est: 4, rounds: 2 }], focusId: 'a' }
+  const state = { items: [{ id: 'a', text: '任务', done: false, at: 1, doneAt: 0, est: 4, rounds: 2, tm: 'down', mins: 25, remindOn: false, remindKind: 'once', remindAt: 0, remindDow: 0, remindedFor: 0, notifiedFor: 0 }], focusId: 'a' }
   assert.equal(writeTodo(state), true)
   assert.deepEqual(readTodo(), state)
   const saved = globalThis.utools.dbStorage.setItem
@@ -861,11 +905,11 @@ test('clearTodo：删除清单，回读到空；重复清除不抛', () => {
   assert.doesNotThrow(() => clearTodo())
 })
 
-test('readFocus：空存储 / 非对象 / 缺 days 回空；非法日期键、非对象、全零天一律丢', () => {
+test('readFocus：空存储 / 非对象回 v2 空壳；老日子（无明细）保留，非法键、非对象、全零天一律丢', () => {
   db.delete(K.focus)
-  assert.deepEqual(readFocus(), { days: {} })
+  assert.deepEqual(readFocus(), { v: 2, days: {}, sessions: [] })
   db.set(K.focus, 'nope')
-  assert.deepEqual(readFocus(), { days: {} })
+  assert.deepEqual(readFocus(), { v: 2, days: {}, sessions: [] })
   db.set(K.focus, {
     days: {
       '2026-10-26': { r: 2, m: 50 },
@@ -877,6 +921,7 @@ test('readFocus：空存储 / 非对象 / 缺 days 回空；非法日期键、�
     },
   })
   const s = readFocus()
+  assert.equal(s.v, 2)
   assert.deepEqual(s.days['2026-10-26'], { r: 2, m: 50 })
   assert.equal(s.days['2026-10-25'], undefined)
   assert.equal(s.days['bad'], undefined)
@@ -885,11 +930,58 @@ test('readFocus：空存储 / 非对象 / 缺 days 回空；非法日期键、�
   db.delete(K.focus)
 })
 
-test('writeFocus：落盘成功回 true 且可回读；失败回 false 不抛；clearFocus 后回空', () => {
+test('readFocus：老形状明细无迁移升级（补 id/s/k），天表改由明细派生', () => {
   db.delete(K.focus)
-  const state = { days: { '2026-10-26': { r: 1, m: 25 } } }
+  // 缺 days、只有 sessions：老数据加字段后也必须能读，且天表立刻能从明细算出来
+  db.set(K.focus, { sessions: [
+    { d: '2026-10-26', t: 3000, m: 25, todoId: ' b ', todoText: '  写 \n 周报  ' },
+    { d: '2026-10-26', t: 1000, m: 25.6 },
+    { d: 'bad', t: 2000, m: 25 }, // 非法日期
+    { d: '2026-10-26', t: 0, m: 25 }, // 非法时间
+    { d: '2026-10-26', t: 2000, m: 0 }, // 非法时长
+    'nope',
+    { d: '2026-10-26', t: 1500, m: 9999, todoText: 'x'.repeat(80) }, // 分钟夹到 1440、文案限长
+  ] })
+  const s = readFocus()
+  assert.equal(s.sessions.length, 3)
+  assert.equal(s.sessions[0].t, 1000)
+  assert.equal(s.sessions[1].m, 1440)
+  assert.equal(s.sessions[1].todoText, 'x'.repeat(60))
+  assert.equal(s.sessions[2].todoId, 'b')
+  assert.equal(s.sessions[2].todoText, '写 周报')
+  for (const one of s.sessions) {
+    assert.equal(one.k, 'down') // 老数据没记模式，一律按倒计时补
+    assert.ok(one.id)
+    assert.ok(isFinite(one.s))
+  }
+  // 三条都是合格轮：分钟相加、轮数相加（不能再沿用「自己累加的 days」）
+  assert.deepEqual(s.days, { '2026-10-26': { r: 3, m: 26 + 1440 + 25 } })
+  db.delete(K.focus)
+})
+
+test('readFocus：有明细的天不认老聚合，没有明细的老日子原样留着', () => {
+  db.set(K.focus, {
+    days: { '2026-10-26': { r: 9, m: 900 }, '2026-10-25': { r: 1, m: 25 } },
+    sessions: [{ d: '2026-10-26', t: 5000, m: 25 }],
+  })
+  const s = readFocus()
+  assert.deepEqual(s.days['2026-10-26'], { r: 1, m: 25 }) // 以明细为准，否则图和列表永远对不上
+  assert.deepEqual(s.days['2026-10-25'], { r: 1, m: 25 }) // 只有天表的老日子没有可派生的依据
+  db.delete(K.focus)
+})
+
+test('writeFocus：落盘前后都过派生，回读是 v2；失败回 false 不抛；clearFocus 后回空', () => {
+  db.delete(K.focus)
+  const state = {
+    days: { '2026-10-26': { r: 5, m: 125 } }, // 自己累加出来的假聚合
+    sessions: [{ d: '2026-10-26', t: 5000, m: 25, todoId: 'a', todoText: '周报' }],
+  }
   assert.equal(writeFocus(state), true)
-  assert.deepEqual(readFocus(), state)
+  const back = readFocus()
+  assert.equal(back.v, 2)
+  assert.deepEqual(back.days, { '2026-10-26': { r: 1, m: 25 } }) // 写盘时就被派生覆盖，漂不出第二条账
+  assert.equal(back.sessions[0].todoId, 'a')
+  assert.deepEqual(readFocus(), back) // 幂等：读出来的再写回去不改变内容
   const saved = globalThis.utools.dbStorage.setItem
   globalThis.utools.dbStorage.setItem = () => { throw new Error('quota') }
   try {
@@ -898,7 +990,102 @@ test('writeFocus：落盘成功回 true 且可回读；失败回 false 不抛；
     globalThis.utools.dbStorage.setItem = saved
   }
   clearFocus()
-  assert.deepEqual(readFocus(), { days: {} })
+  assert.deepEqual(readFocus(), { v: 2, days: {}, sessions: [] })
+})
+
+// 待办的「N 轮」从会话派生（P1：不再由挂件每完成一轮就 rounds +1）
+test('syncTodoRounds：按会话明细补齐轮数（只升不降）', () => {
+  db.delete(K.todo)
+  db.delete(K.focus)
+  db.set(K.todo, { items: [
+    { id: 'a', text: '写周报', at: 1, rounds: 9 },
+    { id: 'b', text: '看文档', at: 1, rounds: 0 },
+  ], focusId: 'a' })
+  db.set(K.focus, { days: {}, sessions: [
+    { d: '2026-10-26', t: 1000, m: 25, todoId: 'a' },
+    { d: '2026-10-26', t: 2000, m: 25, todoId: 'a' },
+    { d: '2026-10-25', t: 3000, m: 25, todoId: 'b' },
+  ] })
+  assert.equal(syncTodoRounds(), true)
+  const items = readTodo().items
+  assert.deepEqual(items.find((x) => x.id === 'a').rounds, 9) // 明细 2 < 历史 9：保留历史
+  assert.deepEqual(items.find((x) => x.id === 'b').rounds, 1) // 0 → 1：补齐
+  assert.equal(readTodo().focusId, 'a') // 只回填 rounds，别把专注目标顺手抹了
+})
+
+test('syncTodoRounds：明细少于历史时不抹掉历史（v1 终身计数）', () => {
+  db.delete(K.todo)
+  db.delete(K.focus)
+  db.set(K.todo, { items: [{ id: 'a', text: '写周报', at: 1, rounds: 9 }], focusId: '' })
+  db.set(K.focus, { days: {}, sessions: [
+    { d: '2026-10-26', t: 1000, m: 25, todoId: 'a' },
+    { d: '2026-10-26', t: 2000, m: 25, todoId: 'a' },
+  ] })
+  // v1 的 rounds 是终身累计，明细只保留 90 天：以明细整值覆盖会把老用户的 9 轮清成 2 轮
+  assert.equal(syncTodoRounds(), false)
+  assert.equal(readTodo().items[0].rounds, 9)
+  db.delete(K.todo)
+  db.delete(K.focus)
+})
+
+test('syncTodoRounds：只数合格轮 —— 正计时 / 休息 / 放弃都不算一轮', () => {
+  db.delete(K.todo)
+  db.delete(K.focus)
+  db.set(K.todo, { items: [{ id: 'a', text: '写周报', at: 1, rounds: 0 }], focusId: '' })
+  db.set(K.focus, { days: {}, sessions: [
+    { d: '2026-10-26', t: 1000, m: 25, todoId: 'a' },
+    { d: '2026-10-26', t: 2000, m: 40, todoId: 'a', k: 'up' },
+    { d: '2026-10-26', t: 3000, m: 5, todoId: 'a', b: 1 },
+    { d: '2026-10-26', t: 4000, m: 12, todoId: 'a', a: 1 },
+  ] })
+  assert.equal(syncTodoRounds(), true)
+  assert.equal(readTodo().items[0].rounds, 1)
+})
+
+test('syncTodoRounds：历史轮数不清零（明细少或没有都不动）', () => {
+  db.delete(K.todo)
+  db.delete(K.focus)
+  db.set(K.todo, { items: [
+    { id: 'a', text: '有明细', at: 1, rounds: 3 },
+    { id: 'b', text: '老数据', at: 1, rounds: 7 },
+  ], focusId: '' })
+  db.set(K.focus, { days: {}, sessions: [{ d: '2026-10-26', t: 1000, m: 25, todoId: 'a' }] })
+  assert.equal(syncTodoRounds(), false) // 1 < 3、7 无依据：都不写
+  const items = readTodo().items
+  assert.equal(items.find((x) => x.id === 'a').rounds, 3)
+  assert.equal(items.find((x) => x.id === 'b').rounds, 7)
+})
+
+test('syncTodoRounds：本来就对得上时不写盘（回 false），脏 rounds 夹到 0–99', () => {
+  db.delete(K.todo)
+  db.delete(K.focus)
+  db.set(K.focus, { days: {}, sessions: [] })
+  db.set(K.todo, { items: [{ id: 'a', text: '空任务', at: 1, rounds: 0 }], focusId: '' })
+  assert.equal(syncTodoRounds(), false)
+  assert.deepEqual(readTodo().items[0].rounds, 0)
+  // 100 条以上明细 → 与 normTodoItem 同口径夹到 99
+  const many = []
+  for (let i = 0; i < 120; i++) many.push({ d: '2026-10-26', t: 1000 + i, m: 25, todoId: 'a' })
+  db.set(K.focus, { days: {}, sessions: many })
+  assert.equal(syncTodoRounds(), true)
+  assert.equal(readTodo().items[0].rounds, 99)
+  db.delete(K.todo)
+  db.delete(K.focus)
+})
+
+test('syncTodoRounds：写盘失败回 false 不抛', () => {
+  db.delete(K.todo)
+  db.set(K.todo, { items: [{ id: 'a', text: '写周报', at: 1, rounds: 0 }], focusId: '' })
+  db.set(K.focus, { days: {}, sessions: [{ d: '2026-10-26', t: 1000, m: 25, todoId: 'a' }] })
+  const saved = globalThis.utools.dbStorage.setItem
+  globalThis.utools.dbStorage.setItem = () => { throw new Error('quota') }
+  try {
+    assert.equal(syncTodoRounds(), false)
+  } finally {
+    globalThis.utools.dbStorage.setItem = saved
+  }
+  db.delete(K.todo)
+  db.delete(K.focus)
 })
 
 // ──────────────────────────────────────────────

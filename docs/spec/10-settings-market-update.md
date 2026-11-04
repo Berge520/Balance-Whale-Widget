@@ -6,6 +6,7 @@
     - **⚠️ 退回范围判定时**不能**用 `parseVer` 把关**：那里放的是范围字符串，`parseVer('^0.5.11')` 直接返 null，会让每条带 caret 的包都掉进 `unknown`。「范围能不能认」交给 `rangeAllows` 自己判，它认不出的形态（`workspace:*` / `npm:` 别名 / `latest`）返 true 落到 `current`。**⚠️ `rangeAllows` 只负责这一档「认不认得出」的兜底，不负责判方向** —— 方向交给上一条的 `lowerBoundOf`；只有取不到下界时才用它的返值决定 current / update。`updateState` 返回值带 `basis: 'realized' | 'range' | 'none'` 标明本条的判定依据，界面据此选文案。
     - **⚠️ 更新前 / 更新后都要重读实装版本**（`realizedOf`）：`marketUpdate` 的 `from` 只取实装版本，**不退回** `hit.depVersion`（否则又会拼出 `v^0.5.11`）；更新成功后重新调 `realizedOf` 取新版本作为 `to`，不能缓存旧值。
     - **⚠️ 0.x 的 caret 上界是下一个 minor**（`^0.5.11` → `[0.5.11, 0.6.0)`），tilde 的上界是 **同一个 minor 的下一个**（`~1.2.3` → `[…, 1.3.0)`；只有 `~1` 这种缺 minor 的才升 major）。两者都容易写错成「升 major」，单测各钉一组边界。
+    - **⚠️ `rangeAllows` 要按 comparator set 合取判上界**（`>=0.1.5 <0.3`，上游 check.ts 的 `parseComparatorTarget` 同口径）：connector 插件族的真实声明是空格分隔的合取式，早期只判 `>=` 下界、把 `<0.3` 静默丢掉 —— `0.4.0` 明明越界却被判「在范围内」。现 `>=` / `>` 分支判完下界后，还要看同一段里有没有 `<` / `<=` 上界：部分版本按 npm 语义补零（`<0.3` ≡ `<0.3.0`，故等于上界**不放行**，`<=0.3` 才放行）；`||` 各分支各自合取；上界认不出（如 `<workspace:*`）保守放行，与整条认不出的口径一致。
     - **目录没给 `version` 就只能是 `unknown`**：目录里近半条目（github / tarball 来源）没有 `version`，比不了。界面**只认 `state === 'update'`**（`dshMarketHasUpdate`），`unknown` **不出徽章、不进计数** —— 不能把「不知道」画成「有新版」。
     - **⚠️「更新」= 按目录 spec 重装，不是 `pnpm update`**：`pnpm update` 只在**声明范围内**升（升不到 0.6.0），而「有更新」的定义正是**超出声明范围** —— 用 `pnpm update` 永远更不到。重装会让 pnpm 把 `package.json` 里的范围**改写**成新版本的写法，这恰是用户期望的「升到市场里那个版本」。
     - **⚠️ 更新与安装走同一条链路**（快照 → `pnpm add` → 回读核验），只是 `reason` 用 `before-market-update`、文案不同。更新失败同样要能回滚。

@@ -22,6 +22,8 @@ export const THEMES = {
   default: { text: '#536ba9', hint: '#9fb0d9', fill: '#FFFFFF', stroke: '#203170' },
   dark:    { text: '#dbe4ff', hint: '#94a3c8', fill: '#1f2437', stroke: '#8fa3e0' },
   sakura:  { text: '#a3486f', hint: '#c98aa8', fill: '#FFF3F8', stroke: '#d9789f' },
+  // 未至之境：深海军蓝底 + 品牌蓝描边（与「界面深浅色」的同名主题同源）
+  fantasy: { text: '#E8F1FF', hint: '#8FA8CC', fill: '#0A1020', stroke: '#3A7BFF' },
 };
 
 // 台词行类型 → 样式类：A 标签行 / B 金额行 / P 时段行 / C 说明行
@@ -81,6 +83,9 @@ export function buildBubbleDom(opts) {
   bubbleBox.className = 'dshwv-bubble';
   bubbleBox.innerHTML =
     '<svg viewBox="0 0 1026 700" preserveAspectRatio="xMidYMid meet" xmlns="http://www.w3.org/2000/svg">' +
+    // HUD 外圈：与主描边同路径、更粗，默认 display:none；只有「未至之境」主题打开时
+    // 由 CSS 显示成一层青色辉光。纯装饰，不参与命中，也不改任何几何
+    '<path class="dshwv-bshape-hud" stroke-width="26" stroke-linejoin="round" stroke-linecap="round" d="M 827 248 A 373 232 0 1 0 81 246 A 373 232 0 0 0 301 465 A 57 32 10 0 0 413 484 A 373 232 0 0 0 827 248 Z"/>' +
     '<path class="dshwv-bshape" stroke-width="18" stroke-linejoin="round" stroke-linecap="round" d="M 827 248 A 373 232 0 1 0 81 246 A 373 232 0 0 0 301 465 A 57 32 10 0 0 413 484 A 373 232 0 0 0 827 248 Z"/>' +
     '<ellipse class="dshwv-b1" cx="352" cy="561" rx="37.5" ry="26" stroke-width="18"/>' +
     '<ellipse class="dshwv-b2" cx="442" cy="646" rx="24.5" ry="18" stroke-width="18"/>' +

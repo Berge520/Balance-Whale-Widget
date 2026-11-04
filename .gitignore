@@ -105,6 +105,9 @@ resources/manifest.json
 # 注意与上面的 .trae/ 是两个目录名 —— `.trae/` 的规则盖不住它，
 # 一旦 git add -A 就会把 43.7MB 的 blob 永久写进历史。
 .trae-html-share-packages/
+# 技能工作流（superpowers / 计划与规格草稿）的本地工作区产物，不进仓库
+.superpowers/
+docs/superpowers/
 
 # ── 操作系统垃圾 ──
 # Windows

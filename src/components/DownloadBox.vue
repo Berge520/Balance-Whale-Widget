@@ -3,22 +3,30 @@
 // 同款 `.dl-box`（进度条 + 行进字节 + 下载源一行），三份只能一起改、改漏一处就三种观感。
 // 收成一处后，进度「总量未知」的滑块态、字节数等宽防抖、超长 URL 断行这些口径只有一个来源。
 // 显示与否由调用方判定（各自比对 dlProgress.pack），本组件只管画。
+import { computed } from 'vue'
 import type { DownloadProgress } from '../types/services'
 
-defineProps<{
+const props = defineProps<{
   progress: DownloadProgress
   // 百分比；null = 总量未知，改用来回扫的滑块（不谎报百分比）
   percent: number | null
   // 行进字节文案（「12 MB / 40 MB」或「12 MB」）
   amount: string
 }>()
+
+// 终态（下载完成 / 下载失败）必须停掉「来回扫」：否则「下载失败」旁边那根条还在动，
+// 看起来像仍在重试；总量未知时终态也按满格收尾（完成绿 / 失败红），让条形自己说明结果。
+const terminal = computed(() => props.progress.phase === 'done' || props.progress.phase === 'failed')
+// 「总量未知」的滑块态只属于进行中
+const indet = computed(() => props.percent === null && !terminal.value)
+const barStyle = computed(() => (indet.value ? undefined : { width: (props.percent === null ? 100 : props.percent) + '%' }))
 </script>
 
 <template>
   <div class="dl-box">
-    <div class="dl-track" :class="{ indet: percent === null }">
-      <div class="dl-bar" :class="{ indet: percent === null, done: progress.phase === 'done', err: progress.phase === 'failed' }"
-           :style="percent === null ? undefined : { width: percent + '%' }"></div>
+    <div class="dl-track">
+      <div class="dl-bar" :class="{ indet: indet, done: progress.phase === 'done', err: progress.phase === 'failed' }"
+           :style="barStyle"></div>
     </div>
     <div class="dl-line">
       <span class="dl-label">{{ progress.label }}</span>
@@ -43,7 +51,9 @@ defineProps<{
   position: relative;
   height: 8px;
   border-radius: 999px;
-  background: var(--track);
+  /* 轨道用 --line 而不是 --track：.dl-box 底色就是 --track，同色会让未填充部分整段看不见，
+     条子看起来像「一截凭空浮着」 */
+  background: var(--line);
   overflow: hidden;
 }
 .dl-bar {

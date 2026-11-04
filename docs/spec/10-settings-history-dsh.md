@@ -28,12 +28,21 @@
 `public/preload/lib/dsh-patch.js`（**纯模块，只认格式不认业务**）+ `settings.js` 宿主层 + 设置页「dsh 插件开关」卡片 + `test/dsh-patch.test.mjs`；写入前复用 E1 的 `dsh-backup.js`。
 
 - **行级读写，不 parse / 不重排 YAML**（V3：只在条目下加一行 `disabled: true`）：`parsePatch(text)` 按 `- id: X` 建条目栈，`disabled:` 归属**上方最近的 `- id:`**，记 `lineIndex` / `disabledLineIndex` / `disabledRaw` / 缩进 / 有无 `config:` 子块；`applyToggle(text, id, disabled)` 只改或插**一行**，返回 `action: 'append' | 'update' | 'insert' | 'noop'`。**不引入 YAML 解析器**：序列化会重排缩进 / 注释 / `!!js` 标签，写坏**用户配置**；「只动一行」diff 最小、可手还原
+  - **⚠️ 必须区分「条目」与「条目的 config 负载」**（上游 #841 系列）：`config:`（或任何冒号后无值的键）打开一个负载区间，**深于该键的行一律算负载** —— 负载里的 `- id: b` / `disabled: true` 既不是新 patch 条目，也不能算到父条目头上。否则界面会多出假插件、勾选还会改到负载里的行（id 撞名时禁用错插件）。「列表与键同列」的合法 YAML（`config:` 下一行直接 `- id:`）同样按负载处理。
   - 已有 `disabled:` 行 → **沿用原缩进**改值；有条目无该行 → 插在 `lineIndex + 1`；无条目 → 末尾追加（文件不以 `\n` 结尾时**先补换行**）。
   - **CRLF 保持**：按原文件 `eol` 回写，不整体改 LF。
   - `disabledValue` **保守**：只有 `false` / `no` / `0` / `null` / `~` 算「未禁用」，其余（含 `!!js '...'`）一律**已禁用**。
+  - **⚠️ `disabled: !!js …` 是表达式，不是字面量**（`isLiteralDisabled` → `disabledExpr`，上游 #1043）：值由 dsh 在组合时求值，市场读不出也替不了。**启用时禁止写字面量覆盖**（写 `false` 会强行打开环境本应关掉的行，随后组合把插件挂起、安装校验失败）；表达式段既不删也不改，`applyToggle` 回 `expression: true`，宿主层回专门 `message` 供界面解释。**禁用方向**同样保留表达式原文，靠末尾兜底段保证生效值仍为 `true`。
   - `validId` 拒换行 / Tab / `:\s` / `#` / 以 `-` 开头 / 超 200 字符，放行 `@` / `/` / `.`。
 - **写完回读校验**（V2「写坏了 dsh 也不报错」）：`toggleDshPatchItem` 写盘后重新 `readTextSafe` + `parsePatch`，`disabled` 不符预期即返回「写入后校验未通过」。
-- **`needsRestart: !disabled`**（V4 **单向**热重载）：加 `disabled` 即时生效、**删行不恢复**，「启用」须提示重启 dsh。
+  - **核的是「生效值」而不是「第一条」**：patch 语义是**同 id 后出现的段覆盖先出现的段**，所以 `items.find(it => it.id === id)` 拿到的第一条可能根本不起作用。「启用」会把该 id 的纯 `disabled` 段全部删光（patch 里没写 = 没禁用，属正常成功），早先按「找不到条目 = 失败」会把成功报成失败；`isolateDshPlugins` 的批量回读同理。
+  - **例外：表达式段被保留时，生效值仍是 `true`**（保守口径）。回读按 `res.expression ? true : disabled` 核，不能把「没覆盖表达式」误判成写入失败。
+- **同 id 多段（对齐上游 dsh-market #821）**：一份 patch 里可能有若干条同 id 的段（用户手写重复、旧版本追加过）。早先只改第一条 → 「关掉 X」改的是被后面覆盖掉的那段，实际毫无效果，而 dsh 对「写了没生效」永不报错（V2），界面只看到一个勾不动的开关。
+  - 落笔口径：**先删多余的纯 `disabled` 段，最后只留一段再写值**。启用（`disabled: false`）= 纯段全删；禁用 = 保留一段（优先纯段）原位改 `true`，其余纯段删光。
+  - **带 `config:` 等其它字段的段绝不整段删** —— 那会把 config 挂到上一条目身上，静默改坏用户配置；这种段只改它自己的 `disabled` 行。
+  - 段尾由 `parsePatch` 的 `endLineIndex`（该条目最后一行内容，空行 / 注释不算）给出，整段删的范围是 `lineIndex..endLineIndex`；**不能靠「下一个条目的头行」反推**（会把两段之间的注释 / 空行当成上一段的成员删掉）。
+  - 末尾兜底「追加一段 `disabled: true`」**只在禁用时**执行：启用时段可能已被删光、生效值天然是 false，若也兜底就会把用户的「启用」写成「禁用」。
+- **`needsRestart: !disabled && !res.expression`**（V4 **单向**热重载）：加 `disabled` 即时生效、**删行不恢复**，「启用」须提示重启 dsh。表达式未被覆盖时并没有真的启用，不能提示「启用需重启」。
 - **写前强制建快照**（复用 E1）：`dshPatchToggle` 先 `dryRun` 探 `changed`，真要改才 `createSnapshot({profile, reason:'manual'})`；**快照失败即中止写入**（`backedUp:false`），返回体带 `snapshot` 目录名
 - **`dshBackup*` 方法**（`dshBackupList` / `dshBackupRestore` / `dshBackupRemove` / `dshBackupCreate`）把 E1 接到设置页：还原是**两步确认**（整文件覆盖，影响大于单条开关）
 - **⚠️ 展开快照必须顺手拉一次列表**：`dshBackups` 初值 `null`、唯一自动刷新在 `dshPatchRefresh` 的 `finally`，直接展开读到 `null` → 显示「展开快照（0 份）」+「还没有快照。」，磁盘上完好。
@@ -42,7 +51,7 @@
   - 与宿主无关：`listDshBackups()` → `dshBackup.listSnapshots()` 链路正常，**纯前端没去要**；排查先看磁盘（`Get-ChildItem $env:USERPROFILE\.dsh\whale-dsh-backup`）再看 manifest。
 - **卡片文案对 V1 明示**：带 client 入口的插件（加载入口在 `profiles/<p>/package.json` 的 `dependencies`）**禁用组装树条目无效**，卡片写明「这类插件可能禁不掉」
 - **不新增 IPC 通道**（D14 合规）：设置页直走 `window.services.*`，`services.d.ts` 补类型，`lib/ipc.js` 的 `whale:dsh` 通道**未改动**。
-- **单测** `test/dsh-patch.test.mjs`：夹具为本机 `cordis.patch.yml` 形态（注释、空行、`config:` 子块、`!!js '...'`、多条目含 disabled）。钉**「只动一行」**（行数不变 + 唯一 diff 行）、`disabled:` 归属、末尾追加与补换行、非法 id 全拒、CRLF 保持、幂等（`noop` 且逐字不变）。
+- **单测** `test/dsh-patch.test.mjs`：夹具为本机 `cordis.patch.yml` 形态（注释、空行、`config:` 子块、`!!js '...'`、多条目含 disabled）。钉**「只动一行」**（行数不变 + 唯一 diff 行）、`disabled:` 归属、末尾追加与补换行、非法 id 全拒、CRLF 保持、幂等（`noop` 且逐字不变）。另钉两组回归：**config 负载里的 `- id:` / `disabled:` 不算条目**（含「列表与键同列」）；**表达式行启用不被字面量覆盖**（只清同 id 的字面量段；禁用保留表达式并保证生效值 `true`）。宿主层的两个转述点由 `test/settings-patch-toggle.test.mjs` 钉住：dryRun 早退（`changed:false`）必须把 `message` / `expression` 带回界面；回读校验按 `res.expression ? true : disabled` 核。
 
 **第 ⑧ 段（阶段三 E3：我的一键隔离）**
 
@@ -53,7 +62,7 @@
   - 不能靠「记插入点反向补偿行号」：`plans[k].line` 已被顺延，与 `hit.lineIndex` 不同坐标系。
   - `plans.line` 一律报**条目头**（`- id:`）行（1 基），`insert` 同；`at` / `indent` 是内部临时字段，落笔后 `delete`，不泄漏到返回值。
   - **任一 id 非法 → 整批拒绝**（`ok:false`，一字不写）：写一半再失败更难收拾。
-- **候选清单 = patch 条目 ∪ 组装树插件 id**（`candidatesOf`）：`normalizeCandidates` **同时认 `patchItems` 与 `patchIds`**（只认一个会让部分 id 静默消失），`idListOf(v)` 归一化（容忍字符串 / `null` / 非数组）。顺序恒为 **patch 先、plugin 后**，**不二次排序**。
+- **候选清单 = patch 条目 ∪ 组装树插件 id**（`candidatesOf`）：`normalizeCandidates` **同时认 `patchItems` 与 `patchIds`**（只认一个会让部分 id 静默消失），`idListOf(v)` 归一化（容忍字符串 / `null` / 非数组）。顺序恒为 **patch 先、plugin 后**，**不二次排序**。patch 条目带 `expression`（表达式行），界面显示「表达式」标签并说明市场不会覆盖它。
 - **`selectBatch` 与 `MAX_BATCH = 100`**：缺省全选（带 `ids` 则只选这些），**冻结 `disabled` / `inPatch` 由候选层给定**，超上限截断并在 `truncated` 标记。
 - **宿主层两条**：`listDshIsolateCandidates(opts)` 是 **Promise**（spawn `dsh --profile <p> --dump-config`），带 **20s 兜底闸门**；**组装树读不到降级**：填 `treeError`、`items` 只含 patch 条目，**不算整体失败**（D26）。`isolateDshPlugins(opts)` 同步：`ids` 空 / 超 `MAX_BATCH` 直接拒；`dryRun` 只算不写、返回 `plans` + `changedCount`；写入后**回读逐条校验**，不符返回 `mismatch`。
 - **`dshIsolateApply` 两步确认**（复用 E1 快照）：先 `dryRun` 探 `changed`，**真要改才** `createSnapshot({profile, reason:'before-isolate'})`；**快照失败即中止写入**。卡片先摆「会动哪几行」（`id` + `dshIsolateActionText(action)` + `第 N 行` / `追加到末尾`），点「确认隔离（先建快照）」才落笔；勾选变化即清空旧计划（`dshIsolatePlan = null`）。

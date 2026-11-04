@@ -95,7 +95,11 @@ function isUnjudgeable(range, allow) {
 
 // 把逐条判定合取成一个三态结论。
 //
-// ⚠️ 合取逻辑（照抄 dsh-market 的核心取舍，整套机制里最值得抄的一条）：
+// ⚠️ 两条声明来源的优先级不是「合取」：包自己写了 `engines.dsh` 时**只按它裁决**，
+//    peerDependencies 全部忽略（宿主 dsh-app-boot 的 unmetRequirements 就是这么判的，
+//    上游 a4febfa 对齐）。只有没写 engine 时才看 peers。
+//
+// ⚠️ peers 内部仍是合取（照抄 dsh-market 的核心取舍）：
 //    · 只要有**任一条**被确证不满足 → incompatible（一票否决）
 //    · 全部满足                    → compatible
 //    · 其余（含 unknown 混在里面）  → unknown，**不能被当兼容用**
@@ -126,14 +130,19 @@ function deriveHostCompatibility(facts, hostVersion, rangeAllows) {
   const verdicts = []
   const ranges = []
   if (facts.engine) {
+    // ⚠️ 包自己声明了 engines.dsh 时，宿主**只按它裁决**，peerDependencies 一律忽略
+    //    （dsh-app-boot 的 unmetRequirements 就是这么判的，上游 a4febfa 对齐）。
+    //    合取会把「engine 满足、peer 不满足」的插件误判 incompatible，而宿主本可加载 ——
+    //    用户装得上的插件被市场标红，比漏报更糟（这正是「市场说不行、宿主照装」的矛盾来源）。
     ranges.push(facts.engine)
     verdicts.push(isUnjudgeable(facts.engine, allow) ? null : (allow(facts.engine, hv) === false ? false : true))
-  }
-  for (const p of facts.peers || []) {
-    const r = String(p.range || '')
-    if (!r) continue
-    ranges.push(r)
-    verdicts.push(isUnjudgeable(r, allow) ? null : (allow(r, hv) === false ? false : true))
+  } else {
+    for (const p of facts.peers || []) {
+      const r = String(p.range || '')
+      if (!r) continue
+      ranges.push(r)
+      verdicts.push(isUnjudgeable(r, allow) ? null : (allow(r, hv) === false ? false : true))
+    }
   }
   if (!verdicts.length) return { status: 'unknown', reason: 'undeclared', requirement: '' }
 

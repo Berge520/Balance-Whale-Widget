@@ -47,6 +47,11 @@ const state = {
   version: '',        // '' = 自动（安装/更新时取 latest）；否则固定版本号
   reinstall: false,   // 更新前先删掉插件目录里的 dsh，强制重装
   noOpen: true,       // 启动时带 --no-open（不自动开浏览器，用「打开页面」按钮打开）
+  // 以管理员身份启动（配置 dshElevated，默认关）。**仅 Windows 生效**：非 Windows 一律普通启动，
+  // 设置页那个开关也只在 Windows 显示（见 startMode）
+  elevated: false,
+  elevating: false,   // 正在请求 UAC（异步过程，用来挡住重复点击导致的第二次弹窗）
+  runElevated: false, // 本次运行的进程是否经 runas 提权启动（stop 据此决定要不要提权结束）
   port: DSH_PORT_DEFAULT, // Web UI 监听端口（可在设置页改；改动要重启 dsh 才生效）
   // 「查询版本」结果（落库缓存，重载插件后仍在）。
   // times 是「版本号 → 发布时间戳(ms)」，从 npm 的 time 字段取。**这是判定版本先后的唯一依据**：
@@ -341,14 +346,18 @@ function spawnCmd(exe, args, node) {
   // POSIX 下独立进程组，结束时可整组杀掉（dsh 会有子进程）
   return spawn(exe, args, Object.assign(options, { detached: true }))
 }
+// 子进程输出统一入口：日志流 + token 地址识别。
+// 普通启动从 stdout/stderr 管道喂进来，提权启动从日志文件喂进来（见 monitorElevated）。
+function feedOutput(d) {
+  const text = String(d == null ? '' : d)
+  if (!text) return
+  pushLog(text)
+  // token 地址可能被拆分到两次输出里，用滚动缓冲拼起来再匹配
+  state.tail = (state.tail + text).slice(-500)
+  captureWebUrl(state.tail)
+}
 function bindOutput(child) {
-  const onData = (d) => {
-    const text = String(d == null ? '' : d)
-    pushLog(text)
-    // token 地址可能被拆分到两次输出里，用滚动缓冲拼起来再匹配
-    state.tail = (state.tail + text).slice(-500)
-    captureWebUrl(state.tail)
-  }
+  const onData = (d) => feedOutput(d)
   try { child.stdout && child.stdout.on('data', onData) } catch (err) {}
   try { child.stderr && child.stderr.on('data', onData) } catch (err) {}
 }
@@ -512,6 +521,201 @@ function elevateInstall(npmExe, args, onDone) {
     if (onDone) onDone(err, { code: code, canceled: canceled })
   })
 }
+// ──────────────────────────────────────────────
+// 以管理员身份启动（Windows runas）
+// ──────────────────────────────────────────────
+// 为什么不在运行时给已启动的进程提权：Windows 的进程令牌在 CreateProcess 时就固定了，
+// 已跑起来的进程**无法**变成管理员（Elevation 是创建时的事）。正规路径只有一条：
+// 用 runas 拉起一个**新的**管理员实例 → 旧实例退出（start/restart/update 都走这条线）。
+//
+// 判定口径（纯函数，单测钉边界）：
+//   非 Windows        → 'plain'（不提权；设置页那个开关也只在 Windows 显示）
+//   开关关闭          → 'plain'
+//   当前已是管理员     → 'plain'（再 runas 没有意义，且对已是管理员的进程 UAC 不会弹）
+//   其余              → 'runas'
+function startMode(info) {
+  const i = info || {}
+  if (!i.win) return 'plain'
+  if (!i.want) return 'plain'
+  if (i.admin) return 'plain'
+  return 'runas'
+}
+// 提权结果 → 后续动作：成功就采用新进程；被取消 / 失败**一律回落普通启动**，
+// 绝不停在「以为在提权、其实没启动」的半启动状态（也不重试，避免连环 UAC 弹窗）。
+function elevateOutcome(res) {
+  const r = res || {}
+  return r.ok ? 'elevated' : 'plain'
+}
+let adminCache = null
+// 当前进程（= uTools 宿主）是否已是管理员。Windows 用 .NET 的 WindowsPrincipal 查令牌，退出码 0/1；
+// 结果缓存：snapshot 会被界面每 4 秒拉一次，不能每次都起一个 powershell。
+// 查不准（powershell 缺失 / 超时）按「不是管理员」处理：最多白走一次 runas 链路（那时 UAC 也不会弹）。
+function isAdmin() {
+  if (adminCache !== null) return adminCache
+  if (!WIN) {
+    adminCache = typeof process.getuid === 'function' && process.getuid() === 0
+    return adminCache
+  }
+  const ps = '$p = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent();'
+    + ' if ($p.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { exit 0 } else { exit 1 }'
+  adminCache = false
+  try {
+    execFileSync(psExe(), ['-NoProfile', '-NonInteractive', '-Command', ps], { windowsHide: true, timeout: 5000, stdio: 'ignore' })
+    adminCache = true
+  } catch (err) { adminCache = false }
+  return adminCache
+}
+// PowerShell 单引号字符串（内部单引号按 PS 规则重复一次转义）
+function psSingle(s) { return "'" + String(s).replace(/'/g, "''") + "'" }
+// VBS 双引号字符串（内部双引号重复一次转义）
+function vbsDouble(s) { return '"' + String(s).replace(/"/g, '""') + '"' }
+function winExe(name) {
+  const root = process.env.SystemRoot || process.env.windir || 'C:\\Windows'
+  const p = path.join(root, 'System32', name)
+  try { if (fs.existsSync(p)) return p } catch (err) {}
+  return name
+}
+// 用 runas 拉起一个 VBS。选 wscript 而不是 cmd/powershell 的理由与 elevateInstall 一致：
+// wscript 属于 GUI 子系统，提权后不会连带创建控制台（否则必闪一个黑窗）。
+// -PassThru（不带 -Wait）拿进程对象；用户点「否」时 Start-Process 抛错 → catch 里用 1223
+// （ERROR_CANCELLED）退出，调用方据此判定「提权被取消」。wait=true 时等 VBS 跑完并透传它的退出码。
+function runasVbs(vbs, wait, onDone) {
+  const ps = 'try { $p = Start-Process -FilePath ' + psSingle(winExe('wscript.exe'))
+    + ' -ArgumentList ' + psSingle(vbs) + ' -Verb RunAs -PassThru' + (wait ? ' -Wait' : '')
+    + ' -ErrorAction Stop; ' + (wait ? 'exit $p.ExitCode' : 'exit 0')
+    + ' } catch { exit 1223 }'
+  execFile(psExe(), ['-NoProfile', '-Command', ps], { windowsHide: true, encoding: 'buffer', timeout: 10 * 60 * 1000 }, (err, so, se) => {
+    const code = err && typeof err.code === 'number' ? err.code : 0
+    onDone(code, decodeOut(so) + decodeOut(se))
+  })
+}
+// 生成提权链路的两段脚本（纯函数，单测直接钉转义）：
+//   · ps1 —— 提权侧真正干活的那段：① 把自己的 pid 写盘（父进程拿不到提权进程的 pid）；
+//            ② 用 & 调 node，stdout/stderr 合并进日志文件（父进程也拿不到它的输出）。
+//            写完 pid 的这个 powershell 就是整棵树的根：结束时 taskkill /T 连 node 一起收掉。
+//   · vbs —— 以窗口模式 0 隐藏拉起 ps1：提权后既没有 cmd 黑窗，也不会闪控制台。
+// BOM 是给 PowerShell 5.1 的：不带 BOM 时它按 ANSI 读 .ps1，路径里有中文就会乱码。
+function buildElevateScripts(o) {
+  const body = [
+    '$pid | Set-Content -LiteralPath ' + psSingle(o.pidFile) + ' -Encoding ascii',
+    '& ' + psSingle(o.exe) + ' ' + o.args.map(psSingle).join(' ') + ' 2>&1 | Out-File -LiteralPath ' + psSingle(o.logFile) + ' -Encoding utf8',
+    'exit $LASTEXITCODE',
+  ].join('\r\n')
+  const ps1 = '\uFEFF' + body + '\r\n'
+  const cmd = 'powershell.exe -NoProfile -ExecutionPolicy Bypass -File "' + o.ps1 + '"'
+  const vbs = 'Set sh = CreateObject("WScript.Shell")\r\n'
+    + 'code = sh.Run(' + vbsDouble(cmd) + ', 0, False)\r\n'
+    + 'WScript.Quit code\r\n'
+  return { ps1, vbs }
+}
+// 提权启动 dsh，结果经 onDone 回：{ ok, pid, logFile, canceled, why }
+// pid 靠提权侧自己写盘拿（提权进程是全新的进程，父进程既拿不到它的 pid 也拿不到它的输出），
+// dsh 的输出改成落日志文件，由 monitorElevated 轮询读回 —— 「打开页面」要用的带 token 地址就在里面。
+function startElevated(exe, args, onDone) {
+  if (!WIN) { onDone({ ok: false, canceled: false, why: '非 Windows 平台不支持提权启动' }); return }
+  const tag = 'whale-run-' + process.pid + '-' + Date.now()
+  const pidFile = path.join(os.tmpdir(), tag + '.pid')
+  const logFile = path.join(os.tmpdir(), tag + '.log')
+  const ps1 = path.join(os.tmpdir(), tag + '.ps1')
+  const vbs = path.join(os.tmpdir(), tag + '.vbs')
+  let done = false
+  const finish = (info) => {
+    if (done) return
+    done = true
+    for (const f of [ps1, vbs, pidFile]) { try { fs.rmSync(f, { force: true }) } catch (err) {} }
+    onDone(info)
+  }
+  try {
+    const scripts = buildElevateScripts({ exe, args, pidFile, logFile, ps1 })
+    fs.writeFileSync(ps1, scripts.ps1, 'utf8')
+    fs.writeFileSync(vbs, scripts.vbs, 'utf8')
+  } catch (err) {
+    finish({ ok: false, canceled: false, why: '无法创建提权脚本：' + errMsg(err) })
+    return
+  }
+  // pid 写盘与进程启动是并发的，轮询最多等 ~5 秒
+  const readPid = (left) => {
+    let pid = 0
+    try { pid = Number(String(fs.readFileSync(pidFile, 'utf8')).replace(/[^\d]/g, '')) } catch (err) {}
+    if (pid > 0) { finish({ ok: true, pid, logFile, canceled: false }); return }
+    if (left <= 0) { finish({ ok: false, canceled: false, why: '提权进程没有写出 pid（可能被安全软件拦下）' }); return }
+    setTimeout(() => readPid(left - 1), 300)
+  }
+  runasVbs(vbs, false, (code) => {
+    if (code === 1223) { finish({ ok: false, canceled: true, why: 'UAC 提权被取消' }); return }
+    readPid(16)
+  })
+}
+// 提权实例的「子进程替身」：真实进程不是我们的子进程（runas 拉起的全新进程），
+// 但上层（start/stop/snapshot/keepAlive）都按 child 的语义工作，这里把最小子集补齐：
+// pid + on('exit')。stdout/stderr 恒为 null（bindOutput 对其做了保护），输出改由日志文件喂进来。
+function makeElevatedChild(pid, logFile) {
+  const listeners = {}
+  const child = {
+    pid,
+    stdout: null,
+    stderr: null,
+    logFile,
+    on(ev, cb) {
+      (listeners[ev] || (listeners[ev] = [])).push(cb)
+      return child
+    },
+    emit(ev, code, signal) {
+      for (const cb of (listeners[ev] || []).slice()) {
+        try { cb(code, signal) } catch (err) { logErr('[whale][dsh] 提权子进程回调异常', err && err.message) }
+      }
+    },
+  }
+  return child
+}
+// 从日志文件的 from 偏移往后读一小段（提权进程的输出没有管道可用，只能靠这个）
+function readLogChunk(file, from) {
+  try {
+    const size = fs.statSync(file).size
+    if (size <= from) return { text: '', next: from }
+    const fd = fs.openSync(file, 'r')
+    try {
+      const len = Math.min(size - from, 64 * 1024)
+      const buf = Buffer.alloc(len)
+      fs.readSync(fd, buf, 0, len, from)
+      // PS 的 Out-File -Encoding utf8 会带 BOM，读第一段时顺手啃掉
+      return { text: decodeOut(buf).replace(/\uFEFF/g, ''), next: from + len }
+    } finally { fs.closeSync(fd) }
+  } catch (err) { return { text: '', next: from } }
+}
+// 轮询两件事：① 日志增量（token 地址 / 报错）② 提权进程是否已退出。
+// 提权进程的退出拿不到 exit 事件（不是我们的子进程），只能按 pid 判活；
+// pidAliveState 对 EPERM 判 alive，正好符合「还能看到这个 pid」的口径。
+function monitorElevated(child) {
+  let from = 0
+  const timer = setInterval(() => {
+    const chunk = readLogChunk(child.logFile, from)
+    if (chunk.text) { from = chunk.next; feedOutput(chunk.text) }
+    if (state.child !== child) { clearInterval(timer); return }
+    if (pidAliveState(child.pid) === 'dead') { clearInterval(timer); child.emit('exit', null, null) }
+  }, 1500)
+  child.__stopMonitor = () => clearInterval(timer)
+}
+// 结束提权实例：普通权限的 taskkill 会被「拒绝访问」，只能再走一次 runas（会弹 UAC）。
+// 复用 runasVbs + VBS 的隐藏窗口，避免结束动作闪黑窗。
+function killElevated(pid, done) {
+  if (!WIN) { if (done) done(new Error('非 Windows 平台不支持提权结束')); return }
+  const vbs = path.join(os.tmpdir(), 'whale-kill-' + process.pid + '-' + Date.now() + '.vbs')
+  try {
+    fs.writeFileSync(vbs, 'Set sh = CreateObject("WScript.Shell")\r\n'
+      + 'code = sh.Run("cmd.exe /d /s /c taskkill /pid ' + Number(pid) + ' /T /F", 0, True)\r\n'
+      + 'WScript.Quit code\r\n', 'utf8')
+  } catch (err) {
+    if (done) done(new Error('无法创建提权脚本：' + errMsg(err)))
+    return
+  }
+  runasVbs(vbs, true, (code, text) => {
+    try { fs.rmSync(vbs, { force: true }) } catch (err) {}
+    if (code === 1223) { if (done) done(new Error('UAC 提权被取消（弹窗里点了「否」）')); return }
+    if (code !== 0) { if (done) done(new Error(text.trim() || ('taskkill 退出码 ' + code))); return }
+    if (done) done(null)
+  })
+}
 function processName(pid, cb) {
   if (WIN) {
     execFile('tasklist', ['/FI', 'PID eq ' + pid, '/FO', 'CSV', '/NH'], { timeout: 5000, windowsHide: true, encoding: 'buffer' }, (err, out) => {
@@ -547,6 +751,23 @@ function processCmdline(pid, cb) {
     })
   })
 }
+// 插件进程真正结束（isKill）时复位探测状态。为什么需要：probe.busy 是「同一时刻只跑一轮」的闸门，
+// 若退出时那一轮的 execFile 回调还没回来，闸门就一直关着 —— 后续 probePort 的调用全被压进 waiters，
+// 只有 8s 超时兜底才会被唤醒（表现为「重载插件后诊断卡 8 秒」）。
+// 注意：probePort 自带的 execFile timeout 已经能兜住真实的进程，这里只是把状态复位，
+// 不做 kill（子进程由 execFile 的 timeout 收尾）。
+function resetProbe() {
+  probe.busy = false
+  probe.waiters = []
+  probe.gen++ // 在飞的那一轮回来时 stale() 判真，不会把结果写回已复位的状态
+  probe.pid = 0
+  probe.name = ''
+  probe.cmdline = ''
+  probe.cmdlineKnown = false
+  probe.at = 0
+  probe.selfOwned = false
+}
+
 // 让本轮结束：**最新的轮次**清空队列并发通知；旧轮只回调自己那个 cb（给旧值也比永不回调好 ——
 // watchReady 的轮询可以被吞一轮，但 detectPort 的调用方若永不回调就只能等 8s 超时兜底）。
 function flushProbe(cb, gen) {
@@ -1014,6 +1235,7 @@ function configure(cfg) {
   state.registry = registry
   state.version = version
   state.noOpen = c.dshNoOpen !== false
+  state.elevated = c.dshElevated === true
   state.reinstall = c.dshReinstall === true
   // 端口是新的（store 的 normDshPort 保证 1–65535）。换了端口就得把「端口相关」的缓存全部复位：
   // probe / ready / ext* 都描述**旧端口**上的状态，留着会污染新端口的判定 —— 典型误判是
@@ -1217,6 +1439,42 @@ function start() {
   const args = [act.entry].concat(webArgs())
   state.error = ''
   state.exitCode = null
+  // 以管理员身份启动（仅 Windows）：判定口径见 startMode。
+  // 「开关刚打开、实例还在跑」时这里不会自动重启 —— 与其它启动参数一样，改完要用户点「重启」才生效。
+  const mode = startMode({ win: WIN, admin: isAdmin(), want: state.elevated })
+  if (mode === 'runas') {
+    if (state.elevating) {
+      pushLog('正在等待上一次 UAC 授权结果，请稍候')
+      return snapshot()
+    }
+    state.elevating = true
+    state.runElevated = true
+    setCmd('runas: ' + exe + ' ' + args.join(' '))
+    pushLog('以管理员身份启动：正在请求管理员权限（会弹 UAC，点「否」则回落普通权限启动）')
+    startElevated(exe, args, (res) => {
+      state.elevating = false
+      if (elevateOutcome(res) === 'elevated') {
+        // 提权启动的落地是在异步回调里，上层早已返回，必须自己推一次快照
+        const child = makeElevatedChild(res.pid, res.logFile)
+        adoptChild(child, node, res.pid)
+        monitorElevated(child)
+        broadcast()
+        return
+      }
+      // 提权被取消 / 失败：**回落普通启动**，保证不会停在半启动状态，也不会重复起进程
+      state.runElevated = false
+      pushLog((res.canceled ? 'UAC 提权已取消' : '提权启动未成功（' + (res.why || '未知原因') + '）')
+        + '：改用普通权限启动（dsh 不会拿到管理员权限）')
+      startPlain(exe, args, node)
+    })
+    return snapshot()
+  }
+  state.runElevated = false
+  return startPlain(exe, args, node)
+}
+
+// 普通权限启动（原有路径）
+function startPlain(exe, args, node) {
   setCmd(exe + ' ' + args.join(' '))
   let child = null
   try { child = spawnCmd(exe, args, node) } catch (err) {
@@ -1224,8 +1482,14 @@ function start() {
     pushLog(state.error)
     return snapshot()
   }
+  return adoptChild(child, node, child.pid || 0)
+}
+
+// 接管一个「本次启动起来的进程」：普通 spawn 的与提权实例的替身都走这里，
+// 保证 running / pid / ready / 退出清理只有一份口径。
+function adoptChild(child, node, pid) {
   state.child = child
-  state.pid = child.pid || 0
+  state.pid = pid || 0
   state.startedAt = Date.now()
   state.stopping = false
   // 记下本次真正监听的端口：之后用户改配置端口时，靠它才能说清「在跑的仍是哪个端口」
@@ -1248,7 +1512,16 @@ function start() {
       state.error = '端口 ' + state.port + ' 已被占用：dsh 可能已在别处运行，请先结束它再启动'
       pushLog(state.error)
     }
-    if (state.child === child) { state.child = null; state.pid = 0; state.stopping = false; state.runVersion = ''; state.runPort = 0 }
+    if (state.child === child) {
+      state.child = null
+      state.pid = 0
+      state.stopping = false
+      state.runVersion = ''
+      state.runPort = 0
+      // 提权实例的日志是临时文件，进程没了就删（普通启动的 logFile 不存在，rmSync 静默失败）
+      if (child.logFile) { try { fs.rmSync(child.logFile, { force: true }) } catch (err) {} }
+      if (child.__stopMonitor) child.__stopMonitor()
+    }
     state.exitCode = code
     state.exitAt = Date.now()
     // 关键推送：taskkill 完成后进程真正退出在这里发生，不广播挂件会一直显示「正在结束…」。
@@ -1257,7 +1530,7 @@ function start() {
     // 接住，探测结果也会如实显示它）
     probePort(() => broadcast())
   })
-  log('[whale][dsh] 已启动', { pid: state.pid, node: node.dir })
+  log('[whale][dsh] 已启动', { pid: state.pid, node: node.dir, elevated: state.runElevated })
   return snapshot()
 }
 
@@ -1265,6 +1538,14 @@ function stop(done) {
   syncConfig()
   const child = state.child
   if (!child) {
+    // 正在等 UAC 结果：此时「结束」没有可结束的对象，而授权一旦通过就会起进程 ——
+    // 让用户等结果再操作，避免出现「点了结束却又起来一个」的错位
+    if (state.elevating) {
+      state.error = ''
+      pushLog('正在等待管理员权限授权（UAC），等弹窗出结果后再操作')
+      if (done) done(snapshot())
+      return snapshot()
+    }
     // 没有本插件启动的进程：看 state.port 上是不是别人（别的终端）跑的 dsh
     const other = portOccupiedByOther()
     if (other) {
@@ -1293,7 +1574,11 @@ function stop(done) {
     return snapshot()
   }
   const pid = state.pid
-  setCmd(WIN ? 'taskkill /pid ' + pid + ' /T /F' : 'kill -TERM -' + pid + '（进程组）')
+  // 提权实例只能由提权进程结束（普通权限的 taskkill 会被「拒绝访问」挡下），会再弹一次 UAC
+  const needElevatedKill = WIN && state.runElevated && !isAdmin()
+  setCmd(needElevatedKill
+    ? 'runas: taskkill /pid ' + pid + ' /T /F'
+    : (WIN ? 'taskkill /pid ' + pid + ' /T /F' : 'kill -TERM -' + pid + '（进程组）'))
   state.stopping = true
   clearReady()
   const onKillErr = (err) => {
@@ -1308,7 +1593,10 @@ function stop(done) {
     }
   }
   try {
-    if (WIN) execFile('taskkill', ['/pid', String(pid), '/T', '/F'], (err) => onKillErr(err))
+    if (needElevatedKill) {
+      pushLog('结束管理员实例需要管理员权限：会再弹一次 UAC')
+      killElevated(pid, (err) => onKillErr(err)) // 成功后由 monitorElevated 发现进程已死，走正常 exit 清理
+    } else if (WIN) execFile('taskkill', ['/pid', String(pid), '/T', '/F'], (err) => onKillErr(err))
     else {
       // 进程组整体结束（spawnCmd 用了 detached: true）
       try { process.kill(-pid, 'SIGTERM') } catch (err) { child.kill('SIGTERM') }
@@ -1321,6 +1609,44 @@ function stop(done) {
   }
   if (done) done(snapshot())
   return snapshot()
+}
+
+// ── 旧实例「退出后再补启 / 再安装」的等待 ────────────────────────────────
+// 为什么需要：结束提权实例本身要走 runas（UAC 弹窗），慢的时候旧进程还在跑；此刻 start()
+// 会因 state.child 非空而静默 no-op，旧实例随后才退出 → 界面停在「未运行」且没有任何提示。
+// 这里轮询等到「自己启动的 child 真的清空」再补一次动作；只补一次（定时器触发前先清掉）。
+// 新一次重启/更新会取消上一次等待，保证不会同时有两个等待各起一个实例。
+// tickMs / graceMs 可注入，单测用短间隔跑，不依赖真实 UAC 与真实时钟。
+let restartWatch = null
+function watchChildGone(o) {
+  if (restartWatch) { restartWatch.cancel(); restartWatch = null }
+  const tick = o.tickMs || 500
+  const grace = o.graceMs || 30000
+  let elapsed = 0
+  let finished = false
+  function stop() {
+    if (finished) return
+    finished = true
+    clearInterval(timer)
+    restartWatch = null
+  }
+  const timer = setInterval(() => {
+    if (finished) return
+    elapsed += tick
+    // 结束提权实例失败（含 UAC 点「否」的 1223）会先把原因写进 state.error：
+    // 旧实例这时不会退出，别干等到 grace 超时，立刻把真实原因交回调用方。
+    // 只认「结束失败：」前缀：exit 事件也会写其它错误（如端口被占用），
+    // 那种错误下进程确实退了，应该继续走 onGone 补启，而不是中止。
+    if (typeof state.error === 'string' && state.error.indexOf('结束失败') === 0) {
+      stop()
+      if (o.onAbort) o.onAbort(state.error)
+      return
+    }
+    if (!state.child) { stop(); o.onGone(); return }
+    if (elapsed >= grace) { stop(); o.onTimeout(); }
+  }, tick)
+  restartWatch = { cancel: stop }
+  return restartWatch
 }
 
 // 重启：先结束（自己的或外部终端启的），等端口真正释放后再用当前配置启动
@@ -1345,9 +1671,31 @@ function restart(done) {
       check((pid) => {
         if (!pid || tries > 20) {
           clearInterval(timer)
-          const s = start()
-          broadcast() // 重启的启动发生在数秒后，原来的请求回调早已结束，必须主动推
-          if (done) done(s)
+          // 端口已释放、但自己的提权实例还没被 monitorElevated 判死（它 1.5s 才查一次，
+          // 慢 UAC 下 taskkill 也可能还没真正执行）：直接 start() 会因 state.child 非空静默
+          // no-op → 用户看到「已结束但没重启」。改为等 child 真正清空后再补启一次。
+          if (!state.child) {
+            const s = start()
+            broadcast() // 重启的启动发生在数秒后，原来的请求回调早已结束，必须主动推
+            if (done) done(s)
+            return
+          }
+          pushLog('旧 dsh 仍在退出中：退出后会自动启动')
+          watchChildGone({
+            onGone: () => {
+              const s = start()
+              broadcast()
+              if (done) done(s)
+            },
+            // stop() 已把真实原因（UAC 取消 / 结束失败）写进 state.error，这里只补一次推送
+            onAbort: () => { broadcast(); if (done) done(snapshot()) },
+            onTimeout: () => {
+              state.error = '重启中止：旧 dsh 仍未退出（可能在等 UAC 或已取消）。请再点一次「重启」'
+              pushLog(state.error)
+              broadcast()
+              if (done) done(snapshot())
+            },
+          })
         }
       })
     }, 350)
@@ -1395,12 +1743,50 @@ function update() {
       broadcast()
       return
     }
-    // 等端口真正释放（刚 taskkill 完可能还没退干净，文件也还被占用）
+    // 等端口真正释放（刚 taskkill 完可能还没退干净，文件也还被占用）。
+    // ⚠️ 到点不能无条件 doInstall()：慢 UAC 下旧提权实例还在跑，npm install 会与它抢
+    //    node_modules（文件被占用导致装坏）。等 child 真退出再装；等不到就明确中止。
     let tries = 0
     const timer = setInterval(() => {
       tries++
       probePort((pid) => {
-        if (!pid || tries > 20) { clearInterval(timer); doInstall() }
+        if (!pid) { clearInterval(timer); doInstall(); return }
+        if (tries <= 20) return
+        clearInterval(timer)
+        if (!state.child) {
+          // 端口仍被外部 dsh 占着：同样不能装
+          state.busy = ''
+          state.error = '更新中止：端口 ' + state.port + ' 仍被另一个 dsh 占用，请先结束它再更新'
+          pushLog(state.error)
+          broadcast()
+          return
+        }
+        pushLog('旧 dsh 仍在退出中：退出后再开始安装')
+        watchChildGone({
+          onGone: () => probePort((still) => {
+            // child 退了、端口却被别的 dsh 抢走：仍然不能装
+            if (still) {
+              state.busy = ''
+              state.error = '更新中止：旧 dsh 已退出，但端口 ' + state.port + ' 被另一个进程占用，请先结束它再更新'
+              pushLog(state.error)
+              broadcast()
+              return
+            }
+            doInstall()
+          }),
+          // stop() 的失败原因已在 state.error 里（UAC 取消 / 结束失败），这里只清 busy 并推送
+          onAbort: (msg) => {
+            state.busy = ''
+            pushLog('更新中止：' + msg)
+            broadcast()
+          },
+          onTimeout: () => {
+            state.busy = ''
+            state.error = '更新中止：旧 dsh 仍未退出（可能在等 UAC 或已取消）。请再点一次「更新」'
+            pushLog(state.error)
+            broadcast()
+          },
+        })
       })
     }, 350)
   })
@@ -2168,6 +2554,11 @@ function cleanNpxCaches() {
 function stopOnQuit() {
   syncConfig()
   if (state.keepAlive || !state.child) return
+  // 提权实例得再弹一次 UAC 才结束得掉；退出流程里弹窗会卡住 uTools 的退出，不如留着并说明
+  if (WIN && state.runElevated && !isAdmin()) {
+    pushLog('uTools 退出：管理员实例需要管理员权限才能结束，已保留运行（下次启动前可在设置页点「结束」，或开启「退出后保留 dsh」）')
+    return
+  }
   pushLog('uTools 退出，结束 dsh')
   stop()
 }
@@ -2202,6 +2593,11 @@ function snapshot() {
     exitCode: state.exitCode,
     exitAt: state.exitAt,
     keepAlive: state.keepAlive,
+    // 以管理员身份启动：配置值 / 本次是否真的以管理员跑 / 当前宿主是否已是管理员（判定见 startMode）
+    elevated: state.elevated,
+    runElevated: state.runElevated,
+    admin: !!isAdmin(),
+    elevating: !!state.elevating,
     url: webUrl(),
     port: state.port,
     nodeDir: node ? node.dir : '',
@@ -2325,6 +2721,16 @@ module.exports = {
   DSH_PKG,
   configure,
   start,
+  // 提权启动的判定口径（纯函数，单测直接钉边界：已提权跳过 / 开关关闭 / 非 Windows / UAC 取消回落）
+  startMode,
+  elevateOutcome,
+  isAdmin,
+  // 提权链路的脚本生成（纯函数）。仅供单测：转义错了运行时才发现（UAC 弹出来却起不来），
+  // 这里把「带空格 / 中文 / 单引号」的路径喂进去，断言 ps1 与 vbs 的引号规则
+  __buildElevateScripts: buildElevateScripts,
+  // 旧实例「退出后补启」等待：单测用短 tick / 短 grace 摆出「慢 UAC 下重启」的时序，
+  // 不需要真的拉 UAC，也不需要真等 30 秒（见 test/dsh-lifecycle.test.mjs）
+  __watchChildGone: watchChildGone,
   stop,
   restart,
   update,
@@ -2340,6 +2746,9 @@ module.exports = {
   dshLockClear,
   openWeb,
   stopOnQuit,
+  // 退出清理（services.js 的 onPluginOut(isKill) 调，与 stopOnQuit 并列）：
+  // 复位端口探测闸门，避免在飞的一轮把 probe.busy 永久卡住
+  resetProbe,
   probePort,
   snapshot,
   // 内部状态本体。仅供单测：端口/版本这几对「配置值 vs 运行值」的语义光看快照判不全，

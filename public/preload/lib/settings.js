@@ -3,7 +3,8 @@
  */
 const fs = require('fs')
 const path = require('path')
-const { PLUGIN_VERSION, K, MODEL_TEMPLATES, MODEL_MAX, DEFAULT_MAIN_MODEL, DSH_PORT_DEFAULT, TODO_TEXT_MAX, TODO_MAX } = require('./constants')
+const os = require('os')
+const { PLUGIN_VERSION, K, MODEL_TEMPLATES, MODEL_MAX, DEFAULT_MAIN_MODEL, DSH_PORT_DEFAULT, TODO_TEXT_MAX, TODO_MAX, FOCUS_STATS_DAYS } = require('./constants')
 const { log, logErr, LOG_FILE } = require('./log')
 const {
   clampNum, readConfig, patchConfig, readSecrets, writeSecrets, readLedger, historyKeepDays,
@@ -13,7 +14,7 @@ const {
   readTodo, writeTodo, clearTodo, normTodoText,
   readFocus, clearFocus, todayKey,
 } = require('./store')
-const { summarize: summarizeFocus } = require('./focus')
+const { summarize: summarizeFocus, listSessions } = require('./focus')
 const {
   fetchBalanceWith, fetchPlatformUsage, checkUpdate, resetBalanceCache,
   fetchModelBalance, refreshModels: refreshModelsApi, getModelsPayload,
@@ -21,7 +22,7 @@ const {
 const {
   ensureWidget, destroyWidget, winAlive, getWidgetError, getWindow,
   applyScaleToWindow, applyOnTop, pushConfig, queueLiveScale, repositionFromAnchor,
-  taskbarState, syncTaskbarWatch, sendToWidget, pushTodo,
+  taskbarState, syncTaskbarWatch, sendToWidget, pushTodo, pushFocusStats,
 } = require('./widget')
 // dsh 一族合计 300KB+，且本模块在设置窗加载时会被求值。下面所有 dsh.xxx 的调用都在函数体内
 // （无模块求值期引用），故改成惰性：首次访问 dsh.* 时才 require，之后复用同一份。
@@ -45,13 +46,15 @@ function hostsOf() {
 const hosts = new Proxy({}, {
   get(_t, key) { return hostsOf()[key] },
 })
-const { sendMail, mailSubject, notifySystem, sendMailAsync } = require('./notify')
+const { notify, sendMail, mailSubject, notifySystem, sendMailAsync } = require('./notify')
 const backup = require('./backup')
 const assets = require('./assets')
 const sounds = require('./sounds')
 const skins = require('./skins')
 const skinPacks = require('./skin-packs')
 const assetsPacks = require('./assets-packs')
+const bgVideo = require('./bg-video')
+const media = require('./media')
 const dlp = require('./download-progress')
 const bubbles = require('./bubbles')
 const codex = require('./codex')
@@ -79,9 +82,17 @@ const dshPatch = lazyRequire('./dsh-patch')
 const parsePatch = (...a) => dshPatch.parsePatch(...a)
 const applyToggle = (...a) => dshPatch.applyToggle(...a)
 const applyBatchDisable = (...a) => dshPatch.applyBatchDisable(...a)
+const removePatchItem = (...a) => dshPatch.removeItem(...a)
+// 同 id 多段时**实际生效**的 disabled 值（后出现的段覆盖先出现的段）——
+// 回读校验必须按它判，不能拿「第一条」当结果（见 toggleDshPatchItem 的注释）
+const effectiveDisabled = (parsed, id) => {
+  const list = parsed.items.filter((it) => it.id === id)
+  return list.length ? list[list.length - 1].disabled : false
+}
 const pnpmCompat = require('./pnpm-compat')
 const { readTextSafe, writeFileAtomicSync, errMsg } = require('./util')
 const holidays = require('./holidays')
+const { normRemind, initialRemindedFor } = require('./reminders')
 
 // 镜像测速超时：只打元数据（几百字节），8s 足够；等不到就说明该源当下不可用
 const PING_TIMEOUT_MS = 8000
@@ -122,6 +133,8 @@ function listDshPatchItems(opts) {
       disabled: it.disabled,
       line: it.lineIndex + 1,
       hasConfig: it.hasConfig,
+      // disabled 是表达式而不是字面量时，界面要能说清「为什么点了启用没变化」
+      expression: it.disabledExpr,
     })),
   }
 }
@@ -146,12 +159,27 @@ function toggleDshPatchItem(opts) {
   const res = applyToggle(text, id, disabled)
   if (!res.ok) return { ok: false, error: res.error || '无法生成新的 patch 内容' }
 
+  // 表达式行的说明（上游 #1043）：市场不会用字面量覆盖 `!!js`。
+  // changed 可能为 true（清掉了同 id 的字面量段）或 false（本来就没东西可清）。
+  const exprMsg = res.expression
+    ? (res.changed ? '已清掉同 id 的字面量覆盖段；' : '')
+      + '「' + id + '」的启用状态由 patch 里的 !!js 表达式决定，市场不会覆盖它；如需强制启用请直接编辑 cordis.patch.yml'
+    : ''
+
   // dryRun：只算不写，界面可以先让用户看清「会写出什么」
   if (o.dryRun === true) {
-    return { ok: true, dryRun: true, action: res.action, changed: res.changed, file: file, profile: profile, id: id, disabled: disabled }
+    return {
+      ok: true, dryRun: true, action: res.action, changed: res.changed,
+      expression: !!res.expression, message: exprMsg || undefined,
+      file: file, profile: profile, id: id, disabled: disabled,
+    }
   }
   if (!res.changed) {
-    return { ok: true, action: res.action, changed: false, file: file, profile: profile, id: id, disabled: disabled }
+    return {
+      ok: true, action: res.action, changed: false,
+      expression: !!res.expression, message: exprMsg || undefined,
+      file: file, profile: profile, id: id, disabled: disabled,
+    }
   }
 
   try {
@@ -169,16 +197,23 @@ function toggleDshPatchItem(opts) {
     return { ok: false, error: '写入失败：' + w.error }
   }
 
-  // V2 的教训落地：写完**回读磁盘**确认那条 id 真的以期望形态出现了。
+  // V2 的教训落地：写完**回读磁盘**确认那条 id 真的以期望形态生效了。
   // 不信任「writeFileSync 没抛错 = 写对了」—— 这里挡的是「内容确实写进文件、但形态不是 patch 能识别的」
+  //
+  // ⚠️ 核的是**生效值**（同 id 多段时后出现的覆盖先出现的），不是「第一条」：
+  //    · 「启用」会把该 id 的纯 disabled 段全部删掉，`find` 返回 undefined —— 这是正常的成功结果
+  //      （patch 里没写 = 没禁用），早先按「找不到就是失败」判会把成功报成失败、还写一条假错误日志。
+  //    · 「禁用」时如果只核第一条，第一条恰好是被后面覆盖掉的那段也会误判。
   const back = readTextSafe(file, '')
-  const check = back.ok ? parsePatch(back.text).items.find((it) => it.id === id) : null
-  if (!check || check.disabled !== disabled) {
-    logErr('[whale][dsh-patch] 写入后回读校验不符', id + ' 期望 disabled=' + disabled)
+  // ⚠️ 表达式段保留是**预期结果**（不是写坏）：此时生效值仍是 true（表达式按保守口径算禁用）。
+  //    若照 requested=false 去核，会把「没覆盖表达式」误判成写入失败，提示用户去回滚一份其实正确的文件。
+  const expectEffect = res.expression ? true : disabled
+  if (!back.ok || effectiveDisabled(parsePatch(back.text), id) !== expectEffect) {
+    logErr('[whale][dsh-patch] 写入后回读校验不符', id + ' 期望 disabled=' + expectEffect)
     return { ok: false, error: '写入后校验未通过，配置可能未生效（已保留快照，可回滚）', file: file }
   }
 
-  log('[whale][dsh-patch] 已切换条目', { id: id, disabled: disabled, action: res.action })
+  log('[whale][dsh-patch] 已切换条目', { id: id, disabled: disabled, action: res.action, expression: !!res.expression })
   return {
     ok: true,
     action: res.action,
@@ -187,9 +222,12 @@ function toggleDshPatchItem(opts) {
     profile: profile,
     id: id,
     disabled: disabled,
+    expression: !!res.expression,
+    message: exprMsg || undefined,
     // V4：patchReload 是单向的 —— 加 disabled 即时生效，**取消禁用不恢复**。
-    // 所以界面必须提示「启用后需要重启 dsh」，不能谎称已即时生效
-    needsRestart: !disabled,
+    // 所以界面必须提示「启用后需要重启 dsh」，不能谎称已即时生效。
+    // 表达式未被覆盖时并没有真的启用，别让界面说「启用需重启」。
+    needsRestart: !disabled && !res.expression,
   }
 }
 
@@ -219,6 +257,7 @@ function listDshIsolateCandidates(opts) {
     disabled: it.disabled,
     line: it.lineIndex + 1,
     hasConfig: it.hasConfig,
+    expression: it.disabledExpr,
   }))
 
   // dump 树里的条目 id；与 patch 里已有的取并集，作为候选项。
@@ -344,19 +383,26 @@ function isolateDshPlugins(opts) {
 
   try {
     fs.mkdirSync(path.dirname(file), { recursive: true })
-    fs.writeFileSync(file, res.text, 'utf8')
   } catch (err) {
-    logErr('[whale][dsh-isolate] 写 patch 文件失败', (err && err.message) || '')
+    logErr('[whale][dsh-isolate] 建 patch 目录失败', errMsg(err))
     return { ok: false, error: '写入失败：' + errMsg(err) }
   }
+  // 与 E2 同一取舍：这是用户手写的 dsh 配置文件，非原子写被杀会留下半份 YAML，
+  // 而 dsh 对读不懂的 patch 只打一行 stderr、退出码 0（V2）
+  const w = writeFileAtomicSync(file, res.text, 'utf8')
+  if (!w.ok) {
+    logErr('[whale][dsh-isolate] 写 patch 文件失败', w.error)
+    return { ok: false, error: '写入失败：' + w.error }
+  }
 
-  // V2 的教训：写完回读磁盘，逐条确认真的成了 disabled —— 批量写更不能只信「没抛错」
+  // V2 的教训：写完回读磁盘，逐条确认真的成了 disabled —— 批量写更不能只信「没抛错」。
+  // ⚠️ 与 E2 同口径按**生效值**核（同 id 多段时后出现的覆盖先出现的）；
+  //    早先 `after.find(...)` 只认第一条，第一条恰好被后段覆盖时会把成功误报成失败。
   const back = readTextSafe(file, '')
-  const after = back.ok ? parsePatch(back.text).items : []
+  const after = back.ok ? parsePatch(back.text) : { items: [] }
   const mismatch = []
   for (let i = 0; i < ids.length; i++) {
-    const hit = after.find((it) => it.id === ids[i])
-    if (!hit || !hit.disabled) mismatch.push(ids[i])
+    if (effectiveDisabled(after, ids[i]) !== true) mismatch.push(ids[i])
   }
   if (mismatch.length) {
     logErr('[whale][dsh-isolate] 写入后回读校验不符', mismatch.join(', '))
@@ -525,6 +571,101 @@ function marketStatus(opts) {
   }
 }
 
+// 读 profile 的 `dsh.profile.bundles` 名单（「哪些包被挂成插件」）。
+// 读不到 / 没有这个字段时返回 null —— **null 与 [] 语义完全不同**：
+//   null = 不知道（isUpdatablePlugin 据此判「不确定 → 是插件」）
+//   []   = 明确一个都没挂
+// 混用会把「读不到」当成「一个插件都没有」，把所有更新提议全删光。
+function profileBundles(profile) {
+  const file = dsh.profilePkgFile(profile)
+  if (!file) return null
+  const r = readTextSafe(file, '')
+  // ENOENT 是预期分支：这份 profile 还没建过（界面上本来就只看已装，走不到这里也无妨）
+  if (!r.ok) return null
+  let pkg = null
+  try {
+    pkg = JSON.parse(r.text)
+  } catch (err) {
+    logErr('[whale][dsh-market] profile/package.json 解析失败，插件判定退为保守口径', errMsg(err))
+    return null
+  }
+  // ⚠️ 局部名不能叫 dsh：本模块顶部有同名的惰性代理（dshOf() 的产物），
+  // 同名 const 会在 TDZ 期内把那个标识符整段遮蔽 —— 函数第一行的 dsh.profilePkgFile()
+  // 直接抛 `Cannot access 'dsh' before initialization`（p14 落地时真踩过，测试全红）
+  const dshField = pkg && typeof pkg === 'object' ? pkg.dsh : null
+  const prof = dshField && typeof dshField === 'object' ? dshField.profile : null
+  const list = prof && typeof prof === 'object' ? prof.bundles : null
+  if (!Array.isArray(list)) return null
+  return list.filter((x) => typeof x === 'string')
+}
+
+// 读一个已装依赖的 manifest，只为判「有没有 dsh 字段」。
+// 返回 { manifest, hasDshField }：
+//   manifest === null —— 读不到（包不在磁盘 / package.json 坏了）；isUpdatablePlugin 据此判不确定
+//   manifest === {}   —— 读到了、但里面没有 dsh 字段 → 这是「确切否定」，不能当成读不到
+// ⚠️ 路径自己拼而不是用 dsh.profileDir：`dsh.js` 刻意没导出它（见该文件导出表注释，
+//    经 Proxy 取到 undefined 会静默失效），这里与 hasPnpmWorkspace 同款做法走 dshHome。
+function pluginManifest(profile, name) {
+  const home = dshBackup.dshHome()
+  const nm = String(name || '').trim()
+  if (!home || !nm) return { manifest: null, hasDshField: false }
+  // 依赖名是包名，只允许包名合法字符 —— 挡掉 `../` 之类的路径穿越
+  if (!/^(@[a-z0-9][a-z0-9._-]*\/)?[a-z0-9][a-z0-9._-]*$/i.test(nm)) return { manifest: null, hasDshField: false }
+  const file = path.join(home, 'profiles', String(profile || 'web'), 'node_modules', nm.replace('/', path.sep), 'package.json')
+  const r = readTextSafe(file, '')
+  if (!r.ok) return { manifest: null, hasDshField: false }
+  let pkg = null
+  try {
+    pkg = JSON.parse(r.text)
+  } catch (err) {
+    logErr('[whale][dsh-market] 包 manifest 解析失败，插件判定退为保守口径：' + nm, errMsg(err))
+    return { manifest: null, hasDshField: false }
+  }
+  if (!pkg || typeof pkg !== 'object') return { manifest: null, hasDshField: false }
+  return { manifest: pkg, hasDshField: pkg.dsh !== undefined && pkg.dsh !== null }
+}
+
+// 一次性采好 isUpdatablePlugin 需要的三份证据，避免每条目录条目重读同一批文件
+// （profile 的 package.json 与 patch 各读一次就够；manifest 按依赖名缓存）。
+function pluginEvidence(profile) {
+  const bundles = profileBundles(profile)
+  const patch = listDshPatchItems({ profile: profile })
+  // 读不到 patch（文件在但读失败 / 找不到 dsh 目录）→ null = 不确定；
+  // 「文件不存在」是正常空态（patch.ok 为 true、items 为空数组）→ 确切否定
+  const patchIds = patch && patch.ok ? patch.items.map((it) => it.id) : null
+  const cache = {}
+  return {
+    bundles: bundles,
+    patchIds: patchIds,
+    info(name) {
+      const k = String(name || '')
+      if (!cache[k]) cache[k] = pluginManifest(profile, k)
+      return cache[k]
+    },
+  }
+}
+
+// 该依赖是不是更新通道能处理的插件（详见 dsh-market.isUpdatablePlugin）。
+function isUpdatablePlugin(profile, name, ev) {
+  return dshMarket.isUpdatablePlugin(name, ev.info(name), ev.bundles, ev.patchIds)
+}
+
+// 「它不是插件」的拒绝返回体（检测侧与更新路由侧共用同一句措辞，两处口径必须一致）。
+// ⚠️ 不含「回滚」二字：这里**什么都没写**，提回滚会让用户以为出了事要善后。
+function notAPluginResult(key, label, profile, spec) {
+  const name = String(key || label || spec || '')
+  return {
+    ok: false,
+    notAPlugin: true,
+    profile: String(profile || 'web'),
+    spec: String(spec || ''),
+    name: String(label || name),
+    error: name + ' 只是 profile 里的一个普通依赖（不是 dsh 插件），市场的更新通道装不了它。'
+      + '这次操作什么都没有改动 —— 你的插件和配置都还在原样，也不需要回滚。'
+      + '如果它真该是插件，可以在 dsh 里把它挂成 bundle 之后再更新，或者直接手动执行 pnpm add。',
+  }
+}
+
 // 检查已装插件有没有新版。opts = { profile?, catalog? }
 //
 // ⚠️ 为什么不放在 marketStatus 里一起算：marketStatus 是**纯本地**的（只读 package.json +
@@ -547,9 +688,13 @@ function marketCheckUpdates(opts) {
   const plugins = Array.isArray(catalog.plugins) ? catalog.plugins : []
   const deps = dsh.installedDeps(profile)
   const versions = dsh.installedVersions(profile)
+  // 三份「是不是插件」的证据只采一次（见 pluginEvidence），且**惰性**：
+  // 只有真出现 state === 'update' 的条目才会去读 manifest，避免为几十条已是最新的包白读文件
+  let evidence = null
   const out = []
   let updates = 0
   let unknown = 0
+  let notAPlugin = 0
   for (let i = 0; i < plugins.length; i++) {
     const p = plugins[i] && typeof plugins[i] === 'object' ? plugins[i] : {}
     // 先按 npm 名对，再按 install spec 反查 —— 与界面 dshMarketHitAt 同一套口径，
@@ -562,7 +707,17 @@ function marketCheckUpdates(opts) {
     let realized = versions[hit.key] || ''
     if (!realized && p.spec) realized = dshMarket.realizedVersionBySpec(versions, p.spec)
     const st = dshMarket.updateState(hit.depVersion, p.version, realized)
-    if (st.state === 'update') updates++
+    // 「比出版本差」不等于「更新通道能更新它」（对齐上游 #793）：只带 bin 的 CLI、
+    // 被别的插件拉进来的库也会比出版本差，但更新通道装的是 bundle，装完也不会被当插件加载。
+    // 判成纯依赖时把 state 打回 'current'（徽章消失）但**保留 latest / installed**——
+    // 静默抹成 unknown 会让用户看不出「它其实有新版本」，只是市场装不了。
+    let plainDep = false
+    if (st.state === 'update') {
+      if (!evidence) evidence = pluginEvidence(profile)
+      plainDep = !isUpdatablePlugin(profile, hit.key, evidence)
+    }
+    if (plainDep) notAPlugin++
+    else if (st.state === 'update') updates++
     else if (st.state === 'unknown') unknown++
     // 只回「已装」的那些，没装的条目界面自己用 dshMarketHitAt 判，不必重复传
     out.push({
@@ -573,11 +728,13 @@ function marketCheckUpdates(opts) {
       installed: st.installed,
       range: st.range,
       latest: st.latest,
-      state: st.state,
+      state: plainDep ? 'current' : st.state,
       basis: st.basis,
+      // true = 它有新版，但只是 profile 里的普通依赖，市场更新不了它（界面据此改文案，不给更新按钮）
+      notAPlugin: plainDep,
     })
   }
-  return { ok: true, profile: profile, entries: out, updates: updates, unknown: unknown, checked: out.length }
+  return { ok: true, profile: profile, entries: out, updates: updates, unknown: unknown, notAPlugin: notAPlugin, checked: out.length }
 }
 
 // ⚠️ 回源 registry 查「官方最新版」——**会联网**，且只该在用户明确点击时调。
@@ -821,6 +978,26 @@ function marketUpdate(opts) {
   //    v1.7.1 起前端在 update 链路也带 npmName（原先只有 install 带），界面才能显示
   //    「<包名> 的版本范围」而不是拿 spec 当包名。validPkgName 挡掉 `github:` / URL 形态。
   const npm = dsh.validPkgName(o.npm) || ''
+
+  // ── 前置拒绝：它不是插件，更新通道装不了它 ──
+  // 与 marketCheckUpdates 用的是同一个判定（同一份证据采集），所以「界面不给更新按钮」与
+  // 「即使被调到也不写盘」是同一句话的两个落点 —— 只做前者，用户从别处（历史操作、别的入口）
+  // 调过来照样会跑一次 pnpm add，装完仍然不是插件。
+  //
+  // ⚠️ 文案必须说清「什么都没改」：过去这类操作在 dsh 侧表现为「更新后插件消失」，
+  //    用户第一反应是配置被弄坏了、要去找快照回滚。这里一行都没写，得先把这句话说明白。
+  const guarded = (() => {
+    const deps = dsh.installedDeps(profile)
+    const hit = dshMarket.matchInstalledBySpec(deps, spec) || (npm ? dshMarket.matchDepByNpm(deps, npm) : null)
+    if (!hit) return null
+    const ev = pluginEvidence(profile)
+    if (isUpdatablePlugin(profile, hit.key, ev)) return null
+    return notAPluginResult(hit.key, label, profile, spec)
+  })()
+  if (guarded) {
+    log('[whale][dsh-market] 拒绝更新纯依赖（不是插件）', guarded.error)
+    return o.dryRun === true ? Object.assign({ dryRun: true, action: 'not-a-plugin', changed: false }, guarded) : guarded
+  }
 
   if (o.dryRun === true) {
     return enforceHostCompat(o).then((hc) => {
@@ -1558,6 +1735,11 @@ function marketUninstall(opts) {
     if (o.dryRun === true) {
       const deps = dsh.installedDeps(profile)
       const has = !!deps[npm]
+      // ⚠️ dryRun 也必须回报 patch 里会顺带清掉哪些条目（P0-3）：卸载不可逆，
+      //    单据上得让用户先看到「除了删包，还会删 patch 里的 X / Y」。
+      //    真写那一步仍会自己重采一次 —— dryRun 与真写之间有用户点头的间隙，
+      //    这期间 profile 可能被动过，真写不能拿这份旧名单当准。
+      const rows = patchRowsOf(profile, npm, oid)
       return {
         ok: true,
         dryRun: true,
@@ -1567,11 +1749,19 @@ function marketUninstall(opts) {
         name: label,
         changed: has,
         action: has ? 'uninstall' : 'missing',
+        patchCleanup: { ok: true, removed: 0, ids: rows },
         message: has
           ? '将从 <profiles/' + profile + '> 里删掉 ' + npm + '（pnpm remove）'
+            + (rows.length ? '，并清掉 patch 里属于它的 ' + rows.length + ' 条残留（' + rows.join('、') + '）' : '')
           : npm + ' 不在 profile 依赖里，无需卸载',
       }
     }
+    // ⚠️ 「这个包在 patch 里有哪些条目」必须在 `pnpm remove` **之前**采集（对齐上游 #799）：
+    //    卸载后包名从 profile/package.json 消失，而条目 id 用的是**用户当初写进 patch 的名字**
+    //    （可能是去 scope 的短名），事后就没法再从「已装清单」把它对回包名了。
+    //    留着这些行会让 dsh 每次启动往 stderr 打一行 `patch: entry "X" not found`（V2：退出码 0、
+    //    永不报错），用户完全看不见，日后重装同名插件还会莫名其妙带着旧 config。
+    const ownedRows = patchRowsOf(profile, npm, oid)
     // 记「卸载 包名@版本」并带上**卸载之前**的实装版本 —— 快照建完才跑 pnpm，此时读到的
     // 还是旧版本，正是这份快照能回滚回去的那一版（见 snapNote 的注释）
     const snap = dshBackup.createSnapshot({
@@ -1612,7 +1802,14 @@ function marketUninstall(opts) {
         }
       }
       log('[whale][dsh-market] 已卸载插件', npm)
-      return { ok: true, removed: true, npm: npm, name: label, profile: profile, snapshot: snap.dirName, needsRestart: true }
+      // 包已经没了，patch 里残留的条目就是死条目：顺手清掉。
+      // ⚠️ 清理失败**不回滚、也不把整体判成失败** —— 包确实卸掉了，回滚只会让用户
+      //    重新装回一个他刚删掉的插件。所以只把结论放在 patchCleanup 里如实回报。
+      const cleanup = cleanupPatchRows(profile, ownedRows)
+      return {
+        ok: true, removed: true, npm: npm, name: label, profile: profile, snapshot: snap.dirName, needsRestart: true,
+        patchCleanup: cleanup,
+      }
     })
   }
 
@@ -1670,6 +1867,76 @@ function shortName(fullName, installed) {
   const slash = full.indexOf('/')
   const short = slash >= 0 ? full.slice(slash + 1) : full
   return map[short] ? short : full
+}
+
+// ── 卸载后的 patch 清理（对齐上游 dsh-market #799）──
+// 在 `pnpm remove` **之前**把「这个包到底在 patch 里占了哪几个 id」采下来。
+//
+// 为什么不能卸载后再算：条目 id 是**用户当初手写进 patch 的名字**（可能是去 scope 的短名，
+// 也可能与包名完全无关），卸载后包名从 profile/package.json 消失，反查的锚点就没了。
+// 两个来源：
+//   · `oid`：界面 dryRun 时算好的那个 id（最准，直接采信）
+//   · 已装清单里这个包对应的短名（`shortName`），以及包名本身
+function patchRowsOf(profile, npm, oid) {
+  const out = {}
+  const add = (v) => {
+    const s = String(v == null ? '' : v).trim()
+    if (s) out[s] = true
+  }
+  add(oid)
+  add(npm)
+  let installed = {}
+  try {
+    installed = dsh.installedDeps(profile) || {}
+  } catch (err) {
+    // 读 profile 失败不致命：拿不到短名映射就只清包名与 oid 两个候选
+    logErr('[whale][dsh-market] 卸载前读已装清单失败（patch 清理可能不完整）', (err && err.message) || String(err))
+  }
+  if (npm && installed[npm]) add(shortName(npm, installed))
+  // 只保留 patch 里**真的存在**的 id：免得把「包名恰好等于别的插件 id」这种情况误删
+  const file = dshPatchPath(profile)
+  if (!file) return []
+  const r = readTextSafe(file, '')
+  if (!r.ok) return []
+  const parsed = parsePatch(r.text)
+  const ids = []
+  for (let i = 0; i < parsed.items.length; i++) {
+    const id = parsed.items[i].id
+    if (out[id] && ids.indexOf(id) < 0) ids.push(id)
+  }
+  return ids
+}
+
+// 卸载成功后清掉这些 id 的所有条目段。
+// 返回结构化结论（`{ ok, removed, ids, error? }`），由 UI 决定要不要提示 —— 不抛错：
+// 包已经卸掉了，这里失败最多是「patch 里剩几条死条目」，回滚反而是更糟的结果。
+function cleanupPatchRows(profile, ids) {
+  const list = Array.isArray(ids) ? ids : []
+  if (!list.length) return { ok: true, removed: 0, ids: [] }
+  const file = dshPatchPath(profile)
+  if (!file) return { ok: false, removed: 0, ids: list, error: '找不到 dsh 配置目录' }
+  const r = readTextSafe(file, '')
+  if (!r.ok) return { ok: false, removed: 0, ids: list, error: '读取 patch 文件失败' }
+  const res = removePatchItem(r.text, list)
+  if (!res.ok) {
+    logErr('[whale][dsh-market] 卸载后清理 patch 失败', (res.error || '') + ' ids=' + list.join(','))
+    return { ok: false, removed: 0, ids: list, error: res.error || '无法生成新的 patch 内容' }
+  }
+  if (!res.changed) return { ok: true, removed: 0, ids: list }
+  const w = writeFileAtomicSync(file, res.text, 'utf8')
+  if (!w.ok) {
+    logErr('[whale][dsh-market] 卸载后写 patch 失败', w.error)
+    return { ok: false, removed: 0, ids: list, error: w.error }
+  }
+  // 同 E2 / E3：写完回读，确认这些 id 真的一条不剩（V2：dsh 对写坏的 patch 不报错）
+  const back = readTextSafe(file, '')
+  const left = back.ok ? parsePatch(back.text).items.filter((it) => list.indexOf(it.id) >= 0) : null
+  if (!left || left.length) {
+    logErr('[whale][dsh-market] 卸载后清理 patch 回读不符', list.join(','))
+    return { ok: false, removed: res.removed, ids: list, error: '写入后校验未通过' }
+  }
+  log('[whale][dsh-market] 已清理卸载插件的 patch 条目', list.join(','))
+  return { ok: true, removed: res.removed, ids: list }
 }
 
 // 按 spec 反查 profile/package.json 里那个**真实的键名**。
@@ -2005,6 +2272,16 @@ function todoMutate(fn) {
   return { ok: true, todo: st }
 }
 
+// 启动片头「每次插件进程启动后只自动播一次」的进程内标记。
+// 放宿主而不是 sessionStorage：设置窗关闭重开可能换 JS 上下文，但 preload 模块仍缓存；
+// 这样「重开设置页」不会重播，插件进程重启才会重新播。
+let bootIntroPlayed = false
+
+// 最近一次删除的完整快照，供设置页「撤回」用。只保留一条（界面上同时只有一个撤回条），
+// 纯内存、不落盘：设置页关掉 / 插件重启后快照自然消失，撤回入口也随之过期。
+// 形状 { item, index, wasFocus } —— index 用于原位放回，wasFocus 用于在不覆盖新专注目标时恢复。
+let lastRemovedTodo = null
+
 module.exports = {
   getConfig() {
     return readConfig()
@@ -2050,12 +2327,36 @@ module.exports = {
   },
   todoRemove(id) {
     const key = String(id || '')
-    return todoMutate((st) => {
+    let snapshot = null
+    const res = todoMutate((st) => {
       const i = st.items.findIndex((x) => x.id === key)
       if (i < 0) return { error: '条目不存在' }
+      snapshot = { item: Object.assign({}, st.items[i]), index: i, wasFocus: st.focusId === key }
       st.items.splice(i, 1)
       if (st.focusId === key) st.focusId = ''
     })
+    // 只有真删掉才更新快照：删除失败不能把上一条可撤回的记录顶掉
+    if (res.ok && snapshot) lastRemovedTodo = snapshot
+    return res
+  },
+  // 撤回最近一次删除（设置页删除 toast 的「撤回」按钮）。宿主只认最近一条快照：
+  // 原位插回、保留全部字段（预估 / 计时 / 提醒 / 完成态 / 轮数），并在删除后没有另设
+  // 新专注目标时恢复原专注目标 —— 用户已另选了任务就不该被旧目标顶掉。
+  todoUndoRemove(id) {
+    const key = String(id || '')
+    const snap = lastRemovedTodo
+    if (!snap || snap.item.id !== key) {
+      return { ok: false, error: '撤回入口已失效（只能撤回最近删除的一条）', todo: readTodo() }
+    }
+    const res = todoMutate((st) => {
+      // 已经存在（同 id 被别处恢复过）按成功处理，不重复插入
+      if (st.items.some((x) => x.id === key)) return
+      if (st.items.length >= TODO_MAX) return { error: '待办条数已达上限（' + TODO_MAX + ' 条），无法撤回' }
+      st.items.splice(Math.min(snap.index, st.items.length), 0, Object.assign({}, snap.item))
+      if (snap.wasFocus && !st.focusId) st.focusId = key
+    })
+    if (res.ok) lastRemovedTodo = null
+    return res
   },
   todoClearDone() {
     return todoMutate((st) => {
@@ -2084,11 +2385,113 @@ module.exports = {
       it.est = n
     })
   },
-  // 专注统计汇总：series 只覆盖最近 days 天（默认 7），total 与图上柱对得上
+  // 每条待办自己的计时方式（学番茄 todo）：'down' 倒计时 / 'up' 正计时 / '' 不计时。
+  // 挂件里点该条的「开始」就按这套参数启动计时；mins 只在倒计时时有意义（1–600）
+  todoSetTimer(id, tm, mins) {
+    const key = String(id || '')
+    const mode = tm === 'up' || tm === '' ? tm : 'down'
+    const m = Math.max(1, Math.min(600, Math.round(Number(mins) || 25)))
+    return todoMutate((st) => {
+      const it = st.items.find((x) => x.id === key)
+      if (!it) return { error: '条目不存在' }
+      it.tm = mode
+      it.mins = m
+    })
+  },
+  // 设置/清除待办到点提醒。改期要重置幂等位，使新的到点时刻能再提醒；
+  // 但重复形态把「这一刻已经过去的那一轮」当成已提醒，否则设完立刻被补弹一轮。
+  todoSetDue(id, remind) {
+    const key = String(id || '')
+    const r = normRemind(remind)
+    return todoMutate((st) => {
+      const it = st.items.find((x) => x.id === key)
+      if (!it) return { error: '条目不存在' }
+      it.remindOn = r.remindOn
+      it.remindKind = r.remindKind
+      it.remindAt = r.remindAt
+      it.remindDow = r.remindDow
+      // 两套幂等位一起设基线：只设 remindedFor 的话，notifiedFor 仍是 0，
+      // 首个 tick 会把「已经过去的那一轮」当新到点，补发一条系统通知
+      const base = initialRemindedFor(r, Date.now())
+      it.remindedFor = base
+      it.notifiedFor = base
+    })
+  },
+  // ──────────────────────────────────────────────
+  // 调试工具（config.debugTools 默认关，只在「开发者」Tab 里渲染入口）
+  // ──────────────────────────────────────────────
+  // 真机回归专用：这些操作以前只能靠拖拽 / 改 leveldb 完成，没法让用户配合验证。
+  // 双保险：UI 默认不渲染，服务入口自己也再查一次开关，避免被误调。
+  // 两个入口都**不写幂等位**、不启动/停止扫描，只做一次投递或数据注入，正常 tick 逻辑不受影响。
+  //
+  // 「立即触发指定提醒」：走与正常 tick 相同的两条通道（系统通知/邮件 + 挂件气泡），
+  // dueAt 取当前时刻，回执带 debug:true（宿主 ipc 据此跳过记账）。
+  debugTodoDue(id) {
+    if (readConfig().debugTools !== true) return { ok: false, error: '调试工具未开启' }
+    const st = readTodo()
+    const it = st.items.find((x) => x.id === String(id || ''))
+    if (!it) return { ok: false, error: '条目不存在' }
+    const cfg = readConfig()
+    const dueAt = Date.now()
+    try { notify('待办到点：' + it.text, cfg) } catch (err) {
+      logErr('[whale][debug] 演练通知失败', err && err.message)
+    }
+    try {
+      require('./ipc').sendWidgetCmd('todo-due', { id: it.id, text: it.text, dueAt: dueAt, debug: true })
+    } catch (err) {
+      logErr('[whale][debug] 演练气泡下发失败', err && err.message)
+      return { ok: false, error: '挂件未就绪，气泡没发出去' }
+    }
+    return { ok: true, todo: st, id: it.id, dueAt: dueAt }
+  },
+  // 「注入旧数据」：一次性造出三类历史故障现场，供后续回归：
+  //  1) remindedFor / notifiedFor 都是 0 的重复提醒（daily，时刻 = 当前时间前 1 分钟）——
+  //     下个 tick 会把它当新到点走完整投递路径（免打扰 / 气泡被拦的补弹都能验）；
+  //  2) pinnedCards 同时含 focus 与 timer（合并卡根重复的旧形态）—— 验去重/排序/取消置顶；
+  //  3) 幽灵媒体项（元数据在、文件不在）—— 验媒体列表与导入配额的自愈。
+  debugInjectLegacy() {
+    if (readConfig().debugTools !== true) return { ok: false, error: '调试工具未开启' }
+    const st = readTodo()
+    const now = new Date()
+    // 当前本地时刻往前 1 分钟（跨零点回绕）。到点时刻已经过去，下个 tick 立刻命中
+    let mins = now.getHours() * 60 + now.getMinutes() - 1
+    if (mins < 0) mins += 24 * 60
+    const id = newTodoId(st.items)
+    st.items.unshift({
+      id: id,
+      text: '调试：旧数据提醒 ' + String(Math.floor(mins / 60)).padStart(2, '0') + ':' + String(mins % 60).padStart(2, '0'),
+      done: false, at: Date.now(), doneAt: 0, est: 0, rounds: 0, tm: 'down', mins: 25,
+      remindOn: true, remindKind: 'daily', remindAt: mins, remindDow: 0,
+      remindedFor: 0, notifiedFor: 0,
+    })
+    if (!writeTodo(st)) return { ok: false, error: '写入失败', todo: readTodo() }
+    try { patchConfig({ pinnedCards: ['focus', 'timer'] }) } catch (err) {
+      logErr('[whale][debug] 注入旧置顶配置失败', err && err.message)
+    }
+    let ghostId = ''
+    try { ghostId = media.injectGhost() } catch (err) {
+      logErr('[whale][debug] 注入幽灵媒体失败', err && err.message)
+    }
+    try { pushConfig() } catch (err) {}
+    try { pushTodo() } catch (err) {}
+    emitConfigChange()
+    emitTodoChange()
+    return { ok: true, todo: st, todoId: id, ghostId: ghostId, pinnedCards: ['focus', 'timer'] }
+  },
+  // 专注统计汇总：series 只覆盖最近 days 天（默认 7），total 与图上柱对得上。
+  // todayByTodo 是「今天每条待办各几轮」，待办列表按它显示今日徽标（历史 rounds 是终身累计）
   focusStats(days) {
-    const n = Math.max(1, Math.min(366, Math.round(Number(days) || 7)))
+    const n = Math.max(1, Math.min(366, Math.round(Number(days) || FOCUS_STATS_DAYS)))
     const s = summarizeFocus(readFocus(), todayKey(), n)
-    return { series: s.series, today: s.today, total: s.total, streak: s.streak, days: n }
+    return {
+      series: s.series, today: s.today, total: s.total, streak: s.streak, days: n,
+      todayByTodo: s.todayByTodo || {},
+    }
+  },
+  // 最近 days 天（默认 FOCUS_STATS_DAYS）的专注会话明细，按时间倒序；只读，不联网
+  focusSessions(days) {
+    const n = Math.max(1, Math.min(366, Math.round(Number(days) || FOCUS_STATS_DAYS)))
+    return listSessions(readFocus(), todayKey(), n)
   },
   // 订阅待办变更，返回退订函数（设置页 onMounted 订阅、onUnmounted 退订）
   onTodoChange(cb) {
@@ -2141,6 +2544,37 @@ module.exports = {
   checkUpdate(force) {
     return checkUpdate(!!force)
   },
+  // 打开系统「动画效果 / 减少动态效果」设置页（Windows 10/11 路径不同）
+  openSystemAnimationSettings() {
+    if (process.platform === 'darwin') {
+      try {
+        const uri = 'x-apple.systempreferences:com.apple.preference.universalaccess'
+        utools.shellOpenExternal(uri)
+        return { ok: true, uri: uri }
+      } catch (err) {
+        logErr('[whale][shell] 打开 macOS 辅助功能设置失败', err && err.message)
+        return { ok: false, error: '无法打开系统设置' }
+      }
+    }
+    if (process.platform !== 'win32') return { ok: false, error: '当前系统不支持自动跳转，请手动打开系统设置' }
+    let build = 0
+    try {
+      const ver = String(process.getSystemVersion ? process.getSystemVersion() : os.release()).split('.')
+      build = Number(ver[2] || 0)
+    } catch (err) {}
+    const uris = build >= 22000
+      ? ['ms-settings:easeofaccess-visualeffects', 'ms-settings:easeofaccess-display']
+      : ['ms-settings:easeofaccess-display', 'ms-settings:easeofaccess-visualeffects']
+    for (const uri of uris) {
+      try {
+        utools.shellOpenExternal(uri)
+        return { ok: true, uri: uri }
+      } catch (err) {
+        logErr('[whale][shell] 打开系统动画设置失败', uri, err && err.message)
+      }
+    }
+    return { ok: false, error: '无法打开系统设置' }
+  },
   // 系统默认浏览器打开外链（用于跳转下载页）
   openExternal(url) {
     try {
@@ -2157,7 +2591,7 @@ module.exports = {
   // 用「不可作为指令命中」的词去触发市场搜索分支。失败返回 false，由设置页兜底走浏览器详情页。
   redirectToMarket(keyword) {
     try {
-      return !!utools.redirect(String(keyword || ''))
+      return !!utools.redirect(String(keyword || ''), '')
     } catch (err) {
       logErr('[whale][market] 跳转插件市场失败', keyword, err && err.message)
       return false
@@ -2242,7 +2676,12 @@ module.exports = {
     const probe = toggleDshPatchItem({ profile: profile, id: id, disabled: disabled, dryRun: true })
     if (!probe.ok) return probe
     if (!probe.changed) {
-      return { ok: true, changed: false, action: probe.action, id: id, disabled: disabled, backedUp: false }
+      // ⚠️ 必须把 probe 的 message / expression 带回去：表达式行「点启用也不会变」时
+      //    changed 恰是 false，漏了它界面就只能说「已经是该状态」，用户完全不知道原因。
+      return {
+        ok: true, changed: false, action: probe.action, id: id, disabled: disabled, backedUp: false,
+        expression: !!probe.expression, message: probe.message,
+      }
     }
     const snap = dshBackup.createSnapshot({ profile: profile, reason: disabled ? 'before-disable' : 'before-enable' })
     if (!snap.ok) {
@@ -2747,6 +3186,9 @@ module.exports = {
     // 「显示待办」刚打开时挂件手里还没有清单快照（pushInit 只在窗口创建时带一次），
     // 补推一份，否则要等用户下次勾选/改清单才会出现内容
     if (cfg.todoOn !== prev.todoOn) pushTodo()
+    // 打开「专注记录」或改了每日目标时补推统计：挂件菜单的专注组只在 focusOn 开启后建，
+    // 不推的话它一直显示「还没有专注记录」（pushInit 只在建窗时带一次）
+    if (cfg.focusOn !== prev.focusOn || cfg.focusGoal !== prev.focusGoal) pushFocusStats()
     // 反向回推给设置页：saveConfig 是设置页自己调的，但设置页的 cfg 不一定等于落库结果 ——
     // 宿主 patchConfig 会做归一化（补齐 / 钳范围 / 清洗），不回推的话设置页手里的还是它自己拼的
     // 那份「未归一化」的值。取消订阅后再回推会打断「配置 → 订阅 → 回推」的闭环
@@ -2947,11 +3389,20 @@ module.exports = {
     const k = sanitizeKey(key) || readSecrets().models[m.id] || ''
     return fetchModelBalance(m, k)
   },
-  // 刷新模型余额/额度（ids 省略 = 全部），结果落运行时状态并推给挂件
+  // 刷新模型余额/额度（ids 省略 = 全部），结果落运行时状态并推给挂件。
+  // 单条查询失败不会让整批 reject（api 里把错误写进各模型自己的 error），所以这里要
+  // 汇总一份失败清单回给设置页 —— 否则页面只能报「已刷新」，用户看不出哪几个其实没查到。
   refreshModels(ids, force) {
-    return refreshModelsApi(ids, force).then(() => {
+    return refreshModelsApi(ids, force).then((st) => {
       pushModels()
-      return { ok: true }
+      const want = Array.isArray(ids) && ids.length ? ids : null
+      const errors = []
+      for (const m of readConfig().models) {
+        if (want && want.indexOf(m.id) < 0) continue
+        const e = st && st[m.id] && st[m.id].error
+        if (e) errors.push({ id: m.id, name: m.name || m.id, error: String(e) })
+      }
+      return { ok: true, errors: errors }
     })
   },
   // —— 自定义音效 ——
@@ -3052,7 +3503,7 @@ module.exports = {
     if (r && r.ok) {
       sendToWidget('whale:skin', skins.getSkinData())
       // 删掉的若是官方图（共享角色/内置），随机图池要同步缩水
-      sendToWidget('whale:shared-skins', skins.getBuiltinData())
+      sendToWidget('whale:shared-skins', skins.getSharedManifest())
     }
     return r
   },
@@ -3061,7 +3512,7 @@ module.exports = {
     const r = skins.removeSkins(ids)
     if (r && r.ok && r.removed) {
       sendToWidget('whale:skin', skins.getSkinData())
-      sendToWidget('whale:shared-skins', skins.getBuiltinData())
+      sendToWidget('whale:shared-skins', skins.getSharedManifest())
     }
     return r
   },
@@ -3078,7 +3529,7 @@ module.exports = {
       sendToWidget('whale:skin', skins.getSkinData())
       // 内置包里的形象带 builtin 标记，会进 randimg 的「共享角色图池」；重推一次图池，
       // 下载完立刻能抽到，不必等挂件下次启动（与 downloadSharedSkin 同口径）
-      sendToWidget('whale:shared-skins', skins.getBuiltinData())
+      sendToWidget('whale:shared-skins', skins.getSharedManifest())
     }
     return r
   },
@@ -3089,7 +3540,7 @@ module.exports = {
     const r = await skinPacks.downloadSkinPackItem(id, { prefix: prefix, thumb: thumb })
     if (r && r.ok && !r.skipped) {
       sendToWidget('whale:skin', skins.getSkinData())
-      sendToWidget('whale:shared-skins', skins.getBuiltinData())
+      sendToWidget('whale:shared-skins', skins.getSharedManifest())
     }
     return r
   },
@@ -3109,7 +3560,7 @@ module.exports = {
     if (r && r.ok && !r.skipped) {
       sendToWidget('whale:skin', skins.getSkinData())
       // 新装的共享角色进「随机图池」：randimg 段要立刻能抽到它，重推一次图池
-      sendToWidget('whale:shared-skins', skins.getBuiltinData())
+      sendToWidget('whale:shared-skins', skins.getSharedManifest())
     }
     return r
   },
@@ -3153,7 +3604,73 @@ module.exports = {
       skins: skins.dir(),
       sounds: sounds.dir(),
       bubbles: bubbles.dir(),
+      media: media.dir(),
     }
+  },
+  // —— 「未至之境」视频壁纸（CC BY-NC-SA 4.0，用户主动下载，不随包） ——
+  // 状态：是否已下载、体积与署名信息；只读磁盘 stat，参数极小，供外观页直接调用
+  bgVideoStatus() {
+    return bgVideo.status()
+  },
+  // 按需下载：走 jsDelivr / ghfast / raw 候选链，sha256 + 体积校验后落 userData/whale-bg。
+  // 进度写入共享下载快照（pack='bg-video'），设置页轮询 downloadProgress 即可
+  async bgVideoDownload() {
+    return bgVideo.download()
+  },
+  // 设置页背景层用：返回 data URL（渲染进程再转 blob），不推给挂件
+  bgVideoData() {
+    return bgVideo.readData()
+  },
+  bgVideoRemove() {
+    const r = bgVideo.remove()
+    // 删的正是在用的内置视频壁纸时，配置要退回安全默认值：否则 bgMode 仍停在 'video'，
+    // 设置页再读盘会直接报「读取失败」，界面与文案（背景回退深海底色）也对不上
+    if (r && r.ok) {
+      try {
+        if (readConfig().bgMode === 'video') {
+          patchConfig({ bgMode: 'off' })
+          pushConfig()
+        }
+      } catch (err) { logErr('[whale][bg-video] 回退背景模式失败', err && err.message) }
+    }
+    return r
+  },
+  // —— 设置页启动片头：每次插件进程启动后只自动播一次 ——
+  // 消费式：第一次调用返回 true 并置位，之后都返回 false。设置页「预览片头」不走这里，
+  // 所以被消费掉也不影响用户主动重看。只服务设置页，挂件 preload 不引用。
+  bootIntroConsume() {
+    if (bootIntroPlayed) return false
+    bootIntroPlayed = true
+    return true
+  },
+  // 本次插件进程是否已经自动播过片头（设置页用来提示「想重看请预览」）
+  bootIntroHasPlayed() {
+    return bootIntroPlayed
+  },
+  // —— 背景 / 片头媒体库（用户导入的图片 / 视频，落 userData/whale-media） ——
+  mediaList() {
+    return media.list()
+  },
+  // 弹选择框：图片会带 dataUrl 供设置页生成缩略图；视频只回 filePath，不搬字节
+  mediaPick(kind) {
+    return media.pick(kind)
+  },
+  mediaImport(opts) {
+    return media.importFile(opts)
+  },
+  mediaRemove(id) {
+    const r = media.remove(id)
+    // 删除的是当前背景/片头时，media.js 已把配置退回安全默认值，这里统一广播
+    if (r && r.ok && r.configChanged) pushConfig()
+    return r
+  },
+  mediaData(id) {
+    return media.data(id)
+  },
+  mediaClearAll() {
+    const r = media.clearAll()
+    if (r && r.ok && r.configChanged) pushConfig()
+    return r
   },
   // —— 自定义气泡图片（点鲸鱼时随机显示一张，无「当前用哪张」概念） ——
   // 列表：元信息 + 缩略图 data URL，供设置页网格展示
@@ -3190,7 +3707,7 @@ module.exports = {
     if (r && r.ok) {
       if (r.skins && r.skins.added > 0) {
         sendToWidget('whale:skin', skins.getSkinData())
-        sendToWidget('whale:shared-skins', skins.getBuiltinData())
+        sendToWidget('whale:shared-skins', skins.getSharedManifest())
       }
       if (r.sounds && r.sounds.applied > 0) sendToWidget('whale:sounds', sounds.getSoundData())
       if (r.bubbles && r.bubbles.added > 0) sendToWidget('whale:bubbles', bubbles.getBubbleData())
@@ -3201,9 +3718,15 @@ module.exports = {
   assetsCancel() {
     return assets.clearPending()
   },
-  // Codex 本地会话统计：读 ~/.codex/sessions 下的 rollout JSONL，按天/模型聚合
-  codexSummary() {
+  // Codex 本地会话统计：读 ~/.codex/sessions 下的 rollout JSONL，按天/模型聚合。
+  // 扫描已改成异步（见 lib/codex.js 的「快照层」），这里给设置页两个入口：
+  //   · codexSummary()      直接 await 一次真实扫描（「刷新」按钮要最新数字）
+  //   · codexSummaryCached() 同步取快照（首帧渲染用，过期也会立刻返回，后台补）
+  async codexSummary() {
     return codex.codexSummary()
+  },
+  codexSummaryCached() {
+    return codex.codexSummaryCached()
   },
   clearCodexCache() {
     return codex.clearCodexCache()
@@ -3292,13 +3815,13 @@ module.exports = {
     const r = mergeLedgerHistory(rows)
     return { ok: true, path: filePath, imported: r.imported, invalid: invalid, kept: r.kept, from: r.from, to: r.to }
   },
-  // 按项清除本地数据：opts = { secrets, config, ledger, window, sounds, skins, bubbles, bubble, todo }，为 true 的项才会被清除。
+  // 按项清除本地数据：opts = { secrets, config, ledger, window, sounds, skins, bubbles, media, bubble, todo }，为 true 的项才会被清除。
   // 各项覆盖的键（务必与新增存储键同步，否则会「清不干净」）：
   //   config  = whale:config + whale:models + whale:timer + whale:cnHolidays（节假日覆盖层属于设置）
   //   ledger  = whale:ledger + whale:codex + whale:dshUsage（用量类派生缓存与账本同源）
   //   window  = whale:window + whale:update + dsh 版本/查询标记/说明正文/自动刷新偏好 + dsh 诊断/转储/市场目录缓存
   //   secrets = whale:secrets（加密，含 API Key / 平台 Token / 模型密钥 / SMTP 凭据）
-  //   sounds/skins/bubbles = 对应元信息键 + 磁盘文件
+  //   sounds/skins/bubbles/media = 对应元信息键 + 磁盘文件
   //   todo    = whale:todo + whale:focus（待办清单与专注统计合成一项：都是用户的长期记录，
   //             清清单不该顺手抹掉专注历史、反之亦然，故由用户一次显式勾选、一次清两处）
   //   bubble  = 按压气泡「文案 + 配图」两处的组合语义：重置 config.bubble / config.bubbleOn（文案、队列、开关）
@@ -3355,12 +3878,21 @@ module.exports = {
       // 气泡图没有「当前用哪张」的概念，删光即自动回退内置 rua.webp，不必改配置
       try { bubbles.clearAll() } catch (err) { logErr('[whale][settings] 清除自定义气泡图失败', err && err.message) }
     }
+    // 背景/片头媒体：文件 + 元信息；清空后若配置还引用着，media.clearAll 会回退为 off/auto
+    if (o.media) {
+      try {
+        const r = media.clearAll()
+        if (r && r.configChanged) pushConfig()
+      } catch (err) { logErr('[whale][settings] 清除背景/片头媒体失败', err && err.message) }
+    }
     // 待办与专注统计：同属用户的长期记录，但两者互相独立 —— 清了清单不该顺手抹掉专注历史，
     // 反之亦然；所以合并成一项「待办与专注记录」一起清，由用户显式勾选。
     if (o.todo) {
       try { clearTodo() } catch (err) { logErr('[whale][settings] 清除待办失败', err && err.message) }
       try { clearFocus() } catch (err) { logErr('[whale][settings] 清除专注统计失败', err && err.message) }
       try { pushTodo() } catch (err) { logErr('[whale][settings] 推送空待办失败', err && err.message) }
+      // 今日轮数缓存也要一起清：只清读数不推，挂件会一直显示清零前的数字
+      try { pushFocusStats() } catch (err) { logErr('[whale][settings] 推送空专注统计失败', err && err.message) }
       emitTodoChange()
       emitFocusChange()
     }
@@ -3410,7 +3942,7 @@ module.exports = {
       try {
         sendToWidget('whale:skin', skins.getSkinData())
         // 官方图（共享角色/内置）也随「形象」一并清掉：随机图池同步推空
-        sendToWidget('whale:shared-skins', skins.getBuiltinData())
+        sendToWidget('whale:shared-skins', skins.getSharedManifest())
       } catch (err) { logErr('[whale][settings] 重置后推送形象失败', err && err.message) }
     }
     // 同理：气泡图被清除后推空数组，挂件立刻回退内置 rua.webp
@@ -3457,7 +3989,11 @@ module.exports = {
       try { pushTodo() } catch (err) { logErr('[whale][settings] 恢复后推送待办失败', err && err.message) }
       emitTodoChange()
     }
-    if (appliedList.indexOf('focus') >= 0) emitFocusChange()
+    // 专注统计不只影响设置页图表：挂件「今日 N 轮」读的是宿主缓存，恢复后必须重推
+    if (appliedList.indexOf('focus') >= 0) {
+      try { pushFocusStats() } catch (err) { logErr('[whale][settings] 恢复后推送专注统计失败', err && err.message) }
+      emitFocusChange()
+    }
     const hit = appliedList.indexOf('config') >= 0 || appliedList.indexOf('window') >= 0
     if (hit) {
       resetBalanceCache()
@@ -3509,9 +4045,29 @@ module.exports = {
       return false
     }
   },
+  // 读取指令当前绑定的全局快捷键（uTools 8.0 新增 API；7.x 上不存在，一律回空串）。
+  // 用途：设置页把「去 uTools 设置里绑一下」的说明升级成「当前绑定 Ctrl+Shift+A / 未检测到」，
+  // 用户不必自己翻设置确认。返回值归一成字符串（'' = 取不到，渲染层不用判 null；**不等于没绑**）。
+  getCmdHotKey(cmdLabel) {
+    try {
+      if (typeof utools.getCmdHotKey !== 'function') return ''
+      const v = utools.getCmdHotKey(String(cmdLabel || '显示/隐藏挂件'))
+      return typeof v === 'string' ? v : ''
+    } catch (err) {
+      return ''
+    }
+  },
+  // 挂件此刻是否真的显示在屏幕上（供设置页判断「试播」等操作能否发出去）。
+  // 判据分两层：窗口不存在 → 一定没显示；窗口存活但被 uTools 连带 hide() → 存在 ≠ 可见。
+  // 探不到可见性（isVisible 缺失/抛错）时按「可见」处理：宁可让用户点一下再收到明确报错，
+  // 也不要把一条本来能用的路径永久灰掉 —— 与 bubblePreview 的口径保持一致。
   isWidgetVisible() {
     if (!winAlive()) return false
-    try { return !!getWindow().isVisible() } catch (err) { return false }
+    try {
+      const w = getWindow()
+      if (!w || typeof w.isVisible !== 'function') return true
+      return !!w.isVisible()
+    } catch (err) { return true }
   },
   // 按压气泡试播到挂件：把设置页当前编辑的泡泡队列整份发去真弹一次。载荷即新模型的 items
   // （泡数组），此处走 normBubble 的 items 归一化，保证与落库同口径；悬浮页点挂件按
@@ -3521,6 +4077,11 @@ module.exports = {
     const items = normBubble({ items: p.items }).items
     if (!items.length) return { ok: false, error: '没有可预览的泡泡' }
     if (!winAlive()) return { ok: false, error: '挂件未显示，先在设置页显示挂件再试播' }
+    // 窗口「存在 ≠ 可见」：隐藏（hide）后窗口仍存活，sendToWidget 照样返回 true，
+    // 用户会看到「已发送」但屏幕上什么都不发生。所以这里必须再查一次可见性。
+    let visible = true
+    try { visible = !!getWindow().isVisible() } catch (err) {} // 探不到就按可见处理，别把能用的路径也挡了
+    if (!visible) return { ok: false, error: '挂件未显示，先在设置页显示挂件再试播' }
     const sent = sendToWidget('whale:bubble-preview', { items: items })
     return sent ? { ok: true } : { ok: false, error: '发送失败，挂件窗口可能正在重建' }
   },

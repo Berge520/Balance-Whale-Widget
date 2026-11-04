@@ -7,11 +7,11 @@ const { errMsg } = require('./util')
 const { getBalance, refreshModels, getModelsPayload, notifyDaily } = require('./api')
 const {
   readConfig, patchConfig, writeAnchor, writeTimer, clearTimer,
-  readTodo, writeTodo, readFocus, writeFocus, todayKey,
+  readTodo, writeTodo, readFocus, writeFocus, syncTodoRounds, todayKey,
 } = require('./store')
-const { recordRound, pruneFocus } = require('./focus')
-const { FOCUS_KEEP_DAYS } = require('./constants')
-const { notify } = require('./notify')
+const { appendSession, pruneFocus } = require('./focus')
+const { FOCUS_KEEP_DAYS, TODO_MAX, TODO_TEXT_MAX } = require('./constants')
+const { notifyTimer } = require('./notify')
 // dsh 一族（dsh / dsh-market / dsh-export / dsh-backup / dsh-usage / ...）合计 300KB+。
 // 顶层 require 会把它压进每次 preload 加载的求值阶段（本模块在启动路径上必加载），
 // 而这里对 dsh 的引用全在运行时（菜单操作、状态广播），没有一处是模块求值期。
@@ -28,9 +28,12 @@ const {
   pushInit, sendToWidget, applyScaleToWindow, applyOnTop, pushConfig, pushTodo, pushFocusStats,
   winAlive, getWindow, queueLiveScale, widgetOrigin,
   widgetSide, spaceAround, usableArea, snapRect, flippedOf, setWidgetPos,
-  syncTaskbarWatch, destroyWidget, ensureSkipTaskbar, show,
+  syncTaskbarWatch, destroyWidget, ensureWindowStyles, applyIgnoreMouse, show,
   beginDragSession, endDragSession, dragMoveTo,
 } = require('./widget')
+// 共享角色图池的**单张**本体（randimg 段抽到才要，见 whale:randimg）。
+// 顶层 require 不额外付代价：widget.js 已经在启动路径上把 skins.js 加载好了。
+const { getSharedImage } = require('./skins')
 // 挂件菜单改配置后，通知已打开的设置窗口同步刷新开关（详见 settings.js 的 onConfigChange）。
 // settings.js(153KB) 连带其依赖树只在「设置窗开着」时才有订阅者；顶层 require 会把这一整片
 // 压进启动求值阶段（本模块在启动路径上必加载）—— 这正好绕过了 services.js 里对它的惰性挂载。
@@ -73,11 +76,49 @@ function syncScaleFromConfig(scale) {
   emitConfigChange()
 }
 
+// ──────────────────────────────────────────────
+// 挂件快捷指令队列
+// ──────────────────────────────────────────────
+// feature 快捷指令（计时器切换 / 专注统计 / 刷新余额）必须等页面 `whale:ready` 后才能送达。
+// **不能只看 winAlive()**：ensureWidget 刚建窗时窗口对象已存在，但页面 preload 还没就绪，
+// 这时发过去没人监听，指令会被静默丢掉（实测：第一次按快捷键经常「没反应」）。
+// 故用「页面就绪」标志 + 待发队列，ready 时统一补发。
+let widgetPageReady = false
+let pendingWidgetCmds = []
+function sendWidgetCmd(cmd, payload) {
+  const msg = { cmd: cmd, payload: payload }
+  if (winAlive() && widgetPageReady) {
+    try { sendToWidget('whale:cmd', msg) } catch (err) {
+      logErr('[whale][cmd] 发送失败', err && err.message)
+    }
+    return
+  }
+  // 页面未就绪：按指令名去重（同一指令连按多次只留最后一次，避免就绪后连播一串历史操作）
+  pendingWidgetCmds = pendingWidgetCmds.filter((m) => m.cmd !== cmd)
+  pendingWidgetCmds.push(msg)
+  if (pendingWidgetCmds.length > 8) pendingWidgetCmds.shift()
+}
+function flushPendingWidgetCmds() {
+  if (!pendingWidgetCmds.length) return
+  const list = pendingWidgetCmds
+  pendingWidgetCmds = []
+  for (const msg of list) {
+    try { sendToWidget('whale:cmd', msg) } catch (err) {
+      logErr('[whale][cmd] 补发失败', err && err.message)
+    }
+  }
+}
+
 // 「页面已请求显示过」去重标志。声明在模块级而非 registerIpc 闭包内：窗口销毁重建后
 // 页面会重新 do-init 并再发一次 whale:show，闭包里的标志无人复位，重复请求会被 if 挡掉，
 // 挂件只能等满 WIDGET_AUTOSHOW_MS(3s) 兜底才显示。destroyWidget() 复位它（见 widget.js）。
+// 同时复位就绪标志与待发指令：窗口都没了，旧指令补发到新窗口只会造成「意外的自动操作」。
 let widgetShown = false
-function resetWidgetShown() { widgetShown = false }
+function resetWidgetShown() {
+  widgetShown = false
+  widgetPageReady = false
+  pendingWidgetCmds = []
+}
 
 function registerIpc() {
   // dsh 异步状态变更（3080 就绪 / 进程退出 / 安装或版本查询完成 …）主动推给挂件：
@@ -92,10 +133,31 @@ function registerIpc() {
 
   ipcRenderer.on('whale:ready', () => {
     log('[whale][widget] 收到 whale:ready（子窗已就绪）')
+    widgetPageReady = true
     pushInit()
     getBalance().then((payload) => {
       sendToWidget('whale:balance', payload)
     })
+    // 补发 feature 快捷指令（可能在页面就绪前就已入队）
+    flushPendingWidgetCmds()
+    // 专注记录自动清理：移除超过保留天数的条目，减少存储膨胀。
+    // 天表与会话明细都要看：只比天表的话，明细超窗而天表没变时永远不会落盘清理
+    try {
+      const before = readFocus()
+      const after = pruneFocus(before, todayKey(), FOCUS_KEEP_DAYS)
+      const beforeKeys = Object.keys(before.days || {}).length
+      const afterKeys = Object.keys(after.days || {}).length
+      const beforeSessions = (before.sessions || []).length
+      const afterSessions = (after.sessions || []).length
+      if (afterKeys < beforeKeys || afterSessions < beforeSessions) {
+        writeFocus(after)
+        log('[whale][focus] 自动清理：' + beforeKeys + ' → ' + afterKeys + ' 天、'
+          + beforeSessions + ' → ' + afterSessions + ' 条记录')
+      }
+      // 待办轮数按明细自愈一次：老版本是「完成一轮 +1」的独立计数器，
+      // 裁剪掉明细或上一版写漏时会对不上，开机校正比让用户看到错数字好
+      if (syncTodoRounds()) { pushTodo(); emitTodoChange() }
+    } catch (err) { logErr('[whale][focus] 开机自愈（裁剪 / 待办轮数）失败', err && err.message) }
   })
 
   // 页面把配置落地后请求显示窗口（窗口以 show:false 创建，防首帧露出随包内置形象）。
@@ -234,21 +296,44 @@ function registerIpc() {
     }
   })
 
-  // 穿透开关状态缓存：值没变就不调 setIgnoreMouseEvents（鼠标在挂件上移动时
-  // 页面会高频上报，重复调用纯属浪费）。缓存按窗口实例失效 —— 窗口重建后新窗口
-  // 默认不穿透，必须重新下发一次。
-  let ignoreMouseWin = null
-  let ignoreMouseVal = null
-  ipcRenderer.on('whale:ignore-mouse', (event, data) => {
-    if (!winAlive()) { ignoreMouseWin = null; ignoreMouseVal = null; return }
-    const w = getWindow()
-    if (w !== ignoreMouseWin) { ignoreMouseWin = w; ignoreMouseVal = null }
-    const ignore = !!(data && data.ignore)
-    if (ignore === ignoreMouseVal) return
-    ignoreMouseVal = ignore
+  // 光标探测：页面启动 / 挂件重建后问一次「指针现在在哪」。
+  // 挂件窗口平时是 ignoreMouse（平时不挡下层应用），靠 pointermove 建立悬停才临时接管；
+  // 但指针若本来就停在鲸鱼上（页面刚重建、挂件刚被拖到光标下），没有 pointermove，
+  // 悬停永远建立不起来 —— 用户看到挂件就在手边，点一下却没反应（点击穿透到下层应用）。
+  // 回包坐标是相对窗口左上角的 CSS 像素（窗口无边框，bounds 即内容区），页面用它补一次命中测试。
+  ipcRenderer.on('whale:probe-cursor', () => {
+    if (!winAlive()) return
+    let p = null
+    try { p = utools.getCursorScreenPoint() } catch (err) {}
+    if (!p || !isFinite(p.x) || !isFinite(p.y)) { sendToWidget('whale:cursor', null); return }
     try {
-      w.setIgnoreMouseEvents(ignore, { forward: true })
-    } catch (err) { ignoreMouseVal = null }
+      const b = getWindow().getBounds()
+      sendToWidget('whale:cursor', { x: Math.round(p.x - b.x), y: Math.round(p.y - b.y) })
+    } catch (err) {
+      logErr('[whale][cursor] 光标探测失败', err && err.message)
+    }
+  })
+
+  // 共享角色图池的单张取图：页面抽到 randimg 段时按 id 来要那一张本体。
+  // 池子本体不再整池推给子窗（真机 39MB 原图 / 52MB base64，读盘 + 编码 + 跨进程克隆
+  // 全压在「打开挂件」那一下，两个进程还各常驻一份）；init 只推清单，这里按需搬单张。
+  // 无论取得到与否都回一条：页面记着「在途」，收不到回包就一直不敢再要同一张。
+  // id 的字符集与「是不是官方图」都在 skins.getSharedImage 里判（子窗传来的值一律当外部输入）。
+  ipcRenderer.on('whale:randimg', (event, data) => {
+    if (!winAlive()) return
+    const id = data && typeof data.id === 'string' ? data.id : ''
+    let url = ''
+    try { url = getSharedImage(id) } catch (err) { logErr('[whale][randimg] 取单张形象失败', err && err.message) }
+    try { sendToWidget('whale:randimg-data', { id: id, url: url }) } catch (err) {
+      logErr('[whale][randimg] 回包失败', err && err.message)
+    }
+  })
+
+  // 穿透开关：交给 widget.js 的 applyIgnoreMouse（那里按值去重，且下发完会重申窗口样式
+  // —— setIgnoreMouseEvents 本身就是会让 Windows 重新登记样式的那类调用之一，
+  // 置顶位和任务栏位就是在这一步掉的）。
+  ipcRenderer.on('whale:ignore-mouse', (event, data) => {
+    applyIgnoreMouse(!!(data && data.ignore))
   })
 
   // 挂件菜单里要打字（留言、时长、定时）：窗口是以 focusable:false 建的，
@@ -282,10 +367,11 @@ function registerIpc() {
           }
         } catch (err) {}
       }
-      ensureSkipTaskbar()
-      // 留痕：这条路径是「挂件冒进任务栏」的主因，出问题时靠它判断走没走到、
+      ensureWindowStyles()
+      // 留痕：这条路径是「挂件冒进任务栏」和「置顶莫名失效」的共同主因（切 focusable 会让
+      // Windows 重登记窗口样式，两个位一起掉），出问题时靠它判断走没走到、
       // 以及 setSkipTaskbar 到底可不可用（不可用时说明得换不切 focusable 的方案）
-      log('[whale][ipc] 菜单输入焦点', want ? '借出' : '交还', 'skipTaskbar 已重申')
+      log('[whale][ipc] 菜单输入焦点', want ? '借出' : '交还', '窗口样式已重申（置顶 + 任务栏）')
     } catch (err) {
       logErr('[whale][ipc] 切换输入焦点失败', err && err.message)
     }
@@ -340,68 +426,133 @@ function registerIpc() {
       back: isFinite(Number(state.back)) ? Math.max(0, Number(state.back)) : 0,
       cycle: isFinite(Number(state.cycle)) ? Math.max(0, Math.round(Number(state.cycle))) : 0,
       cycleDate: typeof state.cycleDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(state.cycleDate) ? state.cycleDate : '',
-      breakLong: state.breakLong === true,
+      // 「定时」模式的总跨度（毫秒）：环形进度条算比例要用，暂停/恢复后也不能丢
+      span: isFinite(Number(state.span)) ? Math.max(0, Math.round(Number(state.span))) : 0,
     })
   })
 
-  // 计时到点通知（页面对「到点通知」开关的判断在页面侧完成，并已在 text 为空时停发）
+  // 计时到点通知：页面把这一轮的 timerNotifyOn / timerMailOn 一起带上来，
+  // 宿主再叠渠道总开关（notifySystemOn / notifyMailOn）—— 漏判任一层都会让
+  // 「计时到点系统通知」这个开关形同虚设。
   ipcRenderer.on('whale:timer-done', (event, data) => {
     const text = String((data && data.text) || '').slice(0, 200)
     if (!text) return
-    notify(text, readConfig())
+    notifyTimer(text, readConfig(), data && data.channels)
   })
 
-  // 待办轻操作：挂件页只有「勾选完成 / 设为当前专注」两种（编辑一律在设置页做）。
+  // 待办轻操作：挂件页只有「勾选完成 / 设为当前专注 / 取消专注」三种（编辑一律在设置页做）。
   // 与 whale:todo 的下行推送同名不同向：这里是子→父，父处理完再 pushTodo 回推权威状态。
+  // 操作被拒（条目已不存在 / 清单已满 / 写失败）时也要回推一次：挂件已经按乐观状态重画，
+  // 静默 return 会让它停在错误状态上，直到下一次无关操作把它顶掉。
   ipcRenderer.on('whale:todo', (event, data) => {
     const op = String((data && data.op) || '')
     const id = String((data && data.id) || '')
-    if (!id || (op !== 'toggle' && op !== 'focus')) return
+    const resync = () => { pushTodo(); emitTodoChange() }
+    if (op !== 'add' && op !== 'clearDone' && op !== 'toggle' && op !== 'focus' && op !== 'unfocus') return
+    // add / clearDone 不需要 id，其余操作必须有
+    if (op !== 'add' && op !== 'clearDone' && !id) { resync(); return }
     const st = readTodo()
-    const it = st.items.find((x) => x.id === id)
-    if (!it) return
-    if (op === 'toggle') {
-      it.done = !it.done
-      it.doneAt = it.done ? Date.now() : 0
-      // 勾完当前专注的那条：专注目标跟着清空，免得挂件一直显示「已完成的任务」
-      if (it.done && st.focusId === id) st.focusId = ''
+    if (op === 'add') {
+      const text = String((data && data.text) || '').replace(/\s+/g, ' ').trim().slice(0, TODO_TEXT_MAX)
+      if (!text || st.items.length >= TODO_MAX) { resync(); return }
+      const seen = new Set(st.items.map((x) => x.id))
+      let newId
+      do { newId = 't' + Date.now().toString(36) + Math.random().toString(36).slice(2, 8) } while (seen.has(newId))
+      st.items.unshift({ id: newId, text: text, done: false, at: Date.now(), doneAt: 0 })
+    } else if (op === 'clearDone') {
+      // 清除所有已完成的待办项
+      st.items = st.items.filter((x) => !x.done)
+      // 如果当前专注目标已被清除，清空专注目标
+      if (st.focusId && !st.items.find((x) => x.id === st.focusId)) {
+        st.focusId = ''
+      }
     } else {
-      if (it.done) return // 已完成的不给设为专注目标
-      st.focusId = st.focusId === id ? '' : id // 再点一次取消
-    }
-    if (!writeTodo(st)) return
-    pushTodo()
-    emitTodoChange()
-  })
-
-  // 专注轮次上报（页面到点后调用；不搭 whale:timer-done 的车 —— 那条被通知开关门控，
-  // 用户关了通知就统计不到，而统计与提醒是两件独立的事）
-  ipcRenderer.on('whale:focus', (event, data) => {
-    const minutes = Math.max(0, Math.min(1440, Math.round(Number(data && data.minutes) || 0)))
-    const key = todayKey()
-    const prev = readFocus()
-    const next = pruneFocus(recordRound(prev, key, minutes), key, FOCUS_KEEP_DAYS)
-    if (!writeFocus(next)) return
-    // 待办轮次递增：若当前有专注目标，对应条目的 rounds +1
-    const todoState = readTodo()
-    if (todoState.focusId) {
-      const item = todoState.items.find((x) => x.id === todoState.focusId)
-      if (item) {
-        item.rounds = (item.rounds || 0) + 1
-        writeTodo(todoState)
-        pushTodo()
+      const it = st.items.find((x) => x.id === id)
+      if (!it) { resync(); return }
+      if (op === 'toggle') {
+        it.done = !it.done
+        it.doneAt = it.done ? Date.now() : 0
+        // 勾完当前专注的那条：专注目标跟着清空，免得挂件一直显示「已完成的任务」
+        if (it.done && st.focusId === id) st.focusId = ''
+      } else if (op === 'focus') {
+        if (it.done) { resync(); return } // 已完成的不给设为专注目标
+        // 明确「设为」，不是开关：取消有独立的 unfocus，重复点击不该把目标点没
+        st.focusId = id
+      } else if (st.focusId === id) {
+        st.focusId = ''
       }
     }
+    if (!writeTodo(st)) { resync(); return }
+    resync()
+  })
+
+  // 到点气泡回执：页面把气泡真正挂出来之后才回这条。
+  // 两套幂等位里，notifiedFor（系统通知/邮件）由扫描侧按送达情况自己写；这里只写
+  // remindedFor（气泡已展示）。气泡被计时气泡占位 / 被拦时页面回 shown=false，宿主不记账，
+  // 下一个 tick 会继续补弹 —— 这就是「通知发过了不重发、气泡没弹出来继续补」的实现。
+  // 气泡一旦展示，本轮就算完成：通知位也一并前进，避免免打扰结束后再补发一条迟到通知。
+  // debug=true 是设置页调试入口触发的，纯投递演练，不许污染真实幂等位。
+  ipcRenderer.on('whale:todo-due-ack', (event, data) => {
+    const d = data && typeof data === 'object' ? data : {}
+    if (d.shown !== true) return
+    if (d.debug === true) return
+    const id = String(d.id || '')
+    const dueAt = Math.round(Number(d.dueAt)) || 0
+    if (!id || !dueAt) return
+    try {
+      const st = readTodo()
+      const it = st.items.find((x) => x.id === id)
+      if (!it) return
+      // 只前进不后退：这一轮可能已被系统通知写掉，或回执迟到（对应上一轮），都不能把幂等位往回拨
+      if (dueAt <= (Math.round(Number(it.remindedFor)) || 0)) return
+      it.remindedFor = dueAt
+      if (dueAt > (Math.round(Number(it.notifiedFor)) || 0)) it.notifiedFor = dueAt
+      writeTodo(st)
+    } catch (err) { logErr('[whale][remind] 气泡回执写幂等位失败', err && err.message) }
+  })
+
+  // 专注会话上报（页面在计时到点 / 正计时结束 / 中途放弃时调用；不搭 whale:timer-done 的车 ——
+  // 那条被通知开关门控，用户关了通知就统计不到，而统计与提醒是两件独立的事）
+  // payload = { mode, startAt, endAt, minutes, isBreak, abandoned }
+  // 页面只报「这段投入是多长、怎么计的、走完还是放弃」；什么算一轮由 focus.isRound 判，
+  // 天表由会话派生 —— 这样挂件、设置页、待办上的轮数迟早都只会有一本账。
+  ipcRenderer.on('whale:focus', (event, data) => {
+    const input = data && typeof data === 'object' ? data : {}
+    const key = todayKey()
+    // 先读待办快照再记账：本轮完成时挂的是哪条任务，要与会话明细一起落库。
+    // 不能只存 todoId 之后反查 —— 任务改名/删除后，历史记录就只剩一个看不懂的 id
+    const todoState = readTodo()
+    const focusItem = todoState.focusId
+      ? todoState.items.find((x) => x.id === todoState.focusId)
+      : null
+    const prev = readFocus()
+    const appended = appendSession(prev, {
+      // 没给结束时刻就按「现在」算：归属日由结束那一刻决定（跨零点的轮次记在结束那天）
+      endAt: Number(input.endAt) > 0 ? Number(input.endAt) : Date.now(),
+      startAt: Number(input.startAt),
+      minutes: Number(input.minutes),
+      mode: input.mode,
+      isBreak: input.isBreak === true,
+      abandoned: input.abandoned === true,
+      todoId: focusItem && focusItem.id,
+      todoText: focusItem && focusItem.text,
+    })
+    const next = pruneFocus(appended, key, FOCUS_KEEP_DAYS)
+    if (!writeFocus(next)) return
+    // 待办的「N 轮」按会话回填（不再自己 +1）：写失败不假报，
+    // 不推 Todo / 不通知设置页，用户看到的是「轮次没加」而不是幽灵更新
+    if (syncTodoRounds()) { pushTodo(); emitTodoChange() }
     // 每日目标达成提醒：只在「今日轮数首次达到目标」时弹一次（notifyDaily 去重）
     const cfg = readConfig()
     const goal = cfg.focusGoal || 0
     if (goal > 0) {
-      const todayEntry = next.days && next.days[key]
-      const todayRounds = todayEntry ? Math.max(0, Math.round(Number(todayEntry.r) || 0)) : 0
-      const prevEntry = prev.days && prev.days[key]
-      const prevRounds = prevEntry ? Math.max(0, Math.round(Number(prevEntry.r) || 0)) : 0
+      const roundsOf = (st) => {
+        const e = st.days && st.days[key]
+        return e ? Math.max(0, Math.round(Number(e.r) || 0)) : 0
+      }
+      const todayRounds = roundsOf(next)
       // 从「未达成」跨入「已达成」的那一刻才提醒：避免重复弹窗
-      if (prevRounds < goal && todayRounds >= goal) {
+      if (roundsOf(prev) < goal && todayRounds >= goal) {
         notifyDaily(`今日专注目标已达成！完成 ${todayRounds} 轮`, cfg, 'goal')
       }
     }
@@ -445,4 +596,4 @@ function registerIpc() {
   })
 }
 
-module.exports = { registerIpc, resetWidgetShown }
+module.exports = { registerIpc, resetWidgetShown, sendWidgetCmd }

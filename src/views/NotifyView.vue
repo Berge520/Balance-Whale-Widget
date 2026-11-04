@@ -1,11 +1,13 @@
 <script lang="ts" setup>
-import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { msgCls, useFlashShow } from '../composables/useFlash'
 import { useFold } from '../composables/useFold'
 import type { AlertRole, SoundRole, WhaleMailSecrets, WhaleServices } from '../types/services'
 
 // 「提醒与通知」整卡：四类自动提醒（峰谷切换 / 低余额 / 今日预算 / 余额大幅波动）+
-// 计时（时长 / 到点留言 / 休息档）+ 通知方式（系统 / 邮件 + SMTP 配置）+ 提醒音独立音量 + 提醒文案折叠。
+// 通知方式（系统 / 邮件 + SMTP 配置）+ 提醒音独立音量 + 提醒文案折叠。
+// 计时相关配置已拆到独立的「计时」卡（TimerView.vue）：那边控件多、搜索命中要直达，
+// 夹在本卡中段只会让两边都难找。本卡只留「提醒怎么送达」这条线。
 // 从设置页 App.vue 抽出。以下项仍留在父级，按 props 下传或 emit 触发，不能跟着搬：
 //   - applyConfig / patchCfg：applyConfig 是父级 onConfigChange 订阅与备份恢复共用的回填入口，
 //     本卡保存提醒文案后要「整份回填 + 落盘」，只能 emit 请求父级做（applyConfig 搬不动）。
@@ -14,16 +16,14 @@ import type { AlertRole, SoundRole, WhaleMailSecrets, WhaleServices } from '../t
 //     SOUND_ROLE_LABEL 还被 settings 里其它卡（音效导入、共享音效选用）引用，跨卡共享，留父级。
 //   - soundsMeta / soundFlash 等音效资源状态：音效导入导出在「外观」页，跨卡共享。
 //   - cfg.alerts 的基线比对（alertsBaseline）随本卡搬入 —— 它只服务本卡的「未保存」提示。
-// 随卡搬入的：计时时长三段输入 / 到点留言 / 休息档、四类提醒的开关与阈值联动、通知渠道与 SMTP 配置、
+// 随卡搬入的：四类提醒的开关与阈值联动、通知渠道与 SMTP 配置、
 // 提醒音独立音量的三态计算、提醒文案的编辑 / 保存 / 恢复默认与折叠态。
 const props = defineProps<{
-  // 挂件配置整体传入：本卡只读写提醒 / 计时 / 邮件相关字段，落盘统一走 emit('patch')
+  // 挂件配置整体传入：本卡只读写提醒 / 邮件相关字段，落盘统一走 emit('patch')
   cfg: any
   services: Partial<WhaleServices>
   // 记账币种（'CNY' / 'USD'）：预算 / 阈值输入框的单位靠它
   usageCurrency: string
-  // 到点留言长度上限（父级 TIMER_NOTE_MAX）
-  timerNoteMax: number
   // 提醒音槽位与标签（父级 ALERT_SOUND_ROLES / SOUND_ROLE_LABEL），跨卡共享故以 props 下传
   alertSoundRoles: AlertRole[]
   soundRoleLabel: Record<SoundRole, string>
@@ -35,39 +35,6 @@ const emit = defineEmits<{
 }>()
 
 // 统一的消息态（Flash）：定义收口在 composables/useFlash.ts，各卡不再各持一份。
-
-// —— 计时：时长三段输入 / 到点留言 / 「休息」档 ——
-// 配置里只存总秒数（timerSec），三段输入是它的展示形态；
-// 拆出来的 h/m/s 单独放一份本地状态，避免每次输入都被折算回秒再拆回来导致光标跳动
-const timerHms = reactive({ h: 0, m: 0, s: 0 })
-function syncTimerHms() {
-  const sec = Math.max(0, Math.min(86399, Math.round(Number(props.cfg.timerSec) || 0)))
-  timerHms.h = Math.floor(sec / 3600)
-  timerHms.m = Math.floor((sec % 3600) / 60)
-  timerHms.s = sec % 60
-}
-// 三段全填 0 时按 25 分钟兜底：否则「填了 0 就开不了计时」，且宿主侧清洗也会把它拉回默认值
-function commitTimerHms() {
-  const sec = Math.round(Number(timerHms.h) || 0) * 3600 + Math.round(Number(timerHms.m) || 0) * 60 + Math.round(Number(timerHms.s) || 0)
-  emit('patch', { timerSec: Math.max(1, Math.min(86399, sec || 1500)) })
-  syncTimerHms()
-}
-// 「休息」档：0 分钟 = 不显示休息按钮（与挂件菜单 hideBubble 后的按钮显隐同口径）
-const timerBreakOn = computed({
-  get: () => props.cfg.timerBreakMin > 0,
-  set: (v: boolean) => { onTimerBreakToggle(v) },
-})
-const timerBreakMinEdit = computed({
-  get: () => (props.cfg.timerBreakMin > 0 ? props.cfg.timerBreakMin : 5),
-  set: () => {},
-})
-// 打开时补一个可用值（5 分钟），关掉时归零（= 不显示按钮）
-function onTimerBreakToggle(on: boolean) {
-  emit('patch', { timerBreakMin: on ? (props.cfg.timerBreakMin > 0 ? props.cfg.timerBreakMin : 5) : 0 })
-}
-function commitTimerBreak() {
-  emit('patch', { timerBreakMin: timerBreakMinEdit.value })
-}
 
 // —— 四类提醒开关的联动 ——
 // 打开「今日预算提醒」时补一个可用金额，避免开关开着但金额为 0（等于不提醒）
@@ -153,7 +120,7 @@ function resetAlerts() {
   emit('save-alerts', null)
 }
 
-// 卡级折叠：本卡正文很长（四类自动提醒开关 + 计时 9 控件 + 通知渠道 / SMTP + 提醒文案 + 提醒音音量），
+// 卡级折叠：本卡正文很长（四类自动提醒开关 + 通知渠道 / SMTP + 提醒文案 + 提醒音音量），
 // 日常只在「改提醒设置」时才逐段展开；与隐私 / 备份 / 关于三卡统一为「默认收起、可展开」，
 // 收起后只留标题与一行摘要，让「用量」组的其它卡上浮
 // 使用 useFold 持久化折叠状态到 localStorage，避免用户每次打开都要重新展开
@@ -180,11 +147,6 @@ const volSummary = computed(() => {
   if (!parts.length) return '全部' + follow
   return parts.join(' · ') + ' · 其余' + follow
 })
-// 计时分区折叠：开关 4 个 + 时长 + 文案 + 休息快捷键共 9 个控件，多数人只在初次设一次，
-// 却把这卡的中段占满。默认收起：计时功能本身从挂件菜单进出，这里只是它的配置项，
-// 折起来能让下方的「低余额 / 预算 / 波动」提醒开关上浮（这几项才是本卡的主入口）。
-// 纯展示态、不给父级，故留组件内部。使用 useFold 持久化到 localStorage
-const timerFold = useFold('timer', false)
 // 与上次回填的内容比对，用于「未保存」提示。基线由父级 applyConfig 后经 syncAlertsBaseline 写入
 const alertsBaseline = ref<string | null>(null)
 const alertsDirty = computed(() => alertsBaseline.value !== null && JSON.stringify(props.cfg.alerts) !== alertsBaseline.value)
@@ -328,12 +290,10 @@ async function testMail() {
 }
 
 // 暴露给父级：
-//   - syncAlertsBaseline：父级 applyConfig 回填 cfg.alerts 后落基线，供「未保存」比对；
-//     同步 syncTimerHms 把 timerSec 的三段展示刷新（配置可能来自备份恢复 / 挂件菜单推送）
-//   - loadMailSecrets：挂载时父级调一次读回 SMTP 凭据（凭据读失败是预期分支，静默）
+//   - syncAlertsBaseline：父级 applyConfig 回填 cfg.alerts 后落基线，供「未保存」比对
+//   - loadMailSecrets：读回 SMTP 凭据（凭据读失败是预期分支，静默）
 function syncAlertsBaseline() {
   alertsBaseline.value = JSON.stringify(props.cfg.alerts)
-  syncTimerHms()
 }
 function loadMailSecrets() {
   // 预期分支：读存储失败/宿主未就绪时保持空表单，用户重填即可
@@ -346,11 +306,7 @@ function loadMailSecrets() {
 onMounted(loadMailSecrets)
 // 离开即清掉三条回执的定时器，避免组件销毁后回调写到已卸载的 reactive 上
 onUnmounted(() => { alertFlashStop(); mailFlashStop(); notifyFlashStop() })
-defineExpose({ syncAlertsBaseline, loadMailSecrets, syncTimerHms })
-
-// timerSec 变化（备份恢复 / 挂件菜单推送）时刷新三段展示；本地 commitTimerHms 已自行 sync，
-// 这里再 sync 一次是幂等的，不会造成光标跳动（只在值真的变化时触发）
-watch(() => props.cfg.timerSec, syncTimerHms)
+defineExpose({ syncAlertsBaseline, loadMailSecrets })
 </script>
 
 <template>
@@ -367,90 +323,6 @@ watch(() => props.cfg.timerSec, syncTimerHms)
       <span class="label">峰谷切换提醒 <em>（进入峰/谷时段时气泡提示，需开启思考气泡）</em></span>
       <input type="checkbox" :checked="cfg.peakRemindOn" @change="emit('patch', { peakRemindOn: ($event.target as HTMLInputElement).checked })" />
     </label>
-
-    <!-- 计时相关项原先散在本卡中段、与「余额提醒」「通知渠道」混排，用户找不到「倒计时时长」在哪儿。
-         加一个分区标题把它们圈起来（与下方「通知方式」同一套 .sub 视觉），不改控件归属。
-         分区整块可折叠：9 个控件是「设一次就不动」的低频项，折起来让下方的提醒开关上浮 -->
-    <h3 class="sub">计时</h3>
-    <button class="link-btn utils-btn utils-secondary" type="button" @click="timerFold.open = !timerFold.open">
-      {{ timerFold.open ? '收起计时设置' : '展开计时设置（通知 / 常驻 / 时长 / 到点提醒 / 休息）' }}
-    </button>
-    <div v-if="timerFold.open" class="guide">
-
-    <label class="field row check">
-      <span class="label">计时到点通知 <em>（挂件菜单「计时」到点时弹系统通知）</em></span>
-      <input type="checkbox" :checked="cfg.timerNotifyOn" @change="emit('patch', { timerNotifyOn: ($event.target as HTMLInputElement).checked })" />
-    </label>
-
-    <label class="field row check">
-      <span class="label">记住计时状态 <em>（重载插件 / 重建挂件后继续计时）</em></span>
-      <input type="checkbox" :checked="cfg.timerPersistOn" @change="emit('patch', { timerPersistOn: ($event.target as HTMLInputElement).checked })" />
-    </label>
-
-    <!-- 计时气泡口径：原先只在挂件菜单「计时 → 更多」里，那层嵌套折叠已去掉，挪到本页 -->
-    <label class="field row check">
-      <span class="label">计时气泡常驻 <em>（开启：计时中气泡一直显示；关闭：只在开始时短暂显示，点小鲸鱼可随时查看）</em></span>
-      <input type="checkbox" :checked="cfg.timerBubblePin" @change="emit('patch', { timerBubblePin: ($event.target as HTMLInputElement).checked })" />
-    </label>
-    <label class="field row check">
-      <span class="label">计时中只显示计时 <em>（开启：气泡只显示计时；关闭：气泡照常显示余额、今日用量等全部内容）</em></span>
-      <input type="checkbox" :checked="cfg.timerBubbleOnly" @change="emit('patch', { timerBubbleOnly: ($event.target as HTMLInputElement).checked })" />
-    </label>
-
-    <!-- 计时时长：与挂件菜单「倒计时」三段输入同一份配置（cfg.timerSec 存秒），
-         这里用三个数字框拆开展示，任一段改动都折算回秒提交 -->
-    <div class="field row">
-      <span class="label">倒计时时长 <em>（挂件菜单「计时」里也能改；0 时 0 分 0 秒按 25 分钟算）</em></span>
-      <input class="num" type="number" min="0" max="23" step="1" v-model.number="timerHms.h" @change="commitTimerHms" />
-      <span class="num-text">时</span>
-      <input class="num" type="number" min="0" max="59" step="1" v-model.number="timerHms.m" @change="commitTimerHms" />
-      <span class="num-text">分</span>
-      <input class="num" type="number" min="0" max="59" step="1" v-model.number="timerHms.s" @change="commitTimerHms" />
-      <span class="num-text">秒</span>
-    </div>
-
-    <label class="field row">
-      <span class="label">到点提醒我 <em>（开始计时前写一句「结束后要做什么」，到点时显示在气泡与通知里）</em></span>
-      <input type="text" :value="cfg.timerNote" :maxlength="timerNoteMax" placeholder="例如：起来喝水、活动一下"
-             @change="emit('patch', { timerNote: ($event.target as HTMLInputElement).value })" />
-    </label>
-
-    <label class="field row check">
-      <span class="label">到点后给「休息」快捷键 <em>（气泡旁的按钮点一下直接开始休息计时）</em></span>
-      <input type="checkbox" v-model="timerBreakOn" />
-    </label>
-    <label v-if="timerBreakOn" class="field row">
-      <span class="label">短休时长</span>
-      <input class="num" type="number" min="1" max="120" step="1" v-model.number="timerBreakMinEdit" @change="commitTimerBreak" />
-      <span class="num-text">分钟</span>
-    </label>
-
-    <!-- 番茄循环：短休/长休/每 N 轮/自动衔接。与上面的「休息快捷键」正交 —— 后者是手动按钮，
-         前者是计时结束后自动进入的休息轮。两者可单独使用也可组合 -->
-    <label class="field row check">
-      <span class="label">番茄循环 <em>（计时结束后自动进入休息，休息结束自动开始下一轮专注）</em></span>
-      <input type="checkbox" :checked="cfg.timerPomoOn" @change="emit('patch', { timerPomoOn: ($event.target as HTMLInputElement).checked })" />
-    </label>
-    <template v-if="cfg.timerPomoOn">
-      <label class="field row">
-        <span class="label">长休时长 <em>（每 N 轮专注后进入长休）</em></span>
-        <input class="num" type="number" min="1" max="60" step="1" :value="cfg.timerLongBreakMin"
-               @change="emit('patch', { timerLongBreakMin: Number(($event.target as HTMLInputElement).value) })" />
-        <span class="num-text">分钟</span>
-      </label>
-      <label class="field row">
-        <span class="label">每几轮进长休</span>
-        <input class="num" type="number" min="2" max="12" step="1" :value="cfg.timerLongEvery"
-               @change="emit('patch', { timerLongEvery: Number(($event.target as HTMLInputElement).value) })" />
-        <span class="num-text">轮</span>
-      </label>
-      <label class="field row check">
-        <span class="label">自动衔接下一轮 <em>（休息/专注结束后 1.5 秒自动开始下一轮，点任何按钮可取消）</em></span>
-        <input type="checkbox" :checked="cfg.timerAutoNext" @change="emit('patch', { timerAutoNext: ($event.target as HTMLInputElement).checked })" />
-      </label>
-    </template>
-
-    </div>
 
     <label class="field row check">
       <span class="label">低余额预警 <em>（余额低于阈值时数字变红，并弹一次提醒气泡 + 每天一次系统通知）</em></span>
@@ -491,7 +363,7 @@ watch(() => props.cfg.timerSec, syncTimerHms)
 
     <!-- 通知渠道：上面这些提醒「用什么方式送达」。系统通知 = 桌面弹窗；邮件 = SMTP 直发。
          渠道是总开关，与具体哪几类提醒要开无关 —— 后者在上面各自的开关里 -->
-    <h3 class="sub">通知方式</h3>
+    <h3 class="card-sub">通知方式</h3>
 
     <label class="field row check">
       <span class="label">系统通知 <em>（桌面弹窗；关闭后所有自动提醒与计时都不再弹窗）</em></span>
@@ -520,7 +392,7 @@ watch(() => props.cfg.timerSec, syncTimerHms)
         {{ mail.mailHost }}:{{ mail.mailPort }} → {{ cfg.mailTo || '（未填收件人）' }}
         <button class="link-btn inline utils-btn utils-secondary" type="button" @click="toggleMailFold()">重新配置</button>
       </p>
-      <button v-else class="link-btn utils-btn utils-secondary" type="button" @click="toggleMailFold()">
+      <button v-else class="link-btn utils-btn utils-secondary fold-toggle" type="button" :aria-expanded="mailOpen" @click="toggleMailFold()">
         {{ mailConfigured ? '收起 SMTP 配置' : 'SMTP 配置（必填）' }}
       </button>
 
@@ -572,11 +444,6 @@ watch(() => props.cfg.timerSec, syncTimerHms)
                  @input="emit('patch', { mailSubjectPrefix: ($event.target as HTMLInputElement).value })" />
         </label>
 
-        <label class="field row check">
-          <span class="label">计时到点也发邮件 <em>（除系统通知外，到点另发一封邮件；关掉则只有系统通知）</em></span>
-          <input type="checkbox" :checked="cfg.timerMailOn" @change="emit('patch', { timerMailOn: ($event.target as HTMLInputElement).checked })" />
-        </label>
-
         <div class="btn-row">
           <button class="export-btn utils-btn utils-outline" type="button" @click="saveMailSettings()">保存邮件设置</button>
           <button class="export-btn utils-btn utils-outline" type="button" :disabled="mailTesting" @click="testMail()">
@@ -594,7 +461,7 @@ watch(() => props.cfg.timerSec, syncTimerHms)
 
     <!-- 低频的「提醒表现 + 时段 + 文案」收在一处折叠，卡片默认只留「哪几类提醒要开」 -->
     <div class="fold">
-      <button class="link-btn utils-btn utils-secondary" @click="alertFolds.open = !alertFolds.open">
+      <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="alertFolds.open" @click="alertFolds.open = !alertFolds.open">
         {{ alertFolds.open ? '收起更多提醒设置' : '更多提醒设置（停留时长 / 免打扰 / 文案）' }}
       </button>
       <div v-if="alertFolds.open" class="guide">
@@ -610,7 +477,7 @@ watch(() => props.cfg.timerSec, syncTimerHms)
         <p class="hint">峰谷切换 / 今日预算 / 低余额 / 穿透说明这几类提醒气泡的停留时间（随机台词不受影响）。</p>
 
         <label class="field row check">
-          <span class="label">免打扰时段 <em>（时段内只弹气泡，不弹自动提醒的系统通知；跨午夜如 23:00–07:00 也支持）</em></span>
+          <span class="label">免打扰时段 <em>（只静音系统通知与邮件，挂件气泡照常弹；跨午夜如 23:00–07:00 也支持）</em></span>
           <input type="checkbox" :checked="cfg.quietOn" @change="emit('patch', { quietOn: ($event.target as HTMLInputElement).checked })" />
         </label>
         <label v-if="cfg.quietOn" class="field row">
@@ -620,8 +487,9 @@ watch(() => props.cfg.timerSec, syncTimerHms)
           <input class="time" type="time" :value="cfg.quietTo" @change="emit('patch', { quietTo: ($event.target as HTMLInputElement).value })" />
         </label>
         <p v-if="cfg.quietOn" class="hint">
-          免打扰静默「今日预算」「低余额」「余额大幅波动」三类自动通知（邮件一并静默）：前两类不占用当天名额（出时段后仍会补发一次），
-          波动通知本身就是一次性的、不补发。计时到点是你主动设定的一次性提醒，照常通知。
+          免打扰只压「系统通知」与「邮件」，挂件气泡不受影响：
+          「今日预算」「低余额」的系统通知不占用当天名额（出时段后补发一次），「余额大幅波动」本来就是一次性、不补发。
+          待办到点提醒在时段内也只弹挂件气泡（不发系统通知与邮件），气泡弹出后该轮即算完成。
         </p>
 
         <!-- 提醒文案：四类自动提醒（低余额 / 预算 / 峰谷 / 穿透）的气泡与系统通知文案 -->
@@ -659,7 +527,7 @@ watch(() => props.cfg.timerSec, syncTimerHms)
          仍在「外观」的音效折叠条里）。默认收起成一行摘要；点标题行展开成滑块，
          摘要行始终播报当前音量口径，不会藏了等于没有 -->
     <div class="fold">
-      <button class="link-btn utils-btn utils-secondary" @click="volFold.open = !volFold.open">
+      <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="volFold.open" @click="volFold.open = !volFold.open">
         {{ volFold.open ? '收起提醒音音量' : '提醒音音量' }}
       </button>
       <p class="hint vol-sum">{{ volSummary }}</p>
@@ -686,15 +554,9 @@ watch(() => props.cfg.timerSec, syncTimerHms)
 
 <style scoped>
 /* 设计令牌来自 main.css 的 :root。通用控件样式已由 main.css 统一提供（全局唯一来源），
-   本组件只留自身特有的控件样式。utils 档位配色、.link-btn、.btn-row 基类也已在 main.css，
-   此处不再留副本。 */
+   本组件只留自身特有的控件样式。utils 档位配色、.link-btn、.btn-row 基类、分区标题 .card-sub
+   也已在 main.css，此处不再留副本。 */
 
-/* 「通知方式」小标题：与卡片流里的分组标题同源（app.css 的 .sub） */
-.sub {
-  margin: 0 0 18px;
-  color: var(--fg-dim);
-  font-size: 13px;
-}
 .export-btn {
   cursor: pointer;
 }

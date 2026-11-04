@@ -111,6 +111,36 @@ test('deriveHostCompatibility：有判不出的、又没有确证不满足的 �
   assert.equal(deriveHostCompatibility(facts, '0.1.7', allow).status, 'unknown')
 })
 
+// ⚠️ 回归（上游 a4febfa）：包写了 engines.dsh 时宿主**只按它裁决**，peer 一律忽略。
+//    早先两条来源做合取，会把「engine 满足、peer 不满足」的插件误判 incompatible，
+//    而宿主本可加载 —— 用户装得上的插件被市场标红。
+test('deriveHostCompatibility：engines.dsh 存在时单独裁决，peer 不再参与', () => {
+  // engine 满足、peer 不满足 → compatible（宿主的 unmetRequirements 同款口径）
+  const ok = {
+    engine: '^0.1.7',
+    peers: [{ name: '@deepseek-ai/dsh-llm', range: '^0.3.0' }],
+  }
+  const v = deriveHostCompatibility(ok, '0.1.8', allow)
+  assert.equal(v.status, 'compatible')
+  // 展示的需求只有 engine：再把 peer 拼进 ∩ 会让用户以为有两条约束
+  assert.equal(v.requirement, '^0.1.7')
+
+  // engine 不满足、peer 满足 → incompatible（同样只看 engine）
+  const bad = {
+    engine: '^0.2.0',
+    peers: [{ name: '@deepseek-ai/dsh-llm', range: '^0.1.0' }],
+  }
+  assert.equal(deriveHostCompatibility(bad, '0.1.8', allow).status, 'incompatible')
+  assert.equal(deriveHostCompatibility(bad, '0.1.8', allow).requirement, '^0.2.0')
+
+  // engine 判不出（如 workspace:*）→ unknown，不能被 peer 的「确证不满足」带成 incompatible
+  const unjudgeable = {
+    engine: 'workspace:*',
+    peers: [{ name: '@deepseek-ai/dsh-llm', range: '^0.3.0' }],
+  }
+  assert.equal(deriveHostCompatibility(unjudgeable, '0.1.8', allow).status, 'unknown')
+})
+
 test('deriveHostCompatibility：超长 range 直接判不出（异常数据不进比较逻辑）', () => {
   const facts = { engine: '', peers: [{ name: '@deepseek-ai/dsh-llm', range: '^1'.repeat(MAX_RANGE_LENGTH) }] }
   assert.equal(deriveHostCompatibility(facts, '0.1.7', allow).status, 'unknown')

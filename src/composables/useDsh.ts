@@ -3,6 +3,7 @@
 // 也让「展开才读、离开即停」这类 dsh 专属约定混在通用设置里难以复核。
 // 依赖全部由 App.vue 注入（services / cfg / patchCfg / activeTab ...），本模块不反向引用设置页。
 import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { useFold } from './useFold'
 import type {
   DshBackupListResult,
   DshBackupSnapshot,
@@ -51,7 +52,8 @@ export function useDsh(opts: {
 // —— DeepSeek Harness（dsh，开发者） ——
 const dsh = reactive({
   running: false, stopping: false, busy: '', pid: 0, startedAt: 0, ready: false, readyAt: 0,
-  keepAlive: false, url: '', port: DEFAULT_DSH_PORT, runPort: 0, needsPortRestart: false,
+  keepAlive: false, elevated: false, runElevated: false, admin: false, elevating: false,
+  url: '', port: DEFAULT_DSH_PORT, runPort: 0, needsPortRestart: false,
   nodeDir: '', nodeVersion: '', nodeAuto: true, found: true,
   error: '', lastCmd: '', log: '',
   registry: '', version: '', resolved: '', hasUpdate: false, runVersion: '', needsRestart: false, reinstall: false, prefix: '', source: '', globalVersion: '', globalDir: '', globalWritable: true,
@@ -102,9 +104,8 @@ function dshToggleTrouble() {
 }
 // 主控卡整体折叠：与其他卡保持一致（都带 caret + 收起态摘要）。默认展开 ——
 // 启动/重启/结束是本 tab 最高频的动作，默认收起等于每次进来都要多点一下。
-// 不并入 devFolds：其余卡是「展开才懒加载」，这张状态在启动时已自动查好，
-// 用独立 ref 表达「默认展开」比给 devFolds 加默认值特例更直白
-const dshMainFold = ref(true)
+// 走 useFold 而不是私有 ref：「管理显示内容」里的默认展开/收起与记忆开关要能管到它
+const dshMainFold = useFold('dshMain', true)
 // 诊断折叠展开时顺手查一次「最新版本」：版本明细都是只读诊断，展开本身就是「我想核对版本」的信号，
 // 此时查一次比让用户再点一次「查询可用版本」更省事。npm view 要联网、较慢，失败也不打断（dshQueryVersions 内部已兜底）
 // 折叠「运行详情」时清掉二段确认态：与 dshToggleTrouble 同理，防止收起后按钮停在确认态被误点
@@ -248,6 +249,12 @@ function dshApply(s: any) {
   dsh.ready = !!s.ready
   dsh.readyAt = s.readyAt || 0
   dsh.keepAlive = s.keepAlive === true
+  // 以管理员身份启动（仅 Windows）：elevated=配置值回显，runElevated=本次真提权了没，
+  // elevating=正在等 UAC 结果，admin=宿主已是管理员（设置页据此说明「不会再弹 UAC」）
+  dsh.elevated = s.elevated === true
+  dsh.runElevated = s.runElevated === true
+  dsh.elevating = s.elevating === true
+  dsh.admin = s.admin === true
   dsh.url = s.url || ''
   dsh.port = s.port || DEFAULT_DSH_PORT
   dsh.nodeDir = s.nodeDir || ''
@@ -665,18 +672,22 @@ const dshStateText = computed(() => {
   if (dsh.busy === 'install') return '安装中…'
   if (dsh.busy === 'update') return '更新中…'
   if (dsh.busy === 'versions') return '查询版本中…'
+  // 正在等 UAC 结果：还没起进程，但也不是「未启动」，必须显式说明（否则用户会以为点了没反应）
+  if (dsh.elevating) return '等待 UAC 确认…（在弹窗里点「否」会回落普通权限启动）'
   if (dsh.running) {
     // 进程还活着、只是配置端口被改了：运行端口上的事实仍然成立，不能显示「启动中」。
     // 这里必须先判 needsPortRestart —— 它的 ready 描述的是 runPort，与新的配置端口无关。
     const portHint = dsh.needsPortRestart
       ? ' · 端口已改为 ' + dsh.port + '（现监听 ' + dsh.runPort + '），点「重启」生效'
       : ''
+    // 提权启动的实例要一眼能认出来：它是 runas 拉起的新进程，与普通启动的处置（结束要 UAC）不同
+    const who = dsh.runElevated ? '管理员' : ''
     if (!dsh.ready && !dsh.needsPortRestart) {
       const wait = dsh.startedAt ? Math.max(0, Math.round((dshNow.value - dsh.startedAt) / 1000)) : 0
-      return '启动中…（' + dsh.port + ' 未就绪' + (wait > 3 ? '，已等待 ' + wait + ' 秒' : '，首次安装需要下载') + '）'
+      return (who ? who + '启动中' : '启动中') + '…（' + dsh.port + ' 未就绪' + (wait > 3 ? '，已等待 ' + wait + ' 秒' : '，首次安装需要下载') + '）'
     }
     const sec = dsh.startedAt && dsh.readyAt ? ((dsh.readyAt - dsh.startedAt) / 1000).toFixed(1) + 's' : ''
-    return '运行中 · pid ' + dsh.pid + (sec ? '（就绪用时 ' + sec + '）' : '') +
+    return (who ? who + '运行中' : '运行中') + ' · pid ' + dsh.pid + (sec ? '（就绪用时 ' + sec + '）' : '') +
       (dsh.needsRestart ? ' · 已更新到 ' + (dsh.resolved || '') + '，点「重启」生效' : '') +
       portHint
   }
@@ -1419,7 +1430,12 @@ function dshPatchToggle(item: DshPatchItem) {
         return
       }
       if (!r.changed) {
-        dshPatchFlash.msg = `「${item.id}」已经是该状态，未改动。`
+        // 表达式行（`!!js`）点了启用也不会变：宿主会给出专门说明，优先展示它
+        dshPatchFlash.msg = r.message || `「${item.id}」已经是该状态，未改动。`
+      } else if (r.message) {
+        // 只为清理市场早先写入的字面量段而改动了文件：如实说「状态仍由表达式决定」
+        dshPatchFlash.err = false
+        dshPatchFlash.msg = r.message + (r.backedUp ? `（改动前已备份 ${r.snapshot}）` : '')
       } else {
         // V4：取消禁用（启用）不是即时生效的，必须重启 —— 这里不能笼统说「已生效」
         const tail = r.needsRestart ? '；dsh 的 patch 热重载是单向的，**启用需重启 dsh 才生效**' : ''
@@ -2404,7 +2420,9 @@ function dshMarketLatestSummary(): string {
 }
 // 本轮里「官方版本 > 基准版本」的条目 —— 顶部汇总区逐个列出。
 // 基准见 dshMarketBaseVer（实装优先），故文案说的是「已装 vX → 官方 vY」而不是目录版本
-const dshMarketLatestStales = computed(() => dshMarketLatestTargets.value.filter((p) => dshMarketLatestStale(p)))
+// ⚠️ 汇总区也要排除纯依赖（notAPlugin）：那套「已装 → 官方」+「装这一版」按钮同样是为
+//    「更新插件」服务的，而市场更新通道装不了纯依赖 —— 留在汇总区等于给用户一个必然失败的入口
+const dshMarketLatestStales = computed(() => dshMarketLatestTargets.value.filter((p) => dshMarketLatestStale(p) && !dshMarketPlainDep(p)))
 
 // 某一行的「官方最新 vX」短文案（在顶部汇总区里用）
 function dshMarketLatestText(p: DshMarketPlugin): string {
@@ -2419,7 +2437,10 @@ function dshMarketLatestText(p: DshMarketPlugin): string {
 // （dshMarketUpdateOf），于是同一插件会出现「上面说能升到 0.4.3、卡片里只在 0.4.2→0.4.3 间打转」，
 // 用户得在两屏之间来回对。这里把汇总区那条「已装 vX → 官方 vY」的话术复用到卡片上，
 // 有官方滞后结论时优先说它（那才是用户真正想点的升级目标）。
+// ⚠️ 纯依赖（notAPlugin）整行不出：徽章与版本行必须同进同退，否则会出现
+//    「可更新的标没了、版本箭头还留着」的不一致，用户照样会去点那行
 function dshMarketOfficialText(p: DshMarketPlugin): string {
+  if (dshMarketPlainDep(p)) return ''
   if (!dshMarketLatestStale(p)) return ''
   const v = dshMarketLatestOf(p)
   const reg = String(v?.version || '')
@@ -2678,6 +2699,19 @@ function dshMarketHasUpdate(p: DshMarketPlugin): boolean {
   return dshMarketUpdateOf(p)?.state === 'update'
 }
 
+// 它有新版，但只是 profile 里的普通依赖（不是 bundle），市场更新不了它。
+// 只用来出一个说明性标签 —— 不给按钮、不参与「只看可更新」筛选（否则那筛选里全是点不动的东西）
+function dshMarketPlainDep(p: DshMarketPlugin): boolean {
+  return dshMarketUpdateOf(p)?.notAPlugin === true
+}
+// 说明文案：把「为什么不能更新」和「你还能做什么」一句讲清，避免用户以为市场坏了
+function dshMarketPlainDepTip(p: DshMarketPlugin): string {
+  const u = dshMarketUpdateOf(p)
+  const ver = u && u.latest ? '（目录提供 v' + u.latest + (u.installed ? '，你装的是 v' + u.installed : '') + '）' : ''
+  return '它在 profile 里只是一个普通依赖，不是 dsh 插件，市场的更新通道装不了它（硬装会被 dsh 回滚）；'
+    + '要用新版就手动 pnpm add，或者先把它挂成 bundle' + ver
+}
+
 // 「已装 → 目录」的展示文案。
 // ⚠️ v 前缀只加在**能确定是版本号**的一侧：实装版本是裸 `0.5.11`，加 v 没问题；
 //    退回显示声明范围时是 `^0.5.11`，加 v 会变成 `v^0.5.11` 这种不成立的写法，
@@ -2686,9 +2720,11 @@ function dshMarketHasUpdate(p: DshMarketPlugin): boolean {
 //    用户会以为有个自己没看出来的更新在等着，实际什么也没变。
 //    注意这里判的是「两个数字相等」而不是 state —— state 为 'update' 是宿主按 semver 比的结论，
 //    而展示用的是字符串版本文本，两者在构建号/前缀不同的写法下可能对不上，所以按展示值自己判一次。
+// ⚠️ notAPlugin 的条目整行不显示（宿主已把它 state 打回 'current'，这里是第二道保证）：
+//    那一行箭头在卡上唯一的作用就是「点更新」，而市场根本更新不了它 —— 留着只会引导用户去点。
 function dshMarketVersionText(p: DshMarketPlugin): string {
   const u = dshMarketUpdateOf(p)
-  if (!u) return ''
+  if (!u || u.notAPlugin) return ''
   const latest = String(u.latest || '')
   if (!latest) return ''
   if (u.installed) {
@@ -3281,6 +3317,15 @@ function dshMarketPreviewInstall(p: DshMarketPlugin, force = false) {
         dshMarketPlan.value = null
         dshMarketFlash.msg = r.message || '已经装过这个包，无需重复安装。'
       } else if (dshMarketHitOf(p)?.inDeps) {
+        // ⚠️ 纯依赖（不是插件）不能走更新流程 —— 更新通道装的是 bundle，装完也不会被当插件加载，
+        //    用户在 dsh 里看到的是「更新完插件没了」。宿主 marketUpdate 也会拒绝（双保险），
+        //    这里先拦一次是为了不把用户带到一张「点了必然被拒」的单据前。
+        if (dshMarketPlainDep(p)) {
+          dshMarketPlan.value = null
+          dshMarketFlash.err = true
+          dshMarketFlash.msg = dshMarketPlainDepTip(p)
+          return
+        }
         // ⚠️ 走到这里说明「已装，但实装版本落后于目录」（宿主 dryRun 比的实装版本）——
         //    这是「更新」，不是「安装」。不能复用安装入口：安装走 marketInstall 的写盘分支，
         //    不带 from 版本、文案也说不出「从哪版到哪版」。所以转交给更新确认流程。
@@ -3523,6 +3568,18 @@ function dshMarketConfirm() {
         dshMarketFlash.msg = `已更新 ${plan.name || plan.npm}${res.from ? `（v${res.from} → ${res.version ? 'v' + res.version : '?'}）` : (res.version ? ' @' + res.version : '')}${res.snapshot ? `（快照 ${res.snapshot}）` : ''}。`
       } else if (plan.action === 'remove') {
         dshMarketFlash.msg = `已从 profile 删掉 ${plan.npm}${r.snapshot ? `（快照 ${r.snapshot}）` : ''}。`
+        // 卸载会顺带清掉 patch 里属于它的残留条目（包没了，条目留着只会让 dsh 每次启动
+        // 打一行 entry not found，用户看不见）。清理失败**不代表卸载失败** ——
+        // 所以既不能把 err 置真，也不能默不作声：说清楚「删了几条 / 没清掉，去哪儿处理」。
+        // ⚠️ 别写「到插件开关卡里删掉」：那张卡只有禁用 / 启用，**没有删除条目**的能力，
+        //    指过去用户会找不到按钮。真实可操作的入口是「dsh 配置备份」回滚，或手改文件。
+        const pc = (r as DshMarketUninstallResult).patchCleanup
+        if (pc && !pc.ok) {
+          dshMarketFlash.msg += ` 但 patch 里属于它的条目没清干净（${pc.ids.join('、')}）：${pc.error || '未知原因'}`
+            + ' —— 不影响这次卸载；想处理干净可在「dsh 配置备份」里回滚到卸载前的快照后重试，或手动编辑 profiles 下的 cordis.patch.yml。'
+        } else if (pc && pc.removed > 0) {
+          dshMarketFlash.msg += `顺带清掉了 patch 里 ${pc.removed} 条残留。`
+        }
       } else {
         const res = r as DshMarketUninstallResult
         dshMarketFlash.msg = `已在 patch 里禁用 ${res.id || plan.npm}，包仍在磁盘上${r.snapshot ? `（快照 ${res.snapshot}）` : ''}。`
@@ -3695,7 +3752,8 @@ function dshMarketPinText(p: DshMarketPlugin) {
   if (p.downloads) parts.push(`${p.downloads} 次下载`)
   if (p.version) parts.push('v' + p.version)
   return parts.join(' · ')
-}
+}
+
 
   // 卸载时务必停表：定时器持有组件闭包，不停会一直空跑；顺带清掉未到点的延迟刷新（见 laterStatus），
   // 设置窗关掉后这些回调不该再跑（dshNotesFastStop 的 onUnmounted 已随块迁入）
@@ -3863,6 +3921,8 @@ function dshMarketPinText(p: DshMarketPlugin) {
     dshMarketPhaseText,
     dshMarketPickSort,
     dshMarketPinText,
+    dshMarketPlainDep,
+    dshMarketPlainDepTip,
     dshMarketPing,
     dshMarketPingBusy,
     dshMarketPingOf,

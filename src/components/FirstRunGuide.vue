@@ -17,7 +17,7 @@
  * 免得「引导里一份、数据 Tab 里一份」两处拼参数（历史上这种重复就漏过收件人）。
 -->
 <script setup lang="ts">
-import { reactive, ref, computed } from 'vue'
+import { reactive, ref, computed, watch } from 'vue'
 
 const props = defineProps<{
   // 已保存的凭据（用于回填）：跳过一次后再进设置页时仍显示上次填了一半的内容
@@ -35,6 +35,10 @@ const props = defineProps<{
   flashErr: boolean
   // 是否由「重新查看新手引导」手动打开（见文件头注释）
   reopen: boolean
+  // 本次引导的保存是否已成功（由 App.vue 在 saveSecrets 成功返回后置位）。
+  // 完成页只在它置位后出现：点「保存」时乐观跳步的话，保存失败（异常落 flashMsg/err）
+  // 也会把用户带到「配置已保存」的完成页，红字回执与绿字结论自相矛盾
+  saved: boolean
 }>()
 
 const emit = defineEmits<{
@@ -59,6 +63,12 @@ const form = reactive({
 // 0 = 填 Key，1 = 定进入方式，2 = 完成。只前进不后退：
 // 回退没有实际意义（前面几步没有分支），少一套状态少一类 bug
 const step = ref(0)
+// 保存成功才进完成页（见 saved prop）。放在 watch 而不是点击时跳步：
+// 保存是异步的（App.vue 走宿主 saveSecrets），成功与否只有父级知道
+watch(
+  () => props.saved,
+  (v) => { if (v) step.value = 2 },
+)
 
 const canSubmit = computed(() => !props.saving && !props.testing)
 const canTest = computed(() => canSubmit.value && !!(form.apiKey.trim() || form.platformToken.trim()))
@@ -111,7 +121,7 @@ function onTest() {
           <span class="label">API Key <em>（必填）</em></span>
           <input v-model="form.apiKey" type="password" placeholder="sk-..." autocomplete="off" spellcheck="false" />
         </label>
-        <button class="link-btn utils-btn utils-secondary" type="button" @click="form.guideApiKey = !form.guideApiKey">
+        <button class="link-btn utils-btn utils-secondary fold-toggle" type="button" :aria-expanded="form.guideApiKey" @click="form.guideApiKey = !form.guideApiKey">
           {{ form.guideApiKey ? '收起教程' : '如何获取 API Key？' }}
         </button>
         <div v-if="form.guideApiKey" class="guide2">
@@ -129,7 +139,7 @@ function onTest() {
           <span class="label">平台 Token <em>（可选）</em></span>
           <input v-model="form.platformToken" type="password" placeholder="platform.deepseek.com 令牌" autocomplete="off" spellcheck="false" />
         </label>
-        <button class="link-btn utils-btn utils-secondary" type="button" @click="form.guideToken = !form.guideToken">
+        <button class="link-btn utils-btn utils-secondary fold-toggle" type="button" :aria-expanded="form.guideToken" @click="form.guideToken = !form.guideToken">
           {{ form.guideToken ? '收起教程' : '如何获取平台 Token？' }}
         </button>
         <div v-if="form.guideToken" class="guide2">
@@ -168,12 +178,14 @@ function onTest() {
            组件刻意不依赖形象下载的实现（那是 App.vue 的活儿），只 emit 一个「带我去看看」 -->
       <template v-else>
         <p class="lead" :class="{ bad: !hasKey }">
-          <template v-if="hasKey">配置已保存，挂件马上就能读到余额。桌面上的小鲸鱼就是它，点它会有菜单。</template>
+          <template v-if="hasKey">配置已保存，挂件马上就能读到余额。桌面上的小鲸鱼就是它，右键点它会弹出菜单。</template>
           <template v-else>没有填 API Key，设置已保存，但挂件还读不到余额。可在<strong>数据</strong> Tab 里补上。</template>
         </p>
         <div class="extra">
           <span class="extra-title">想换个形象？</span>
-          <span class="extra-desc">插件包只带了默认那张；另有 1 张可以下载，在「资源」Tab 里挑。现在不挑也行，随时都能去。</span>
+          <!-- 不写具体张数：可下载形象分「内置补充包」与「上游共享角色」两批，
+               数量由宿主清单决定（会随素材更新变化），写死就会变成过期的假承诺 -->
+          <span class="extra-desc">插件包只带了默认那张；更多形象（内置补充包与上游共享角色）在「资源」Tab 里按需下载，点哪张下哪张。现在不挑也行，随时都能去。</span>
         </div>
       </template>
 
@@ -198,10 +210,11 @@ function onTest() {
           <button class="ghost utils-btn utils-outline" type="button" :disabled="!canSubmit" @click="emit('skip')">跳过</button>
         </template>
 
-        <!-- 第二步：主按钮保存（保存即结束引导）。放这里而不是第三步，是为了「关掉窗口也不会丢配置」 -->
+        <!-- 第二步：主按钮保存。保存放在这一步而不是完成页，是为了「中途关掉窗口也不会丢配置」；
+             保存成功后由父级把 saved 置位、这里才推进到完成页（不在这里乐观跳步，见 saved prop 注释） -->
         <template v-else-if="step === 1">
           <button class="utils-btn utils-primary" type="button" :disabled="!canSubmit" @click="onSave">
-            {{ saving ? '保存中…' : '保存并开始使用' }}
+            {{ saving ? '保存中…' : '保存并继续' }}
           </button>
           <button class="ghost utils-btn utils-outline" type="button" @click="step = 0">上一步</button>
         </template>

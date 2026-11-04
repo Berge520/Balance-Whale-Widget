@@ -12,11 +12,12 @@
  *  settings.js   对外 window.services（设置页 API）
  */
 const { log, logErr, LOG_FILE } = require('./lib/log')
-const { readConfig, patchConfig, alertFor, alertOneLine } = require('./lib/store')
+const { readConfig, patchConfig, alertFor, alertOneLine, readTodo, writeTodo } = require('./lib/store')
+const { runDueTick } = require('./lib/reminders')
 const { notify } = require('./lib/notify')
-const { checkUpdate } = require('./lib/api')
-const { ensureWidget, toggleWidget, pushConfig } = require('./lib/widget')
-const { registerIpc } = require('./lib/ipc')
+const { checkUpdate, inQuietHours } = require('./lib/api')
+const { ensureWidget, toggleWidget, pushConfig, dispose: disposeWidget } = require('./lib/widget')
+const { registerIpc, sendWidgetCmd } = require('./lib/ipc')
 
 // dsh 一族（dsh / dsh-market / dsh-export / dsh-backup / dsh-usage / ...）合计 300KB+，
 // 而启动路径上只在「插件进程真正退出」时才用得到 stopOnQuit()。顶层 require 会把这整片
@@ -60,6 +61,32 @@ if (isSettingsWindow()) {
 // 供 passthrough 分支等内部使用：主窗才有意义，其它窗口返回 null
 function settingsApiOrNull() { return isSettingsWindow() ? getSettings() : null }
 
+// ──────────────────────────────────────────────
+// 待办到点提醒：30s 轮询
+// ──────────────────────────────────────────────
+// 判定全部在 lib/reminders.js（纯函数），这里只负责「什么时候扫一次」：
+// 进插件时启动 + 立刻补扫一次（插件不在期间错过的到点也补一次），退出时停表。
+// 到点只提醒（通知 + 挂件气泡），不自动开始计时。
+let remindTimer = null
+function startReminders() {
+  stopReminders()
+  const tick = () => {
+    try {
+      const cfg = readConfig()
+      // 免打扰时段只弹挂件气泡，不弹系统通知 —— 与设置页「免打扰」的文案一致
+      // （计时到点是用户主动设定的一次性提醒，不走这条，照常通知）
+      const fired = runDueTick({ now: Date.now(), readTodo, writeTodo, notify, sendToWidget: sendWidgetCmd, cfg, silent: inQuietHours(cfg) })
+      // 留痕：到点提醒是静默副作用，真机排查时只能靠日志确认扫到了、发了几条
+      if (fired && fired.length) log('[whale][remind] 到点提醒', { count: fired.length, ids: fired.map((x) => x.id) })
+    } catch (err) { logErr('[whale][remind] 到点扫描失败', err && err.message) }
+  }
+  tick() // 启动补扫：插件不在期间错过的也补一次
+  remindTimer = setInterval(tick, 30000)
+}
+function stopReminders() {
+  if (remindTimer) { clearInterval(remindTimer); remindTimer = null }
+}
+
 // 启动横幅：dev 下写入 %TEMP%\whale-debug.log（进程被杀不丢，用于事后排查生命周期问题）
 log('[whale][boot] preload 已加载', { windowType: winType(), logFile: LOG_FILE || '(仅控制台)' })
 
@@ -77,6 +104,11 @@ try {
   utools.onPluginEnter((action) => {
     const code = action && action.code
     log('[whale][lifecycle] onPluginEnter', { code, from: (action && action.from) || '', windowType: winType() })
+    // 待办到点扫描对所有入口都适用：热键只切挂件 / 穿透 / 刷新等会提前 return，
+    // 不能只在默认分支起表。延后一帧起，别抢启动那几帧。
+    setTimeout(function () {
+      try { startReminders() } catch (err) { logErr('[whale][remind] 启动扫描失败', err && err.message) }
+    }, 0)
     // 「切换挂件」指令：通常由全局快捷键触发（feature.mainHide 使搜索框不弹出）
     if (code === 'whale-toggle') {
       toggleWidget()
@@ -97,8 +129,28 @@ try {
       notify(alertOneLine(alertFor(cfg, next ? 'passOn' : 'passOff')), cfg)
       return
     }
+    // 「刷新余额」指令：强制重新拉取余额并推送到挂件（跳过缓存）。
+    // 走快捷指令队列而不是这里直接推：窗口可能刚建、页面还没 ready，直接 sendToWidget 会丢；
+    // 页面收到指令后自己发 whale:refresh（manual=true），与菜单按钮同一条路径
+    if (code === 'whale-refresh') {
+      ensureWidget({ focus: true })
+      sendWidgetCmd('refresh-balance')
+      return
+    }
+    // 「计时器」指令：切换计时器的运行/暂停/启动状态
+    if (code === 'whale-timer') {
+      ensureWidget({ focus: true })
+      sendWidgetCmd('timer-toggle')
+      return
+    }
+    // 「专注统计」指令：在挂件气泡区显示今日专注摘要
+    if (code === 'whale-focus') {
+      ensureWidget({ focus: true })
+      sendWidgetCmd('show-focus')
+      return
+    }
     // 「打开设置」兜底入口：挂件菜单在「显示挂件」模式下用 utools.redirect('余额挂件') 重定向进入。
-    // 本插件仅剩 whale / whale-toggle 两个 feature 且都设了 mainHide:true（防挂件抢焦前主窗闪烁），
+    // 本插件所有 feature 都设了 mainHide:true（防挂件抢焦前主窗闪烁），
     // uTools 不会自动弹主窗，所以这里在重定向入口显式 showMainWindow
     // （重定向已让插件重新激活，此时主窗可被唤回）；不触碰挂件。
     // 官方类型定义里该值写作 "reirect"（疑为文档笔误），两种拼写都兼容。
@@ -153,10 +205,27 @@ try {
 try {
   utools.onPluginOut((isKill) => {
     log('[whale][lifecycle] onPluginOut', { isKill, windowType: winType() })
+    // 到点扫描只在本插件进程真正退出时停表：关 / 隐藏设置窗（isKill=false）时挂件仍在桌面，
+    // 停掉扫描会让到点提醒再也不响（此前「关一次设置窗提醒就没了」就是这个原因）。
+    // 真正退出后下次 onPluginEnter 会重起并补扫一次。若发现表已停（旧版本遗留状态），补起即可。
+    if (isKill) {
+      stopReminders()
+    } else if (!remindTimer) {
+      try { startReminders() } catch (err) { logErr('[whale][remind] 恢复扫描失败', err && err.message) }
+    }
     // 插件进程真正结束（isKill=true）时按「保留 dsh」开关决定是否结束 dsh，避免留下孤进程占着 3080。
     // 关闭已分离的设置窗口也会触发 onPluginOut，但那种情况 isKill=false，不能动 dsh。
     if (isKill) {
-      try { dshModule().stopOnQuit() } catch (err) { logErr('[whale][dsh] 退出清理失败', err && err.message) }
+      // 只 require 一次再取两项：dsh 一族 300KB+，两次 dshModule() 虽命中 Node 缓存但读起来像两条路径
+      let dsh = null
+      try { dsh = dshModule() } catch (err) { logErr('[whale][dsh] 加载退出清理失败', err && err.message) }
+      try { if (dsh) dsh.stopOnQuit() } catch (err) { logErr('[whale][dsh] 退出清理失败', err && err.message) }
+      // 端口探测闸门：在飞的一轮若不复位，probe.busy 会永久为 true（见 dsh.js 的 resetProbe）
+      try { if (dsh) dsh.resetProbe() } catch (err) { logErr('[whale][dsh] 复位端口探测失败', err && err.message) }
+      // 挂件侧的宿主定时器（任务栏轮询 / 兜底显示 / 实时缩放帧槽位）。不销毁窗口 —— uTools 自己会收
+      try { disposeWidget() } catch (err) { logErr('[whale][widget] 退出清理失败', err && err.message) }
+      // codex 的补扫定时器：5s 后才触发，退出时若还挂着会白扫一轮全量
+      try { require('./lib/codex').dispose() } catch (err) { logErr('[whale][codex] 退出清理失败', err && err.message) }
     }
   })
 } catch (err) { logErr('[whale][lifecycle] 注册 onPluginOut 失败', err && err.message) }

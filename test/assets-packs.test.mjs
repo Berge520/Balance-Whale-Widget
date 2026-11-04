@@ -16,7 +16,7 @@
  * 单张真源文件（public/shared/**）**随仓库提交**（见 .gitignore 的 !public/shared/**），
  * 但本测试不读本地文件 —— 下载链路全部走注入的 fetchImpl 桩，CI 上同样跑。
  */
-import test from 'node:test'
+import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
 import os from 'node:os'
 import path from 'node:path'
@@ -26,6 +26,8 @@ import { createRequire } from 'node:module'
 // ── utools 桩：内存 dbStorage + userData 指向本次测试的临时目录 ──
 const store = new Map()
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'whale-assets-test-'))
+// 本次的素材目录跑完即废。不删的话每轮 npm test 在 %TEMP% 里攒一个 whale-assets-test-*（5MB 级）
+after(() => { fs.rmSync(TMP, { recursive: true, force: true }) })
 globalThis.utools = {
   getPath: () => TMP,
   dbStorage: {

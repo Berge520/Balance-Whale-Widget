@@ -10,12 +10,24 @@
  *
  * settings.js 顶层 require 了 log.js（→ utools.getPath），所以先挂桩再 require。
  */
-import test from 'node:test'
+import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
 import os from 'node:os'
 import fs from 'node:fs'
 import path from 'node:path'
 import { createRequire } from 'node:module'
+
+// 本文件的临时目录都登记在这里，跑完统一删。用例内那几处 rmSync 只在断言通过时走得到，
+// 断言一失败就在 %TEMP% 里留一座 whale-dsh-home-* / whale-exact-*- / whale-*install-*
+const tmpRoots = []
+function mkTmp(prefix) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix))
+  tmpRoots.push(dir)
+  return dir
+}
+after(() => {
+  for (const dir of tmpRoots) fs.rmSync(dir, { recursive: true, force: true })
+})
 
 // ── utools 桩：settings.js 顶层只需 getPath（log.js 用它定位落盘目录）──
 globalThis.utools = {
@@ -143,7 +155,7 @@ test('marketInstall：建快照前与起 pnpm 前都要播阶段旁白（回归�
 //    而后面的 dryRun 几条共用同一份夹具（profile 顶层那份）—— 不还原就会把 1.48.0 改成 1.57.0，
 //    后面的用例集体误判（实测踩过：一次改下来 4 条红）
 test('marketInstall(exact)：成功时回 from = 装之前的实装版本（供结果卡画 旧 → 新）', async () => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'whale-exact-from-'))
+  const home = mkTmp('whale-exact-from-')
   const profDir = path.join(home, 'profiles', PROFILE)
   fs.mkdirSync(path.join(profDir, 'node_modules', 'dshmarket'), { recursive: true })
   fs.writeFileSync(path.join(profDir, 'package.json'), JSON.stringify({ name: 'dsh-profile-web', private: true, dependencies: { dshmarket: '^1.48.0' } }))
@@ -180,7 +192,7 @@ test('marketInstall(exact)：成功时回 from = 装之前的实装版本（供�
 // 早先成功返回体回传的是 `hit.depVersion`（声明范围），界面拼成 `v^1.65.1` ——
 // 精确安装的结果卡上冒出 caret，与「精确到 v1.65.1」自相矛盾。必须回传实装版本。
 test('marketInstall(exact)：回传的 version 是实装版本，不能带声明范围的 caret（v^1.65.1 是 bug）', async () => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'whale-exact-caret-'))
+  const home = mkTmp('whale-exact-caret-')
   const profDir = path.join(home, 'profiles', PROFILE)
   fs.mkdirSync(path.join(profDir, 'node_modules', 'dshmarket'), { recursive: true })
   fs.writeFileSync(path.join(profDir, 'package.json'), JSON.stringify({ name: 'dsh-profile-web', private: true, dependencies: { dshmarket: '^1.48.0' } }))
@@ -225,7 +237,7 @@ test('marketInstall(exact)：回传的 version 是实装版本，不能带声明
 //    所以这里用 DSH_HOME 指向临时目录造一个最小 profile —— 比打桩更贴近真实链路，
 //    也顺手钉住「profile 定位靠 DSH_HOME」这条口径。dryRun 分支不跑 npm、不建快照、不写盘。
 const FAKE_VERSION = '1.49.0'
-const DSH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'whale-dsh-home-'))
+const DSH_HOME = mkTmp('whale-dsh-home-')
 const PROFILE = 'web'
 fs.mkdirSync(path.join(DSH_HOME, 'profiles', PROFILE, 'node_modules', 'dshmarket'), { recursive: true })
 fs.writeFileSync(
@@ -804,7 +816,7 @@ test('marketInstall dryRun：带 force → 放行（ok:true），但「不兼容
 })
 
 test('marketInstall：force 下真写不被拦（回归：只给 dryRun 带 force 会让确认后照样失败）', async () => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'whale-force-install-'))
+  const home = mkTmp('whale-force-install-')
   const profDir = path.join(home, 'profiles', PROFILE)
   fs.mkdirSync(path.join(profDir, 'node_modules', 'dshmarket'), { recursive: true })
   fs.writeFileSync(path.join(profDir, 'package.json'), JSON.stringify({ name: 'dsh-profile-web', private: true, dependencies: { dshmarket: '^1.48.0' } }))
@@ -837,7 +849,7 @@ test('marketInstall：force 下真写不被拦（回归：只给 dryRun 带 forc
 })
 
 test('marketInstall：不带 force 时真写仍被拦（force 是放行开关，不是无差别放行）', async () => {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'whale-noforce-install-'))
+  const home = mkTmp('whale-noforce-install-')
   const profDir = path.join(home, 'profiles', PROFILE)
   fs.mkdirSync(path.join(profDir, 'node_modules', 'dshmarket'), { recursive: true })
   fs.writeFileSync(path.join(profDir, 'package.json'), JSON.stringify({ name: 'dsh-profile-web', private: true, dependencies: { dshmarket: '^1.48.0' } }))

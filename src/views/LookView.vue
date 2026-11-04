@@ -1,8 +1,17 @@
 <script lang="ts" setup>
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { msgCls, type Flash } from '../composables/useFlash'
 import { useFold } from '../composables/useFold'
-import type { HolidayStatus, SkinGallery, SkinMeta, SoundMeta, SoundRole, WhaleServices } from '../types/services'
+import BubblePreview from '../components/BubblePreview.vue'
+import DownloadBox from '../components/DownloadBox.vue'
+import type { DownloadProgress, HolidayStatus, MediaItem, SkinGallery, SkinMeta, SoundMeta, SoundRole, WhaleServices } from '../types/services'
+
+// 气泡主题预览样本：与挂件同一套渲染器，切主题前先看效果（含未至之境 HUD）
+const themePreviewLines = [
+  { t: 'DeepSeek 余额', s: 'A' },
+  { t: '¥ 88.88', s: 'B' },
+  { t: '今日已用 ¥ 1.23', s: 'C' },
+] as Array<{ t: string; s: 'A' | 'B' | 'P' | 'C' }>
 
 // 「挂件外观」整卡：大小 / 形象 / 深浅色 / 气泡与文案 / 音效，从设置页 App.vue 抽出。
 // 仍有多处留在父级，按 props 下传或 emit 触发，不能跟着搬：
@@ -20,6 +29,11 @@ import type { HolidayStatus, SkinGallery, SkinMeta, SoundMeta, SoundRole, WhaleS
 const props = defineProps<{
   // 挂件配置整体传入：本卡只读写外观相关字段，落盘统一走 emit('patch')
   cfg: any
+  // 本组件渲染两张卡（挂件外观 / 设置页视觉），显隐与置顶逐卡判定
+  cardOn: (tab: string, key: string) => boolean
+  pinned: string[]
+  // 搜索态：命中时两张卡都强制展开（临时开合不落盘）
+  searchActive: boolean
   // 随包内置形象清单（父级持有，check-shared 比对的一份在那边）
   builtinSkins: string[]
   // 历史内置形象 id 全集：老配置里可能存着已移出包的值，补 option 用
@@ -49,6 +63,12 @@ const props = defineProps<{
   builtinSoundSets: Array<{ key: string; label: string; press: string; release: string }>
   // 宿主 API（父级注入）：仅「更新节假日表」用，不在此组件内直接引用全局变量
   services: Partial<WhaleServices>
+  // 视频壁纸的播放状态（父级持有 <video>）：自动播放被拦 / 解码失败时给用户播放入口
+  bgMediaPaused: boolean
+  bgMediaIsVideo: boolean
+  bgMediaError: string
+  // 本次插件启动是否已经自动播过片头（由宿主进程内标记回读）
+  bootIntroAutoPlayed: boolean
 }>()
 const emit = defineEmits<{
   (e: 'patch', p: Record<string, any>): void
@@ -61,6 +81,24 @@ const emit = defineEmits<{
   // 这里只把要播的 ./whale/*.mp3 路径递上去
   (e: 'preview-builtin-sound', url: string): void
   (e: 'ui-mode-change', mode: string): void
+  // 视频壁纸下载 / 删除后通知父级重读宿主缓存并挂载（或释放）背景层
+  (e: 'bg-video-updated'): void
+  // 背景视频暂停 / 解码失败时，用户点按钮要求播放
+  (e: 'bg-media-play'): void
+  // 暂停当前背景视频
+  (e: 'bg-media-pause'): void
+  // 背景遮罩 / 模糊 / 亮度 / 暗角 / 构图滑杆：本地先应用再落库（父级负责即时预览）
+  (e: 'bg-tune', p: { bgScrim?: number; bgBlur?: number; bgBrightness?: number; bgVignette?: number; bgFit?: 'cover' | 'contain'; bgFocusX?: number; bgFocusY?: number; bgZoom?: number }): void
+  // 按当前画面亮度自动给遮罩一个建议值
+  (e: 'bg-auto-tune'): void
+  // 预览设置页启动片头（显式点击，不受「每次启动只播一次」限制）；参数是当前「纯净播放」勾选值
+  (e: 'preview-boot-intro', clean: boolean): void
+  // 纯净播放开关：本地立即应用再落库（否则预览时 cfg 还没回填）
+  (e: 'boot-intro-clean-change', on: boolean): void
+  // 打开系统「减少动态效果」设置页（Win10 轻松使用→显示 / Win11 辅助功能→视觉效果）
+  (e: 'open-system-animation-settings'): void
+  // 切到资源页「背景与片头」卡
+  (e: 'go-assets'): void
 }>()
 // 「随机」抽签池规模：内置那张（开关打开时）+ 画廊里未取消参与随机的项。
 // 口径与父级 allSkinChoices 一致 —— 这里只用来显示，真正的抽签仍在父级 doRandomSkin。
@@ -84,6 +122,25 @@ const bubbleModelOn = computed(() => props.cfg.bubble?.on === true)
 // 默认收起：这两组都是「配置一次后很少再动」的低频项（气泡配色 / 峰谷文案 / 节假日表 /
 // 音色音量），展开后很长，会把上方常用的「大小 / 形象 / 深浅色」挤到屏幕外。
 const lookFolds = reactive({ bubble: false, sound: false })
+// 「设置页视觉」独立卡：默认收起，摘要显示当前背景/片头状态
+const pageVisualFold = useFold('pageVisual', false)
+// 搜索态强制展开命中的卡（与资源页 / 计时卡同口径）：否则搜到某个字段，卡片却收着，
+// 只能看到摘要、看不到命中的那一项。搜索期间的临时收起状态不写 localStorage。
+const searchFoldClosed = reactive({ look: false, pageVisual: false })
+const lookOpen = computed(() => (props.searchActive ? !searchFoldClosed.look : cardFold.open))
+const pageVisualOpen = computed(() => (props.searchActive ? !searchFoldClosed.pageVisual : pageVisualFold.open))
+function toggleCardFold(key: 'look' | 'pageVisual') {
+  if (props.searchActive) { searchFoldClosed[key] = !searchFoldClosed[key]; return }
+  if (key === 'look') cardFold.open = !cardFold.open
+  else pageVisualFold.open = !pageVisualFold.open
+}
+watch(() => props.searchActive, () => {
+  searchFoldClosed.look = false
+  searchFoldClosed.pageVisual = false
+})
+function pinCls(key: string) {
+  return { 'card-pinned': props.pinned.includes(key) }
+}
 
 // 整卡折叠：本卡是「外观」Tab 的第一张、也是最长的一张（大小 / 形象 / 深浅色 + 气泡与文案 +
 // 音效三组），进 Tab 就要滚很久。标题即按钮、默认展开、可收起（沿 dsh 卡的 .card-toggle 范式）。
@@ -156,20 +213,187 @@ const holidayNote = computed(() => {
   const at = h.fetchedAt ? new Date(h.fetchedAt * 1000).toLocaleString() : ''
   return `已更新：${h.years.join('、')} 年全年 ${h.total} 天${at ? '（' + at + '）' : ''}`
 })
+
+// —— 「未至之境」视频壁纸：按需下载 + 本地状态 ——
+// 素材不随包（CC BY-NC-SA 4.0），下载/删除都由用户主动点；挂件不读，只在设置页播放。
+const bgVideo = reactive({
+  installed: false,
+  bytes: 0,
+  legacy: false,
+  busy: false,
+  flash: null as Flash | null,
+})
+const bgDl = ref<DownloadProgress | null>(null)
+let bgPollTimer = 0
+let bgDlClearTimer = 0
+
+function refreshBgVideo() {
+  try {
+    const s = props.services.bgVideoStatus?.()
+    if (s && s.ok) {
+      bgVideo.installed = s.installed === true
+      bgVideo.bytes = Number(s.bytes) || 0
+      bgVideo.legacy = s.legacy === true
+    }
+  } catch (err) { /* 宿主未提供（浏览器预览）时按未下载处理 */ }
+}
+const bgDlPercent = computed<number | null>(() => {
+  const s = bgDl.value
+  if (!s || !s.totalKnown || !(s.total > 0)) return null
+  return Math.max(0, Math.min(100, Math.round((Number(s.received) || 0) / s.total * 100)))
+})
+const bgDlAmount = computed(() => {
+  const s = bgDl.value
+  if (!s) return ''
+  const got = Number(s.received) || Number(s.bytes) || 0
+  return s.totalKnown && s.total > 0
+    ? `${props.assetSize({ size: got })} / ${props.assetSize({ size: s.total })}`
+    : props.assetSize({ size: got })
+})
+function bgDlTick() {
+  let s: DownloadProgress | null = null
+  try { s = props.services.downloadProgress?.() || null } catch (err) {}
+  if (s && s.pack !== 'bg-video') s = null
+  bgDl.value = s
+  if (!s || s.phase === 'done' || s.phase === 'failed') {
+    stopBgPoll()
+    if (s && (s.phase === 'done' || s.phase === 'failed')) scheduleBgDlClear()
+  }
+}
+function startBgPoll() {
+  bgDlTick()
+  if (!bgPollTimer) bgPollTimer = window.setInterval(bgDlTick, 250)
+}
+function stopBgPoll() {
+  if (bgPollTimer) { window.clearInterval(bgPollTimer); bgPollTimer = 0 }
+}
+function scheduleBgDlClear() {
+  if (bgDlClearTimer) return
+  bgDlClearTimer = window.setTimeout(() => { bgDl.value = null; bgDlClearTimer = 0 }, 8000)
+}
+async function onBgVideoDownload() {
+  if (bgVideo.busy) return
+  bgVideo.busy = true
+  bgVideo.flash = null
+  bgDl.value = null
+  if (bgDlClearTimer) { window.clearTimeout(bgDlClearTimer); bgDlClearTimer = 0 }
+  startBgPoll()
+  try {
+    const r = await props.services.bgVideoDownload?.()
+    if (r && r.ok) {
+      bgVideo.flash = { msg: r.skipped ? '视频壁纸已在本地' : '视频壁纸已下载，正在启用', err: false }
+      refreshBgVideo()
+      emit('bg-video-updated')
+    } else {
+      bgVideo.flash = { msg: '下载失败：' + ((r && r.error) || '未知错误'), err: true }
+    }
+  } catch (err: any) {
+    bgVideo.flash = { msg: '下载失败：' + String((err && err.message) || err || '未知错误'), err: true }
+  } finally {
+    bgVideo.busy = false
+    stopBgPoll()
+    refreshBgVideo()
+  }
+}
+function onBgVideoRemove() {
+  try {
+    const r = props.services.bgVideoRemove?.()
+    if (r && r.ok) {
+      bgVideo.flash = { msg: '已删除本地视频，背景回退为深海底色', err: false }
+      bgDl.value = null
+      refreshBgVideo()
+      emit('bg-video-updated')
+    } else {
+      bgVideo.flash = { msg: '删除失败：' + ((r && r.error) || '未知错误'), err: true }
+    }
+  } catch (err: any) {
+    bgVideo.flash = { msg: '删除失败：' + String((err && err.message) || err || '未知错误'), err: true }
+  }
+}
+function onBgModeChange(mode: string) {
+  emit('patch', { bgMode: mode })
+  if (mode === 'video') refreshBgVideo()
+  if (mode === 'custom') refreshMedia()
+}
+
+// 背景/片头媒体库（资源页导入）：外观页只读列表做选择，导入与删除仍在资源页
+const mediaItems = ref<MediaItem[]>([])
+function refreshMedia() {
+  try {
+    const r = props.services.mediaList?.()
+    if (r && r.ok) mediaItems.value = r.items || []
+  } catch (err) { mediaItems.value = [] }
+}
+const mediaVideos = computed(() => mediaItems.value.filter((m) => m.type === 'video'))
+const selectedBgMedia = computed(() => mediaItems.value.find((m) => m.id === props.cfg.bgMediaId) || null)
+const BG_OPTIONS = [
+  { value: 'off', label: '关闭' },
+  { value: 'deep', label: '深海光晕' },
+  { value: 'aurora', label: '极光' },
+  { value: 'stars', label: '星海' },
+  { value: 'mist', label: '薄雾' },
+  { value: 'polar', label: '极夜' },
+  { value: 'warm', label: '暖光' },
+  { value: 'video', label: '鲸鱼娘视频' },
+  { value: 'custom', label: '我的媒体' },
+] as const
+function bgOptionNote(value: string) {
+  if (value === 'video') return bgVideo.installed ? '已下载' : '需下载'
+  if (value === 'custom') return selectedBgMedia.value ? selectedBgMedia.value.name : '未选择'
+  if (value === 'off') return ''
+  return '纯 CSS'
+}
+function mediaNameOf(id: string) {
+  const m = mediaItems.value.find((x) => x.id === id)
+  return m ? m.name : ''
+}
+// 「设置页视觉」折叠组收起时的摘要：背景模式 + 片头状态
+const BG_LABELS: Record<string, string> = {
+  off: '关闭', deep: '深海光晕', aurora: '极光', stars: '星海',
+  mist: '薄雾', polar: '极夜', warm: '暖光',
+}
+const pageVisualSummary = computed(() => {
+  const mode = props.cfg.bgMode
+  let bg = BG_LABELS[mode] || '关闭'
+  if (mode === 'video') bg = bgVideo.installed ? '鲸鱼娘视频' : '鲸鱼娘视频（未下载）'
+  else if (mode === 'custom') {
+    const name = mediaNameOf(props.cfg.bgMediaId)
+    bg = name ? `自定义 · ${name}` : (props.cfg.bgMediaId ? '自定义（媒体丢失）' : '自定义（未选择）')
+  }
+  let intro = '片头关'
+  if (props.cfg.bootIntroOn) {
+    const mediaName = props.cfg.bootIntroSource === 'media' ? mediaNameOf(props.cfg.bootIntroMediaId) : ''
+    const source = props.cfg.bootIntroSource === 'media'
+      ? (mediaName ? ' · ' + mediaName : '（未选视频）')
+      : ''
+    intro = '片头开' + source + (props.cfg.bootIntroClean ? ' · 纯净' : '')
+  }
+  return `背景：${bg} · ${intro}`
+})
+
+onMounted(() => { refreshBgVideo(); refreshMedia() })
+watch(() => props.cfg.bgMode, (v) => {
+  if (v === 'video') refreshBgVideo()
+  if (v === 'custom') refreshMedia()
+})
+onUnmounted(() => {
+  stopBgPoll()
+  if (bgDlClearTimer) { window.clearTimeout(bgDlClearTimer); bgDlClearTimer = 0 }
+})
 </script>
 
 <template>
   <!-- [外观] 挂件外观：大小 / 形象 / 气泡（主题 · 峰谷文案 · 开关）/ 音效（开关 · 音色 · 音量）。
        素材的「导入 / 删除 / 试听 / 素材包」都在「资源」页，这里只选「用哪个」——
        所以素材说明统一放在卡片开头一句，各设置项下面只留「当前用的是什么」的状态 -->
-  <section class="card" data-search="look">
+  <section v-if="cardOn('look', 'look')" class="card" :class="pinCls('look')" data-search="look">
     <div class="card-head">
-      <h2 class="card-toggle" @click="cardFold.open = !cardFold.open">
-        <span class="caret">{{ cardFold.open ? '▾' : '▸' }}</span>挂件外观
-        <span v-if="!cardFold.open" class="card-sum">{{ cardSummary }}</span>
+      <h2 class="card-toggle" @click="toggleCardFold('look')">
+        <span class="caret">{{ lookOpen ? '▾' : '▸' }}</span>挂件外观
+        <span v-if="!lookOpen" class="card-sum">{{ cardSummary }}</span>
       </h2>
     </div>
-    <template v-if="cardFold.open">
+    <template v-if="lookOpen">
 
     <p class="hint">
       素材都会复制到本地数据目录（不引用源文件），单文件 ≤5MB。导入 / 删除 / 试听、素材占用与素材包导出
@@ -242,15 +466,17 @@ const holidayNote = computed(() => {
         <option value="auto">跟随 uTools</option>
         <option value="light">浅色</option>
         <option value="dark">深色</option>
+        <option value="fantasy">未至之境（深色）</option>
       </select>
     </label>
     <p class="hint">
-      设置页与挂件菜单面板的深浅形态，一般选「跟随 uTools」。手动固定后将与 uTools 主题相反；
-      不影响气泡配色（在下方「气泡与文案」里单独设置）。
+      设置页与挂件菜单面板的深浅形态，一般选「跟随 uTools」。浅色 / 深色会固定下来，与 uTools 主题相反；
+      「未至之境」恒为暗色。不影响气泡配色（在下方「气泡与文案」里单独设置）。
     </p>
 
+
     <div class="fold">
-      <button class="link-btn utils-btn utils-secondary" @click="lookFolds.bubble = !lookFolds.bubble">{{ lookFolds.bubble ? '收起气泡与文案' : '气泡与文案（主题 · 峰谷 · 思考气泡 · 报时 · 菜单按钮）' }}</button>
+      <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="lookFolds.bubble" @click="lookFolds.bubble = !lookFolds.bubble">{{ lookFolds.bubble ? '收起气泡与文案' : '气泡与文案（主题 · 峰谷 · 思考气泡 · 报时 · 菜单按钮）' }}</button>
       <div v-if="lookFolds.bubble">
         <label class="field row">
           <span class="label">气泡配色</span>
@@ -258,8 +484,13 @@ const holidayNote = computed(() => {
             <option value="default">默认（蓝白）</option>
             <option value="dark">深色</option>
             <option value="sakura">樱花</option>
+            <option value="fantasy">未至之境（深蓝）</option>
           </select>
         </label>
+        <div class="theme-preview">
+          <div class="theme-preview-label">效果预览</div>
+          <BubblePreview :lines="themePreviewLines" :theme="cfg.theme" :scale="0.5" />
+        </div>
 
         <label class="field row">
           <span class="label">峰谷文案</span>
@@ -288,6 +519,13 @@ const holidayNote = computed(() => {
           <span class="label">思考气泡</span>
           <input type="checkbox" :checked="cfg.bubbleOn" @change="emit('patch', { bubbleOn: ($event.target as HTMLInputElement).checked })" />
         </label>
+        <!-- 关掉后不只是「不弹台词」：所有气泡类反馈一起没了，连计时到点的动作条也挂不出来
+             （动作条定位在气泡下缘，见 floating-page.js 的 updateTimerActions）。
+             这句话只在关着时出现 —— 开着的时候说一遍「关掉会怎样」纯属噪音 -->
+        <p v-if="!cfg.bubbleOn" class="hint">
+          已关闭：挂件不再弹任何气泡 —— 峰谷 / 预算 / 低余额提醒、计时气泡，以及计时到点后气泡旁的
+          「休息 / 再来一轮」按钮都跟着消失，只剩系统通知（若开着）。
+        </p>
 
         <label class="field row check">
           <span class="label">小鲸鱼报时 <em>（气泡首行显示当前时间）</em></span>
@@ -300,14 +538,14 @@ const holidayNote = computed(() => {
         </p>
 
         <label class="field row check">
-          <span class="label">挂件右上角菜单按钮</span>
+          <span class="label">挂件右上角菜单按钮 <em>（关掉后悬停不再出现；右键点鲸鱼仍能唤出同一个菜单）</em></span>
           <input type="checkbox" :checked="cfg.menuBtn" @change="emit('patch', { menuBtn: ($event.target as HTMLInputElement).checked })" />
         </label>
       </div>
     </div>
 
     <div class="fold">
-      <button class="link-btn utils-btn utils-secondary" @click="lookFolds.sound = !lookFolds.sound">{{ lookFolds.sound ? '收起音效' : '音效（开关 · 音色 · 音量）' }}</button>
+      <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="lookFolds.sound" @click="lookFolds.sound = !lookFolds.sound">{{ lookFolds.sound ? '收起音效' : '音效（开关 · 音色 · 音量）' }}</button>
       <div v-if="lookFolds.sound">
         <label class="field row check">
           <span class="label">音效开关</span>
@@ -352,6 +590,219 @@ const holidayNote = computed(() => {
           只在对应提醒真的弹出时响一次（系统通知不受影响）。各类提醒音的独立音量在「用量」页的「提醒与通知」里调。
         </p>
       </div>
+    </div>
+    </template>
+  </section>
+  <!-- [外观] 设置页视觉：背景氛围 / 视频与自定义媒体构图 / 智能遮罩 / 启动片头。
+       与「挂件外观」分开成卡：这里改的是设置页本身的样子（全局背景层 + 启动动画），
+       与挂件主题是两回事；两张卡各自可显隐、可置顶。 -->
+  <section v-if="cardOn('look', 'pageVisual')" class="card" :class="pinCls('pageVisual')" data-search="pageVisual">
+    <div class="card-head">
+      <!-- 默认收起：背景与片头基本是「调一次就不再动」的低频项，展开后很长 -->
+      <h2 class="card-toggle" @click="toggleCardFold('pageVisual')">
+        <span class="caret">{{ pageVisualOpen ? '▾' : '▸' }}</span>设置页视觉
+        <span v-if="!pageVisualOpen" class="card-sum">{{ pageVisualSummary }}</span>
+      </h2>
+    </div>
+    <template v-if="pageVisualOpen">
+
+    <div class="field">
+      <span class="label">背景氛围</span>
+      <div class="bg-gallery">
+        <button v-for="opt in BG_OPTIONS" :key="opt.value" type="button" class="bg-card"
+                :class="{ 'is-active': cfg.bgMode === opt.value }" :aria-pressed="cfg.bgMode === opt.value"
+                @click="onBgModeChange(opt.value)">
+          <span class="bg-swatch" :class="'bg-swatch-' + opt.value">
+            <img v-if="opt.value === 'custom' && selectedBgMedia?.thumb" :src="selectedBgMedia.thumb" alt="" />
+            <span v-else-if="opt.value === 'custom'" class="bg-swatch-plus">＋</span>
+            <span v-else-if="opt.value === 'video'" class="bg-swatch-play">▶</span>
+          </span>
+          <span class="bg-card-name">{{ opt.label }}</span>
+          <span class="bg-card-note">{{ bgOptionNote(opt.value) }}</span>
+        </button>
+      </div>
+    </div>
+    <p class="hint">纯 CSS 背景零素材；视频壁纸需单独下载，自定义媒体在「资源」页导入；都只在设置页播放，不进入挂件。画面会跟随界面深浅色自动适配。</p>
+
+    <div v-if="cfg.bgMode === 'video'" class="bg-video-box">
+      <template v-if="bgVideo.installed">
+        <p class="hint">已下载 {{ assetSize({ size: bgVideo.bytes }) }}，可随时删除本地文件。</p>
+        <div class="bg-video-actions">
+          <button class="link-btn utils-btn utils-secondary" type="button" :disabled="bgVideo.busy"
+                  @click="onBgVideoDownload">{{ bgVideo.busy ? '正在下载…' : '重新下载' }}</button>
+          <button class="link-btn utils-btn utils-secondary" type="button" :disabled="bgVideo.busy"
+                  @click="onBgVideoRemove">删除本地文件</button>
+        </div>
+      </template>
+      <template v-else>
+        <p class="hint">{{ bgVideo.legacy
+          ? '已下载旧版 1.3 MB 短片。完整版约 6.3 MB，下载后会覆盖并清理旧文件。'
+          : '尚未下载（约 6.3 MB）。素材不随插件包分发，下载后可随时关闭或删除。' }}</p>
+        <button class="link-btn utils-btn utils-secondary" type="button" :disabled="bgVideo.busy"
+                @click="onBgVideoDownload">{{ bgVideo.busy ? '正在下载…' : (bgVideo.legacy ? '更新为完整版（6.3 MB）' : '下载视频壁纸（6.3 MB）') }}</button>
+      </template>
+      <DownloadBox v-if="bgDl" :progress="bgDl" :percent="bgDlPercent" :amount="bgDlAmount" />
+      <p v-if="bgVideo.flash && bgVideo.flash.msg" class="msg" :class="msgCls(bgVideo.flash)">{{ bgVideo.flash.msg }}</p>
+      <p class="hint bg-video-credit">
+        素材：<a href="https://github.com/zhu1090093659/dsh-web" target="_blank" rel="noreferrer">stushansusu</a>
+        · <a href="https://creativecommons.org/licenses/by-nc-sa/4.0/" target="_blank" rel="noreferrer">CC BY-NC-SA 4.0</a>
+        · 仅限非商业使用，二次分发须保留署名与同许可证。
+      </p>
+    </div>
+
+    <div v-if="cfg.bgMode === 'custom'" class="bg-video-box">
+      <label class="field row">
+        <span class="label">背景媒体</span>
+        <select :value="cfg.bgMediaId" @change="emit('patch', { bgMediaId: ($event.target as HTMLSelectElement).value })">
+          <option value="">（未选择）</option>
+          <option v-for="m in mediaItems" :key="m.id" :value="m.id">{{ m.name }}（{{ m.type === 'video' ? '视频' : '图片' }}）</option>
+        </select>
+      </label>
+      <p v-if="!mediaItems.length" class="hint">还没有导入背景媒体。</p>
+      <button v-if="!mediaItems.length" class="link-btn utils-btn utils-secondary" type="button"
+              @click="emit('go-assets')">去资源页导入</button>
+      <p v-else-if="!cfg.bgMediaId" class="hint">从上面的下拉选一项；图片 / 视频都按 cover 铺满。</p>
+      <p v-else-if="!mediaNameOf(cfg.bgMediaId)" class="hint">选中的媒体已丢失或已删除，背景会回退为深海底色。</p>
+      <div v-else-if="selectedBgMedia" class="bg-media-preview">
+        <img v-if="selectedBgMedia.thumb" :src="selectedBgMedia.thumb" alt="" />
+        <span v-else class="bg-media-preview-kind">视频</span>
+        <span class="bg-media-preview-meta">
+          {{ selectedBgMedia.type === 'video' ? '视频' : '图片' }} · {{ assetSize(selectedBgMedia) }}
+        </span>
+        <button class="link-btn utils-btn utils-secondary" type="button"
+                @click="emit('go-assets')">管理媒体</button>
+      </div>
+      <label class="field row">
+        <span class="label">适配</span>
+        <select :value="cfg.bgFit" @change="emit('bg-tune', { bgFit: ($event.target as HTMLSelectElement).value as 'cover' | 'contain' })">
+          <option value="cover">铺满裁切</option>
+          <option value="contain">完整显示</option>
+        </select>
+      </label>
+      <label class="field row">
+        <span class="label">焦点 X</span>
+        <input class="range" type="range" min="0" max="100" step="5" :value="cfg.bgFocusX"
+               @input="emit('bg-tune', { bgFocusX: Number(($event.target as HTMLInputElement).value) })" />
+        <span class="num-text">{{ cfg.bgFocusX }}%</span>
+      </label>
+      <label class="field row">
+        <span class="label">焦点 Y</span>
+        <input class="range" type="range" min="0" max="100" step="5" :value="cfg.bgFocusY"
+               @input="emit('bg-tune', { bgFocusY: Number(($event.target as HTMLInputElement).value) })" />
+        <span class="num-text">{{ cfg.bgFocusY }}%</span>
+      </label>
+      <label class="field row">
+        <span class="label">缩放</span>
+        <input class="range" type="range" min="100" max="130" step="5" :value="cfg.bgZoom"
+               @input="emit('bg-tune', { bgZoom: Number(($event.target as HTMLInputElement).value) })" />
+        <span class="num-text">{{ cfg.bgZoom }}%</span>
+      </label>
+    </div>
+
+    <div v-if="cfg.bgMode === 'video' || cfg.bgMode === 'custom'" class="bg-tune">
+      <label class="field row">
+        <span class="label">遮罩</span>
+        <input class="range" type="range" min="0" max="80" step="5" :value="cfg.bgScrim"
+               @input="emit('bg-tune', { bgScrim: Number(($event.target as HTMLInputElement).value) })" />
+        <span class="num-text">{{ cfg.bgScrim }}%</span>
+      </label>
+      <label class="field row">
+        <span class="label">模糊</span>
+        <input class="range" type="range" min="0" max="20" step="1" :value="cfg.bgBlur"
+               @input="emit('bg-tune', { bgBlur: Number(($event.target as HTMLInputElement).value) })" />
+        <span class="num-text">{{ cfg.bgBlur }}px</span>
+      </label>
+      <label class="field row">
+        <span class="label">亮度</span>
+        <input class="range" type="range" min="50" max="120" step="5" :value="cfg.bgBrightness"
+               @input="emit('bg-tune', { bgBrightness: Number(($event.target as HTMLInputElement).value) })" />
+        <span class="num-text">{{ cfg.bgBrightness }}%</span>
+      </label>
+      <label class="field row">
+        <span class="label">暗角</span>
+        <input class="range" type="range" min="0" max="100" step="5" :value="cfg.bgVignette"
+               @input="emit('bg-tune', { bgVignette: Number(($event.target as HTMLInputElement).value) })" />
+        <span class="num-text">{{ cfg.bgVignette }}%</span>
+      </label>
+      <div class="bg-presets">
+        <button class="export-btn utils-btn utils-outline" type="button"
+                @click="emit('bg-tune', { bgScrim: 45, bgBlur: 0, bgBrightness: 100, bgVignette: 100 })">恢复默认</button>
+        <button class="export-btn utils-btn utils-outline" type="button"
+                @click="emit('bg-auto-tune')">智能适配</button>
+        <button class="export-btn utils-btn utils-outline" type="button"
+                @click="emit('bg-tune', { bgScrim: 25, bgBlur: 0, bgBrightness: 105, bgVignette: 60 })">清晰</button>
+        <button class="export-btn utils-btn utils-outline" type="button"
+                @click="emit('bg-tune', { bgScrim: 45, bgBlur: 4, bgBrightness: 100, bgVignette: 100 })">柔和</button>
+        <button class="export-btn utils-btn utils-outline" type="button"
+                @click="emit('bg-tune', { bgScrim: 60, bgBlur: 8, bgBrightness: 95, bgVignette: 100 })">沉浸</button>
+      </div>
+      <!-- 视频背景常驻播放控制：播放中只留紧凑的重播入口，暂停/报错时才展开说明 -->
+      <template v-if="bgMediaIsVideo && (cfg.bgMode === 'custom' || bgVideo.installed)">
+        <div v-if="bgMediaError" class="bg-video-play-row">
+          <span class="hint">视频无法播放：{{ bgMediaError }}</span>
+          <button class="link-btn utils-btn utils-secondary" type="button" @click="emit('bg-media-play')">播放视频</button>
+        </div>
+        <div v-else-if="bgMediaPaused" class="bg-video-play-row">
+          <span class="hint">视频已暂停；浏览器可能拦截了自动播放，点右侧继续。</span>
+          <button class="link-btn utils-btn utils-secondary" type="button" @click="emit('bg-media-play')">播放视频</button>
+        </div>
+        <div v-else class="bg-video-replay-row">
+          <span class="hint">视频播放中</span>
+          <button class="link-btn utils-btn utils-secondary" type="button" @click="emit('bg-media-pause')">暂停</button>
+          <button class="link-btn utils-btn utils-secondary" type="button" @click="emit('bg-media-play')">重播</button>
+        </div>
+      </template>
+    </div>
+
+    <label class="field row check">
+      <span class="label">启动片头 <em>（每次插件启动后首次打开设置页播一次）</em></span>
+      <input type="checkbox" :checked="cfg.bootIntroOn"
+             @change="emit('patch', { bootIntroOn: ($event.target as HTMLInputElement).checked })" />
+    </label>
+    <template v-if="cfg.bootIntroOn">
+      <label class="field row">
+        <span class="label">片头来源</span>
+        <select :value="cfg.bootIntroSource" @change="emit('patch', { bootIntroSource: ($event.target as HTMLSelectElement).value })">
+          <option value="auto">跟随背景（有视频就用）</option>
+          <option value="media">指定片头视频</option>
+          <option value="css">纯 HUD 片头</option>
+        </select>
+      </label>
+      <label v-if="cfg.bootIntroSource === 'media'" class="field row">
+        <span class="label">片头视频</span>
+        <select :value="cfg.bootIntroMediaId" @change="emit('patch', { bootIntroMediaId: ($event.target as HTMLSelectElement).value })">
+          <option value="">（未选择）</option>
+          <option v-for="m in mediaVideos" :key="m.id" :value="m.id">{{ m.name }}</option>
+        </select>
+      </label>
+      <p v-if="cfg.bootIntroSource === 'media' && !mediaVideos.length" class="hint">
+        还没有视频：去「资源」页「背景与片头」导入；未选择 / 媒体丢失时回退纯 HUD 片头。
+      </p>
+      <button v-if="cfg.bootIntroSource === 'media' && !mediaVideos.length"
+              class="link-btn utils-btn utils-secondary" type="button"
+              @click="emit('go-assets')">去资源页导入</button>
+      <p v-else-if="cfg.bootIntroSource === 'media' && !cfg.bootIntroMediaId" class="hint">
+        选一个视频；未选择时回退纯 HUD 片头。
+      </p>
+      <label class="field row check">
+        <span class="label">纯净播放 <em>（片头期间隐藏所有 Tab 与卡片）</em></span>
+        <input type="checkbox" :checked="cfg.bootIntroClean"
+               @change="emit('boot-intro-clean-change', ($event.target as HTMLInputElement).checked)" />
+      </label>
+      <p class="hint">开启后片头播放时设置页完全隐藏，只显示启动动画；跳过 / 播完后自动恢复。</p>
+    </template>
+    <div class="boot-intro-row">
+      <p class="hint">
+        <template v-if="bootIntroAutoPlayed">本次插件启动已自动播放过；想重看请点「预览片头」。</template>
+        <template v-else>每次插件启动后首次打开设置页自动播一次；想重看随时点「预览片头」。</template>
+        播放时点击 / 任意键跳过；系统减少动态效果时只关闭转场/扫描动画，视频仍播放。
+      </p>
+      <span class="boot-intro-actions">
+        <button class="link-btn utils-btn utils-secondary" type="button"
+                @click="emit('open-system-animation-settings')">系统动画设置</button>
+        <button class="link-btn utils-btn utils-secondary" type="button"
+                @click="emit('preview-boot-intro', cfg.bootIntroClean)">预览片头</button>
+      </span>
     </div>
     </template>
   </section>
@@ -443,5 +894,271 @@ const holidayNote = computed(() => {
 .export-btn:hover:not(:disabled) {
   color: var(--fg);
   border-color: var(--accent);
+}
+/* 气泡主题预览：与挂件同一渲染器；stage 自带虚线框，这里只做居中与间距 */
+.theme-preview {
+  margin: 10px 0 14px;
+}
+.theme-preview-label {
+  margin-bottom: 6px;
+  font-size: 12px;
+  color: var(--fg-faint);
+}
+.theme-preview :deep(.bubble-preview-stage) {
+  margin: 0 auto;
+}
+
+/* 视频壁纸的状态区：下载按钮 / 重新下载 / 删除 + 许可署名，跟在「背景氛围」下拉后 */
+.bg-video-box {
+  margin: 8px 0 4px;
+  padding: 10px 12px;
+  border: 1px solid var(--card-border);
+  border-radius: 8px;
+  background: var(--track);
+}
+.bg-video-box .hint {
+  margin: 0 0 8px;
+}
+.bg-video-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.bg-video-play-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+.bg-video-play-row .hint {
+  flex: 1 1 auto;
+  margin: 0;
+}
+/* 背景画廊：九张卡片直接看效果，替代单个下拉 */
+.bg-gallery {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(92px, 1fr));
+  gap: 8px;
+  margin-top: 6px;
+}
+.bg-card {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 6px;
+  overflow: hidden;
+  border: 1px solid var(--card-border);
+  border-radius: 8px;
+  background: var(--track);
+  color: var(--fg);
+  text-align: left;
+  line-height: 1.2;
+  cursor: pointer;
+}
+.bg-card:hover { border-color: var(--accent); }
+.bg-card.is-active {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px var(--accent);
+}
+.bg-swatch {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 52px;
+  overflow: hidden;
+  border-radius: 5px;
+  background-color: #0A1020;
+}
+.bg-swatch img { width: 100%; height: 100%; object-fit: cover; }
+.bg-swatch-off { background: linear-gradient(135deg, #0A1020, #05070D); }
+.bg-swatch-deep {
+  background:
+    radial-gradient(80% 90% at 18% 12%, rgba(58, 123, 255, 0.5), transparent 62%),
+    radial-gradient(80% 90% at 84% 88%, rgba(57, 255, 209, 0.18), transparent 60%),
+    #05070D;
+}
+.bg-swatch-aurora {
+  background:
+    radial-gradient(90% 100% at 82% 0%, rgba(57, 255, 209, 0.4), transparent 60%),
+    radial-gradient(90% 100% at 8% 100%, rgba(120, 80, 255, 0.45), transparent 62%),
+    #05070D;
+}
+.bg-swatch-stars {
+  background:
+    radial-gradient(1px 1px at 18% 24%, #E8F1FF, transparent 55%),
+    radial-gradient(1px 1px at 38% 68%, #39FFD1, transparent 55%),
+    radial-gradient(1px 1px at 58% 34%, #E8F1FF, transparent 55%),
+    radial-gradient(1px 1px at 76% 76%, #8FA8CC, transparent 55%),
+    radial-gradient(1px 1px at 88% 28%, #39FFD1, transparent 55%),
+    #05070D;
+}
+.bg-swatch-mist {
+  background:
+    radial-gradient(90% 80% at 20% 30%, rgba(138, 164, 230, 0.35), transparent 62%),
+    radial-gradient(90% 80% at 80% 70%, rgba(57, 255, 209, 0.18), transparent 65%),
+    linear-gradient(180deg, #142847, #05070D);
+}
+.bg-swatch-polar {
+  background:
+    linear-gradient(118deg, transparent 18%, rgba(57, 255, 209, 0.35) 34%, transparent 52%),
+    linear-gradient(242deg, transparent 24%, rgba(120, 80, 255, 0.35) 46%, transparent 62%),
+    #05070D;
+}
+.bg-swatch-warm {
+  background:
+    radial-gradient(90% 100% at 20% 18%, rgba(255, 170, 90, 0.45), transparent 65%),
+    radial-gradient(90% 100% at 82% 82%, rgba(255, 110, 138, 0.32), transparent 62%),
+    #05070D;
+}
+.bg-swatch-video {
+  background:
+    radial-gradient(80% 90% at 50% 40%, rgba(58, 123, 255, 0.32), transparent 65%),
+    #05070D;
+}
+.bg-swatch-play { color: #B9E8E0; font-size: 14px; }
+.bg-swatch-custom {
+  border: 1px dashed var(--line);
+  background: rgba(5, 7, 13, 0.6);
+}
+.bg-swatch-plus { color: var(--fg-faint); font-size: 18px; }
+/* 浅色下缩略图换成同一氛围的淡彩版：否则「画廊预览是深色、切过去是浅色」，
+   用户按缩略图选不到自己以为的效果（配色与 main.css 的浅色 ::before 同源） */
+html:not(.dark) .bg-swatch { background-color: #F4F4F4; }
+html:not(.dark) .bg-swatch-off { background: linear-gradient(135deg, #F7F8FB, #E9EBF0); }
+html:not(.dark) .bg-swatch-deep {
+  background:
+    radial-gradient(80% 90% at 18% 12%, rgba(83, 107, 169, 0.32), transparent 62%),
+    radial-gradient(80% 90% at 84% 88%, rgba(42, 170, 150, 0.22), transparent 60%),
+    #F4F4F4;
+}
+html:not(.dark) .bg-swatch-aurora {
+  background:
+    radial-gradient(90% 100% at 82% 0%, rgba(42, 190, 170, 0.32), transparent 60%),
+    radial-gradient(90% 100% at 8% 100%, rgba(130, 100, 220, 0.3), transparent 62%),
+    #F4F4F4;
+}
+html:not(.dark) .bg-swatch-stars {
+  background:
+    radial-gradient(2px 2px at 18% 24%, rgba(31, 42, 68, 0.7), transparent 60%),
+    radial-gradient(2px 2px at 38% 68%, rgba(28, 130, 112, 0.65), transparent 60%),
+    radial-gradient(2px 2px at 58% 34%, rgba(31, 42, 68, 0.6), transparent 60%),
+    radial-gradient(2px 2px at 76% 76%, rgba(83, 107, 169, 0.6), transparent 60%),
+    radial-gradient(2px 2px at 88% 28%, rgba(28, 130, 112, 0.6), transparent 60%),
+    #F4F4F4;
+}
+html:not(.dark) .bg-swatch-mist {
+  background:
+    radial-gradient(90% 80% at 20% 30%, rgba(138, 164, 230, 0.38), transparent 62%),
+    radial-gradient(90% 80% at 80% 70%, rgba(120, 200, 190, 0.28), transparent 65%),
+    linear-gradient(180deg, #EEF3FB, #F4F4F4);
+}
+html:not(.dark) .bg-swatch-polar {
+  background:
+    linear-gradient(118deg, transparent 18%, rgba(42, 170, 150, 0.3) 34%, transparent 52%),
+    linear-gradient(242deg, transparent 24%, rgba(130, 100, 220, 0.28) 46%, transparent 62%),
+    #F4F4F4;
+}
+html:not(.dark) .bg-swatch-warm {
+  background:
+    radial-gradient(90% 100% at 20% 18%, rgba(255, 170, 90, 0.4), transparent 65%),
+    radial-gradient(90% 100% at 82% 82%, rgba(255, 110, 138, 0.28), transparent 62%),
+    #F4F4F4;
+}
+html:not(.dark) .bg-swatch-video {
+  background:
+    radial-gradient(80% 90% at 50% 40%, rgba(83, 107, 169, 0.3), transparent 65%),
+    #F4F4F4;
+}
+html:not(.dark) .bg-swatch-play { color: #3A5B8F; }
+html:not(.dark) .bg-swatch-custom { background: rgba(244, 244, 244, 0.85); }
+.bg-card-name { overflow: hidden; font-size: 12px; white-space: nowrap; text-overflow: ellipsis; }
+.bg-card-note { overflow: hidden; font-size: 10px; color: var(--fg-faint); white-space: nowrap; text-overflow: ellipsis; }
+
+/* 背景媒体预览：缩略图 + 类型/体积 + 管理入口 */
+.bg-media-preview {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 8px 0;
+  padding: 8px;
+  border: 1px solid var(--card-border);
+  border-radius: 8px;
+  background: var(--track);
+}
+.bg-media-preview img,
+.bg-media-preview-kind {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 96px;
+  height: 54px;
+  overflow: hidden;
+  border-radius: 6px;
+  object-fit: cover;
+  background: rgba(0, 0, 0, 0.2);
+  color: var(--fg-dim);
+  font-size: 11px;
+}
+.bg-media-preview-meta {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--fg-faint);
+  font-size: 11px;
+}
+/* 背景滑杆预设 */
+.bg-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 4px 0 8px;
+}
+.bg-tune {
+  margin: 8px 0 12px;
+}
+/* 视频播放中：只留一行紧凑的重播入口 */
+.bg-video-replay-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin: 6px 0 0;
+}
+.bg-video-replay-row .hint {
+  margin: 0;
+  font-size: 11px;
+}
+.bg-video-credit {
+  margin: 8px 0 0;
+  font-size: 11px;
+  opacity: 0.8;
+}
+.bg-video-credit a {
+  color: var(--accent);
+}
+/* 启动片头：说明文字与「预览片头」按钮同一行，按钮在右侧 */
+.boot-intro-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 8px;
+  margin: 4px 0 12px;
+}
+.boot-intro-row .hint {
+  flex: 1 1 auto;
+  margin: 0;
+}
+.boot-intro-actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+  margin-left: auto;
+}
+.boot-intro-actions .link-btn {
+  white-space: nowrap;
 }
 </style>

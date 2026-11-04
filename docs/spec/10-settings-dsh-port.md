@@ -11,6 +11,6 @@
       - 前端：`dshStateText` 的 `dsh.external` 分支在 `externalRunPort !== dsh.port` 时输出「外部 dsh · pid N（现监听 Y）· 端口已改为 X，点『重启』生效」；`dshSetPort()` 新增 `dsh.external` 分支（说「外部 dsh（pid N）仍在 Y 上运行」）；挂件 `dshRender()` 状态行与 title 同步。
   - **状态轮询只在「开发者」Tab 激活时进行**（`watch(activeTab)` → `dshPolling.start()/stop()`）：dsh 是低频开发功能，停在其它 Tab 不空转；首次进入补一次 deep 探测（识别外部终端里跑的 dsh），轮询本身为**浅探测**（`dshStatus(false)`，不触发宿主异步探端口的 600ms 补读）。`onWindowActive` 也只在 dev Tab 下补 deep。初次 deep 探测的时机因此从 `onMounted` 挪到「首次切到 dev Tab」（`dshDeepOnce`）。
 - **「dsh 用量统计」/「Codex 会话统计」卡片**（「开发者」Tab）：**整卡默认收起**（`devFolds`，标题即开关，`toggleDevCard`），收起态标题右侧挂一行摘要。
-  - **首次「展开」才读取**（`devStatsLoaded` 每卡只置一次）：宿主是**同步**扫文件（Codex 会话日志可能几十 MB），不想看的用户永远不付这次扫描成本，想看的一展开即有数。之后靠卡片里的「刷新」按钮，收起再展开不重扫（要强制重读用「清除缓存并重扫」）。
+  - **首次「展开」才读取**（`devStatsLoaded` 每卡只置一次）：宿主要扫文件（Codex 会话日志可能几十 MB），不想看的用户永远不付这次扫描成本，想看的一展开即有数。**Codex 一侧的扫描自 v-codex 起已全异步**（`fs.promises` + 切片让出事件循环，见 07 分片），不再卡渲染进程；`dshUsageSummary()` 仍是同步小扫（只读 dsh 自己的会话投影缓存），故两卡都保留「默认收起」以省掉无谓 IO。之后靠卡片里的「刷新」按钮，收起再展开不重扫（要强制重读用「清除缓存并重扫」）。
   - **摘要不预读**（方案 A）：只有「本会话已展开读过」后才显示「今日 X tokens · 本月 Y」，没读过则显示「点击展开查看」—— 折叠 = 零预读。
-  - **图表档位 7 / 14 / 30 天**（复用「用量与账本」的 `.range-tabs` 样式，容器 `.range-tabs-row` 右对齐）：宿主 `dshUsageSummary()` / `codexSummary()` 一次返回 **`days31`**（31 天，索引 0 是今天），设置页按 `dshUsageRange` / `codexRange` 取尾部切片渲染，**切档不重新请求**；14 天以上套 `.chart-dense`，30 天档日期标签每 5 天抽一个（`dshUsageLabelEvery` / `codexLabelEvery`）。
+  - **图表档位 7 / 14 / 30 天**（复用「用量与账本」的 `.range-tabs` 样式，容器 `.range-tabs-row` 右对齐）：宿主 `dshUsageSummary()`（同步）/ `codexSummary()`（**async，须 `await`**）一次返回 **`days31`**（31 天，索引 0 是今天），设置页按 `dshUsageRange` / `codexRange` 取尾部切片渲染，**切档不重新请求**；14 天以上套 `.chart-dense`，30 天档日期标签每 5 天抽一个（`dshUsageLabelEvery` / `codexLabelEvery`）。

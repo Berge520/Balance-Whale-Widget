@@ -17,7 +17,7 @@ const UPDATE_FETCH_TIMEOUT_MS = 15000
 const UPDATE_CHECK_URL = 'https://ghfast.top/https://raw.githubusercontent.com/Berge520/Balance-Whale-Widget/refs/heads/main/package.json'
 // 当前插件版本。uTools 未提供读取插件自身版本的 API，此处由 scripts/sync-version.mjs
 // 在构建前从 package.json 的 version 自动写入，无需手动维护
-const PLUGIN_VERSION = '1.13.0'
+const PLUGIN_VERSION = '1.14.0'
 const UPDATE_TTL_MS = 12 * 3600 * 1000
 
 const MIN_SCALE = 0.6
@@ -98,6 +98,35 @@ const SHARED_PACK_DEFAULT_PREFIX = 'https://ghfast.top/'
 const SHARED_PACK_TIMEOUT_MS = 30000
 // 单张体积上限：最大单张约 2.6MB，给 8MB 余量，既容得下也拦得住代理返回 HTML 错误页
 const SHARED_PACK_MAX_BYTES = 8 * 1024 * 1024
+
+// ──────────────────────────────────────────────
+// 「未至之境」鲸鱼娘视频壁纸（用户自行选择下载，不随包分发）
+// ──────────────────────────────────────────────
+// 素材版权：stushansusu 原创，CC BY-NC-SA 4.0；原始来源
+// https://github.com/zhu1090093659/dsh-web（market/dist/assets/skins/whale-fantasy）。
+// 本项目**不把视频放进插件包**：用户点「下载视频壁纸」时才取，落在 userData/whale-bg/，
+// 且只在设置页「未至之境」界面播放；挂件页不读这份素材。
+// 用原始 25.5s 完整循环（含线条构建 / 眨眼 / 雨滴），不是上游打包仓库里裁出的 2.58s 眨眼片段——
+// 「完整版」需要可见的动态，短片段大部分时间几乎静止。URL 钉在上游 dev 的提交上，避免分支更新后
+// sha256 对不上导致下载失败。
+const BG_VIDEO_COMMIT = '8b0f32f460caafb262a03f17fbac42c06f3debb1'
+const BG_VIDEO_RAW = 'https://raw.githubusercontent.com/zhu1090093659/dsh-web/' + BG_VIDEO_COMMIT
+  + '/market/dist/assets/skins/whale-fantasy/assets/whale-fantasy-loop.mp4'
+// 候选链：jsDelivr → ghfast 加速 → raw 直连。jsDelivr 实测最快，raw 兜底。
+const BG_VIDEO_URLS = [
+  'https://cdn.jsdelivr.net/gh/zhu1090093659/dsh-web@' + BG_VIDEO_COMMIT
+    + '/market/dist/assets/skins/whale-fantasy/assets/whale-fantasy-loop.mp4',
+  'https://ghfast.top/' + BG_VIDEO_RAW,
+  BG_VIDEO_RAW,
+]
+const BG_VIDEO_SHA256 = 'db8a022ac3bf877efb764ca4962e79c9b32cc07fa4be2cbc8ac98d4df0310e4d'
+const BG_VIDEO_BYTES = 6630589
+const BG_VIDEO_MAX_BYTES = 10 * 1024 * 1024
+const BG_VIDEO_TIMEOUT_MS = 90000
+const BG_VIDEO_LICENSE = 'CC BY-NC-SA 4.0'
+const BG_VIDEO_AUTHOR = 'stushansusu'
+const BG_VIDEO_SOURCE = 'https://github.com/zhu1090093659/dsh-web'
+const BG_VIDEO_LICENSE_URL = 'https://creativecommons.org/licenses/by-nc-sa/4.0/'
 
 // 共享角色图清单：id → { name, file, sha256, size }。id 是打包时生成的 ASCII 短名
 // （中文名含全角括号，通不过 skins.js 的 id 白名单，故原名留作展示 name）。
@@ -337,11 +366,13 @@ const K = {
   win: 'whale:window',      // dbStorage：窗口锚点
   update: 'whale:update',   // dbStorage：上次检查更新结果缓存
   timer: 'whale:timer',     // dbStorage：计时状态（重建挂件后恢复）
-  // dbStorage：待办清单 { items: [{ id, text, done, at, doneAt }], focusId }。
+  // dbStorage：待办清单 { items: [{ id, text, done, at, doneAt, est, rounds, tm, mins }], focusId }。
+  // rounds（该任务的完成轮数）是会话明细的派生缓存，由 store.syncTodoRounds 用 focus.roundsByTodo 回填，不再自己累加
   // 与计时分开存：清单是长期数据（进备份），计时是易失的会话状态（只用于重建恢复）
   todo: 'whale:todo',
-  // dbStorage：专注轮次统计 { days: { 'YYYY-MM-DD': { r, m } } }（r = 完成轮次，m = 专注分钟）。
-  // 只按天存两个数，不存每轮明细 —— 90 天窗口下明细会长到没必要，而界面只需要日柱与汇总
+  // dbStorage：专注记录 { v: 2, days: { 'YYYY-MM-DD': { r, m } }, sessions: [{ id, d, s, t, m, k, b?, a?, todoId?, todoText? }] }
+  // （sessions 是唯一事实源，days 只是它的派生视图：r = 合格轮，m = 专注分钟；
+  //   k = down/up/at，b = 休息，a = 放弃；90 天窗口，进备份）
   focus: 'whale:focus',
   dshVersions: 'whale:dshVersions', // dbStorage：dsh 可用版本列表缓存（查询结果，重载后仍可选用）
   // dbStorage：dsh 版本「查过没有」的标记。与 dshVersions 分开存：列表可能为空（上游下架），
@@ -358,6 +389,7 @@ const K = {
   sounds: 'whale:sounds',   // dbStorage：自定义音效元信息，六槽位 press/release/low/budget/peak/pass 各 {name,ext,at}|null
   skins: 'whale:skins',     // dbStorage：自定义挂件形象画廊 { items: [{ id, name, ext, at }], current: id }
   bubbles: 'whale:bubbles', // dbStorage：自定义气泡图片（点鲸鱼时随机显示一张）[{ id, name, ext, at }]
+  media: 'whale:media',     // dbStorage：背景/片头媒体库 { items: [{ id, name, ext, type, size, at }] }
   models: 'whale:models',   // dbStorage：多厂商模型的运行时状态（余额/今日已用/额度，不进备份）
   codex: 'whale:codex',     // dbStorage：Codex 会话统计缓存（各文件 size/mtime + 聚合，不含凭据）
   dshUsage: 'whale:dshUsage', // dbStorage：dsh 用量统计缓存（会话缓存的 size/mtime + 解析结果，不含凭据）
@@ -398,11 +430,18 @@ const TODO_MAX = 200
 // 专注轮次统计保留天数（固定 90 天，刻意不跟 historyKeepDays）：
 // 它只是「最近有没有在专注」的正反馈，窗口太长反而让界面变成一条平线
 const FOCUS_KEEP_DAYS = 90
+// 专注统计窗口（柱图 / 明细 / 挂件「近 N 天」共用）：7 根柱刚好，再长就挤了。
+// 真源只此一处：widget.js / settings.js 一律 require；设置页拿不到 preload 常量，
+// 留 STAT_DAYS 一份副本由 check-shared 钉住（明细窗口必须与柱图同值，否则分组头缺数字）
+const FOCUS_STATS_DAYS = 7
 // 番茄循环：每 N 轮专注进入一次长休（2–12，默认 4）。与 TIMER_LONG_BREAK_DEFAULT 同组，
 // 改一处要同步 App.vue / floating-page.js（check-shared 校验三处同值）
 const TIMER_LONG_EVERY_DEFAULT = 4
 // 番茄循环：长休时长（1–60 分钟，默认 15）。短休复用 timerBreakMin（用户已配）
 const TIMER_LONG_BREAK_DEFAULT = 15
+// 挂件计时组的快捷时长四档（分钟）。固定 4 个：菜单宽度只够一行四个 chips，
+// 缺项补默认、多项截掉（见 store.js normTimerPresets）。与 App.vue / floating-page.js 同值（check-shared 校验）
+const TIMER_PRESETS_DEFAULT = [15, 25, 45, 60]
 // 每日专注目标上限（0 = 不设目标，1–99）。与 App.vue 的 FOCUS_GOAL_MAX 同值（check-shared 校验）
 const FOCUS_GOAL_MAX = 99
 
@@ -556,6 +595,16 @@ module.exports = {
   SHARED_PACK_MAX_BYTES,
   SHARED_SKIN_PACK_SKINS,
   SHARED_SOUND_LIB,
+  BG_VIDEO_RAW,
+  BG_VIDEO_URLS,
+  BG_VIDEO_SHA256,
+  BG_VIDEO_BYTES,
+  BG_VIDEO_MAX_BYTES,
+  BG_VIDEO_TIMEOUT_MS,
+  BG_VIDEO_LICENSE,
+  BG_VIDEO_AUTHOR,
+  BG_VIDEO_SOURCE,
+  BG_VIDEO_LICENSE_URL,
   NEWEST_VERSION,
   DSH_PORT_DEFAULT,
   BASE_MIN,
@@ -584,8 +633,10 @@ module.exports = {
   TODO_TEXT_MAX,
   TODO_MAX,
   FOCUS_KEEP_DAYS,
+  FOCUS_STATS_DAYS,
   TIMER_LONG_EVERY_DEFAULT,
   TIMER_LONG_BREAK_DEFAULT,
+  TIMER_PRESETS_DEFAULT,
   FOCUS_GOAL_MAX,
   MODEL_TEMPLATES,
 }

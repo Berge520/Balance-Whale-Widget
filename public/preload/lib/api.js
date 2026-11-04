@@ -382,7 +382,7 @@ function quotaWindow(spec, data) {
   }
 }
 // 订阅额度。多窗口接口（OpenCode Go 的 5h/周/月、MiniMax 的 5h/周）走 model.windows；
-// 此时首个窗口的值同时写到顶层 usedPct/resetAt —— 挂件主显示与低额度预警都按单窗口取值，
+// 此时首个窗口的值同时写到顶层 usedPct/resetAt —— 挂件主显示按单窗口取值，
 // 不改成「多窗口」的话这些既有链路都不用动。
 function parseModelQuota(model, data) {
   const specs = Array.isArray(model.windows) && model.windows.length ? model.windows : [model]
@@ -401,10 +401,16 @@ function parseModelQuota(model, data) {
   }
 }
 // Codex 本地会话统计（kind='codex'）：值来自 lib/codex.js 解析 ~/.codex 的会话日志，
-// 不查接口也不要密钥。复用「余额」那套运行时状态，只是把金额换成 token 数
-function parseModelCodex() {
-  const r = codexOf().codexSummary()
-  if (!r || !r.ok) return { ok: false, error: (r && r.error) || 'Codex 会话统计失败' }
+// 不查接口也不要密钥。复用「余额」那套运行时状态，只是把金额换成 token 数。
+//
+// 扫描是异步的（逐文件让出事件循环 + 单轮预算），而 refreshModels 会把结果写进模型状态，
+// 写进去的必须是真数字 —— 所以这里走 codexSummaryEnsured 有界等待（≤2.5s），
+// 不能用「返回快照、过期也照写」的 codexSummaryCached：那会把上一轮的旧 token 当成新结果落库。
+// 等不到（首次扫描特别慢）就按失败返回，下次刷新再补，绝不把 null/旧值写成新数据
+async function parseModelCodex() {
+  const r = await codexOf().codexSummaryEnsured(2500)
+  if (!r) return { ok: false, transient: true, error: 'Codex 会话统计还在首次扫描，稍后刷新即可' }
+  if (!r.ok) return { ok: false, error: r.error || 'Codex 会话统计失败' }
   // codexWindows 单独取名，不与额度型的 windows（QuotaWindow[]）混用
   return { ok: true, tokens: r.todayTokens, monthTokens: r.monthTokens, codexWindows: r.windows || null }
 }
@@ -447,6 +453,10 @@ async function refreshModels(ids, force) {
     const at = typeof cur.at === 'number' ? cur.at : 0
     if (!force && at && Date.now() - at < MODEL_STALE_MS) continue
     const r = await fetchModelBalance(m, secrets.models[m.id])
+    // 瞬时失败（目前只有「Codex 首次扫描没赶上 2.5s 预算」这一条）不覆盖状态：
+    // 旧 token / 窗口仍然有效，覆盖成错误会让挂件在扫描期间闪一下「统计失败」，
+    // 而 at 一写又会让 force=false 的懒加载在 MODEL_STALE_MS 内跳过重试
+    if (!r.ok && r.transient) continue
     const next = Object.assign({}, cur, { at: Date.now(), currency: m.currency, date: today })
     if (!r.ok) {
       next.error = r.error
@@ -642,6 +652,7 @@ function checkUpdate(force) {
 // ──────────────────────────────────────────────
 let balanceCache = null // { at, payload }
 let balanceInFlight = null
+let balanceFailCount = 0 // 连续失败计数（stale 回落不算失败）
 
 // 金额文案（跟随当前币种）
 function moneyText(v, payload) {
@@ -650,23 +661,79 @@ function moneyText(v, payload) {
 }
 // 免打扰时段（本地时间，支持跨午夜如 23:00–07:00）：时段内不弹系统通知，挂件气泡照常。
 // 静默三类自动通知（今日预算 / 低余额 / 余额大幅波动）；计时到点是用户主动设定的一次性提醒，不受影响。
-function inQuietHours(cfg) {
-  if (!cfg || cfg.quietOn !== true) return false
+function quietRange(cfg) {
+  if (!cfg || cfg.quietOn !== true) return null
   const re = /^(\d{1,2}):(\d{2})$/
   const a = re.exec(String(cfg.quietFrom || ''))
   const b = re.exec(String(cfg.quietTo || ''))
-  if (!a || !b) return false
-  const now = new Date()
-  const cur = now.getHours() * 60 + now.getMinutes()
+  if (!a || !b) return null
   const from = Number(a[1]) * 60 + Number(a[2])
   const to = Number(b[1]) * 60 + Number(b[2])
-  if (from === to) return false // 起止相同视为未开启
-  return from < to ? (cur >= from && cur < to) : (cur >= from || cur < to)
+  if (from === to) return null // 起止相同视为未开启
+  return { from, to }
 }
-// 自动提醒的统一出口：免打扰时段直接跳过（不占用当天名额，出时段后仍会补发），
+function minutesNow(at) {
+  const d = new Date(at)
+  return d.getHours() * 60 + d.getMinutes()
+}
+function inQuietAt(r, at) {
+  const cur = minutesNow(at)
+  return r.from < r.to ? (cur >= r.from && cur < r.to) : (cur >= r.from || cur < r.to)
+}
+function inQuietHours(cfg) {
+  const r = quietRange(cfg)
+  return !!r && inQuietAt(r, Date.now())
+}
+// 本次免打扰的结束时刻（本地毫秒时间戳；不在时段内返回 0）。
+// 补发要靠它排定时器，所以不能只回答「是/否」——按钟面算到 to 那一刻，
+// 比固定 24h 轮询稳（改系统时间 / 夏令时都不会漂）。
+function quietEndAt(cfg, nowMs) {
+  const r = quietRange(cfg)
+  if (!r) return 0
+  const at = isFinite(Number(nowMs)) ? Number(nowMs) : Date.now()
+  if (!inQuietAt(r, at)) return 0
+  const d = new Date(at)
+  d.setHours(Math.floor(r.to / 60), r.to % 60, 0, 0)
+  // 跨午夜的时段（23:00–07:00）且当前已过 from：结束在明天
+  if (r.from > r.to && minutesNow(at) >= r.from) d.setDate(d.getDate() + 1)
+  return d.getTime()
+}
+// 「每天一次」类提醒在免打扰内被挡下时先记一笔，出时段后补发。
+// 注释早就写着「出时段后仍会补发」，但那之前没有任何重试路径 —— 目标达成只在
+// 「今日轮数跨过目标线」那一刻触发，错过就永远不再说。
+// 只补同一天的：跨过零点再说「今日目标已达成」指的是昨天，会让人误读，直接作废。
+let dailyPending = null // Map<kind, { text, day }>
+let quietFlushTimer = null
+function scheduleQuietFlush(cfg) {
+  const now = Date.now()
+  const endAt = quietEndAt(cfg, now)
+  if (!endAt) return
+  if (quietFlushTimer) clearTimeout(quietFlushTimer)
+  quietFlushTimer = setTimeout(function () {
+    quietFlushTimer = null
+    const c = readConfig()
+    // 时段被改长 / 时间被改：还在免打扰里就按新时段重排，别提前吵
+    if (inQuietHours(c)) { scheduleQuietFlush(c); return }
+    const day = todayKey()
+    const pend = dailyPending
+    dailyPending = null
+    if (!pend) return
+    for (const [kind, item] of pend) {
+      if (!item || item.day !== day) continue
+      if (!claimDailyNotice(kind)) continue
+      notify(item.text, c)
+    }
+  }, Math.max(1000, endAt - now))
+}
+// 自动提醒的统一出口：免打扰时段记下待补发（不占用当天名额，出时段后补），
 // 否则每天最多发一次（去重标记落账本）。
 function notifyDaily(text, cfg, kind) {
-  if (inQuietHours(cfg)) return
+  if (inQuietHours(cfg)) {
+    if (!dailyPending) dailyPending = new Map()
+    dailyPending.set(kind, { text: String(text || ''), day: todayKey() })
+    scheduleQuietFlush(cfg)
+    return
+  }
   if (!claimDailyNotice(kind)) return // 今天已提醒过
   notify(text, cfg)
 }
@@ -780,25 +847,44 @@ function getBalance(force) {
   balanceInFlight = getBalancePayload(!!force)
     .then((payload) => {
       if (payload.ok) {
+        // 恢复检测：之前连续失败过，现在终于拉到了真实新数据
+        if (balanceFailCount > 0) {
+          payload.recovered = true
+          balanceFailCount = 0
+        }
         // 「未计入用量」提示只在真实新采样那一刻下发；缓存副本剥掉，
         // 避免 TTL 内复用/挂件重建推快照时重复弹气泡。change（{change} 占位符）同理：
-        // 缓存副本归零，否则同一次降幅会在 TTL 内被反复当成「本轮变化」
+        // 缓存副本归零，否则同一次降幅会在 TTL 内被反复当成「本轮变化」。
+        // recovered 同理：它只属于「刚恢复」那一次，留在缓存里会让 25s 内重建的挂件再弹一次「网络恢复」
         const cached = Object.assign({}, payload)
         delete cached.adjust
+        delete cached.recovered
         cached.change = 0
         balanceCache = { at: now, payload: cached }
         return payload
       }
+      // stale 回落不算失败：用户仍看到旧余额，只是数据不新
       if (payload.transient && balanceCache) {
         return Object.assign({}, balanceCache.payload, { stale: true, error: payload.error })
       }
+      // 真实失败（非 stale）：累加连续失败计数
+      balanceFailCount++
+      if (balanceFailCount >= 3) {
+        payload.consecutiveFailures = balanceFailCount
+      }
       return payload
     })
-    .catch((err) => ({
-      ok: false,
-      code: 'ERROR',
-      error: '余额服务异常: ' + errMsg(err).slice(0, 200),
-    }))
+    .catch((err) => {
+      // 抛错也是真实失败：同样计数，否则「连续失败」在异常路径下永远到不了阈值
+      balanceFailCount++
+      const payload = {
+        ok: false,
+        code: 'ERROR',
+        error: '余额服务异常: ' + errMsg(err).slice(0, 200),
+      }
+      if (balanceFailCount >= 3) payload.consecutiveFailures = balanceFailCount
+      return payload
+    })
     .finally(() => { balanceInFlight = null })
   return balanceInFlight
 }
@@ -811,6 +897,7 @@ function getCachedBalance() {
 function resetBalanceCache() {
   balanceCache = null
   balanceInFlight = null
+  balanceFailCount = 0
 }
 
 module.exports = {
@@ -827,6 +914,10 @@ module.exports = {
   // 通知：每日一次去重（用于目标达成等只需提醒一次的场景）与立即通知
   notifyDaily,
   notifyNow,
+  // 免打扰结束时刻推算（纯函数，导出给单测：补发定时器全靠它算准那一刻）
+  quietEndAt,
+  // 宿主侧到点扫描也要按同一套免打扰口径决定弹不弹系统通知（见 services.js）
+  inQuietHours,
   // 纯函数，仅导出给单测：这几处取错值不会抛错，只会把余额显示错（见 test/api.test.mjs）
   pickBalanceInfo,
   pickPath,

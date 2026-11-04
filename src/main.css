@@ -63,6 +63,288 @@ html.dark {
   --bar-bg: #303133;
 }
 
+/* 「未至之境」：深海军蓝底 + 品牌蓝高光（暗色专用，fantasy 类由 App.vue 的 applyUtoolsDark 挂）。
+   配色语言取自鲸鱼娘 · 未至之境皮肤（CC BY-NC-SA 4.0），本项目只取色值、不含其 CSS 与美术素材。 */
+html.dark.fantasy {
+  --fg: #E8F1FF;
+  --fg-dim: #8FA8CC;
+  --fg-faint: #6E82A1;
+  --accent: #77A4FF;
+  --accent-weak: rgba(58, 123, 255, 0.18);
+  --line: rgba(58, 123, 255, 0.28);
+  --card-bg: rgba(10, 16, 32, 0.72);
+  --card-border: rgba(30, 58, 107, 0.9);
+  --track: rgba(58, 123, 255, 0.14);
+  --input-bg: #0A1020;
+  --ok: #4FE0B0;
+  --err: #FF6E8A;
+  --err-weak: rgba(255, 110, 138, 0.16);
+  --err-line: rgba(255, 110, 138, 0.35);
+  --warn: #FFD27A;
+  /* 必须与 body 底色一致（见文件头注释） */
+  --bar-bg: #05070D;
+}
+
+/* 背景只加极淡的两处光晕，不铺整幅插画：设置页是长表单，文字对比度优先 */
+html.dark.fantasy body {
+  background-image:
+    radial-gradient(1100px 520px at 88% -8%, rgba(58, 123, 255, 0.2), transparent 62%),
+    radial-gradient(760px 460px at -12% 108%, rgba(57, 255, 209, 0.07), transparent 60%);
+  background-attachment: fixed;
+}
+
+/* 可选背景氛围：跟随界面深浅色，浅色 / 深色 / 未至之境都生效；固定层避免随页面滚动，纯 CSS 零素材。
+   深色（含未至之境）沿用深海冷色系，浅色另有一套淡彩配色 —— 浅色下深色文字可读优先。
+   每套的最后一层基色取 var(--bar-bg)：它同时是 body 与吸顶 Tab 条的底色，叠色后不会露出色带。
+   body::before 的 z-index:-1 落在 body 静态渐变之上、内容之下；基色不透明，
+   旧「未至之境」的静态光晕会被自然盖住，故不需要再逐套清 body 的 background-image。 */
+html.bg-deep body::before,
+html.bg-aurora body::before,
+html.bg-stars body::before,
+html.bg-mist body::before,
+html.bg-polar body::before,
+html.bg-warm body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  /* 动画放在这套低特异性的共享规则里，时长/方向由各氛围写自定义属性。
+     这样 reduce-motion 的 `animation: none`（同特异性、靠后）才压得住 ——
+     若把 animation 写进 html.dark.bg-* 那条更高特异性的规则，媒体查询也赢不了它。 */
+  animation: whale-bg-drift var(--bg-drift-dur, 18s) ease-in-out infinite var(--bg-drift-dir, alternate);
+}
+
+/* —— 深色（含未至之境）：深海冷色系 —— */
+html.dark.bg-deep body::before {
+  background:
+    radial-gradient(900px 520px at 18% 8%, rgba(58, 123, 255, 0.28), transparent 62%),
+    radial-gradient(760px 460px at 82% 88%, rgba(57, 255, 209, 0.14), transparent 60%),
+    radial-gradient(1200px 700px at 50% 120%, rgba(20, 40, 71, 0.8), transparent 70%),
+    var(--bar-bg);
+  --bg-drift-dur: 18s;
+  --bg-drift-dir: alternate;
+}
+html.dark.bg-aurora body::before {
+  background:
+    radial-gradient(1000px 520px at 80% 0%, rgba(57, 255, 209, 0.2), transparent 60%),
+    radial-gradient(900px 520px at 10% 100%, rgba(120, 80, 255, 0.22), transparent 62%),
+    radial-gradient(700px 420px at 50% 50%, rgba(58, 123, 255, 0.18), transparent 65%),
+    var(--bar-bg);
+  --bg-drift-dur: 24s;
+  --bg-drift-dir: alternate-reverse;
+}
+html.dark.bg-stars body::before {
+  background:
+    radial-gradient(1.5px 1.5px at 12% 18%, rgba(232, 241, 255, 0.9), transparent 55%),
+    radial-gradient(1.5px 1.5px at 28% 72%, rgba(57, 255, 209, 0.8), transparent 55%),
+    radial-gradient(1px 1px at 44% 30%, rgba(232, 241, 255, 0.75), transparent 55%),
+    radial-gradient(1.5px 1.5px at 61% 80%, rgba(138, 164, 230, 0.9), transparent 55%),
+    radial-gradient(1px 1px at 76% 22%, rgba(57, 255, 209, 0.7), transparent 55%),
+    radial-gradient(1.5px 1.5px at 88% 62%, rgba(232, 241, 255, 0.85), transparent 55%),
+    radial-gradient(1px 1px at 54% 50%, rgba(232, 241, 255, 0.6), transparent 55%),
+    radial-gradient(900px 620px at 50% 25%, rgba(58, 123, 255, 0.16), transparent 68%),
+    radial-gradient(700px 500px at 20% 90%, rgba(57, 255, 209, 0.08), transparent 65%),
+    var(--bar-bg);
+  --bg-drift-dur: 26s;
+  --bg-drift-dir: alternate;
+}
+html.dark.bg-mist body::before {
+  background:
+    radial-gradient(1200px 420px at 15% 28%, rgba(138, 164, 230, 0.2), transparent 62%),
+    radial-gradient(1000px 500px at 82% 72%, rgba(57, 255, 209, 0.12), transparent 65%),
+    linear-gradient(180deg, rgba(20, 40, 71, 0.55), rgba(5, 7, 13, 0.9)),
+    var(--bar-bg);
+  --bg-drift-dur: 30s;
+  --bg-drift-dir: alternate;
+}
+html.dark.bg-polar body::before {
+  background:
+    linear-gradient(118deg, transparent 18%, rgba(57, 255, 209, 0.14) 34%, transparent 52%),
+    linear-gradient(242deg, transparent 24%, rgba(120, 80, 255, 0.16) 46%, transparent 62%),
+    radial-gradient(900px 520px at 50% 0%, rgba(58, 123, 255, 0.18), transparent 65%),
+    var(--bar-bg);
+  --bg-drift-dur: 22s;
+  --bg-drift-dir: alternate-reverse;
+}
+html.dark.bg-warm body::before {
+  background:
+    radial-gradient(900px 560px at 18% 16%, rgba(255, 170, 90, 0.18), transparent 65%),
+    radial-gradient(800px 520px at 84% 82%, rgba(255, 110, 138, 0.14), transparent 62%),
+    radial-gradient(700px 460px at 50% 50%, rgba(255, 210, 122, 0.08), transparent 65%),
+    var(--bar-bg);
+  --bg-drift-dur: 28s;
+  --bg-drift-dir: alternate;
+}
+
+/* —— 浅色：同氛围的淡彩版本，深色文字可读优先；亮底保持 #f4f4f4，不压不透明深色 —— */
+html:not(.dark).bg-deep body::before {
+  background:
+    radial-gradient(900px 520px at 18% 8%, rgba(83, 107, 169, 0.16), transparent 62%),
+    radial-gradient(760px 460px at 82% 88%, rgba(42, 170, 150, 0.1), transparent 60%),
+    radial-gradient(1200px 700px at 50% 120%, rgba(190, 210, 240, 0.5), transparent 70%),
+    var(--bar-bg);
+  --bg-drift-dur: 18s;
+  --bg-drift-dir: alternate;
+}
+html:not(.dark).bg-aurora body::before {
+  background:
+    radial-gradient(1000px 520px at 80% 0%, rgba(42, 190, 170, 0.14), transparent 60%),
+    radial-gradient(900px 520px at 10% 100%, rgba(130, 100, 220, 0.14), transparent 62%),
+    radial-gradient(700px 420px at 50% 50%, rgba(83, 107, 169, 0.1), transparent 65%),
+    var(--bar-bg);
+  --bg-drift-dur: 24s;
+  --bg-drift-dir: alternate-reverse;
+}
+/* 浅色下星点改用深色并放大到 2–2.5px：1px 的半透明点落在亮底上会被抗锯齿洗掉，等于没画 */
+html:not(.dark).bg-stars body::before {
+  background:
+    radial-gradient(2.5px 2.5px at 12% 18%, rgba(31, 42, 68, 0.6), transparent 60%),
+    radial-gradient(2.5px 2.5px at 28% 72%, rgba(28, 130, 112, 0.55), transparent 60%),
+    radial-gradient(2px 2px at 44% 30%, rgba(31, 42, 68, 0.5), transparent 58%),
+    radial-gradient(2.5px 2.5px at 61% 80%, rgba(83, 107, 169, 0.6), transparent 60%),
+    radial-gradient(2px 2px at 76% 22%, rgba(28, 130, 112, 0.5), transparent 58%),
+    radial-gradient(2.5px 2.5px at 88% 62%, rgba(31, 42, 68, 0.55), transparent 60%),
+    radial-gradient(2px 2px at 54% 50%, rgba(31, 42, 68, 0.45), transparent 58%),
+    radial-gradient(900px 620px at 50% 25%, rgba(83, 107, 169, 0.14), transparent 68%),
+    radial-gradient(700px 500px at 20% 90%, rgba(42, 170, 150, 0.1), transparent 65%),
+    var(--bar-bg);
+  --bg-drift-dur: 26s;
+  --bg-drift-dir: alternate;
+}
+html:not(.dark).bg-mist body::before {
+  background:
+    radial-gradient(1200px 420px at 15% 28%, rgba(138, 164, 230, 0.22), transparent 62%),
+    radial-gradient(1000px 500px at 82% 72%, rgba(120, 200, 190, 0.14), transparent 65%),
+    linear-gradient(180deg, rgba(225, 235, 250, 0.55), rgba(244, 244, 244, 0.6)),
+    var(--bar-bg);
+  --bg-drift-dur: 30s;
+  --bg-drift-dir: alternate;
+}
+html:not(.dark).bg-polar body::before {
+  background:
+    linear-gradient(118deg, transparent 18%, rgba(42, 170, 150, 0.12) 34%, transparent 52%),
+    linear-gradient(242deg, transparent 24%, rgba(130, 100, 220, 0.12) 46%, transparent 62%),
+    radial-gradient(900px 520px at 50% 0%, rgba(83, 107, 169, 0.14), transparent 65%),
+    var(--bar-bg);
+  --bg-drift-dur: 22s;
+  --bg-drift-dir: alternate-reverse;
+}
+html:not(.dark).bg-warm body::before {
+  background:
+    radial-gradient(900px 560px at 18% 16%, rgba(255, 170, 90, 0.18), transparent 65%),
+    radial-gradient(800px 520px at 84% 82%, rgba(255, 110, 138, 0.12), transparent 62%),
+    radial-gradient(700px 460px at 50% 50%, rgba(255, 210, 122, 0.12), transparent 65%),
+    var(--bar-bg);
+  --bg-drift-dur: 28s;
+  --bg-drift-dir: alternate;
+}
+@keyframes whale-bg-drift {
+  from { transform: translate3d(-1.5%, -1%, 0) scale(1.02); }
+  to { transform: translate3d(1.5%, 1%, 0) scale(1.05); }
+}
+@media (prefers-reduced-motion: reduce) {
+  html.bg-deep body::before,
+  html.bg-aurora body::before,
+  html.bg-stars body::before,
+  html.bg-mist body::before,
+  html.bg-polar body::before,
+  html.bg-warm body::before { animation: none; }
+}
+
+/* 媒体背景（内置视频 / 用户图片视频）：跟随界面深浅色。
+   层放在内容之下、根背景之上；body 透明让画面透出，--card-bg 的半透明卡面
+   保证长表单可读。遮罩分两层：均匀压暗/提亮（--bg-scrim）+ 上下渐晕；
+   模糊 / 亮度走滤镜，滑杆值由 App.vue 写成 CSS 变量。
+   浅色下遮罩改为白色系并额外 +0.28 不透明度：深色文字压在深色画面上会看不清。 */
+html.bg-video,
+html.bg-custom { background-color: var(--bar-bg); }
+html.bg-media-on body { background-color: transparent; }
+html.bg-video .bg-video-layer,
+html.bg-custom .bg-custom-layer {
+  position: fixed;
+  inset: 0;
+  z-index: -1;
+  overflow: hidden;
+  pointer-events: none;
+  background: var(--bar-bg);
+}
+html.bg-video .bg-video-el,
+html.bg-custom .bg-custom-el {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  filter: blur(var(--bg-blur, 0px)) brightness(var(--bg-brightness, 1));
+  /* 模糊会在边缘带出透明边，稍微放大一点盖住 */
+  transform: scale(1.02);
+}
+html.bg-custom .bg-custom-el {
+  transform: scale(var(--bg-zoom, 1.02));
+}
+html.bg-video .bg-video-el {
+  /* 16:9 素材在竖向窗口里默认从正中裁切，会把脸放到内容栏背后；
+     取偏右上的焦点，让侧边留白露出眼睛与发饰 */
+  object-position: 78% 42%;
+}
+html.bg-video .bg-video-veil,
+html.bg-custom .bg-custom-veil {
+  position: absolute;
+  inset: 0;
+  background: rgba(3, 6, 14, var(--bg-scrim, 0.45));
+}
+html:not(.dark).bg-video .bg-video-veil,
+html:not(.dark).bg-custom .bg-custom-veil {
+  /* +0.28 是浅色可读性补偿；min(1, …) 保证遮罩拖到 80% 时不会算出非法 alpha */
+  background: rgba(247, 248, 251, min(1, calc(var(--bg-scrim, 0.45) + 0.28)));
+}
+html.bg-video .bg-video-scrim,
+html.bg-custom .bg-custom-scrim {
+  position: absolute;
+  inset: 0;
+  opacity: var(--bg-vignette, 1);
+  background:
+    radial-gradient(120% 80% at 50% 0%, rgba(5, 7, 13, 0) 0%, rgba(5, 7, 13, 0.45) 72%, var(--bar-bg) 100%),
+    linear-gradient(180deg, rgba(5, 7, 13, 0.36), rgba(5, 7, 13, 0.16) 42%, rgba(5, 7, 13, 0.52));
+}
+html:not(.dark).bg-video .bg-video-scrim,
+html:not(.dark).bg-custom .bg-custom-scrim {
+  background:
+    radial-gradient(120% 80% at 50% 0%, rgba(244, 244, 244, 0) 0%, rgba(244, 244, 244, 0.55) 72%, #F4F4F4 100%),
+    linear-gradient(180deg, rgba(244, 244, 244, 0.5), rgba(244, 244, 244, 0.22) 42%, rgba(244, 244, 244, 0.66));
+}
+/* 浅色 + 媒体底：卡面补一层白，长表单文字不依赖画面本身明暗 */
+html:not(.dark).bg-media-on .card {
+  background-color: rgba(255, 255, 255, 0.72);
+}
+
+/* 纯净片头：片头播放期间隐藏整个设置页（只留 body 上的片头层）。
+   pending 是首帧预涂（App 还没判断出这次播不播），clean 是确认播放后的正式状态。 */
+html.boot-intro-pending #app,
+html.boot-intro-clean #app,
+html.boot-intro-pending .page,
+html.boot-intro-clean .page,
+html.boot-intro-clean .tab-bar,
+html.boot-intro-clean .card {
+  visibility: hidden !important;
+}
+
+/* 卡面加一道内高光 + 左上/右下 HUD 角标：玻璃感来自 --card-bg 的半透明底，
+   不额外加模糊（长列表滚动时省 GPU）。角标用 background-image 四层，不改定位、
+   不影响卡内绝对定位子元素 */
+html.dark.fantasy .card {
+  box-shadow: inset 0 1px 0 rgba(232, 241, 255, 0.05);
+  background-image:
+    linear-gradient(rgba(57, 255, 209, 0.35), rgba(57, 255, 209, 0.35)),
+    linear-gradient(rgba(57, 255, 209, 0.35), rgba(57, 255, 209, 0.35)),
+    linear-gradient(rgba(57, 255, 209, 0.35), rgba(57, 255, 209, 0.35)),
+    linear-gradient(rgba(57, 255, 209, 0.35), rgba(57, 255, 209, 0.35));
+  background-repeat: no-repeat;
+  background-size: 12px 1px, 1px 12px, 12px 1px, 1px 12px;
+  background-position: 8px 8px, 8px 8px, calc(100% - 20px) calc(100% - 8px), calc(100% - 8px) calc(100% - 20px);
+}
+
 html,
 body {
   margin: 0;
@@ -464,7 +746,7 @@ html.dark ::-webkit-scrollbar-thumb:active {
 }
 
 /* ===== 跨卡片共用的基类：全局唯一来源 =====
-   .card / .card h2 / .field / .field.row select / .label / .field.check .label /
+   .card / .card h2 / .card-sub / .card-sub em / .field / .field.row select / .label / .field.check .label /
    .field:not(.row) .label / .label em / .hint / .hint a / .msg / .fold / .fold > .link-btn /
    .fold + .fold / .guide / .guide-use / .guide > .link-btn:first-child / .guide code / .guide a /
    input 与 select 的表单控件基类 / select option / 焦点态 / .num / .num-text / 通用复选框
@@ -504,11 +786,36 @@ html.dark ::-webkit-scrollbar-thumb:active {
     transform: translateY(0);
   }
 }
+/* 置顶卡的左侧竖条。必须留在全局：置顶 class 由子视图（LookView / AssetsView）挂在各自卡根上，
+   而 App.vue 的 scoped 样式只带 App 的 scope id —— 子组件的卡根拿不到它（Vue 只给单根组件下发
+   父 scope id），写在 App 里会让「挂件外观 / 设置页视觉 / 资源组」的置顶竖条静默失效。
+   竖条用 inset box-shadow 而不是 border-left：不占盒宽，卡片宽度与未置顶时一致。 */
+.card-pinned {
+  box-shadow: inset 3px 0 0 var(--accent);
+}
 .card h2 {
   margin: 0 0 12px;
   font-size: 14px;
   font-weight: 600;
   color: var(--fg-dim);
+}
+/* 卡内分区标题（h3）：长卡片靠它把「默认与快捷档位 / 到点提醒 / 休息与番茄」这样的区切开。
+   ★ 这条早先有三份 scoped 副本 —— App.vue 头部的 .sub（其实是页头副标题，被顺带当成
+     分区标题用）、NotifyView 的 .sub、TimerView 的 .timer-sub，间距还各写各的（0 0 18px / 20px 0 12px）；
+     而隔壁「专注与待办」卡一份都没用，整卡是一堵没有分区的墙 —— 相邻两张同源同责的卡读起来像两个产品。
+     上提到这里当唯一来源，各卡不留副本。孤儿 CSS 闸门只查「规则没人用」，查不出「该有的没有」，
+     所以这份收敛由 test/card-sub-shared.test.mjs 钉住。
+   只管卡里的 h3：列表行内的小字副标题（.mm-sub / .bmp-sub / .skin-sub-title 那些）是另一回事，不并进来。 */
+.card-sub {
+  margin: 18px 0 10px;
+  color: var(--fg-dim);
+  font-size: 13px;
+}
+/* 标题尾注（如「专注明细 · 最近 7 天 · 34 条」的范围）：跟着标题走，不再另起一行表头 */
+.card-sub em {
+  font-style: normal;
+  font-size: 12px;
+  color: var(--fg-faint);
 }
 /* 卡头：标题（左） + 操作按钮组（右）一行排开。
    ★ 这条此前在几个组件里各留了一份 scoped 副本（2969bf8 的收敛漏了补进这里），
@@ -545,12 +852,51 @@ html.dark ::-webkit-scrollbar-thumb:active {
   font-weight: 400;
   color: var(--fg-dim);
 }
+/* 默认收起的卡片只剩一行标题，不给悬停反馈就看不出标题可点 */
+.card-toggle:hover,
+.card-toggle:focus-visible {
+  color: var(--accent);
+}
+.card-toggle:hover .caret,
+.card-toggle:focus-visible .caret {
+  color: var(--accent);
+}
 .card-sum {
   margin-left: auto;
   font-size: 12px;
   font-weight: 400;
   color: var(--fg-dim);
   text-align: right;
+}
+/* 卡内分区的折叠标题（h3.card-sub + .card-sub-toggle）：整行可点，收起时尾注给一行状态摘要。
+   原先只在 TimerView.vue 的 scoped 块里（只有那张卡有分区折叠），FocusView 也要用 ——
+   子组件拿不到兄弟组件的 scoped 样式，故与 .card-toggle 同样上提到全局当唯一来源。 */
+.card-sub-toggle {
+  cursor: pointer;
+  user-select: none;
+}
+.card-sub-toggle:hover,
+.card-sub-toggle:focus-visible {
+  color: var(--accent);
+}
+.card-sub-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+/* 三角字符同 .card-toggle .caret 口径：小字号下 600 字重会把 ▸/▾ 糊成一道短横。
+   只放共用部分，间距交给各自的上下文（卡头里三角在前、分区标题里三角在后，方向不同） */
+.fold-caret {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--fg-faint);
+}
+.card-sub-toggle .fold-caret {
+  margin-left: 6px;
+}
+.card-sub-toggle:hover .fold-caret,
+.card-sub-toggle:focus-visible .fold-caret {
+  color: var(--accent);
 }
 .field {
   display: block;
@@ -697,6 +1043,49 @@ input[type='checkbox'] {
 }
 .fold > .link-btn {
   margin-top: 0;
+}
+/* 折叠开关：.fold 里既有折叠钮、也有纯动作钮（「打开所在文件夹」「新手引导」），
+   所以折叠钮显式带 .fold-toggle，不能按 .fold > .link-btn 一刀切。
+   整行可点 + 右侧三角 + 悬停底色 —— 收起后也能一眼看出「这块能展开」；
+   去掉 .link-btn 的下划线，避免和动作类文字链混成同一类。 */
+.fold-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  margin-top: 0;
+  padding: 6px 8px;
+  border-radius: 6px;
+  color: var(--fg-dim);
+  font-size: 13px;
+  text-decoration: none;
+}
+.fold-toggle:hover,
+.fold-toggle:focus-visible {
+  background: var(--track);
+  color: var(--fg);
+}
+.fold-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+/* 三角字符在小字号下会继承 600 字重糊成一道短横，固定宽度并显式 400（与 .card-toggle .caret 同口径） */
+.fold-toggle::after {
+  content: '▸';
+  flex: 0 0 auto;
+  margin-left: auto;
+  width: 1em;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--fg-faint);
+  text-align: center;
+}
+.fold-toggle[aria-expanded="true"]::after {
+  content: '▾';
+}
+.fold-toggle:hover::after,
+.fold-toggle:focus-visible::after {
+  color: var(--fg);
 }
 .fold + .fold {
   padding-top: 12px;

@@ -97,11 +97,13 @@ function setRange(s: number, e: number) {
 }
 
 type DragMode = 'start' | 'end'
-let drag: { mode: DragMode; sx: number } | null = null
+// 必须记下按下时的选区基准值：dt 是「相对按下点的总位移」，
+// 若每帧加到「当前值」上会逐帧累加，手柄越拖越飞（与 SkinCropper 同理）
+let drag: { mode: DragMode; sx: number; s0: number; e0: number } | null = null
 
 function startDrag(e: PointerEvent, mode: DragMode) {
   e.preventDefault()
-  drag = { mode: mode, sx: e.clientX }
+  drag = { mode: mode, sx: e.clientX, s0: startSec.value, e0: endSec.value }
   window.addEventListener('pointermove', onDragMove)
   window.addEventListener('pointerup', endDrag)
 }
@@ -110,8 +112,8 @@ function onDragMove(e: PointerEvent) {
   if (!drag || !trackEl.value) return
   const w = trackEl.value.clientWidth || 1
   const dt = ((e.clientX - drag.sx) / w) * total.value
-  if (drag.mode === 'start') setRange(startSec.value + dt, endSec.value)
-  else setRange(startSec.value, endSec.value + dt)
+  if (drag.mode === 'start') setRange(drag.s0 + dt, drag.e0)
+  else setRange(drag.s0, drag.e0 + dt)
 }
 
 function endDrag() {

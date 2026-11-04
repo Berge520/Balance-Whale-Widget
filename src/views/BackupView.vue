@@ -39,7 +39,9 @@ const backupItems: Array<{ key: string; label: string; note: string }> = [
   { key: 'holidays', label: '节假日表', note: '（联网更新的覆盖层，未更新过则无此项）' },
   { key: 'bubbles', label: '气泡图素材', note: '（按压气泡导入的自定义配图；导出时勾选「包含气泡图素材」才带）' },
   { key: 'todo', label: '待办与专注记录', note: '（待办清单 + 近 90 天专注轮次，同名覆盖；备份里没有时无此项）' },
-  { key: 'secrets', label: '凭据', note: '（API Key / 平台 Token / SMTP 密码，用备份密码解密）' },
+  // 与「数据与隐私」页清除侧、导出侧同一口径：whale:secrets 里不止 API Key / 平台 Token，
+  // 还有各模型密钥与邮件 SMTP 凭据 —— 恢复会整份覆盖，文案漏写会让人以为只动前两项
+  { key: 'secrets', label: '凭据', note: '（API Key / 平台 Token / 各模型密钥 / SMTP 密码，用备份密码解密）' },
 ]
 // has 仍是两个键：合并项任一存在即可勾选
 const backupHas = (key: string) => {
@@ -138,11 +140,14 @@ function backupApply() {
       backupFlash.err = true
       backupFlash.msg = '恢复失败：' + ((r && (r.errors || [])[0]) || (r && r.error) || '未知错误')
     } else {
-      let msg = '已恢复：' + backupNames(applied) + '。'
+      // 宿主返回的 ok 只表示「至少有一项写进去了」：部分失败时 applied 与 errors 同时非空，
+      // 只报「已恢复」会让用户以为全都写进去了（重启后发现设置照旧），故改口径为「部分恢复」
+      const errs = (r.errors || []) as string[]
+      let msg = (errs.length ? '部分恢复：' : '已恢复：') + backupNames(applied) + '。'
       if (skipped.length) msg += '备份里没有：' + backupNames(skipped) + '。'
       if (r.widgetRebuilt) msg += '挂件已按恢复的设置重建。'
-      backupFlash.err = false
-      if (r.errors && r.errors.length) { msg += r.errors.join('；'); backupFlash.err = true }
+      if (errs.length) msg += errs.join('；') + '。'
+      backupFlash.err = errs.length > 0
       backupPassword.value = ''
       backupPreview.value = null
       backupFlash.msg = msg
@@ -183,7 +188,7 @@ const cardSummary = computed(() => backupPreview.value ? '已读取备份，待�
       </h2>
     </div>
     <template v-if="cardFold.open">
-    <p class="hint">把「挂件设置 / 账本 / 窗口位置 / 计时 / 节假日表」打包成一个 JSON 文件；<strong>不含</strong> dsh 开发者配置与已导入的形象 / 音效素材（这几类可用「资源」页的素材包单独导出）。<strong>凭据默认不导出</strong>，勾选「包含凭据」后必须设密码，凭据（API Key / 平台 Token / SMTP 密码）会用 scrypt + AES-256-GCM 加密后才写入文件（文件里没有明文）。<strong>按压气泡</strong>的文字与开关随「挂件设置」一起备份，自定义配图默认不导出，勾选「包含气泡图素材」才会一并打包。<strong>安全提示：</strong>密码不会保存到任何地方，忘记就无法解密（其余项仍可正常恢复）；备份文件本身含你的设置与用量记录，请妥善保管。</p>
+    <p class="hint">把「挂件设置 / 账本 / 窗口位置 / 计时 / 节假日表」打包成一个 JSON 文件；<strong>不含</strong> dsh 开发者配置与已导入的形象 / 音效素材（这几类可用「资源」页的素材包单独导出）。<strong>凭据默认不导出</strong>，勾选「包含凭据」后必须设密码，凭据（API Key / 平台 Token / 各模型密钥 / SMTP 密码）会用 scrypt + AES-256-GCM 加密后才写入文件（文件里没有明文）。<strong>按压气泡</strong>的文字与开关随「挂件设置」一起备份，自定义配图默认不导出，勾选「包含气泡图素材」才会一并打包。<strong>安全提示：</strong>密码不会保存到任何地方，忘记就无法解密（其余项仍可正常恢复）；备份文件本身含你的设置与用量记录，请妥善保管。</p>
     <label class="field row check">
       <span class="label">包含凭据 <em>（需设密码，加密后写入）</em></span>
       <input type="checkbox" v-model="backupWithSecrets" @change="backupFlash.msg = ''" />

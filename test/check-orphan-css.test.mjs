@@ -14,7 +14,7 @@
  * 样本经注入环境变量喂进脚本（COC_ROOT / COC_FILES / COC_TS_FILES / COC_ALLOW），
  * 真实构建不设这些变量，走脚本内置默认值。
  */
-import test from 'node:test'
+import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import os from 'node:os'
@@ -27,8 +27,12 @@ const SCRIPT = path.join(ROOT, 'scripts', 'check-orphan-css.mjs')
 
 // 样本仓库工厂：写出 N 个 .vue 文件（相对路径 → 内容）与可选 .ts 文件。
 // 只覆盖脚本读取的部分：<template> / <style scoped> / <script> 段。
+// 每个用例一座临时仓库，跑完统一删（见文末 after）：这些目录对本次自检之外没有价值，
+// 不删的话每轮 npm test 在 %TEMP% 里攒十几个 whale-coc-selftest-*
+const tmpRoots = []
 function makeRepo(vueFiles, tsFiles = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'whale-coc-selftest-'))
+  tmpRoots.push(root)
   for (const [rel, content] of Object.entries(vueFiles)) {
     const p = path.join(root, rel)
     fs.mkdirSync(path.dirname(p), { recursive: true })
@@ -54,6 +58,10 @@ function runScript(repo, extra = {}) {
     encoding: 'utf8',
   })
 }
+
+after(() => {
+  for (const root of tmpRoots) fs.rmSync(root, { recursive: true, force: true })
+})
 
 // 一个"活类 + 一个孤儿类"的最小 .vue：.live 在模板里用了，.dead 没有
 const LIVE_ORPHAN = `<template>

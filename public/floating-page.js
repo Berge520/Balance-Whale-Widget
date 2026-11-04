@@ -30,6 +30,8 @@
   var TIMER_AT_DEFAULT = '07:30'; // 定时刻默认值（与宿主 store.js 的 defaultConfig 同值）
   var TIMER_BREAK_DEFAULT = 5;    // 到点后「休息 N 分钟」的默认档位
   var TIMER_NOTE_MAX = 60;        // 到点留言长度上限（留言只在设置页编辑，与那里输入框的 maxLength、宿主清洗同值）
+  // 快捷时长四档（分钟）的出厂默认：设置页可改（cfg.timerPresets），这里只在配置缺失时兜底
+  var TIMER_PRESETS_DEFAULT = [15, 25, 45, 60];
   // 随包分发的内置挂件形象（相对插件根目录；用哪张由设置页的 skin 值决定）。
   // 键 = public/whale/ 下的图片文件名，加形象时这里加一行、设置页「形象」下拉加一个 option；
   // 宿主 store.js 的 BUILTIN_SKINS 另有一份同值的合法值清单，三处要一起改。
@@ -68,12 +70,14 @@
   // 宿主桥接（preload/floating.js 注入）；缺省空实现，单独打开页面也不报错
   var whaleApi = window.whale || {
     onInit: function () {}, onBalance: function () {}, onConfig: function () {}, onSnapped: function () {},
-    onSounds: function () {}, onSkin: function () {}, onBubbles: function () {}, onModels: function () {}, onDark: function () {},
-    onBubblePreview: function () {}, onTodo: function () {},
+    onSounds: function () {}, onSkin: function () {}, onBubbles: function () {}, onSharedSkins: function () {}, onRandimgData: function () {}, onModels: function () {}, onDark: function () {},
+    onBubblePreview: function () {}, onTodo: function () {}, onTodoDue: function () {}, onFocusStats: function () {}, onCmd: function () {}, onCursor: function () {},
+    isDark: function () { return false; }, copyText: function () { return false; },
     ready: function () {}, refresh: function () {}, saveConfig: function () {},
     saveTimer: function () {}, notifyTimerDone: function () {},
-    todoSend: function () {}, focusRound: function () {},
+    todoSend: function () {}, todoDueAck: function () {}, focusSession: function () {},
     dragBegin: function () {}, dragMove: function () {}, dragEnd: function () {}, setIgnoreMouse: function () {}, setInputFocus: function () {},
+    probeCursor: function () {}, requestRandimg: function () {},
     openSettings: function () {}, dsh: function () {}, onDsh: function () {},
     refreshModels: function () {}, setMainModel: function () {}, hideWidget: function () {},
     reportError: function () {},
@@ -108,6 +112,23 @@
   img.alt = 'DeepSeek 余额';
   img.draggable = false;
 
+  // 计时器环形进度条：与鲸鱼形象同位置同尺寸，计时进行中才可见
+  var ringSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  ringSvg.setAttribute('viewBox', '0 0 100 100');
+  ringSvg.setAttribute('class', 'dshwv-ring');
+  var ringTrack = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+  ringTrack.setAttribute('cx', '50'); ringTrack.setAttribute('cy', '50'); ringTrack.setAttribute('r', '46');
+  ringTrack.setAttribute('class', 'dshwv-ring-track');
+  var ringFill = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+  ringFill.setAttribute('cx', '50'); ringFill.setAttribute('cy', '50'); ringFill.setAttribute('r', '46');
+  ringFill.setAttribute('class', 'dshwv-ring-fill');
+  // 周长 = 2πr ≈ 289.03
+  var RING_CIRCUM = 2 * Math.PI * 46;
+  ringFill.setAttribute('stroke-dasharray', String(RING_CIRCUM));
+  ringFill.setAttribute('stroke-dashoffset', String(RING_CIRCUM));
+  ringSvg.appendChild(ringTrack);
+  ringSvg.appendChild(ringFill);
+
   var menuBtn = document.createElement('button');
   menuBtn.type = 'button';
   menuBtn.className = 'dshwv-menu-btn';
@@ -128,6 +149,11 @@
   menuBox.setAttribute('aria-label', '挂件菜单');
   function menuLabel(text) { var s = document.createElement('span'); s.className = 'dshwv-menu-label'; s.textContent = text; return s; }
   function menuRow() { var r = document.createElement('div'); r.className = 'dshwv-menu-row'; return r; }
+  // 组内说明行：灰底一句说明（menuHint）+ 蓝色一句怎么做（menuHintAct）。
+  // 菜单里三处空态/提示（计时、专注、待办）早先各起一套 class，同一角色四种长相，
+  // 缩进和字号也各调各的 —— 收敛成这一对唯一来源，各组只剩文案差异。
+  function menuHint(text) { var d = document.createElement('div'); d.className = 'dshwv-menu-hint'; d.textContent = text; return d; }
+  function menuHintAct(text) { var d = document.createElement('div'); d.className = 'dshwv-menu-hint-act'; d.textContent = text; return d; }
 
   // 菜单分组：**全部默认折叠，且每次打开菜单都重置成全折叠** —— 展开组合不落盘、不记忆，
   // 无论上次展开过哪一组，重新打开都回到「一屏可扫、每组标题都看得见」的收起态（见 toggleMenu）。
@@ -147,7 +173,11 @@
     arrow.className = 'dshwv-group-arrow';
     var name = document.createElement('span');
     name.textContent = title;
-    head.appendChild(arrow); head.appendChild(name);
+    // 折叠态摘要（setSummary）：折叠时也能一眼看到这组的关键值（大小档位 / 余额 / 计时剩余），
+    // 展开后隐藏 —— 展开时组内就有同一个数，再挂一份纯属重复
+    var sum = document.createElement('span');
+    sum.className = 'dshwv-group-sum';
+    head.appendChild(arrow); head.appendChild(name); head.appendChild(sum);
     var bodyEl = document.createElement('div');
     bodyEl.className = 'dshwv-group-body';
     // 多包一层 inner：组体用 grid-template-rows 0fr↔1fr 做高度过渡，
@@ -165,6 +195,8 @@
       // 展开/收起在 CSS 里用 grid-template-rows 0fr↔1fr 过渡（见 floating.css）。
       // 不再直接切 display：那样高度是瞬变的，positionMenu 重夹 maxHeight 时肉眼能看到跳一下
       arrow.textContent = open ? '▾' : '▸';
+      // 摘要只在折叠态显示：展开后组内已有同一个数
+      sum.style.display = open ? 'none' : '';
       head.setAttribute('aria-expanded', open ? 'true' : 'false');
       // 收起只是把 grid 压成 0fr + overflow:hidden，里面的控件仍在 DOM 里、仍能被 Tab 聚焦 ——
       // 按 Tab 会把焦点送进「看不见的」输入框（在 uTools 窗口里尤其明显）。
@@ -185,6 +217,10 @@
       // 暴露 inner：各组的行都 append 到这里（bodyEl 只是高度动画用的 grid 外壳）
       body: inner,
       setOpen: function (v) { open = !!v; apply(); },
+      // 折叠态摘要：传空串即清掉。调用点见各组的刷新函数（render / timerStep / renderTodoMenu 等）
+      setSummary: function (text) { sum.textContent = text || ''; },
+      // 专注组用它切换标题（专注 / 计时）
+      setTitle: function (t) { name.textContent = t || ''; head.title = t || '' },
     };
     menuGroupEls[key] = api;
     return api;
@@ -276,7 +312,7 @@
   bubbleToggle.type = 'checkbox';
   bubbleToggle.className = 'dshwv-check';
   bubbleToggle.checked = true;
-  bubbleToggle.title = '开启/关闭思考气泡';
+  bubbleToggle.title = '开启/关闭思考气泡（关掉后挂件不再弹任何气泡：提醒、计时气泡与到点后的「休息 / 再来一轮」按钮都在气泡上）';
   bubbleToggle.addEventListener('change', function () { setBubbleOn(bubbleToggle.checked); });
 
   var timeToggle = document.createElement('input');
@@ -326,14 +362,18 @@
     b.className = 'dshwv-menu-link dshwv-timer-reset';
     b.textContent = '重置';
     b.title = '清掉本次计时进度（模式保留）';
-    b.addEventListener('click', function (e) { e.stopPropagation(); resetTimer(); });
+    b.addEventListener('click', function (e) {
+      e.stopPropagation();
+      // 已经专注一会儿的轮次直接清零太可惜：过 1 分钟先问一句（<1 分钟/休息轮不值得打扰）
+      requestTimerDiscard(function () { resetTimer(); });
+    });
     return b;
   }
   var timerResetBtn = makeResetBtn();
 
   // 倒计时目标：时 / 分 / 秒 三段（上限 23:59:59）。
   // 三段互不钳制 —— 50 分、80 秒都允许输入，startTimer 里统一折算成秒数，避免「填 90 分要自己换成 1 时 30 分」
-  // 菜单输入统一「回车才生效」：change 事件是随输入/失焦触发的，边打字边存配置
+  // 菜单输入统一「回车才生效」：change 事件是随输入/失焦触发的，边打字边改目标
   // 会让数字框打一半（如「2」→「25」）就被钳制回填，光标位置也跟着跳。
   // 改为显式提交：回车提交并失焦回显，blur 也提交一次（点到菜单别处不该丢掉这次编辑）。
   // 组字守卫：中文输入法组字期间按 Enter 是「确认候选词」，isComposing/229 时不能当「提交」处理，
@@ -355,7 +395,8 @@
     el.min = '0'; el.max = String(max); el.step = '1';
     el.className = 'dshwv-number dshwv-timer-seg';
     el.title = title;
-    commitOnEnter(el, function () { saveCfg(); });
+    // 只改「这一轮」的目标：不落盘（默认时长由设置页写），刷新芯片高亮与折叠摘要即可
+    commitOnEnter(el, function () { syncTimerQuick(); refreshMenuSummaries(); });
     return el;
   }
   var timerHour = timerSegInput(23, '倒计时小时数（0–23，与分、秒合计后生效，回车生效）');
@@ -377,30 +418,21 @@
   timerTime.className = 'dshwv-number dshwv-timer-time';
   timerTime.value = TIMER_AT_DEFAULT;
   timerTime.title = '定时刻（HH:MM，已过点则顺延到明天，回车生效）';
-  commitOnEnter(timerTime, function () { saveCfg(); });
+  // 定时刻仍落盘：设置页没有这个字段，重载后沿用上次的时刻最省事。
+  // 它和「默认时长」是两回事（一个时刻、一个时长），不会与设置页的默认值互相覆盖
+  commitOnEnter(timerTime, function () {
+    var at = String(timerTime.value || '');
+    if (/^\d{1,2}:\d{2}$/.test(at)) {
+      cfgTimerAtSeen = at;
+      saveCfg({ timerAt: at });
+    }
+    refreshMenuSummaries();
+  });
 
-  // 计时留言 / 休息档：都要打字或填数字，悬浮窗没有好的输入环境，只在设置页改。
-  // 页面保留本地副本（到点气泡与「休息 N 分钟」按钮要用），由 applyConfig 回推。
-
-  var notifyToggle = document.createElement('input');
-  notifyToggle.type = 'checkbox';
-  notifyToggle.className = 'dshwv-check';
-  notifyToggle.checked = true;
-  notifyToggle.title = '计时到点时弹系统通知';
-  notifyToggle.addEventListener('change', function () { setTimerNotifyOn(notifyToggle.checked); });
-
-  // 到点提醒气泡停留时长：0 = 常驻（手动点气泡关闭）
-  var remindSelect = document.createElement('select');
-  remindSelect.className = 'dshwv-sound';
-  remindSelect.appendChild(soundOpt('5', '5 秒'));
-  remindSelect.appendChild(soundOpt('8', '8 秒'));
-  remindSelect.appendChild(soundOpt('15', '15 秒'));
-  remindSelect.appendChild(soundOpt('0', '常驻'));
-  remindSelect.title = '到点提醒气泡的停留时长（常驻 = 需手动点气泡关闭）';
-  remindSelect.addEventListener('change', function () { setTimerRemindSec(remindSelect.value); });
-
-  // 计时气泡是否常驻 / 是否只显示计时：两个开关都只在设置页改，页面保留本地副本
-  // 与 setter（showTimerBubble / 气泡切换要用），但不再往菜单里放控件
+  // 到点通知 / 提醒停留 / 气泡常驻 / 只显计时 / 留言 / 休息档：全是「设一次、长期生效」的配置，
+  // 菜单里不再各摆一份开关（两处入口两套回填，最容易出现「这边关了那边还开着」）。
+  // 页面保留本地副本（到点通知、气泡停留与「休息 N 分钟」按钮要用），由 applyConfig 回推；
+  // 想改去设置页「计时」卡，菜单底部留了一个直达入口。
 
   var volInput = document.createElement('input');
   volInput.type = 'range';
@@ -419,11 +451,10 @@
     [scaleInput, '大小'],
     [soundToggle, '音效开关'], [soundSelect, '音色'], [volInput, '音量'],
     [opacitySelect, '透明度'], [usageSelect, '用量口径'], [peakSelect, '峰谷方案'],
-    [bubbleToggle, '思考气泡'], [remindToggle, '峰谷提醒'], [remindSelect, '到点提醒停留时长'],
+    [bubbleToggle, '思考气泡'], [remindToggle, '峰谷提醒'],
     [timeToggle, '气泡报时'], [lockToggle, '锁定位置'],
     [timerSelect, '计时模式'], [timerHour, '倒计时小时'], [timerMin, '倒计时分钟'], [timerSec, '倒计时秒'],
     [timerTime, '定时时刻'],
-    [notifyToggle, '到点通知'],
   ].forEach(function (pair) {
     pair[0].setAttribute('aria-label', pair[1]);
   });
@@ -436,12 +467,61 @@
   row3.appendChild(menuLabel('音量')); row3.appendChild(volInput); row3.appendChild(volPct);
   var rowOpacity = menuRow();
   rowOpacity.appendChild(menuLabel('透明度')); rowOpacity.appendChild(opacitySelect);
+  // 余额条：**置顶常显，不进任何折叠组**。余额是最高频的信息（「我还有多少钱」），
+  // 藏在第二层要点两下才看得到；主显示换成别的模型时它也跟着换口径（mainAmountText），
+  // 所以不参与「DeepSeek 专属行收起」那套逻辑
+  var rowBalanceTop = menuRow();
+  rowBalanceTop.classList.add('dshwv-menu-toprow');
+  // 标签跟着主显示类型走（余额 / 剩余额度 / 今日 token）：写死「余额」时，
+  // 额度型主显示会出现「余额 62%」——说的和显示的不是一回事
+  var menuBalanceLabelEl = menuLabel('余额');
+  rowBalanceTop.appendChild(menuBalanceLabelEl);
+  var menuBalanceEl = document.createElement('span');
+  menuBalanceEl.className = 'dshwv-model-val';
+  menuBalanceEl.textContent = '--';
+  rowBalanceTop.appendChild(menuBalanceEl);
+  // 穿透中的逃生行：鼠标穿透开着时，挂件本体点不动，只能靠「在鲸鱼上停约 1 秒」临时接管才点得开菜单；
+  // 菜单一关又得重来一遍。所以在菜单里给一条「关闭穿透」的直达入口 —— 不用去设置页翻「窗口」Tab
+  var rowPass = menuRow();
+  rowPass.classList.add('dshwv-menu-passrow');
+  rowPass.appendChild(menuLabel('穿透中'));
+  var passOffBtn = document.createElement('button');
+  passOffBtn.type = 'button';
+  passOffBtn.className = 'dshwv-menu-link';
+  passOffBtn.textContent = '关闭穿透';
+  passOffBtn.title = '立即关闭鼠标穿透（与设置页「窗口 → 鼠标穿透」是同一个开关）';
+  // 保存失败时不能让按钮永久卡在「关闭中…」：宿主若没回推配置，3 秒后自己复原
+  var passOffTimer = null;
+  passOffBtn.addEventListener('click', function (e) {
+    e.stopPropagation();
+    // 不做「乐观隐藏」：保存失败时行若已消失，用户就失去了这个逃生入口
+    passOffBtn.disabled = true;
+    passOffBtn.textContent = '关闭中…';
+    whaleApi.saveConfig({ passThrough: false });
+    if (passOffTimer) clearTimeout(passOffTimer);
+    passOffTimer = setTimeout(function () {
+      passOffTimer = null;
+      syncPassRow(passThroughOn);
+    }, 3000);
+  });
+  rowPass.appendChild(passOffBtn);
+  rowPass.style.display = 'none'; // 默认不显示，穿透开启时由 syncPassRow 放出
+  // 逃生行的显隐与按钮态：只认「当前穿透是否开着」这一个事实，每次 applyConfig 都刷一遍
+  function syncPassRow(on) {
+    if (passOffTimer) { clearTimeout(passOffTimer); passOffTimer = null; }
+    rowPass.style.display = on ? '' : 'none';
+    passOffBtn.disabled = false;
+    passOffBtn.textContent = '关闭穿透';
+  }
   var row4 = menuRow();
   row4.appendChild(menuLabel('用量')); row4.appendChild(usageSelect);
   var row5 = menuRow();
   row5.appendChild(menuLabel('峰谷')); row5.appendChild(peakSelect);
   var row6 = menuRow();
   row6.appendChild(menuLabel('气泡')); row6.appendChild(bubbleToggle);
+  // 「气泡设置」独立成行：它是个跳转按钮，和开关塞在同一行时长得像第二个开关，点错率不低
+  var rowBubbleSet = menuRow();
+  rowBubbleSet.appendChild(menuLabel('气泡内容'));
   // 「气泡设置」：悬浮窗里没有好的文字/结构编辑环境（自定义泡泡是行×模块 + 占位符 + 预览的复杂编辑器），
   // 直接跳到设置页「外观 → 按压气泡（自定义泡泡）」卡
   var bubbleSettingsBtn = document.createElement('button');
@@ -454,23 +534,97 @@
     closeMenu();
     openSettings('bubble');
   });
-  row6.appendChild(bubbleSettingsBtn);
+  rowBubbleSet.appendChild(bubbleSettingsBtn);
   var rowRemind = menuRow();
   rowRemind.appendChild(menuLabel('峰谷提醒')); rowRemind.appendChild(remindToggle);
+  // 余额快捷操作：刷新（跳过缓存立即拉取）+ 复制当前余额到剪贴板
+  var rowBalanceActions = menuRow();
+  var refreshBalanceBtn = document.createElement('button');
+  refreshBalanceBtn.type = 'button';
+  refreshBalanceBtn.className = 'dshwv-menu-link';
+  refreshBalanceBtn.textContent = '刷新余额';
+  // 两只刷新按钮并排出现时（模型组展开），光看文字「刷新余额 / 刷新全部」分不清范围。
+  // title 里写清「只刷哪一路」：本按钮只发 DeepSeek 余额那一条，模型组的才连全部模型一起刷
+  refreshBalanceBtn.title = '跳过缓存，只立刻刷新 DeepSeek 余额（其它模型点「刷新全部」）';
+  // 「刷新中…」的置位 / 复位 / 超时兜底都在余额一节的 setRefreshBtnBusy 里
+  // （按钮态与挂件本体呼吸圈同一时刻收尾，不各写一套定时器）；点按钮统一走 refresh(true)
+  refreshBalanceBtn.addEventListener('click', function (e) {
+    e.stopPropagation();
+    // 走 refresh(true) 而不是直接 whaleApi.refresh：挂件本体上的「刷新中」呼吸圈也要亮起来
+    // （只发 IPC 的话，点了刷新在挂件上、甚至在这只按钮上，除了「刷新中…」没有任何进行中的观感）
+    refresh(true);
+  });
+  var copyBalanceBtn = document.createElement('button');
+  copyBalanceBtn.type = 'button';
+  copyBalanceBtn.className = 'dshwv-menu-link';
+  // 文案跟着主显示的「名分」走（余额 / 额度 / token），初值只是 DeepSeek 默认态，
+  // 切到别的模型时由 applyModelVisibility 改写
+  copyBalanceBtn.textContent = '复制余额';
+  copyBalanceBtn.title = '复制当前余额数字到剪贴板';
+  // 复制后的临时态（已复制 / 复制失败）期间不许被 applyModelVisibility 回写冲掉
+  var copyBtnBusy = false;
+  copyBalanceBtn.addEventListener('click', function (e) {
+    e.stopPropagation();
+    var text = mainAmountText();
+    // 页面没有 utools 全局，复制统一走 preload 暴露的 whaleApi.copyText（同步返回是否成功）
+    var ok = false;
+    try { ok = whaleApi.copyText ? !!whaleApi.copyText(text) : false } catch (err) { ok = false }
+    copyBtnBusy = true;
+    copyBalanceBtn.textContent = ok ? '已复制' : '复制失败';
+    // 复原文案同样走动态名分：主显示若是额度型，不能恢复成「复制余额」
+    setTimeout(function () {
+      copyBtnBusy = false;
+      copyBalanceBtn.textContent = copyAmountLabel();
+    }, 1500);
+  });
+  rowBalanceActions.appendChild(refreshBalanceBtn);
+  rowBalanceActions.appendChild(copyBalanceBtn);
+  // 「用量明细」：这一组的数字（今日已用 / 额度）都来自账本，看完数字最常见的下一步就是
+  // 「钱花哪了」。菜单里其余数据组都有回设置页的入口（气泡设置 / 专注设置 / 待办管理），
+  // 这一组不该缺 —— 否则用户想看得细一点，只能自己想到「打开设置」再翻到「用量」Tab
+  var usageDetailBtn = document.createElement('button');
+  usageDetailBtn.type = 'button';
+  usageDetailBtn.className = 'dshwv-menu-link';
+  usageDetailBtn.textContent = '用量明细';
+  usageDetailBtn.title = '打开设置页的「用量与账本」卡（趋势 / 本月汇总 / 账本明细）';
+  usageDetailBtn.addEventListener('click', function (e) {
+    e.stopPropagation();
+    closeMenu();
+    openSettings('usage');
+  });
+  rowBalanceActions.appendChild(usageDetailBtn);
   var row7 = menuRow();
   row7.appendChild(menuLabel('报时')); row7.appendChild(timeToggle);
   var rowTimer = menuRow();
   rowTimer.appendChild(menuLabel('计时')); rowTimer.appendChild(timerSelect); rowTimer.appendChild(timerBtn);
-  // 计时读数行：气泡被点掉 / 自动收起后，菜单里仍能看到这一轮还剩多久（正计时看「已用」），
-  // 休息轮标签直接写「休息」。重置按钮也放这里 —— 三种模式都有清零入口，不必再往「目标」行塞。
-  // 只在计时中 / 暂停时出现（见 updateTimerStatus），空闲时没有进度可清
+  // 当前行：计时中 / 暂停时显示「任务名 + 读数 + 暂停 + 重置」；
+  // 空闲但已有专注任务时显示「当前 + 任务名 + 开始」。放在合并组最上面，
+  // 不用滚到下面的计时块就能暂停 / 重置。
   var rowTimerStatus = menuRow();
+  rowTimerStatus.classList.add('dshwv-focus-current');
   var timerStatusLabel = menuLabel('剩余');
+  var timerStatusTask = document.createElement('span');
+  timerStatusTask.className = 'dshwv-focus-task';
+  timerStatusTask.style.display = 'none';
   var timerStatusVal = document.createElement('span');
   timerStatusVal.className = 'dshwv-timer-readout';
   timerStatusVal.textContent = '00:00';
+  var timerCurrentBtn = document.createElement('button');
+  timerCurrentBtn.type = 'button';
+  timerCurrentBtn.className = 'dshwv-menu-link dshwv-timer-current';
+  timerCurrentBtn.textContent = '暂停';
+  timerCurrentBtn.title = '暂停 / 继续当前计时';
+  timerCurrentBtn.addEventListener('click', function (e) {
+    e.stopPropagation();
+    if (timerRunning) { pauseTimer(); return; }
+    if (timerPaused) { resumeTimer(); return; }
+    var it = todoFocusItem();
+    if (it) startTodoTimer(it);
+  });
   rowTimerStatus.appendChild(timerStatusLabel);
+  rowTimerStatus.appendChild(timerStatusTask);
   rowTimerStatus.appendChild(timerStatusVal);
+  rowTimerStatus.appendChild(timerCurrentBtn);
   rowTimerStatus.appendChild(timerResetBtn);
   rowTimerStatus.style.display = 'none';
   // 目标输入框：计时中 / 暂停时锁住（见 lockTimerTargets）
@@ -487,11 +641,85 @@
   var rowTimerAt = menuRow();
   rowTimerAt.appendChild(menuLabel('目标'));
   rowTimerAt.appendChild(timerTime);
-  // 到点要做什么（留言一句 + 「休息」按钮的分钟档）：都要打字或填数字，悬浮窗里没有好的
-  // 输入环境，只在设置页「提醒与通知」改。页面保留本地副本（到点气泡与「休息 N 分钟」按钮要用），
-  // 由 applyConfig 回推 —— 所以这里不再建行。
-  var rowNotify = menuRow();
-  rowNotify.appendChild(menuLabel('到点通知')); rowNotify.appendChild(notifyToggle); rowNotify.appendChild(remindSelect);
+  // 放弃确认：重置 / 切模式 / 换一条待办都会丢掉当前进度。内联在菜单里而不是弹系统对话框——
+  // 悬浮窗是独立置顶窗，系统对话框会抢焦点、把菜单顶掉，还得再找回来。
+  // 只在「非休息轮 + 已专注 ≥1 分钟」时出现：刚开始的几秒和休息轮没什么好可惜的
+  var rowTimerConfirm = document.createElement('div');
+  rowTimerConfirm.className = 'dshwv-timer-confirm';
+  rowTimerConfirm.style.display = 'none';
+  var timerConfirmText = document.createElement('div');
+  timerConfirmText.className = 'dshwv-timer-confirm-text';
+  var timerConfirmRow = document.createElement('div');
+  timerConfirmRow.className = 'dshwv-timer-confirm-row';
+  var timerConfirmAbortBtn = document.createElement('button');
+  timerConfirmAbortBtn.type = 'button';
+  timerConfirmAbortBtn.className = 'dshwv-timer-confirm-btn dshwv-timer-confirm-abort';
+  timerConfirmAbortBtn.textContent = '放弃本轮';
+  timerConfirmAbortBtn.title = '丢掉这一轮的进度：按实际专注分钟记账，但不算完成一轮';
+  timerConfirmAbortBtn.addEventListener('click', function (e) {
+    e.stopPropagation();
+    confirmTimerDiscard();
+  });
+  var timerConfirmKeepBtn = document.createElement('button');
+  timerConfirmKeepBtn.type = 'button';
+  timerConfirmKeepBtn.className = 'dshwv-timer-confirm-btn';
+  timerConfirmKeepBtn.textContent = '继续计时';
+  timerConfirmKeepBtn.title = '不放弃，回到当前这一轮';
+  timerConfirmKeepBtn.addEventListener('click', function (e) {
+    e.stopPropagation();
+    cancelTimerConfirm();
+  });
+  timerConfirmRow.appendChild(timerConfirmAbortBtn);
+  timerConfirmRow.appendChild(timerConfirmKeepBtn);
+  rowTimerConfirm.appendChild(timerConfirmText);
+  rowTimerConfirm.appendChild(timerConfirmRow);
+  // 快捷时长四档：比「选倒计时 → 改三段输入框 → 点开始」少三步，覆盖绝大多数番茄钟时长；
+  // 自定义时长仍走下面的目标输入框。档位由设置页决定（cfg.timerPresets），菜单只建 4 个空壳。
+  // 点击时读自身 data-min、不在闭包里捕获创建时的分钟数 —— 若按旧值开始，
+  // 设置页把档位改完之后就会出现「按钮写着 30 分、计时却跑 45 分」
+  var rowTimerQuick = menuRow();
+  rowTimerQuick.appendChild(menuLabel('快捷'));
+  var timerChips = document.createElement('div');
+  timerChips.className = 'dshwv-timer-chips';
+  var timerChipEls = [];
+  for (var qi = 0; qi < TIMER_PRESETS_DEFAULT.length; qi++) {
+    var chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = 'dshwv-timer-chip';
+    chip.textContent = TIMER_PRESETS_DEFAULT[qi] + ' 分';
+    chip.title = '倒计时 ' + TIMER_PRESETS_DEFAULT[qi] + ' 分钟并立即开始';
+    chip.setAttribute('data-min', String(TIMER_PRESETS_DEFAULT[qi]));
+    chip.addEventListener('click', function (e) {
+      e.stopPropagation();
+      quickStartTimer(Number(this.getAttribute('data-min')) || 0);
+    });
+    timerChips.appendChild(chip);
+    timerChipEls.push(chip);
+  }
+  rowTimerQuick.appendChild(timerChips);
+  // 「只显计时」开着时，计时气泡里只有时间、看不到余额 —— 这是最常被问的一句
+  //（设置页那段说明普通用户翻不到，帮助页更不会去翻）。给一行提示，
+  // 只在「计时中 / 暂停」且「只显计时」开着时出现：其余时候双击本来就没有特殊行为，写了反而误导
+  var rowTimerPeekHint = menuHint('计时中双击小鲸鱼，可临时看一眼余额');
+  rowTimerPeekHint.style.display = 'none';
+  function syncTimerPeekHint() {
+    var show = timerBubbleOnly && (timerRunning || timerPaused);
+    rowTimerPeekHint.style.display = show ? '' : 'none';
+  }
+  // 计时设置：默认时长 / 快捷档位 / 到点提醒 / 番茄循环都收在设置页。
+  // 菜单只负责「这一轮」怎么跑；开启专注 / 待办后这只按钮直达合并卡。
+  var rowTimerFoot = menuRow();
+  var timerSettingsBtn = document.createElement('button');
+  timerSettingsBtn.type = 'button';
+  timerSettingsBtn.className = 'dshwv-menu-link';
+  timerSettingsBtn.textContent = '计时设置';
+  timerSettingsBtn.title = '打开设置页的「计时」卡（默认时长、快捷档位、到点提醒、番茄循环）';
+  timerSettingsBtn.addEventListener('click', function (e) {
+    e.stopPropagation();
+    closeMenu();
+    openSettings((focusOn || todoOn) ? 'focus' : 'timer');
+  });
+  rowTimerFoot.appendChild(timerSettingsBtn);
   var row8 = menuRow();
   row8.appendChild(menuLabel('锁定')); row8.appendChild(lockToggle);
   var row9 = menuRow();
@@ -514,19 +742,24 @@
   hideBtn.textContent = '隐藏挂件';
   hideBtn.title = '隐藏挂件（设置页「显示挂件」或切换挂件快捷键可再次唤出）';
   // 二次确认：它在菜单最底部、旁边就是「打开设置」，误触一下挂件就没了（虽然能唤回，
-  // 但用户未必知道路径）→ 首次点击只进确认态，3s 内再点一次才真隐藏
+  // 但用户未必知道路径）→ 首次点击只进确认态，5s 内再点一次才真隐藏。
+  // 取 5s 而不是更短的 3s：确认态出现后用户要「读到文字 → 确认这是自己想点的 → 再挪回来点」，
+  // 3s 时手稍慢就白点一次，还容易被当成「点了没反应」
   var hideConfirmTimer = null;
   function resetHideBtn() {
     if (hideConfirmTimer) { clearTimeout(hideConfirmTimer); hideConfirmTimer = null; }
     hideBtn.classList.remove('dshwv-menu-link-warn');
     hideBtn.textContent = '隐藏挂件';
+    hideBtn.title = '隐藏挂件（设置页「显示挂件」或切换挂件快捷键可再次唤出）';
   }
   hideBtn.addEventListener('click', function (e) {
     e.stopPropagation();
     if (!hideConfirmTimer) {
       hideBtn.classList.add('dshwv-menu-link-warn');
       hideBtn.textContent = '再点一次隐藏';
-      hideConfirmTimer = setTimeout(resetHideBtn, 3000);
+      // 确认态里把回退路径也写进 title：此刻用户最担心的就是「藏没了怎么找回来」
+      hideBtn.title = '再点一次即隐藏；藏起来后可在设置页点「显示挂件」，或按切换挂件快捷键唤回（5 秒后自动取消）';
+      hideConfirmTimer = setTimeout(resetHideBtn, 5000);
       return;
     }
     resetHideBtn();
@@ -570,20 +803,27 @@
   rowDshCmd.appendChild(menuLabel('命令')); rowDshCmd.appendChild(dshCmdEl);
 
   // 分组：全部默认折叠，每次打开菜单都重置为全折叠（见 toggleMenu），菜单高度恒定。
-  // look 组有 7 行控件（大小 / 音效 / 音量 / 透明度 / 气泡 / 报时 / 锁定），
+  // look 组 8 行（大小 / 音效 / 音量 / 透明度 / 气泡 / 气泡内容 / 报时 / 锁定），
   // 一次铺开会把菜单塞满，故与其他组一样收起、想用再点开
   var groupLook = menuGroup('look', '外观与音效');
   groupLook.body.appendChild(row1); groupLook.body.appendChild(row2); groupLook.body.appendChild(row3);
   groupLook.body.appendChild(rowOpacity);
-  groupLook.body.appendChild(row6); groupLook.body.appendChild(row7); groupLook.body.appendChild(row8);
-  var groupUsage = menuGroup('usage', '用量与峰谷');
+  groupLook.body.appendChild(row6); groupLook.body.appendChild(rowBubbleSet);
+  groupLook.body.appendChild(row7); groupLook.body.appendChild(row8);
+  // 组名保留「余额」：余额条虽已置顶常显，但这一组里还有「用量 / 峰谷」，
+  // 叫「用量与峰谷」时用户仍会把它当成「管数字的地方」
+  var groupUsage = menuGroup('usage', '余额与用量');
   groupUsage.body.appendChild(row4); groupUsage.body.appendChild(row5);
   groupUsage.body.appendChild(rowRemind);
-  var groupTimer = menuGroup('timer', '计时');
-  groupTimer.body.appendChild(rowTimer); groupTimer.body.appendChild(rowTimerStatus);
-  groupTimer.body.appendChild(rowTimerDown);
-  groupTimer.body.appendChild(rowTimerAt);
-  groupTimer.body.appendChild(rowNotify);
+  groupUsage.body.appendChild(rowBalanceActions);
+  // 唯一的「专注」组：今日 / 当前 / 放弃确认 / 待办 / 计时 / 底部入口在下方统一装配。
+  // 展开态一次解决「选任务 → 开始 → 暂停」，不再跨两个组。
+  var groupFocus = menuGroup('focus', '专注');
+  // 到点接力状态：null = 未进入接力。具体行为见 timerTodoBtn / timerHandoff 相关函数；
+  // 提前声明是因为折叠摘要要先读它。
+  var timerHandoff = null;
+  // 完成标记的延迟校验：宿主没有回执，等回推后再确认这条真的完成了
+  var handoffVerifyTimer = null;
   // dsh 是面向开发者的功能，但打包版同样要有 —— 早先按 window.whale.dev 建组，
   // 结果正式安装的 .upx 里开发者模式默认关闭，这一节整个消失（连 DOM 都没有）。
   // 现在无条件建组，再用「这台机器上有没有 dsh」决定显隐：探测到已安装（source 非空）
@@ -594,42 +834,113 @@
   groupDsh.body.appendChild(rowDshState); groupDsh.body.appendChild(rowDshCmd);
   groupDsh.el.style.display = 'none';
 
-  // —— 待办清单：设置页负责增删改，挂件只做「勾选 / 设专注」——
-  // 悬浮窗没有好的输入环境（窗口默认不可聚焦，菜单一开一关就得借焦点），所以这里不放输入框。
-  // 清单常驻在菜单最上面：专注时最想看到的就是「现在做哪条、还剩几条」
+  // —— 折叠态摘要 ——
+  // 菜单收起时只有 7 个组名，什么值都看不到；给每组挂一句「现在是多少」，
+  // 折叠态就有信息量（多大 / 今天用了多少 / 还剩多久 / 几条待办）。
+  // 用缓存挡住重复写入：计时每秒都会调一次，textContent 赋值会触发重排，不该白做
+  var summaryCache = {};
+  function setGroupSummary(api, key, text) {
+    text = text || '';
+    if (summaryCache[key] === text) return;
+    summaryCache[key] = text;
+    api.setSummary(text);
+  }
+  // 组标题 / 底部入口：focusOn || todoOn 时是「专注」枢纽，纯计时才叫「计时」。
+  // 缓存 key 挡住每秒刷新时的无谓 DOM 写入。
+  var focusChromeKey = '';
+  function syncFocusGroupChrome() {
+    var hub = focusOn || todoOn;
+    var key = hub ? 'hub' : 'timer';
+    if (focusChromeKey === key) return;
+    focusChromeKey = key;
+    groupFocus.setTitle(hub ? '专注' : '计时');
+    timerSettingsBtn.textContent = hub ? '专注与待办设置' : '计时设置';
+    timerSettingsBtn.title = hub
+      ? '在设置页管理专注记录、待办与计时默认值'
+      : '在设置页配置计时默认值（默认时长、快捷档位、到点提醒、番茄循环）';
+  }
+  function refreshMenuSummaries() {
+    setGroupSummary(groupLook, 'look', snapNum(curScale) + ' 档 · ' + opacityPct + '%');
+    // 今日用量未知（实时·令牌口径下平台接口没给）时写「--」而不是 ¥0.00：
+    // 挂件第三行同场景就是「今日已用 --」，两边口径要一致，否则菜单会把「没拿到」说成「今天没花钱」
+    var usedSum = (state.todayUsage === null || state.todayUsage === undefined)
+      ? '--' : fmt(Number(state.todayUsage), state.currency);
+    setGroupSummary(groupUsage, 'usage', state.balance === null ? '' : '今日 ' + usedSum);
+    // 计时摘要必须带「已用 / 剩 / 休息 / 暂停」前缀：光一个 12:34 读不出是已用还是剩余。
+    // 空闲时也要有信息量：菜单收起后看不到「下一轮会跑多久」，这里直接写出来 ——
+    // 倒计时写本轮目标，定时写时刻，关闭态写设置页的默认时长（「默认 25 分」）
+    var timerSum = '';
+    if (timerActive()) {
+      if (timerFinished) timerSum = '到点';
+      else {
+        var head = timerPaused ? '暂停 ' : (timerIsBreak ? '休息 ' : (timerMode === 'up' ? '已用 ' : '剩 '));
+        timerSum = head + fmtClock(timerRemainMs());
+      }
+    } else if (timerMode === 'at') {
+      timerSum = '定时 ' + (timerTime.value || '--');
+    } else if (timerMode === 'down') {
+      timerSum = Math.max(1, Math.round(timerSegTotalSec() / 60)) + ' 分';
+    } else if (timerMode === 'up') {
+      timerSum = '正计时';
+    } else {
+      timerSum = '默认 ' + Math.max(1, Math.round((cfgTimerSecSeen || TIMER_MIN_DEFAULT * 60) / 60)) + ' 分';
+    }
+    // 合并组：先给任务 / 清单 / 今日轮数，纯计时才落回默认时长。
+    // 时间放在任务名前（如「剩 12:34 · 写周报」）：摘要 104px 截断时先保时间。
+    var focusItem = todoFocusItem();
+    var focusText = focusItem ? String(focusItem.text || '') : '';
+    if (timerHandoff) {
+      timerSum = '任务完成';
+    } else if (timerActive() && !timerFinished && !timerIsBreak && focusText) {
+      timerSum += ' · ' + focusText;
+    } else if (!timerActive() && focusText) {
+      timerSum = focusText;
+    } else if (!timerActive() && todoOn) {
+      var todoLeft = 0;
+      var todoAll = (todoState && todoState.items) || [];
+      for (var ti = 0; ti < todoAll.length; ti++) if (!todoAll[ti].done) todoLeft++;
+      if (todoLeft > 0) {
+        timerSum = todoLeft + ' 项' + ((focusOn && focusSummary) ? ' · 今日 ' + focusSummary.today.r + ' 轮' : '');
+      } else if (focusOn && focusSummary) {
+        timerSum = '今日 ' + focusSummary.today.r + ' 轮';
+      }
+    } else if (!timerActive() && focusOn && focusSummary) {
+      timerSum = '今日 ' + focusSummary.today.r + ' 轮';
+    }
+    setGroupSummary(groupFocus, 'focus', timerSum);
+    setGroupSummary(groupModels, 'models', models.length > 1 ? models.length + ' 个' : '');
+    syncFocusGroupChrome();
+  }
+
+  // —— 待办清单：设置页负责增删改，挂件里可直接开始 / 勾选 / 快速添加 ——
+  // 清单常驻在「专注」组里：专注时最想看到的就是「现在做哪条、还剩几条」
   var todoOn = false;
-  // 「专注记录」总开关：关着时不显示专注按钮、气泡不挂尾注、倒计时走完也不记轮次。
-  // 只有一个开关：早先拆成「专注记录 + 计时结束自动记录」两个，前者描述里就写着
-  // 「计时结束后自动记一轮」，后者关掉后整条链路变成什么都不记 —— 用户只会以为自己开了功能却坏了
+  // 「专注记录」总开关：只决定记不记录、算不算轮、出不出统计与目标；
+  // 任务开始 / 气泡任务名 / 到点「完成这条」都不再受它门控（见 2026-11-01 spec）。
   var focusOn = false;
   var todoState = { items: [], focusId: '' };
   // 本次菜单里刚勾掉的条目：勾完仍留在原位置灰，手滑了点错能马上撤回；
   // 下次打开菜单清空（见 toggleMenu），勾掉的就不再见 —— 挂件只服务「现在要做什么」，
   // 回看 / 清理已完成交给设置页，免得清单越用越长、把待办挤出滚动区
   var todoJustDone = {};
-  // —— 专注统计：今日轮数 / 目标 / 连续天数 ——
-  var groupFocus = menuGroup('focus', '专注');
+  // —— 今日统计：今日行 + 连续 / 近 N 天一行；标题与底部入口由 syncFocusGroupChrome 统一管理 ——
   var focusStatsEl = document.createElement('div');
   focusStatsEl.className = 'dshwv-focus-stats';
   var focusGoal = 0; // 每日目标（0 = 未设置）
   var focusSummary = null; // { today: {r, m}, streak }
   function renderFocusStats() {
-    focusStatsEl.textContent = '';
-    if (!focusOn) { groupFocus.el.style.display = 'none'; return; }
-    groupFocus.el.style.display = '';
+    focusStatsEl.style.display = focusOn ? '' : 'none'
+    focusStatsEl.textContent = ''
+    if (!focusOn) return
     if (!focusSummary) {
-      var hint = document.createElement('div');
-      hint.className = 'dshwv-focus-hint';
-      hint.textContent = '还没有专注记录';
-      focusStatsEl.appendChild(hint);
+      focusStatsEl.appendChild(menuHint('还没有专注记录'));
+      focusStatsEl.appendChild(menuHintAct('跑一段计时就自动记上'));
       return;
     }
     // 今日轮数 / 目标
     var todayRow = document.createElement('div');
     todayRow.className = 'dshwv-focus-row';
-    var todayLabel = document.createElement('span');
-    todayLabel.className = 'dshwv-focus-label';
-    todayLabel.textContent = '今日';
+    var todayLabel = menuLabel('今日');
     var todayValue = document.createElement('span');
     todayValue.className = 'dshwv-focus-value';
     if (focusGoal > 0) {
@@ -656,56 +967,125 @@
       todayRow.appendChild(todayValue);
     }
     focusStatsEl.appendChild(todayRow);
-    // 连续天数
-    if (focusSummary.streak > 0) {
-      var streakRow = document.createElement('div');
-      streakRow.className = 'dshwv-focus-row';
-      var streakLabel = document.createElement('span');
-      streakLabel.className = 'dshwv-focus-label';
-      streakLabel.textContent = '连续';
-      var streakValue = document.createElement('span');
-      streakValue.className = 'dshwv-focus-value';
-      streakValue.textContent = focusSummary.streak + ' 天';
-      streakRow.appendChild(streakLabel);
-      streakRow.appendChild(streakValue);
-      focusStatsEl.appendChild(streakRow);
+    // 连续 / 近 N 天压成一行：今日数字已经在上方，这两项只补「量级与坚持」。
+    // 数据来自同一份 summary 的 total —— 宿主按 FOCUS_STATS_DAYS(7) 现算，不是终身累计，
+    // 所以标签写「近 7 天」而不是「累计」（参考番茄 todo 的「共专注 N 天」，但口径必须说实）
+    var totalR = focusSummary.total ? Number(focusSummary.total.r) || 0 : 0;
+    var totalM = focusSummary.total ? Number(focusSummary.total.m) || 0 : 0;
+    var metaParts = [];
+    if (focusSummary.streak > 0) metaParts.push('连续 ' + focusSummary.streak + ' 天');
+    if (totalR > 0) metaParts.push('近 ' + (Number(focusSummary.days) || 7) + ' 天 ' + totalR + ' 轮 · ' + totalM + ' 分钟');
+    if (metaParts.length) {
+      var meta = document.createElement('div');
+      meta.className = 'dshwv-focus-meta';
+      meta.textContent = metaParts.join(' · ');
+      focusStatsEl.appendChild(meta);
     }
   }
-  groupFocus.body.appendChild(focusStatsEl);
-  // 设置按钮：跳转到设置页的专注卡
-  var rowFocusFoot = menuRow();
-  var focusManageBtn = document.createElement('button');
-  focusManageBtn.type = 'button';
-  focusManageBtn.className = 'dshwv-menu-link';
-  focusManageBtn.textContent = '专注设置';
-  focusManageBtn.title = '在设置页配置专注记录与每日目标';
-  focusManageBtn.addEventListener('click', function (e) {
-    e.stopPropagation();
-    closeMenu();
-    openSettings('focus');
-  });
-  rowFocusFoot.appendChild(menuLabel('设置'));
-  rowFocusFoot.appendChild(focusManageBtn);
-  groupFocus.body.appendChild(rowFocusFoot);
 
-  var groupTodo = menuGroup('todo', '待办');
+  // 待办块：设置页负责增删改，挂件里直接开始 / 勾选 / 快速添加
+  var rowTodoAdd = menuRow();
+  var todoAddInput = document.createElement('input');
+  todoAddInput.type = 'text';
+  todoAddInput.className = 'dshwv-todo-add';
+  todoAddInput.placeholder = '添加待办，回车保存';
+  todoAddInput.title = '添加待办，回车保存';
+  todoAddInput.setAttribute('aria-label', '添加待办');
+  // 同宿主 constants.js 的 TODO_TEXT_MAX（悬浮页拿不到宿主常量）：宿主也会按同一上限截断
+  todoAddInput.maxLength = 60;
+  // 待办条数上限：由宿主随 init 下发（单一来源仍是 constants.js 的 TODO_MAX，页面不抄副本）。
+  // 满额时宿主会**直接丢弃** add 且不回任何消息 —— 页面若不先拦一下，用户打完字按回车，
+  // 输入框清空、清单里却没有这条，看起来就是「加了但没生效」。拦在前面给一句气泡，并保留输入内容
+  var todoMax = 0;
+  // 提交一条待办：回车与「添加」按钮共用。返回是否已提交（未提交时保留输入框里的内容）
+  function submitTodoAdd() {
+    var text = todoAddInput.value.trim();
+    if (!text) return false;
+    if (todoMax > 0 && ((todoState && todoState.items) || []).length >= todoMax) {
+      // 用户主动动作，计时中也照常反馈（force）；到点态不抢动作条（同 showRemindBubble 的口径）
+      showRemindBubble([
+        { t: '待办已满', s: 'A', c: '#e0433f' },
+        { t: '最多 ' + todoMax + ' 条', s: 'P', c: '' },
+        { t: '先在设置页清掉一些', s: 'C', c: '', w: true },
+      ], !timerFinished);
+      return false;
+    }
+    try { whaleApi.todoSend({ op: 'add', text: text }); } catch (_) {}
+    todoAddInput.value = '';
+    return true;
+  }
+  todoAddInput.addEventListener('keydown', function (e) {
+    e.stopPropagation();
+    // 组字守卫与 commitOnEnter 同口径：中文输入法里按 Enter 是「确认候选词」，
+    // 只判 isComposing 不够（个别输入法此刻 keyCode 仍是 229），否则会把半截词当成待办提交
+    if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) {
+      e.preventDefault();
+      submitTodoAdd();
+    }
+    if (e.key === 'Escape') { e.preventDefault(); todoAddInput.blur(); }
+  });
+  todoAddInput.addEventListener('click', function (e) { e.stopPropagation(); });
+  var todoAddBtn = document.createElement('button');
+  todoAddBtn.type = 'button';
+  todoAddBtn.className = 'dshwv-menu-link dshwv-todo-add-btn';
+  todoAddBtn.textContent = '添加';
+  todoAddBtn.title = '添加这条待办';
+  todoAddBtn.setAttribute('aria-label', '添加待办');
+  todoAddBtn.addEventListener('click', function (e) {
+    e.stopPropagation();
+    if (submitTodoAdd()) todoAddInput.focus();
+  });
+  rowTodoAdd.appendChild(todoAddInput);
+  rowTodoAdd.appendChild(todoAddBtn);
   var todoListEl = document.createElement('div');
   todoListEl.className = 'dshwv-todo';
   var rowTodoFoot = menuRow();
-  var todoManageBtn = document.createElement('button');
-  todoManageBtn.type = 'button';
-  todoManageBtn.className = 'dshwv-menu-link';
-  todoManageBtn.textContent = '管理待办';
-  todoManageBtn.title = '在设置页添加 / 重命名 / 删除待办';
-  todoManageBtn.addEventListener('click', function (e) {
+  // 清除已完成：一键清理所有已勾选的待办项。待办管理入口统一在组底部「专注与待办设置」，
+  // 这里不再重复放一个管理按钮。
+  var todoClearDoneBtn = document.createElement('button');
+  todoClearDoneBtn.type = 'button';
+  todoClearDoneBtn.className = 'dshwv-menu-link dshwv-menu-link-2nd';
+  todoClearDoneBtn.textContent = '清除已完成';
+  todoClearDoneBtn.title = '一键清除所有已完成的待办项';
+  todoClearDoneBtn.addEventListener('click', function (e) {
     e.stopPropagation();
-    closeMenu();
-    openSettings('focus');
+    var all = (todoState && todoState.items) || [];
+    var doneCount = all.filter(function (it) { return it.done; }).length;
+    if (doneCount === 0) {
+      showRemindBubble([
+        { t: '没有已完成的待办', s: 'A', c: '#8a95b5' },
+        { t: '所有待办项都还未完成', s: 'P', c: '' },
+        { t: '继续加油！', s: 'C', c: '', w: true },
+      ]);
+      return;
+    }
+    try { whaleApi.todoSend({ op: 'clearDone' }); } catch (_) {}
+    showRemindBubble([
+      { t: '已清除 ' + doneCount + ' 项', s: 'A', c: '#2fa24c' },
+      { t: '完成的待办已移除', s: 'P', c: '' },
+      { t: '清单已更新', s: 'C', c: '', w: true },
+    ]);
   });
-  rowTodoFoot.appendChild(menuLabel('清单'));
-  rowTodoFoot.appendChild(todoManageBtn);
-  groupTodo.body.appendChild(todoListEl);
-  groupTodo.body.appendChild(rowTodoFoot);
+  rowTodoFoot.appendChild(todoClearDoneBtn);
+  rowTodoFoot.style.display = 'none';
+  var todoBlock = document.createElement('div');
+  todoBlock.className = 'dshwv-focus-todo';
+  todoBlock.appendChild(rowTodoAdd);
+  todoBlock.appendChild(todoListEl);
+  todoBlock.appendChild(rowTodoFoot);
+
+  // 合并组装配：今日 → 当前 → 放弃确认 → 待办 → 计时 → 底部入口。
+  // 顺序固定，避免「任务 / 计时 / 设置」再分三处找。
+  groupFocus.body.appendChild(focusStatsEl);
+  groupFocus.body.appendChild(rowTimerStatus);
+  groupFocus.body.appendChild(rowTimerConfirm);
+  groupFocus.body.appendChild(todoBlock);
+  groupFocus.body.appendChild(rowTimer);
+  groupFocus.body.appendChild(rowTimerQuick);
+  groupFocus.body.appendChild(rowTimerDown);
+  groupFocus.body.appendChild(rowTimerAt);
+  groupFocus.body.appendChild(rowTimerPeekHint);
+  groupFocus.body.appendChild(rowTimerFoot);
 
   // —— 多厂商模型：点一行即把它设为挂件主显示 ——
   var groupModels = menuGroup('models', '模型');
@@ -716,6 +1096,8 @@
   modelsRefreshBtn.type = 'button';
   modelsRefreshBtn.className = 'dshwv-menu-link';
   modelsRefreshBtn.textContent = '刷新全部';
+  // 与「刷新余额」的区分写在这里：那一只只管 DeepSeek，这一只把列表里所有模型都重拉
+  modelsRefreshBtn.title = '跳过缓存，立刻刷新列表里的全部模型（含 DeepSeek 余额）';
   // 忙碌态只在「刷新完成」时收尾：宿主收到请求会先推一次旧快照、拉完再推一次带 refreshDone 的
   // （见 preload/lib/ipc.js）。用定时器猜网络耗时不是提前解锁（慢了能连点）就是残留「刷新中…」。
   // 兜底定时器只防极端情况（宿主异常 / 窗口重建丢了那次推送），不能让按钮永久禁用
@@ -736,20 +1118,34 @@
     setModelsRefreshBusy(true);
     whaleApi.refreshModels(null, true);
   });
-  rowModelsRefresh.appendChild(menuLabel('余额'));
+  // 这一行不放「余额」标签：按钮是「刷新全部」（所有模型），额度型模型也在这张表里，
+  // 写成「余额 刷新全部」既重复又容易读成「只刷余额」。改成与余额操作行同款的两只按钮
   rowModelsRefresh.appendChild(modelsRefreshBtn);
+  // 「管理模型」：菜单里只能切主显示 / 刷新，加模型、改密钥、调字段路径都得回设置页
+  var modelsManageBtn = document.createElement('button');
+  modelsManageBtn.type = 'button';
+  modelsManageBtn.className = 'dshwv-menu-link';
+  modelsManageBtn.textContent = '管理模型';
+  modelsManageBtn.title = '打开设置页的「模型与余额」卡（添加 / 删除模型、改密钥与字段路径）';
+  modelsManageBtn.addEventListener('click', function (e) {
+    e.stopPropagation();
+    closeMenu();
+    openSettings('models');
+  });
+  rowModelsRefresh.appendChild(modelsManageBtn);
   groupModels.body.appendChild(modelsListEl);
   groupModels.body.appendChild(rowModelsRefresh);
 
-  // 待办放最前：专注时最常看的是「现在做哪条」；关掉时整组 display:none，
-  // 与模型组一样不会在中间留白把上下两组隔开
+  // 余额条置顶常显：最高频的信息不该藏在折叠组里（详见 rowBalanceTop 的注释）
+  menuBox.appendChild(rowBalanceTop);
+  // 穿透中的逃生行紧随余额条：穿透期间它是「怎么退出来」的唯一入口，不该藏在折叠组里
+  menuBox.appendChild(rowPass);
+  // 专注放最前：专注时最常看的是「现在做哪条」；合并组一次展开就有任务 + 计时 + 统计。
+  // models 随后：它是余额类操作，且只在多模型时显示（见下面的 display 切换）
   menuBox.appendChild(groupFocus.el);
-  menuBox.appendChild(groupTodo.el);
-  // models 紧随其后：它是菜单里最高频的余额操作，且只在多模型时显示（见下面的 display 切换）
   menuBox.appendChild(groupModels.el);
   menuBox.appendChild(groupLook.el);
   menuBox.appendChild(groupUsage.el);
-  menuBox.appendChild(groupTimer.el);
   menuBox.appendChild(groupDsh.el);
   menuBox.appendChild(row9);
 
@@ -769,6 +1165,7 @@
     // 只有内置 DeepSeek 时整组收起，菜单保持原样；添加过模型才出现
     var hasExtra = models.length > 1;
     groupModels.el.style.display = hasExtra ? '' : 'none';
+    refreshMenuSummaries(); // 模型组折叠摘要（几个模型）
     modelsListEl.textContent = '';
     if (!hasExtra) return;
     models.forEach(function (m) {
@@ -815,12 +1212,45 @@
     var t = String(it.text || '');
     return t.length > 8 ? t.slice(0, 8) + '…' : t;
   }
+  // 下一条：按清单存储顺序取「当前条之后」的下一条未完成，末尾回绕。
+  // 用完整 items（含已完成）定位 afterId，这样 afterId 已被勾掉 / 删除时也不会
+  // 从清单首条重新开始；afterId 完全不在清单里才退回第一条未完成。
+  function nextUnfinishedTodo(afterId) {
+    var items = (todoState && todoState.items) || [];
+    var start = -1;
+    for (var i = 0; i < items.length; i++) if (items[i].id === afterId) { start = i; break }
+    for (var n = 0; n < items.length; n++) {
+      var idx = start >= 0 ? (start + 1 + n) % items.length : n;
+      if (items[idx].id !== afterId && !items[idx].done) return items[idx];
+    }
+    return null;
+  }
+  function todoTimerLabel(it) {
+    if (!it) return '';
+    if (it.tm === 'up') return '正计时';
+    if (it.tm === '') return '不计时';
+    return Math.max(1, Math.min(600, Math.round(Number(it.mins) || 25))) + ' 分';
+  }
   // 计时气泡的尾注顺带告诉用户「这一轮在为哪条待办专注」（没有专注项时原样返回）。
-  // 与菜单里的专注按钮同受 focusOn 门控：关掉专注闭环后，残留的 focusId 不该还在气泡上挂着
+  // focusOn 只决定记不记录，不挡任务名：关掉记录时尾注仍要能看出在做哪条
   function withFocusTail(s) {
-    if (!focusOn) return s;
     var f = todoFocusText();
     return f ? s + ' · 专注：' + f : s;
+  }
+  // 待办到点徽标：once 非今天显示 M-D HH:MM；重复形态显示 HH:MM；过期用 over 标记。
+  // 只做展示（编辑入口在设置页）；at=0 视为「还没选时刻」，不画徽标
+  function todoRemindLabel(it) {
+    var at = Number(it.remindAt) || 0;
+    if (!at) return null;
+    function p(n) { return (n < 10 ? '0' : '') + n; }
+    if (it.remindKind === 'once') {
+      var d = new Date(at);
+      var hm = p(d.getHours()) + ':' + p(d.getMinutes());
+      var sameDay = d.toDateString() === new Date().toDateString();
+      return { text: sameDay ? hm : (d.getMonth() + 1) + '-' + d.getDate() + ' ' + hm, full: d.toLocaleString(), over: at < Date.now() };
+    }
+    var mins = Math.max(0, Math.min(1439, at));
+    return { text: p(Math.floor(mins / 60)) + ':' + p(mins % 60), full: it.remindKind, over: false };
   }
   function todoRow(it) {
     var row = document.createElement('div');
@@ -845,36 +1275,124 @@
     text.title = it.text;
     row.appendChild(check);
     row.appendChild(text);
-    if (!it.done && focusOn) {
+    // 到点提醒徽标：到点只提醒，不自动开始计时；只做展示，不在挂件内编辑
+    if (it.remindOn) {
+      var due = todoRemindLabel(it);
+      if (due) {
+        var dueEl = document.createElement('span');
+        dueEl.className = 'dshwv-todo-due';
+        dueEl.textContent = due.text;
+        if (due.over) dueEl.classList.add('dshwv-todo-due-over');
+        dueEl.title = '到点提醒：' + due.full;
+        row.appendChild(dueEl);
+      }
+    }
+    // 今日轮数（学番茄 todo 的「今天做了几个」）：只统计今天挂在当前条目上的轮次。
+    // 与下方「done/est」的终身累计分开显示 —— 两者口径不同，混在一个数字里会读不出今天还剩多少
+    var todayN = (focusOn && focusSummary && focusSummary.todayByTodo)
+      ? Number(focusSummary.todayByTodo[it.id]) || 0
+      : 0;
+    if (todayN > 0) {
+      var todayEl = document.createElement('span');
+      todayEl.className = 'dshwv-todo-today';
+      todayEl.textContent = '今日 ' + todayN + ' 轮';
+      todayEl.title = '今天在这条待办上完成 ' + todayN + ' 轮';
+      row.appendChild(todayEl);
+    }
+    // 预估 / 已完成轮数（参考番茄 todo 每张待办卡上的时长）：设置页能填「预估 N 轮」，
+    // 挂件里也该看得到进度 —— 否则「这条还差几轮」只能回设置页翻。没填预估（0）就不占位置
+    var estN = Number(it.est) || 0;
+    if (estN > 0) {
+      var doneN = Number(it.rounds) || 0;
+      var estEl = document.createElement('span');
+      estEl.className = 'dshwv-todo-est';
+      estEl.textContent = doneN + '/' + estN;
+      estEl.title = '已完成 ' + doneN + ' 轮 / 预估 ' + estN + ' 轮';
+      row.appendChild(estEl);
+    }
+    if (it.done) {
+      // 刚勾掉的行留在原位（置灰），并给一个明确的撤销入口：
+      // 早先只能靠再点一次那个小小的勾选框反悔，勾掉后它看起来就像「已经完事了」，
+      // 用户不会想到还能点回来。按钮只在这一轮菜单内出现（重开菜单清空 todoJustDone）
+      var undoBtn = document.createElement('button');
+      undoBtn.type = 'button';
+      undoBtn.className = 'dshwv-todo-undo';
+      undoBtn.textContent = '撤销';
+      undoBtn.title = '把「' + it.text + '」恢复为未完成';
+      undoBtn.addEventListener('click', function (e) {
+        e.stopPropagation();
+        delete todoJustDone[it.id];
+        whaleApi.todoSend({ op: 'toggle', id: it.id });
+      });
+      row.appendChild(undoBtn);
+    }
+    if (!it.done) {
       var on = it.id === todoState.focusId;
+      // 每条待办自带计时方式（学番茄 todo）：'down' 倒计时 / 'up' 正计时 / '' 不计时。
+      // 按钮从「专注」改成「开始」：点一下 = 设为专注 + 按这条的参数启动计时（不计时的只设专注）。
+      // 三种态：进行中（这条正在计时，不可点）/ 专注中（是当前专注但没在计时，点一下取消）/ 开始
+      var todoTm = it.tm === 'up' || it.tm === '' ? it.tm : 'down';
+      var timerBusy = timerRunning || timerPaused;
+      var running = on && timerBusy;
       var focusBtn = document.createElement('button');
       focusBtn.type = 'button';
-      focusBtn.className = 'dshwv-todo-focusbtn' + (on ? ' dshwv-todo-focusing' : '');
-      focusBtn.textContent = on ? '专注中' : '专注';
-      focusBtn.title = on ? '点一下取消专注' : '把这条设为当前专注';
+      focusBtn.className = 'dshwv-todo-focusbtn' + ((on || running) ? ' dshwv-todo-focusing' : '');
+      if (running) {
+        focusBtn.textContent = '进行中';
+        focusBtn.title = '这条正在计时';
+        focusBtn.disabled = true;
+      } else if (on && !todoTm) {
+        focusBtn.textContent = '专注中';
+        focusBtn.title = '点一下取消专注';
+      } else {
+        focusBtn.textContent = '开始';
+        focusBtn.title = todoTm === 'up'
+          ? '设为当前专注并开始正计时'
+          : (todoTm === 'down'
+            ? '设为当前专注并开始倒计时 ' + (Number(it.mins) || 25) + ' 分钟'
+            : '把这条设为当前专注（这条设为「不计时」）');
+      }
       focusBtn.addEventListener('click', function (e) {
         e.stopPropagation();
-        whaleApi.todoSend({ op: 'focus', id: it.id });
+        if (running) return;
+        // 已经是当前专注、且这条「不计时」→ 点一下取消。取消是独立 op，不再靠 focus 的开关语义
+        if (on && !todoTm) { whaleApi.todoSend({ op: 'unfocus', id: it.id }); return; }
+        startTodoTimer(it);
       });
       row.appendChild(focusBtn);
     }
     return row;
   }
   function renderTodoMenu() {
-    groupTodo.el.style.display = todoOn ? '' : 'none';
+    todoBlock.style.display = todoOn ? '' : 'none';
+    refreshMenuSummaries();
+    updateTimerStatus();
     if (!todoOn) return;
     todoListEl.textContent = '';
     var all = (todoState && todoState.items) || [];
+    var doneN = 0;
+    for (var di = 0; di < all.length; di++) if (all[di].done) doneN++;
+    if (todoClearDoneBtn) {
+      todoClearDoneBtn.textContent = doneN > 0 ? '清除已完成（' + doneN + '）' : '清除已完成';
+      todoClearDoneBtn.style.display = doneN > 0 ? '' : 'none';
+    }
+    rowTodoFoot.style.display = doneN > 0 ? '' : 'none';
     // 只画未完成项 + 本次菜单里刚勾掉的（置灰留在原位，顺序不变）
     var items = [];
     for (var i = 0; i < all.length; i++) {
       if (!all[i].done || todoJustDone[all[i].id]) items.push(all[i]);
     }
     if (!items.length) {
-      var empty = document.createElement('div');
-      empty.className = 'dshwv-todo-empty';
-      empty.textContent = all.length ? '待办都完成了，去设置页加新的' : '还没有待办，去设置页添加';
-      todoListEl.appendChild(empty);
+      // 空态直接铺说明行（和计时 / 专注组同一对 class），不再套一层自带缩进的容器：
+      // 容器再 pad 一次，行上的文字就和上面的清单错开一截
+      if (all.length) {
+        todoListEl.appendChild(menuHint('待办都完成了，去设置页加新的'));
+      } else {
+        todoListEl.appendChild(menuHint('还没有待办'));
+        todoListEl.appendChild(menuHintAct('点击下方输入框快速添加'));
+        // 补一句「这里看不到什么」：勾掉的待办不留在挂件里，用户看不到时容易以为丢了
+        todoListEl.appendChild(menuHint('勾选即完成；已完成的到设置页查看'));
+      }
       return;
     }
     items.forEach(function (it) { todoListEl.appendChild(todoRow(it)); });
@@ -932,6 +1450,17 @@
     dshStartBtn.disabled = !!s.running || ext || !!other || busy;
     dshRestartBtn.disabled = (!s.running && !ext) || busy;
     dshStopBtn.disabled = (!s.running && !ext) || !!s.stopping;
+    // DSH 错误气泡：首次出现新错误时弹出提醒，避免每次状态推送都重复打扰
+    if (err && err !== lastDshError) {
+      lastDshError = err;
+      showRemindBubble([
+        { t: 'DSH 异常', s: 'A', c: '#e0433f' },
+        { t: err.length > 18 ? err.slice(0, 18) + '…' : err, s: 'P', c: '#e0433f' },
+        { t: '可在菜单或设置页查看详情', s: 'C', c: '', w: true },
+      ]);
+    } else if (!err) {
+      lastDshError = '';
+    }
   }
   function dshSend(action) {
     if (!HAS_BRIDGE) { dshRender({ error: '未连接宿主，无法控制 dsh' }); return; }
@@ -1019,7 +1548,13 @@
 
   var body = document.createElement('div');
   body.className = 'dshwv-body';
+  // 手动刷新的呼吸圈（见 refresh() 的 setRefreshing）。放在 img 之后、ring 之前：
+  // 气泡与菜单在 body 之外，不受它影响；ringSvg 的 z-index 更高，计时进行中仍压在上面
+  var refreshMask = document.createElement('div');
+  refreshMask.className = 'dshwv-refresh-mask';
   body.appendChild(img);
+  body.appendChild(refreshMask);
+  body.appendChild(ringSvg);
   body.appendChild(bubbleBox);
   root.appendChild(body);
   root.appendChild(menuBtn);
@@ -1038,6 +1573,7 @@
   // 滑块初值所用的本地默认倍率即上方 curScale（见 scaleInput 初始化）。
   var flipped = false;
   var animDelayTimer = null, drag = null, shown = null, animId = null;
+  var flashTimer = null; // 余额变动动效定时器（1.3s 后移除 flash 类名）
   var bubbleShown = false, bubbleTimer = null, bubbleRandomActive = false, bubbleRandomLines = null;
   // 设置页「挂件气泡试播」会话：previewSession = {steps, idx}。优先级低于计时/提醒、
   // 独立于随机台词（点鲸鱼本体弹随机台词时不抢会话里的这条），点挂件气泡才顺序翻条
@@ -1069,6 +1605,25 @@
   var bubbleTimerActive = false; // 计时气泡（正计时/倒计时/定时/时间到），优先级最高
   // BUBBLE_STYLE_CLASS（台词行类型 → 样式类）已移入共享渲染器，applyBubbleLines 经薄壳走渲染器
 
+  // —— 下班倒计时（可开关的独立展示形态）——
+  // 算法唯一源在 public/preload/lib/offwork.js，构建期打成 dist/offwork-core.js，
+  // 宿主 require 同一份源码做配置归一。默认值也从那里取，避免页面与宿主两份副本漂移。
+  var OFFWORK_CORE = window.OffworkCore || null;
+  var OFFWORK_DEFAULTS = (OFFWORK_CORE && OFFWORK_CORE.DEFAULTS) || {
+    start: '09:00', end: '18:00', days: [1, 2, 3, 4, 5],
+    showSec: true, weekendOn: false, paydayOn: false, paydayDay: 10,
+  };
+  var offworkOn = false;
+  var offworkStart = OFFWORK_DEFAULTS.start;
+  var offworkEnd = OFFWORK_DEFAULTS.end;
+  var offworkDays = OFFWORK_DEFAULTS.days.slice();
+  var offworkShowSec = OFFWORK_DEFAULTS.showSec;
+  var offworkWeekendOn = OFFWORK_DEFAULTS.weekendOn;
+  var offworkPaydayOn = OFFWORK_DEFAULTS.paydayOn;
+  var offworkPaydayDay = OFFWORK_DEFAULTS.paydayDay;
+  // 最近一次已写入 DOM 的倒计时文本：每秒巡检只在「秒数 / 阶段 / 临近档位」变化时才写 DOM
+  var offworkLastKey = '';
+
   var soundOn = true, soundVol = 0.9, soundSet = 'duck';
   // 提醒音独立音量（low/budget/peak/pass 四类提醒音，press/release 音色音不在此列）：
   // volSet=false = 没动过滑块，播放跟随全局音量；true = 用自己的。必须用布尔位区分
@@ -1081,12 +1636,28 @@
   // 宿主推送的自定义气泡图片（whale:bubbles，base64 data URL 数组）。与形象不同，这里没有
   // 「当前用哪张」：抽到「动图组」时从里面随机取一张，空数组则回退内置 rua.webp
   var customBubbles = [];
-  // 宿主推送的「已装官方可下载形象」本体（whale:shared-skins，base64 data URL 数组）：
+  // 宿主推送的「已装官方可下载形象」**清单**（whale:shared-skins：[{ id, ext, size }]，不含本体）：
   // 台词 v2 randimg 段的共享角色图池。与 customBubbles 分开 —— randimg 抽的是共享角色的
-  // 形象图（上游 gif 模块能力），不是用户自定义气泡图；空数组时 randimg 段整段丢
-  var sharedSkins = [];
+  // 形象图（上游 gif 模块能力），不是用户自定义气泡图；清单为空时 randimg 段整段丢。
+  // 为什么推清单而不是整池：整池实测 39MB 原图 / 52MB base64，读盘 + 编码 + 跨进程克隆
+  // 全压在「打开挂件」那一下，而且本页要常驻一份、宿主再存一份。现在抽到哪张按 id 单张
+  // 来要（whale:randimg → whale:randimg-data），到手存在 sharedImgs（有字节预算，超了淘汰最旧）。
+  // 下标语义：randimg 段的 imgs 是「池里第几张」（1 起算），指向 sharedPool 的顺序。
+  var sharedPool = [];
+  var sharedImgs = {};        // id → data URL（已到手的本体）
+  var sharedImgsBytes = 0;    // 已到手本体的原图字节合计（按清单里的 size 记账）
+  var sharedPending = {};     // 已发出、还没回包的 id（去重，避免同一张反复要）
+  var sharedDead = {};        // 回包为空串的 id：文件已经不在，别再抽它、也别再要它
+  var sharedReady = [];       // 已到手的清单项。只在清单/缓存变化时换数组身份 ——
+  //                           pickOne 的「不与上次重复」记在数组引用上，每次都新建数组就记不住
+  // 本体的字节预算：按清单里的**原图字节**记账，页面里实际是 base64（约 1.37 倍），12MB 原图 ≈ 16MB 字符串。
+  // 整池是 39MB 原图 / 52MB base64，且宿主那一份现在完全不留 —— 这里是唯一的一份常驻。
+  var SHARED_CACHE_BYTES = 12 * 1024 * 1024;
+  var SHARED_PREFETCH = 4;    // 预取的**下限**张数（预算没满就一直预取到满，见 prefetchSharedImgs）
+  var SHARED_PREFETCH_FIRST_MS = 800; // 等首帧画完再开始搬图，别跟首帧抢主线程
+  var SHARED_PREFETCH_GAP_MS = 200;   // 每张之间隔一下，避免连着几张 1.5MB 克隆挤在同一 tick
   var skinId = DEFAULT_SKIN;   // 当前形象：BUILTIN_SKINS 的键，或 'custom'（用户导入）
-  var themeId = 'default';     // 当前气泡配色：'default' | 'dark' | 'sakura'
+  var themeId = 'default';     // 当前气泡配色：'default' | 'dark' | 'sakura' | 'fantasy'
   var opacityPct = 100;        // 窗口透明度 20–100
   var passThroughOn = false;   // 鼠标穿透总开关：开启后连鲸鱼也穿透；悬停片刻可临时接管
   // 透明度：写成 CSS 变量 --dshw-opacity，由样式表消费（.dshwv-root 与菜单打开态各自相乘）。
@@ -1115,6 +1686,8 @@
       root.style.setProperty('--dshwv-hint', t.hint);
       root.style.setProperty('--dshwv-fill', t.fill);
       root.style.setProperty('--dshwv-stroke', t.stroke);
+      // HUD 装饰的开关：CSS 只在 .dshwv-theme-fantasy 下显示外圈/文字角标
+      root.classList.toggle('dshwv-theme-fantasy', themeId === 'fantasy');
     } catch (err) {}
   }
 
@@ -1214,14 +1787,38 @@
     try { setWidgetCursor(''); } catch (err) {}
     sendIgnoreMouse(true);
   }
-  // 提醒气泡自动收起：remindSec = 0 表示常驻，等用户点掉（设置页可配）
-  function setRemindAutoHide() {
-    if (remindSec > 0) bubbleArm(remindSec * 1000, hideBubble);
-    else bubbleDisarm();
+  // 提醒气泡自动收起：remindSec = 0 表示常驻，等用户点掉（设置页可配）。
+  // keepTimerBubble=true（force 顶掉了原本正显示的计时气泡）时，收起后把计时气泡还回去：
+  // 否则按完「专注统计」过几秒气泡整个消失，只剩一个还在转的环，容易被当成计时停了
+  function setRemindAutoHide(keepTimerBubble) {
+    if (remindSec <= 0) { bubbleDisarm(); return; }
+    if (!keepTimerBubble) { bubbleArm(remindSec * 1000, hideBubble); return; }
+    bubbleArm(remindSec * 1000, function () {
+      hideBubble();
+      // 还回去的计时气泡仍按「计时气泡常驻」开关决定停留：常驻 → 0（一直挂着），
+      // 否则按 bubbleDwell 秒自动收起。写死 0 会让关掉常驻的用户被顶一次提醒后气泡永久不散
+      if (timerActive() && !timerFinished) showTimerBubble(timerBubbleAutoMs());
+    });
   }
-  // 提醒气泡统一入口：峰谷/预算/低余额/穿透说明都走这里（三行内容，停留秒数共用设置）
-  function showRemindBubble(lines) {
-    if (!bubbleOn || timerActive()) return; // 计时进行中不打断（此时也有系统通知兜底）
+  // 被动提醒的让路条件：计时进行中（系统通知兜底），或「时间到」动作条正显示（不能顶掉它）。
+  // 不能直接用 timerActive()：它把 timerFinished 也算「活跃」，而用户点「知道了」/点鲸鱼收起气泡后
+  // 该位不会复位（只有开始 / 重置计时才清），会让待办到点、峰谷、低余额这些被动提醒长期静默。
+  function remindBubbleBlocked() {
+    if (timerRunning || timerPaused) return true;
+    return !!(timerFinished && bubbleShown && bubbleTimerActive);
+  }
+  // 提醒气泡统一入口：峰谷/预算/低余额/穿透说明都走这里（三行内容，停留秒数共用设置）。
+  // force=true 只给「用户主动触发的指令」（专注统计、切换穿透）用：计时进行中也照常显示，
+  // 否则按了快捷键 / 点了开关毫无反馈。到点态（timerFinished）不传 force —— 那时气泡下缘
+  // 挂着「休息 / 再来一轮 / 知道了」动作条，被顶掉后 hideBubble 会 clearTimerDone()，按钮再也回不来
+  // 返回值 = 气泡是否真的挂出来了（false = 气泡总开关关 / 计时占位被拦）。
+  // 待办到点靠它回执宿主，只有真显示才算送达（见 ipc.js 的 whale:todo-due-ack）
+  function showRemindBubble(lines, force) {
+    if (!bubbleOn) return false;
+    if (!force && remindBubbleBlocked()) return false;
+    // 记下「原本正显示计时气泡」：到点自动收起时按此把计时还回去（用户此前已点收则不还）。
+    // 只认计时气泡真正占着气泡的情形（只显计时 / 已到点）；peek 态到点本就该切回常规内容，不在此列
+    var keepTimerBubble = !!(force && bubbleTimerActive && timerTakesBubble());
     if (bubbleTimer) { clearTimeout(bubbleTimer); bubbleTimer = null; }
     renderer.cancelGifFade();
     bubbleShown = true;
@@ -1235,20 +1832,25 @@
     restoreBubbleLines();
     applyBubbleLines(lines);
     bubbleBox.classList.add('dshwv-bubble-open');
-    setRemindAutoHide();
+    setRemindAutoHide(keepTimerBubble);
+    return true;
   }
   // 穿透开关切换的一次性说明气泡（穿透只影响输入、不影响绘制，气泡照常可见）。
   // 文案取设置页的「提醒文案」模板，红/绿沿用状态色（开=红，关=绿）
   function showPassNotice(on) {
     playAlertSound('pass');
-    showRemindBubble(alertLines(on ? 'passOn' : 'passOff', {}, on ? '#e0433f' : '#2fa24c'));
+    // 用户自己点的穿透开关，计时进行中也要说一声（否则开了穿透却不知道、也不知道怎么关回来）
+    showRemindBubble(alertLines(on ? 'passOn' : 'passOff', {}, on ? '#e0433f' : '#2fa24c'), !timerFinished);
   }
   var timerNotifyOn = true, timerPersistOn = true; // 计时到点系统通知 / 计时状态持久化
   // 计时到点的邮件通知开关，以及「邮件渠道总开关」的本地副本：页面不自己发信，
   // 只用来判断「到点该不该叫宿主发」—— 两个渠道都关时才真的不发。
   var timerMailOn = true, mailOn = false;
+  // 重载/休眠回来后，「到点」在 5 分钟内才算刚结束：补铃 + 通知 + 记轮还说得过去；
+  // 再久就只是过期状态 —— 补通知等于隔天半夜弹窗，记轮也会记到错误的一天。
+  var RESTORE_GRACE_MS = 5 * 60 * 1000;
   var usageMode = 'ledger', peakMode = 'default';
-  // 界面深浅色偏好（设置页可改）：'auto' 跟 uTools / 'light' / 'dark'。
+  // 界面深浅色偏好（设置页可改）：'auto' 跟 uTools / 'light' / 'dark' / 'fantasy'（未至之境，暗色专用）。
   // 生效值 = 偏好为 auto 时取 uTools 实际深浅，否则用偏好本身；uTools 侧实时值由 onDark/isDark 维护
   var uiMode = 'auto';
   var utoolsDark = false; // uTools 当前深浅态的最新缓存（applyDark 合成用）
@@ -1257,6 +1859,11 @@
   var lowAlertOn = true, lowAlertAmount = 10; // 低余额预警（余额低于阈值时数字变红）
   var budgetOn = false, budgetAmount = 0; // 今日预算：用量超过预算额时提醒（0 = 未设置）
   var tapAdvance = false; // 点挂件本体是否也推进依次播放（默认关；见 endDrag 的 wasClick 分支）
+  // 计时中「双击鲸鱼看一眼余额」的连击判定（见 endDrag / showBalancePeek）。
+  // 取 500ms = Windows 默认双击间隔：取 320ms 时手慢一点（350~450ms）就会被当成两次单击，
+  // 用户只看到「双击没反应」，而且没有任何提示能告诉他差在哪
+  var WHALE_DBLCLICK_MS = 500;
+  var lastWhaleClickAt = 0;
   var timeBubbleOn = true; // 报时：气泡首行显示当前时间
   var dragLock = false; // 锁定位置：禁止拖拽与滚轮缩放（点击刷新仍可用）
   var menuOpen = false;
@@ -1264,6 +1871,8 @@
   var menuDirLocked = false; // 方向已定：打开动画期间内容高度变化不重算，防面板在按钮上下侧来回翻
   var firstBalance = true, pendingManual = false;
   var lastIsPeak = null; // 上一次的峰谷状态，用于检测「进入峰时/谷时」的切换
+  var lastFailCount = 0; // 上一次收到的连续失败计数，用于只在首次跨过阈值时弹气泡
+  var lastDshError = ''; // 上一次的 DSH 错误信息，用于只在首次出现时弹气泡
 
   // —— 固定文案池 ——
   // 报时模板与动图降级文案：与宿主 store.js 的 QUOTE_TEXT_DEFAULT 逐字一致（浮动页没有 require
@@ -1307,25 +1916,156 @@
     if (i <= 0) return pickBubbleUrl() || null;
     return customBubbles[Math.min(i, customBubbles.length) - 1] || null;
   }
-  // randimg 段的取图回调（渲染器 randImgSrc / bubbleModImageSrc）：每次显示从「已装共享角色图」池里
-  // 随机抽一张（不连续重复，复用 pickOne 的 WeakMap 机制）。一张都没装时回 null，渲染器据此整段丢。
+  // randimg 段的取图回调（渲染器 randImgSrc / bubbleModImageSrc）：每次显示从「已装共享角色图」
+  // 池里随机抽一张**已经到手**的（不连续重复，复用 pickOne 的 WeakMap 机制）。
   // imgs 是「本段可抽的共享角色下标集」（1 起算，模块编辑器填的就是它）：非空时只在该子集里抽，
-  // 空数组 = 不设限、整池随机。没有这个过滤，「随机图池」就成了空设置（曾踩：填了只抽这几张也不生效）
+  // 空数组 = 不设限、整池随机。没有这个过滤，「随机图池」就成了空设置（曾踩：填了只抽这几张也不生效）。
+  // 池子为空、或想要的那几张一张都还没到手时回 null —— 渲染器据此整段丢；
+  // 与此同时已经把想要的那张发出去要了，下一次按压（或预取到位）就有图。
   function randImgSrc(imgs) {
-    if (!sharedSkins.length) return null;
-    var list = filterSharedSkins(imgs);
-    return pickOne(list) || null;
+    if (!sharedPool.length) return null;
+    var cand = filterSharedPool(imgs);
+    var want = pickOne(cand);
+    // 顺手把「这次想抽的那张」要回来（一次按压至多要一张，免得一口气搬回一堆本体）。
+    // 已到手 / 在途 / 已知要不到的 id 由 requestSharedImg 自己跳过
+    if (want) requestSharedImg(want.id);
+    var ready = readySharedPool(imgs);
+    if (!ready.length) return null;
+    var one = pickOne(ready);
+    return (one && sharedImgs[one.id]) || null;
   }
-  // 把 imgs 下标集翻译成 sharedSkins 的子集：下标 1 起算（0 / 空 = 随机，落到整池），越界项忽略；
-  // 过滤后一张不剩（全是脏值 / 越界）时回退整池，宁可多抽几张也不让整段凭空消失
-  function filterSharedSkins(imgs) {
-    if (!Array.isArray(imgs) || !imgs.length) return sharedSkins;
+  // 把 imgs 下标集翻译成 sharedPool 的子集：下标 1 起算（0 / 空 = 随机，落到整池），越界项忽略；
+  // 过滤后一张不剩（全是脏值 / 越界）时回退整池，宁可多抽几张也不让整段凭空消失。
+  // 整池这一支必须返回 sharedPool 本身：pickOne 的「不与上次重复」记在数组引用上，
+  // 每次新建数组等于没有避重（同一张连着抽出来给用户看）。
+  function filterSharedPool(imgs) {
+    if (!Array.isArray(imgs) || !imgs.length) return sharedPool;
     var out = [];
     for (var i = 0; i < imgs.length; i++) {
       var idx = Math.round(Number(imgs[i]) || 0);
-      if (idx >= 1 && idx <= sharedSkins.length) out.push(sharedSkins[idx - 1]);
+      var e = (idx >= 1 && idx <= sharedPool.length) ? sharedPool[idx - 1] : null;
+      if (e && !sharedDead[e.id]) out.push(e);
     }
-    return out.length ? out : sharedSkins;
+    return out.length ? out : sharedPool;
+  }
+  // 「已到手」的那几张（同样按 imgs 限 —— 注意 imgs 的下标指池子位置，不是到手列表的位置）。
+  // 不限子集时直接交回 sharedReady，理由同上（数组身份稳定才有避重）。
+  function readySharedPool(imgs) {
+    if (!Array.isArray(imgs) || !imgs.length) return sharedReady;
+    var cand = filterSharedPool(imgs);
+    if (cand === sharedPool) return sharedReady;
+    var out = [];
+    for (var i = 0; i < cand.length; i++) { if (sharedImgs[cand[i].id]) out.push(cand[i]); }
+    return out;
+  }
+  // 重建「已到手」列表：清单换了、新到手一张、淘汰一张、得知一张要不到，都要走这里
+  function rebuildSharedReady() {
+    var out = [];
+    for (var i = 0; i < sharedPool.length; i++) {
+      var e = sharedPool[i];
+      if (e && sharedImgs[e.id]) out.push(e);
+    }
+    sharedReady = out;
+  }
+  // 清单里某张的原图字节数（预算记账用）；清单里没有就按 0，不让预算算飞
+  function sharedSizeOf(id) {
+    for (var i = 0; i < sharedPool.length; i++) {
+      if (sharedPool[i].id === id) return Number(sharedPool[i].size) || 0;
+    }
+    return 0;
+  }
+  // 某张在预算里算多少字节。清单一定带 size（宿主按真实文件大小给），这里是异常兜底：
+  // 已到手 → 按 base64 长度反推（每 4 字符 ≈3 字节）；还没到手 → 按最坏的一张估。
+  // 记账与淘汰必须用同一个口径，否则「加的时候算 90万、减的时候算 0」会把预算一路加爆、
+  // 接着把整池淘汰光。
+  function sharedCostOf(id) {
+    var size = sharedSizeOf(id);
+    if (size) return size;
+    var url = sharedImgs[id];
+    return url ? Math.round(url.length * 0.75) : 900 * 1024;
+  }
+  // 向宿主单张要一张本体：已到手 / 在途 / 已知要不到的都跳过。
+  // 没有真实桥接（单独打开页面调试）时直接不做事，randimg 段维持「没图就不显示」。
+  function requestSharedImg(id) {
+    if (!id || !whaleApi.requestRandimg) return;
+    if (sharedImgs[id] || sharedPending[id] || sharedDead[id]) return;
+    sharedPending[id] = true;
+    try { whaleApi.requestRandimg(id); } catch (err) { delete sharedPending[id]; }
+  }
+  // 回包落地。空串 = 那张文件已经不在（用户在文件管理器里清了 userData/whale-skins）：
+  // 记成死链，本次会话不再抽它，免得每次按压都白要一次。
+  function takeSharedImg(id, url) {
+    delete sharedPending[id];
+    if (typeof url !== 'string' || !url) { sharedDead[id] = true; rebuildSharedReady(); return; }
+    // 重复回包（重推清单时恰好有在途的那次）：本体已经在手里，不必再占一遍预算
+    if (sharedImgs[id]) { rebuildSharedReady(); return; }
+    sharedImgs[id] = url;
+    sharedImgsBytes += sharedCostOf(id);
+    // 超预算就淘汰最旧：id 都以字母开头（画廊自生成 k…、官方 DSniang…/s…），
+    // 对象键按插入顺序遍历，所以第一个 key 就是最旧那张
+    while (sharedImgsBytes > SHARED_CACHE_BYTES) {
+      var oldest = null;
+      for (var k in sharedImgs) { oldest = k; break; }
+      if (oldest === null) break;
+      sharedImgsBytes -= sharedCostOf(oldest);
+      delete sharedImgs[oldest];
+    }
+    rebuildSharedReady();
+  }
+  // 首帧后空闲预取：在字节预算内把本地尽量填满（预算装不下下一张才停，SHARED_PREFETCH 是下限）。
+  // 没这一步的话「打开挂件后第一次按压」大概率没图（要一张、回一张十几毫秒，那一泡早就收起来了）。
+  // 预取的是**随机**几张而不是「清单前几张」：前几张永远是先下载的那几张，用户会以为随机池坏了。
+  // 为什么按预算而不是固定 4 张：池子可能有 36 张，只留 4 张的话 randimg 永远在那几个角色里打转 ——
+  // 「抽到不同的共享角色」正是这个模块的看点。预算封顶 ≈10 张，仍然是整池的四分之一不到。
+  var sharedPrefetchTimer = null;
+  function prefetchSharedImgs() {
+    if (sharedPrefetchTimer) { clearTimeout(sharedPrefetchTimer); sharedPrefetchTimer = null; }
+    if (!sharedPool.length || !whaleApi.requestRandimg) return;
+    if (sharedReady.length >= SHARED_PREFETCH && sharedImgsBytes + sharedCostOf(sharedPool[0].id) > SHARED_CACHE_BYTES) return;
+    var want = [];
+    for (var i = 0; i < sharedPool.length; i++) {
+      var id = sharedPool[i].id;
+      if (!sharedImgs[id] && !sharedDead[id]) want.push(id);
+    }
+    // 洗牌后逐张排空（每张之间隔一下，别把几张 1.5MB 的克隆挤进同一个 tick）
+    for (var j = want.length - 1; j > 0; j--) {
+      var s = Math.floor(Math.random() * (j + 1)), t = want[j];
+      want[j] = want[s]; want[s] = t;
+    }
+    var n = 0;
+    var step = function () {
+      sharedPrefetchTimer = null;
+      if (n >= want.length) return;
+      var id = want[n];
+      var cost = sharedCostOf(id);
+      if (sharedReady.length >= SHARED_PREFETCH && sharedImgsBytes + cost > SHARED_CACHE_BYTES) return;
+      requestSharedImg(id);
+      n++;
+      if (n < want.length) sharedPrefetchTimer = setTimeout(step, SHARED_PREFETCH_GAP_MS);
+    };
+    sharedPrefetchTimer = setTimeout(step, SHARED_PREFETCH_FIRST_MS);
+  }
+  // 收到清单（首推 / 设置页下载或删除后重推）：本体缓存里已经不在池中的那几张当场丢掉，
+  // 删一张共享角色不该在挂件里留 1.5MB 尸体。死链标记一并清掉 —— 重新下载过的图要能再试。
+  function applySharedPool(data) {
+    var list = toList(data), next = [];
+    for (var i = 0; i < list.length; i++) {
+      var e = list[i];
+      if (e && typeof e === 'object' && typeof e.id === 'string' && e.id) next.push(e);
+    }
+    sharedPool = next;
+    var keep = {}, bytes = 0;
+    for (var j = 0; j < sharedPool.length; j++) {
+      var id = sharedPool[j].id;
+      keep[id] = true;
+      if (sharedImgs[id]) bytes += sharedCostOf(id);
+    }
+    for (var k in sharedImgs) { if (!keep[k]) delete sharedImgs[k]; }
+    sharedImgsBytes = bytes;
+    sharedDead = {};
+    sharedPending = {};
+    rebuildSharedReady();
+    prefetchSharedImgs();
   }
   // —— 按压气泡模块取值（渲染器 modText / modImageSrc 回调）——
   // 模板占位符与旧台词同一套（renderLinePlaceholders）；另加四个上游专属 token：
@@ -1957,6 +2697,7 @@
   // 休息轮：到点后点「休息 N 分钟」起的那一轮。必须与专注轮分开，否则休息会被记成
   // 专注分钟、气泡还挂着「专注：xxx」、休息完「再来一轮」也按休息时长重启
   var timerIsBreak = false;   // 这一轮是休息：不记专注、不挂专注尾注、到点不给「休息 / 完成这条」
+  var timerReported = false;  // 本轮已记账（到点或放弃）：防止「到点后重置」「重载后补弹时间到」再记一次
   var timerBreakBackSec = 0;  // 休息前的专注时长（秒）：休息结束还原给 timerArg，供「继续专注」
   var timerBreakSec = 0;      // 本次休息时长（秒）：刻意不写进三段时间输入框 —— 那是专注时长，
                               // 写进去会被 saveCfg 的 timerSec 永久覆盖，用户下次专注就变 5 分钟了
@@ -1967,12 +2708,20 @@
   var timerLongBreakMin = 15;    // 长休时长（分钟，1–60）
   var timerLongEvery = 4;        // 每几轮专注后进入长休（2–12）
   var timerAutoNext = false;     // 计时结束后是否自动开始下一轮
-  var timerCycle = 0;            // 当前是第几个番茄（0 = 未开始/非番茄模式）
+  var timerCycle = 0;            // 番茄循环的排程位（0 = 未开始/非番茄模式）：只决定「第几轮进长休」，不是账本 —— 只有 timerPomoOn 开着才递增，专注记录关着时也照走。今日几轮一律看宿主推的 focusSummary
   var timerCycleDate = '';       // 记录 cycle 的日期（YYYY-MM-DD），跨日归零
-  var timerBreakLong = false;    // 上一次休息是否为长休
+  var timerAtSpan = 0;           // 「定时」模式的总跨度（毫秒）：进度环需要它当总量，暂停/恢复也不丢
   var timerRemindSec = 8;    // 到点提醒气泡停留秒数（0 = 常驻，手动点气泡关闭）
   var timerBubblePin = true; // 计时中气泡是否常驻显示（关闭则只短暂显示，点小鲸鱼可再看）
   var timerBubbleOnly = true; // 气泡是否只显示计时：关掉后气泡照常显示余额/用量等全部内容
+  // 宿主配置里「默认时长 / 默认模式 / 定时刻」最近一次见到的值：只有它们真的变了才回填。
+  // 菜单里的时长与模式是「这一轮」的草稿 —— 若每次配置广播都按 cfg 重写，
+  // 用户改完目标、随手调一下音量（也会广播配置），目标就被打回默认值了。
+  // pendingTimerSec：计时中收到新的默认时长先压着，等回到空闲再落到目标输入框（见 syncTimerMenu）
+  var cfgTimerSecSeen = null;
+  var cfgTimerModeSeen = null;
+  var cfgTimerAtSeen = null;
+  var pendingTimerSec = null;
   var timerTick = null;
   var timerClockText = '';   // 气泡里已渲染的时钟文本：每秒只改这一处，避免整块重排
   // —— 到点气泡里的可点动作（挂 body，与菜单同级）——
@@ -2001,6 +2750,16 @@
   timerDoneBtn.textContent = '知道了';
   timerDoneBtn.title = '收起提醒（计时已结束）';
   timerDoneBtn.addEventListener('click', function () { cancelPomoAutoNext(); hideBubble(); });
+  // 到点接力：完成当前待办后把「下一条」摆到气泡下方，点一下才启动。
+  var timerNextBtn = document.createElement('button');
+  timerNextBtn.type = 'button';
+  timerNextBtn.className = 'dshwv-timer-act dshwv-timer-act-main';
+  timerNextBtn.textContent = '开始下一条';
+  timerNextBtn.title = '开始下一条待办的计时';
+  timerNextBtn.addEventListener('click', function (e) {
+    e.stopPropagation();
+    startNextTodo();
+  });
   // 专注闭环的收尾：这一轮走完，把正在专注的待办直接勾掉（省得再开菜单找）
   var timerTodoBtn = document.createElement('button');
   timerTodoBtn.type = 'button';
@@ -2011,16 +2770,118 @@
     cancelPomoAutoNext();
     var it = todoFocusItem();
     if (!it) return;
-    whaleApi.todoSend({ op: 'toggle', id: it.id });
-    hideBubble();
+    // todoOn 关闭时保持旧行为：完成即收起，不接力（清单本来就不在挂件里显示）
+    if (!todoOn) {
+      whaleApi.todoSend({ op: 'toggle', id: it.id });
+      hideBubble();
+      return;
+    }
+    enterHandoff(it);
+  });
+  // 番茄自动衔接的显式取消。原先只有「点挂件任意处」能取消，但那既不可见、又容易误触：
+  // 用户想点「知道了」而点偏一点，自动衔接就被悄悄取消了。改成给一个明确的按钮，
+  // 并收回「点任何地方都取消」的隐式行为（见 document 上的 pointerdown）
+  var timerPomoCancelBtn = document.createElement('button');
+  timerPomoCancelBtn.type = 'button';
+  timerPomoCancelBtn.className = 'dshwv-timer-act';
+  timerPomoCancelBtn.textContent = '取消衔接';
+  timerPomoCancelBtn.title = '停在「时间到」，不自动开始下一轮';
+  timerPomoCancelBtn.addEventListener('click', function (e) {
+    e.stopPropagation();
+    cancelPomoAutoNext();
+    // 气泡里那行「即将开始…」要立刻换成常规尾注，不能等下一次 render 才改
+    render();
+    updateTimerActions();
   });
   timerDoneActions.appendChild(timerBreakBtn);
   timerDoneActions.appendChild(timerAgainBtn);
   timerDoneActions.appendChild(timerTodoBtn);
+  timerDoneActions.appendChild(timerNextBtn);
+  timerDoneActions.appendChild(timerPomoCancelBtn);
   timerDoneActions.appendChild(timerDoneBtn);
   document.body.appendChild(timerDoneActions);
+
+  // —— 到点接力：完成当前待办 → 气泡显示下一条 → 用户点一下才启动 ——
+  function clearTimerHandoff() {
+    if (handoffVerifyTimer) { clearTimeout(handoffVerifyTimer); handoffVerifyTimer = null; }
+    timerHandoff = null;
+  }
+  // 标记完成是子→父 IPC，没有返回值；等宿主回推后再校验一次，避免写失败时假装完成。
+  function scheduleHandoffVerify() {
+    if (handoffVerifyTimer) clearTimeout(handoffVerifyTimer);
+    handoffVerifyTimer = setTimeout(function () {
+      handoffVerifyTimer = null;
+      if (!timerHandoff) return;
+      var it = null;
+      var items = (todoState && todoState.items) || [];
+      for (var i = 0; i < items.length; i++) if (items[i].id === timerHandoff.doneId) { it = items[i]; break }
+      if (!it || !it.done) {
+        clearTimerHandoff();
+        showTimerBubble(timerRemindMs());
+      }
+    }, 1200);
+  }
+  function enterHandoff(it) {
+    if (!it) { hideBubble(); return; }
+    cancelPomoAutoNext();
+    var next = nextUnfinishedTodo(it.id);
+    timerHandoff = {
+      doneId: it.id,
+      doneText: String(it.text || ''),
+      nextId: next ? next.id : '',
+      nextText: next ? String(next.text || '') : '',
+      nextTimerLabel: next ? todoTimerLabel(next) : '',
+      nextMode: next ? (next.tm === 'up' || next.tm === '' ? next.tm : 'down') : '',
+      changed: false,
+    };
+    todoJustDone[it.id] = true;
+    whaleApi.todoSend({ op: 'toggle', id: it.id });
+    showTimerBubble(0);
+    scheduleHandoffVerify();
+  }
+  function startNextTodo() {
+    if (!timerHandoff) return;
+    var next = null;
+    var items = (todoState && todoState.items) || [];
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].id === timerHandoff.nextId && !items[i].done) { next = items[i]; break }
+    }
+    if (!next) {
+      next = nextUnfinishedTodo(timerHandoff.doneId);
+      if (!next) {
+        timerHandoff.nextId = '';
+        timerHandoff.nextText = '';
+        timerHandoff.nextTimerLabel = '';
+        timerHandoff.nextMode = '';
+        timerHandoff.changed = true;
+        showTimerBubble(0);
+        return;
+      }
+      timerHandoff.nextId = next.id;
+      timerHandoff.nextText = String(next.text || '');
+      timerHandoff.nextTimerLabel = todoTimerLabel(next);
+      timerHandoff.nextMode = next.tm === 'up' || next.tm === '' ? next.tm : 'down';
+    }
+    // 用点击这一刻重查到的任务重算模式：入接力后设置页可能把这条改成「不计时」
+    var mode = next.tm === 'up' || next.tm === '' ? next.tm : 'down';
+    clearTimerHandoff();
+    if (mode === '') {
+      if (next.id !== todoState.focusId) whaleApi.todoSend({ op: 'focus', id: next.id });
+      hideBubble();
+      return;
+    }
+    startTodoTimer(next);
+  }
+
   // 两位补零：报时 / 计时 / 重置时刻统一共用（原先 timeLabel 内另抄了一份 p2）
   function pad2(n) { return n < 10 ? '0' + n : String(n); }
+  // 本地日期键（YYYY-MM-DD）：番茄轮次的「跨日归零」必须按用户本地日历算。
+  // 早先用 toISOString() 取的是 UTC 日期 —— 东八区 0–8 点时它会退回「昨天」，
+  // 番茄轮次要到早上 8 点才归零，跨零点反而继续累计。
+  function localDayKey() {
+    var d = new Date();
+    return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+  }
   // 时长统一显示成 时:分:秒（满一分钟起就带小时位，避免正计时走成 90:00 这种读不出小时的形式）
   function fmtClock(ms) {
     var s = Math.max(0, Math.round(ms / 1000));
@@ -2040,10 +2901,18 @@
     if (total <= 0) total = TIMER_MIN_DEFAULT * 60;
     return Math.min(TIMER_MAX_SEC, total);
   }
+  // 把「默认时长」写进三段输入框。焦点所在的那一格跳过：用户正在编辑时被覆盖，
+  // 看起来就像「输入实时生效」。只在宿主默认值真的变化时才走到这里（见 applyConfig）
+  function timerEditing(el) { return document.activeElement === el; }
+  function writeTimerTargetSec(sec) {
+    var ts = Math.min(TIMER_MAX_SEC, Math.max(1, Math.round(Number(sec)) || TIMER_MIN_DEFAULT * 60));
+    if (!timerEditing(timerHour)) timerHour.value = String(Math.floor(ts / 3600));
+    if (!timerEditing(timerMin)) timerMin.value = String(Math.floor((ts % 3600) / 60));
+    if (!timerEditing(timerSec)) timerSec.value = String(ts % 60);
+  }
   function timerActive() { return timerRunning || timerPaused || timerFinished; }
-  // —— 到点动作条：只有「时间到」且气泡在显示时才出现（挂在 body 上，定位到气泡下缘） ——
-  function updateTimerActions() {
-    if (!timerFinished || !bubbleShown) { timerDoneActions.classList.remove('dshwv-actions-open'); return; }
+  // 休息按钮的显隐 / 文案：正常到点与接力态共用一份计算。
+  function updateBreakButton() {
     // 休息轮自己的到点：不再给「休息」（刚休息完）也不给「完成这条」（这一轮没在专注）
     // 番茄循环开启时，按 cycle 判断下一轮是短休还是长休，决定按钮显隐与文案
     var breakMin = timerBreakMin;
@@ -2063,15 +2932,41 @@
     } else {
       timerBreakBtn.title = '';
     }
-    // 「完成这条」只在有正在专注的待办、且专注功能开着时出现
-    timerTodoBtn.style.display = (focusOn && !timerIsBreak && todoFocusText()) ? '' : 'none';
+  }
+  // —— 到点动作条：只有「时间到 / 接力」且气泡在显示时才出现（挂在 body 上，定位到气泡下缘） ——
+  function updateTimerActions() {
+    if (timerHandoff) {
+      if (!bubbleShown) { timerDoneActions.classList.remove('dshwv-actions-open'); return; }
+      updateBreakButton();
+      timerNextBtn.style.display = timerHandoff.nextId ? '' : 'none';
+      timerNextBtn.textContent = timerHandoff.nextMode === '' ? '设为专注' : '开始下一条';
+      timerNextBtn.title = timerHandoff.nextMode === ''
+        ? '把下一条设为当前专注（该条设为不计时）'
+        : '开始下一条待办的计时';
+      timerAgainBtn.style.display = 'none';
+      timerTodoBtn.style.display = 'none';
+      timerPomoCancelBtn.style.display = 'none';
+      timerDoneBtn.style.display = '';
+      timerDoneActions.classList.add('dshwv-actions-open');
+      positionTimerActions();
+      return;
+    }
+    if (!timerFinished || !bubbleShown) { timerDoneActions.classList.remove('dshwv-actions-open'); return; }
+    updateBreakButton();
+    timerNextBtn.style.display = 'none';
+    timerDoneBtn.style.display = '';
+    // 「完成这条」只在有正在专注的待办时出现（focusOn 不再门控）
+    timerTodoBtn.style.display = (!timerIsBreak && todoFocusText()) ? '' : 'none';
+    // 「取消衔接」只在确实在等自动开始时出现
+    timerPomoCancelBtn.style.display = pomoAutoPending ? '' : 'none';
     // 休息结束后的这一轮是「回到专注」：叫「再来一轮」会被当成再来一次休息
     timerAgainBtn.textContent = timerIsBreak ? '继续专注' : '再来一轮';
     timerAgainBtn.title = timerIsBreak ? '按休息前的专注时长接着计时' : '按上次的目标接着计时';
     // 番茄循环自动衔接提示：如果 timerAutoNext 开启，给按钮加个提示
-    if (timerPomoOn && timerAutoNext) {
-      timerAgainBtn.title += '（自动衔接已开启，1.5 秒后自动开始）';
+    if (pomoAutoPending) {
+      timerAgainBtn.title += '（' + pomoAutoLeftSec() + ' 秒后自动开始，可点「取消衔接」停下）';
     }
+    timerAgainBtn.style.display = '';
     timerDoneActions.classList.add('dshwv-actions-open');
     positionTimerActions();
   }
@@ -2118,6 +3013,32 @@
     timerSec.value = String(n % 60);
     startTimer();
   }
+  // 从待办直接开始（学番茄 todo：每条待办各自配「倒计时 N 分钟 / 正计时 / 不计时」）：
+  // 点该条的「开始」= 设为当前专注 + 按它自己的参数启动计时。
+  // 已有计时在跑时不悄悄丢掉：过 1 分钟先弹内联确认，短进度/休息轮直接切（见 requestTimerDiscard）
+  function startTodoTimer(it) {
+    if (!it) return;
+    var tm = it.tm === 'up' || it.tm === '' ? it.tm : 'down';
+    function begin() {
+      // 只在还不是当前专注时才发 focus：宿主的 focus 是开关语义，对已专注的条目再发一次会取消它
+      if (it.id !== todoState.focusId) whaleApi.todoSend({ op: 'focus', id: it.id });
+      if (!tm) { closeMenu(); return; } // 不计时：只设专注
+      timerMode = tm;
+      timerSelect.value = tm;
+      if (tm === 'down') {
+        var mins = Math.max(1, Math.min(600, Math.round(Number(it.mins) || 25)));
+        var sec = Math.min(TIMER_MAX_SEC, mins * 60);
+        timerHour.value = String(Math.floor(sec / 3600));
+        timerMin.value = String(Math.floor((sec % 3600) / 60));
+        timerSec.value = String(sec % 60);
+      }
+      startTimer();
+      // 开始后收起菜单：计时气泡才是此刻的主角，菜单压在上面反而挡住读数
+      closeMenu();
+    }
+    if (timerRunning || timerPaused) { requestTimerDiscard(begin); return; }
+    begin();
+  }
   function timerModeLabel() {
     if (timerIsBreak) return '休息';
     return timerMode === 'up' ? '正计时' : (timerMode === 'at' ? '定时' : '倒计时');
@@ -2144,16 +3065,27 @@
     return timerFocusTail('共 ' + fmtClock((Number(timerArg) || 0) * 1000));
   }
   function timerLines() {
+    if (timerHandoff) {
+      var nextLine = timerHandoff.nextId
+        ? '下一条：' + timerHandoff.nextText + '（' + timerHandoff.nextTimerLabel + '）'
+        : (timerHandoff.changed ? '待办已变化' : '待办已清空，休息一下');
+      return [
+        { t: '任务完成', s: 'A', c: '' },
+        { t: '✓ ' + timerHandoff.doneText, s: 'P', c: '#2fa24c', w: true },
+        { t: nextLine, s: 'C', c: '', w: true },
+      ];
+    }
     if (timerFinished) {
-      // 到点：大字给「时间到！」，说明行优先显示用户自己写的留言（这才是他要知道的「接下来做什么」）
+      // 到点：大字给「结束」，说明行优先显示用户自己写的留言（这才是他要知道的「接下来做什么」）
       var lines = [
         { t: timerModeLabel() + '结束', s: 'A', c: '' },
         { t: timerNote || '时间到！', s: timerNote ? 'B' : 'P', c: '#e0433f', w: !!timerNote },
       ];
-      // 番茄循环自动衔接中：在尾注行前插入提示
+      // 番茄循环自动衔接中：在尾注行前插入提示。
+      // 带秒数而不是只写「即将开始…」：用户要知道还剩多久能反悔，静止的省略号只会让人以为卡住了
       if (pomoAutoPending) {
         var nextLabel = timerIsBreak ? '专注' : (shouldLongBreak() ? '长休' : '短休');
-        lines.push({ t: '即将开始' + nextLabel + '...', s: 'C', c: '#2f57d6', w: true });
+        lines.push({ t: '即将开始' + nextLabel + ' ' + pomoAutoLeftSec() + 's', s: 'C', c: '#2f57d6', w: true });
       } else {
         lines.push({ t: timerTailText(), s: 'C', c: '', w: true });
       }
@@ -2178,10 +3110,73 @@
   // 单次推进：刷新气泡显示 + 判断是否到点（窗口被后台节流时，恢复可见时会立即补一次）
   function timerStep() {
     if (!timerRunning) return;
-    if (timerMode !== 'up' && Date.now() >= timerEndAt) { finishTimer(); return; }
+    if (timerMode !== 'up' && Date.now() >= timerEndAt) {
+      // 电脑休眠 / 窗口被长时间节流后唤醒：与 restoreTimer 同口径，超出宽限就静默翻页，
+      // 不再补响铃、补记一轮 —— 否则睡一夜回来会突然「时间到」并多记一段专注
+      if (Date.now() - timerEndAt > RESTORE_GRACE_MS) { timerReported = true; resetTimer(); return; }
+      finishTimer();
+      return;
+    }
     updateTimerClock();
+    updateTimerRing();
     // 菜单开着时同步读数行（关着就不写 DOM，打开那一刻由 toggleMenu 补一次）
     if (menuOpen) updateTimerStatus();
+  }
+  // 环形进度条：每秒刷新进度与阶段配色。正计时无固定总量，用已计秒数对 3600 取模做循环动画
+  // 配色与「环形激活」class 只在阶段切换时才变：每秒都重写同值等于每秒让内联样式失效重算
+  var ringColorCache = '';
+  function updateTimerRing() {
+    if (!timerRunning && !timerPaused) {
+      ringSvg.classList.remove('dshwv-ring-active');
+      // 颜色变量是内联的，不随类名一起失效：停表后不清掉，下一轮会从「上一轮的颜色」
+      // 渐变成新颜色（CSS 里 stroke 有 .4s 过渡），看着像配色串了台
+      ringSvg.style.removeProperty('--dshw-ring-color');
+      ringColorCache = ''; // 变量被摘掉了，缓存也要失效，否则下一轮同色会被跳过而根本不写回
+      return;
+    }
+    var firstFrame = !ringSvg.classList.contains('dshwv-ring-active');
+    if (firstFrame) ringSvg.classList.add('dshwv-ring-active');
+    // 阶段配色：休息轮→绿（长休→橙），专注轮→蓝
+    var color = timerIsBreak
+      ? ((timerPomoOn && shouldLongBreak()) ? '#e8a317' : '#2fa24c')
+      : '#4a90d9';
+    if (color !== ringColorCache) {
+      ringSvg.style.setProperty('--dshw-ring-color', color);
+      ringColorCache = color;
+    }
+    // 进度计算
+    var pct = 0;
+    if (timerMode === 'up') {
+      // 正计时：无固定总量，以 60 分钟为周期循环
+      var elapsed = timerRunning ? timerElapsed + (Date.now() - timerStartAt) : timerElapsed;
+      pct = (elapsed % 3600000) / 3600000;
+    } else if (timerMode === 'at') {
+      // 定时：总量 = 起止跨度（timerAtSpan）。暂停时用剩余量，恢复后按跨度重算
+      if (timerAtSpan > 0) {
+        var atRemain = timerRunning ? Math.max(0, timerEndAt - Date.now()) : timerRemain;
+        pct = 1 - (atRemain / timerAtSpan);
+      }
+    } else {
+      // 倒计时：剩余/总量 —— 从满圈开始递减，直观表达「还剩多少」
+      // （早先按已用比例画，圈是一点点涨满的，与「倒计时」的直觉相反）
+      var totalSec = timerArg ? Number(timerArg) : 0;
+      if (totalSec > 0) {
+        var remain = timerRunning ? Math.max(0, timerEndAt - Date.now()) : timerRemain;
+        pct = remain / (totalSec * 1000);
+      }
+    }
+    pct = Math.max(0, Math.min(1, pct));
+    var ringOffset = RING_CIRCUM * (1 - pct);
+    if (firstFrame) {
+      // 圈刚亮起这一帧直接落到当前进度、不走 CSS 的 .9s 过渡：
+      // 否则倒计时会先「从空圈涨满」再开始递减，与「从满开始减少」的语义打架
+      ringFill.style.transition = 'none';
+      ringFill.setAttribute('stroke-dashoffset', String(ringOffset));
+      ringSvg.getBoundingClientRect(); // 强制回流，让 none 生效后再恢复过渡
+      ringFill.style.transition = '';
+    } else {
+      ringFill.setAttribute('stroke-dashoffset', String(ringOffset));
+    }
   }
   function startTimerTick() {
     if (timerTick) return;
@@ -2196,6 +3191,8 @@
   // 计时气泡的自动收起时长：0 = 常驻。到点提醒用「提醒时长」；计时中：
   // 「只显计时」开 → 按「气泡常驻」；关 → 只先弹出来提示一下，随后回到余额/用量的常规气泡
   function timerBubbleAutoMs() {
+    // 接力气泡是决策点，必须等用户选；不能被「气泡常驻 / 只显计时」变更重新布防成 8s 自动收起
+    if (timerHandoff) return 0;
     if (timerFinished) return timerRemindMs();
     return (timerBubbleOnly && timerBubblePin) ? 0 : bubbleDwellMs;
   }
@@ -2204,6 +3201,7 @@
   // 退出「刚结束」展示态：气泡收起 / 用户点了鲸鱼都算已经看到，标记清掉后
   // 菜单时长与留言重新可编辑、气泡也不再一直被计时占用（否则点鲸鱼永远只弹「时间到」）
   function clearTimerDone() {
+    clearTimerHandoff();
     timerFinished = false;
     timerDoneActions.classList.remove('dshwv-actions-open');
     syncTimerMenu();
@@ -2214,7 +3212,10 @@
   function notifyTimerDone() {
     if (!timerNotifyOn && !(timerMailOn && mailOn)) return;
     var text = '小鲸鱼提醒：' + timerDoneText();
-    try { whaleApi.notifyTimerDone(text); } catch (err) { logErr('[whale][page] 计时通知失败', err && err.message); }
+    try {
+      // 两个开关随文案一起交给宿主：宿主只看 text 时，timerNotifyOn / timerMailOn 永远不生效
+      whaleApi.notifyTimerDone(text, { system: timerNotifyOn, mail: timerMailOn && mailOn });
+    } catch (err) { logErr('[whale][page] 计时通知失败', err && err.message); }
   }
   // 到点说的一句话：用户留言优先，没有就按模式给默认说法。
   // 倒计时的 timerArg 是秒数串，必须换算成 时:分:秒 —— 早先直接拼出来是「倒计时结束（1500）」
@@ -2231,19 +3232,21 @@
       mode: timerMode,
       running: timerRunning,
       paused: timerPaused,
-      startAt: (timerRunning && timerMode === 'up') ? timerStartAt : 0,
+      startAt: (timerRunning && (timerMode === 'up' || timerMode === 'at')) ? timerStartAt : 0,
       endAt: (timerRunning && timerMode !== 'up') ? timerEndAt : 0,
       elapsed: timerMode === 'up' ? timerElapsed : 0,
       remain: (timerPaused && timerMode !== 'up') ? timerRemain : 0,
       arg: timerArg,
       // 休息轮必须一起存：重载后恢复成专注轮会把休息记成专注，且「继续专注」会按休息时长重启
       isBreak: timerIsBreak,
+      // 本轮是否已记账：重载后补弹「时间到」/「到点后重置」都靠它挡住第二次上报
+      reported: timerReported,
       back: timerBreakBackSec,
-      // 番茄循环状态：cycle = 本轮是第几个番茄，cycleDate = 记录 cycle 的日期（跨日归零），
-      // breakLong = 上一次休息是否为长休（用于每 N 轮判断下一轮是短休还是长休）
+      // 番茄循环状态：cycle = 本轮是第几个番茄，cycleDate = 记录 cycle 的本地日期（跨日归零）
       cycle: timerCycle,
       cycleDate: timerCycleDate,
-      breakLong: timerBreakLong,
+      // 「定时」模式的总跨度（毫秒）：进度环当总量用，暂停/重载后也要能算
+      span: timerAtSpan,
     };
   }
   function saveTimerState() {
@@ -2258,13 +3261,14 @@
     timerMode = t.mode;
     timerArg = typeof t.arg === 'string' ? t.arg : '';
     timerIsBreak = t.isBreak === true;
+    timerReported = t.reported === true;
     timerBreakBackSec = Math.max(0, Math.round(Number(t.back) || 0));
-    // 番茄循环状态恢复：cycle / cycleDate / breakLong
+    // 番茄循环状态恢复：cycle / cycleDate / 定时跨度
     timerCycle = Math.max(0, Math.round(Number(t.cycle) || 0));
     timerCycleDate = (typeof t.cycleDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(t.cycleDate)) ? t.cycleDate : '';
-    timerBreakLong = t.breakLong === true;
-    // 跨日归零：如果 cycleDate 不是今天，重置 cycle
-    var today = new Date().toISOString().slice(0, 10);
+    timerAtSpan = Math.max(0, Math.round(Number(t.span) || 0));
+    // 跨日归零：按本地日历判断（UTC 日期在东八区凌晨会退回昨天）
+    var today = localDayKey();
     if (timerCycleDate && timerCycleDate !== today) {
       timerCycle = 0;
       timerCycleDate = '';
@@ -2273,10 +3277,26 @@
     if (t.running) {
       if (timerMode === 'up') {
         timerStartAt = Number(t.startAt) || Date.now();
+        // 暂停过再继续的正计时，已计毫秒在 elapsed 里；漏还原会让「已用」只剩最后一段
+        timerElapsed = Math.max(0, Number(t.elapsed) || 0);
       } else {
         timerEndAt = Number(t.endAt) || 0;
-        // 挂件不在期间已到点：补一次提示音 + 通知 + 气泡
-        if (!timerEndAt || Date.now() >= timerEndAt) { finishTimer(); return; }
+        // 挂件不在期间已到点：宽限内补一次提示音 + 通知 + 气泡；超出宽限静默放弃。
+        // 旧行为是无条件 finishTimer()，重载隔了几天也会补弹「时间到」、补记一轮专注
+        if (!timerEndAt) { resetTimer(); return; }
+        var late = Date.now() - timerEndAt;
+        if (late >= 0) {
+          if (late <= RESTORE_GRACE_MS) { finishTimer(); return; }
+          // 超出宽限：这一轮既不补「时间到」也不记账。挂件没开着，用户到底专注了多久
+          // 无从证实，补一条「放弃 N 分钟」反而把统计带偏 —— 标记为已记账，让这一轮静默翻页
+          timerReported = true;
+          resetTimer();
+          return;
+        }
+        // 定时模式的进度环需要起点；老状态没存 startAt 时用「终点 - 跨度」反推
+        if (timerMode === 'at') {
+          timerStartAt = Number(t.startAt) || (timerAtSpan > 0 ? timerEndAt - timerAtSpan : 0);
+        }
       }
       timerRunning = true;
       timerPaused = false;
@@ -2289,21 +3309,40 @@
     timerElapsed = Math.max(0, Number(t.elapsed) || 0);
     timerRemain = Math.max(0, Number(t.remain) || 0);
     timerPaused = !!t.paused;
+    updateTimerRing(); // 剩余时间已还原，环也要按它重画；否则停在重载前的旧比例
     syncTimerMenu();
     if (timerPaused) showTimerBubble(timerBubbleAutoMs());
   }
-  // 专注闭环：倒计时走完记一轮（正计时 / 定时没有「目标时长」，不计入统计）。
-  // 与到点通知分开判：通知开关关着也要计数，所以不能搭 whale:timer-done 的顺风车。
-  // 休息轮也不算 —— 休息记成专注会把统计彻底带偏
-  function reportFocusRound() {
-    if (!focusOn || timerIsBreak || timerMode !== 'down') return;
-    // 目标时长（秒）。0 / 非法说明这一轮根本没设定时长（脏恢复态），不记
-    var sec = Math.round(Number(timerArg) || 0);
-    if (sec <= 0) return;
-    // 分钟数四舍五入，但**不足 1 分钟按 1 分钟计**：30 秒一轮也是一次「完成」，
-    // 记 0 分钟会让「今日 N 轮 / 0 分钟」自相矛盾（柱状图按分钟画，这一轮直接看不见）
-    var minutes = Math.max(1, Math.round(sec / 60));
-    try { whaleApi.focusRound(minutes); } catch (err) { logErr('[whale][page] 上报专注失败', err && err.message); }
+  // 专注会话上报：只描述「这一轮实际投了多久、怎么计的、走完还是放弃」，
+  // 什么算一轮、归哪天、天表怎么聚，全交给宿主（lib/focus.js）判 ——
+  // 早先只在倒计时到点这一个入口记账，正计时与半途放弃都不落，用户坐了 40 分钟统计里却是 0。
+  // 与到点通知分开判：通知开关关着也要记账，统计与提醒是两件独立的事。
+  function reportFocusSession(extra) {
+    if (timerReported) return; // 一轮只记一次（到点后重置 / 重载后补弹时间到都会二次进入）
+    if (!focusOn) return;      // 专注记录开关
+    if (timerMode !== 'down' && timerMode !== 'up' && timerMode !== 'at') return;
+    var ms = timerProgressMs();
+    var abandoned = !!(extra && extra.abandoned);
+    // 刚开始不到 1 分钟就放弃：本来就是「没进入状态」，记一行 1 分钟反而看不出意义
+    if (abandoned && ms < DISCARD_CONFIRM_MS) return;
+    // 休息轮只记「走完的」：明细里带休息徽标，天表不聚合它。
+    // 中途被打断的休息不是专注数据（躺了两分钟就被顶掉，说明不了任何事），别往日志里倒噪音
+    if (timerIsBreak && abandoned) return;
+    timerReported = true;
+    var now = Date.now();
+    // 结束时刻取「本轮真正的终点」：走完用预定终点（跨零点的轮次归到结束那天），
+    // 中途放弃就是按下按钮这一刻
+    var endAt = timerEndAt > 0 ? Math.min(timerEndAt, now) : now;
+    try {
+      whaleApi.focusSession({
+        mode: timerMode,
+        startAt: Math.max(0, endAt - ms),
+        endAt: endAt,
+        minutes: Math.round(ms / 60000),
+        isBreak: timerIsBreak,
+        abandoned: abandoned,
+      });
+    } catch (err) { logErr('[whale][page] 上报专注会话失败', err && err.message); }
   }
   // 休息结束：timerArg 这期间存的是休息秒数，不还原的话「继续专注」会按休息时长重启。
   // 三段时间输入框全程没动过（见 timerBreakSec 的注释），所以这里只还原 timerArg 即可。
@@ -2318,18 +3357,39 @@
     return timerPomoOn && timerCycle > 0 && (timerCycle % timerLongEvery === 0);
   }
   // 番茄循环：自动开始下一轮（专注→休息 或 休息→专注）。timerAutoNext 开启且 timerPomoOn 时调用
-  var pomoAutoTimer = null; // 自动衔接的定时器 ID，用于取消
-  var pomoAutoPending = false; // 是否正在等待自动衔接（用于 UI 显示）
+  var POMO_NEXT_DELAY_MS = 3000; // 衔接等待期：给用户「看清刚结束、还想不想接着来」的时间，且够点一次「取消衔接」
+  var pomoAutoTimer = null;      // 自动衔接的定时器 ID，用于取消
+  var pomoAutoTick = null;       // 等待期内每秒刷一次倒计时的定时器
+  var pomoAutoEndAt = 0;         // 等待期的结束时刻（ms），倒计时秒数由它反算，不靠计数器自减
+  var pomoAutoPending = false;   // 是否正在等待自动衔接（用于 UI 显示）
+  function pomoAutoLeftSec() {
+    if (!pomoAutoPending) return 0;
+    return Math.max(1, Math.ceil((pomoAutoEndAt - Date.now()) / 1000));
+  }
+  function stopPomoAutoTick() {
+    if (pomoAutoTick) { clearInterval(pomoAutoTick); pomoAutoTick = null; }
+  }
   function schedulePomoNext(isBreakJustFinished) {
-    if (!timerPomoOn || !timerAutoNext) return;
+    if (!timerPomoOn) return;
     if (timerMode !== 'down') return; // 自动衔接只对倒计时模式生效
-    if (pomoAutoTimer) { clearTimeout(pomoAutoTimer); pomoAutoTimer = null; }
-    // 延迟 1.5 秒再自动开始：给用户一个反应窗口，期间点任何按钮都会取消自动衔接
+    // 专注结束 → 番茄循环本身就该自动进入休息（与 README / 设置页文案一致）；
+    // 休息结束 → 只有勾了「自动衔接下一轮」才自动回到专注
+    if (isBreakJustFinished && !timerAutoNext) return;
+    cancelPomoAutoNext();
+    // 延迟再自动开始：给用户一个反应窗口，期间点「取消衔接」或任意计时动作可取消
     pomoAutoPending = true;
-    showTimerBubble(timerRemindMs()); // 刷新气泡显示「即将开始...」
+    pomoAutoEndAt = Date.now() + POMO_NEXT_DELAY_MS;
+    showTimerBubble(timerRemindMs()); // 刷新气泡显示「即将开始…」
+    // 每秒刷新气泡里的秒数与动作条：等待期只有几秒，用 250ms 让读秒不显得跳字
+    pomoAutoTick = setInterval(function () {
+      if (!pomoAutoPending) { stopPomoAutoTick(); return; }
+      if (bubbleTimerActive && timerFinished) render();
+      updateTimerActions();
+    }, 250);
     pomoAutoTimer = setTimeout(function () {
       pomoAutoTimer = null;
       pomoAutoPending = false;
+      stopPomoAutoTick();
       if (isBreakJustFinished) {
         // 休息结束 → 开始下一轮专注
         repeatTimerTimer(0); // 按之前的专注时长重新开始
@@ -2340,37 +3400,37 @@
           repeatTimerTimer(breakMin * 60, true);
         }
       }
-    }, 1500);
+      updateTimerActions();
+    }, POMO_NEXT_DELAY_MS);
   }
   // 取消自动衔接（用户手动操作时调用）
   function cancelPomoAutoNext() {
     if (pomoAutoTimer) { clearTimeout(pomoAutoTimer); pomoAutoTimer = null; }
+    stopPomoAutoTick();
     pomoAutoPending = false;
+    pomoAutoEndAt = 0;
   }
   // 到点：提示音（沿用音效开关与音量）+ 系统通知 + 气泡显示「时间到！」，默认 8s 后自动收起
   function finishTimer() {
     timerRunning = false;
     timerPaused = false;
     stopTimerTick();
+    updateTimerRing();
     timerFinished = true;
     timerClockText = '';
     playPress();
     notifyTimerDone();      // 必须早于 restoreFocusAfterBreak：通知要按「这一轮」的时长说话
-    // 番茄循环状态更新：专注轮结束时递增 cycle，休息轮结束时更新 breakLong
+    // 番茄循环状态更新：专注轮结束时递增 cycle（按本地日期跨日归零）
     var wasBreak = timerIsBreak;
     if (timerPomoOn && timerMode === 'down') {
-      var today = new Date().toISOString().slice(0, 10);
+      var today = localDayKey();
       if (!wasBreak) {
-        // 专注轮结束：递增 cycle，更新 cycleDate（跨日归同时保留
+        // 专注轮结束：递增 cycle，更新 cycleDate
         timerCycle = (timerCycleDate === today) ? timerCycle + 1 : 1;
         timerCycleDate = today;
-      } else {
-        // 休息轮结束：记录本次是否为长休（在 cycle 递增前判断，因为 cycle 已经加过了）
-        // 实际上应该在专注结束时判断下一轮是否长休，这里简化处理
-        timerBreakLong = (timerCycle % timerLongEvery === 0);
       }
     }
-    reportFocusRound();
+    reportFocusSession();
     restoreFocusAfterBreak();
     saveTimerState();
     syncTimerMenu();
@@ -2380,7 +3440,10 @@
   }
   // asBreak：起的是「休息」轮 —— 不记专注、不挂专注尾注、时长不写进三段时间输入框
   function startTimer(asBreak) {
+    clearTimerHandoff();
+    cancelPomoAutoNext(); // 用户手动起一轮 → 不再等自动衔接（否则几秒后被它盖掉）
     timerIsBreak = !!asBreak;
+    timerReported = false; // 新一轮开始：记账标记归零，这一轮到点/放弃时才落一笔
     if (!timerIsBreak) timerBreakBackSec = 0;
     var now = Date.now();
     if (timerMode === 'down') {
@@ -2399,6 +3462,7 @@
       timerArg = String(sec); // 秒数：气泡「共 x」与「再来一轮」都按它复原
       timerEndAt = now + sec * 1000;
       timerRemain = 0;
+      timerAtSpan = 0; // 定时模式的跨度只在 at 分支用，别把上一轮的值带过来
     } else if (timerMode === 'at') {
       var m = /^(\d{1,2}):(\d{2})$/.exec(String(timerTime.value || ''));
       var hh = m ? Math.min(23, Number(m[1])) : 7;
@@ -2411,11 +3475,15 @@
       if (d.getTime() <= now) d.setDate(d.getDate() + 1);
       timerEndAt = d.getTime();
       timerRemain = 0;
+      // 进度环的「总量」= 从现在到目标时刻的跨度，起点一并记下（暂停/重载后仍能算比例）
+      timerStartAt = now;
+      timerAtSpan = Math.max(0, timerEndAt - now);
     } else {
       timerMode = 'up';
       timerStartAt = now;
       timerElapsed = 0;
       timerRemain = 0;
+      timerAtSpan = 0;
     }
     timerRunning = true;
     timerPaused = false;
@@ -2424,13 +3492,16 @@
     if (timerFinished) hideBubble();
     timerFinished = false;
     startTimerTick();
-    saveCfg();       // 记住这次用的模式与参数
+    updateTimerRing();
+    // 不 saveCfg：模式与时长是本轮参数，运行态交给 saveTimerState 持久化。
+    // 默认值只由设置页写 —— 早前这里整份落盘，点一次 5 分钟快捷档，下次的默认时长就成 5 分钟了
     saveTimerState();
     syncTimerMenu();
     showTimerBubble(timerBubbleAutoMs()); // 开始/暂停/继续都先弹计时：常驻时不收起，否则短暂提示
   }
   // 暂停：保留进度（正计时记住已计时间，倒计时/定时记住剩余时间），继续时接着走
   function pauseTimer() {
+    cancelPomoAutoNext(); // 暂停也是「用户已经接管」，别让自动衔接在等待期结束后把新一轮顶上来
     var now = Date.now();
     if (timerMode === 'up') {
       timerElapsed += now - timerStartAt;
@@ -2442,24 +3513,33 @@
     timerRunning = false;
     timerPaused = true;
     stopTimerTick();
+    updateTimerRing();
     saveTimerState();
     syncTimerMenu();
     showTimerBubble(timerBubbleAutoMs());
   }
   function resumeTimer() {
+    cancelPomoAutoNext();
     var now = Date.now();
     if (timerMode === 'up') timerStartAt = now;
-    else timerEndAt = now + Math.max(0, timerRemain);
+    else {
+      timerEndAt = now + Math.max(0, timerRemain);
+      // 定时模式恢复起点，进度环接着按跨度算（暂停期间不丢总量）
+      if (timerMode === 'at') timerStartAt = timerAtSpan > 0 ? timerEndAt - timerAtSpan : 0;
+    }
     timerRemain = 0;
     timerRunning = true;
     timerPaused = false;
     startTimerTick();
+    updateTimerRing();
     saveTimerState();
     syncTimerMenu();
     showTimerBubble(timerBubbleAutoMs());
   }
   // 完全复位（切模式 / 点「重置」）：清掉进度回到未开始；不传 nextMode 则保留当前模式
   function resetTimer(nextMode) {
+    clearTimerHandoff();
+    cancelPomoAutoNext();
     timerRunning = false;
     timerPaused = false;
     timerFinished = false;
@@ -2467,11 +3547,13 @@
     timerBreakBackSec = 0;
     timerBreakSec = 0;
     timerStartAt = 0;
+    timerAtSpan = 0;
     timerEndAt = 0;
     timerElapsed = 0;
     timerRemain = 0;
     timerClockText = '';
     stopTimerTick();
+    updateTimerRing();
     if (nextMode !== undefined) timerMode = nextMode;
     if (bubbleTimerActive) hideBubble();
     saveTimerState();
@@ -2479,22 +3561,20 @@
   }
   function setTimerMode(v) {
     var next = (v === 'up' || v === 'down' || v === 'at') ? v : 'off';
-    resetTimer(next);
-    saveCfg(); // 记住所选模式，重载后不用重新选
+    // 模式是用户显式选的「以后也用这个」：落盘，重载后不用重新选。
+    // 快捷档位 / 待办开始 / 再来一轮只是本轮临时切到倒计时，不走这里、不写默认模式
+    function commitMode() {
+      resetTimer(next);
+      // 先记下新值：宿主回推同一个模式时，applyConfig 不会再去改本地状态
+      cfgTimerModeSeen = next;
+      saveCfg({ timerMode: next });
+    }
+    // 切模式 = 复位当前轮：已经专注一会儿的先问一句（确认期间下拉先回退到当前模式）
+    if (next !== timerMode) { requestTimerDiscard(commitMode); return; }
+    commitMode();
   }
-  function setTimerNotifyOn(v) {
-    timerNotifyOn = !!v;
-    notifyToggle.checked = timerNotifyOn;
-    saveCfg();
-  }
-  // 到点留言 / 休息档：菜单里已无输入框（只在设置页改），本地副本由 applyConfig 回推，
-  // 故这里不再保留 setter
-  function setTimerRemindSec(v) {
-    var n = Math.round(Number(v));
-    timerRemindSec = (n === 0 || n === 5 || n === 8 || n === 15) ? n : 8;
-    remindSelect.value = String(timerRemindSec);
-    saveCfg();
-  }
+  // 到点通知 / 提醒停留 / 留言 / 休息档 / 气泡两个开关：菜单里已无对应控件（只在设置页改），
+  // 本地副本由 applyConfig 回推，故这里不再保留 setter
   // 计时气泡常驻 / 只显计时：两个开关只在设置页改，页面按 applyConfig 回推的配置生效。
   // 计时中切回「常驻」时立刻重新展开气泡，否则要等下一次刷新才看得到
   function applyTimerBubblePrefs() {
@@ -2524,20 +3604,65 @@
       }
     }
   }
-  // 读数行：气泡被点掉 / 自动收起后，菜单里仍能看到这一轮还剩多久（正计时看「已用」），
-  // 休息轮标签直接写「休息」。只在计时中 / 暂停时出现，空闲时没有进度可清
+  // 当前行：计时中 / 暂停时显示读数与暂停；空闲但有专注任务时显示「当前 + 开始」。
+  // timerFinished 时整行隐藏：到点后的主角是气泡动作条 / 接力气泡，不在菜单里重复。
   function updateTimerStatus() {
     var busy = timerRunning || timerPaused;
-    rowTimerStatus.style.display = busy ? '' : 'none';
+    var focusItem = todoFocusItem();
+    var idleFocus = !busy && !timerFinished && !!focusItem;
+    rowTimerStatus.style.display = (busy || idleFocus) ? '' : 'none';
     lockTimerTargets(busy);
-    if (!busy) return;
+    // 合并组的折叠摘要（任务 / 剩余 / 今日轮数）：菜单开着时由 timerStep 每秒调到这里
+    refreshMenuSummaries();
+    if (!busy) {
+      if (pendingTimerDiscard) cancelTimerConfirm();
+      if (idleFocus) {
+        if (timerStatusLabel.textContent !== '当前') timerStatusLabel.textContent = '当前';
+        var idleTaskText = String(focusItem.text || '');
+        if (timerStatusTask.textContent !== idleTaskText) timerStatusTask.textContent = idleTaskText;
+        timerStatusTask.title = idleTaskText;
+        timerStatusTask.style.display = '';
+        timerStatusVal.style.display = 'none';
+        // tm='' 的任务已经设为专注，没有计时可启，不摆「开始」
+        var canStart = focusItem.tm === 'down' || focusItem.tm === 'up';
+        timerCurrentBtn.style.display = canStart ? '' : 'none';
+        if (canStart) {
+          timerCurrentBtn.textContent = '开始';
+          timerCurrentBtn.title = '按这条待办自己的计时方式开始';
+        }
+        timerResetBtn.style.display = 'none';
+      }
+      syncTimerQuick();
+      return;
+    }
     var label = timerIsBreak ? '休息' : (timerMode === 'up' ? '已用' : '剩余');
     if (timerPaused) label += '·暂停';
     if (timerStatusLabel.textContent !== label) timerStatusLabel.textContent = label;
+    if (focusItem && !timerIsBreak) {
+      var busyTaskText = String(focusItem.text || '');
+      if (timerStatusTask.textContent !== busyTaskText) timerStatusTask.textContent = busyTaskText;
+      timerStatusTask.title = busyTaskText;
+      timerStatusTask.style.display = '';
+    } else {
+      timerStatusTask.style.display = 'none';
+    }
+    timerStatusVal.style.display = '';
     var txt = fmtClock(timerRemainMs());
     if (timerStatusVal.textContent !== txt) timerStatusVal.textContent = txt;
+    timerCurrentBtn.style.display = '';
+    timerCurrentBtn.textContent = timerRunning ? '暂停' : '继续';
+    timerCurrentBtn.title = timerRunning ? '暂停当前计时' : '继续当前计时';
+    timerResetBtn.style.display = '';
+    // 确认框挂着时进度每秒在走，文案跟着刷新（否则停在一分钟前的「已专注 01:05」）
+    if (pendingTimerDiscard) updateTimerConfirmText();
+    syncTimerQuick();
   }
   function syncTimerMenu() {
+    // 计时中收到的「默认时长」变更：回到空闲再落到目标输入框（理由见 applyConfig 的 timerSec 分支）
+    if (pendingTimerSec !== null && !timerRunning && !timerPaused) {
+      writeTimerTargetSec(pendingTimerSec);
+      pendingTimerSec = null;
+    }
     timerSelect.value = timerMode;
     timerBtn.textContent = timerRunning ? '暂停' : (timerPaused ? '继续' : '开始');
     // 「目标」两个互斥子行：倒计时行 / 定时刻行各显示自己那套。
@@ -2560,8 +3685,152 @@
     timerSegUnits[1].style.display = down ? '' : 'none';
     timerSegUnits[2].style.display = down ? '' : 'none';
     // 留言与休息档已移到设置页：菜单里不再有对应行，这里也不用显隐
+    syncTimerQuick();
     updateTimerStatus();
     updateTimerActions();
+    // 「双击看余额」提示只在「只显计时开着 + 计时中/暂停」时出现（见 rowTimerPeekHint）
+    syncTimerPeekHint();
+  }
+
+  // —— 放弃本轮的内联确认 ——
+  // 触发点：重置 / 切计时模式 / 换一条待办开始 / 点快捷时长。这些动作都会清零当前进度，
+  // 而进度里最贵的是「已经专注了多久」。低于 1 分钟或休息轮不打扰（本来也没什么可丢的）
+  var DISCARD_CONFIRM_MS = 60000;
+  var pendingTimerDiscard = null;
+  function timerProgressMs() {
+    if (timerMode === 'up') {
+      return timerRunning ? timerElapsed + (Date.now() - timerStartAt) : Math.max(0, timerElapsed);
+    }
+    if (timerMode === 'down') {
+      var total = Math.max(0, Number(timerArg) || 0) * 1000;
+      if (!total) return 0;
+      var remain = timerRunning ? Math.max(0, timerEndAt - Date.now()) : Math.max(0, timerRemain);
+      return Math.min(total, Math.max(0, total - remain));
+    }
+    if (timerMode === 'at') {
+      var span = Math.max(0, timerAtSpan);
+      if (!span) return 0;
+      var left = timerRunning ? Math.max(0, timerEndAt - Date.now()) : Math.max(0, timerRemain);
+      return Math.min(span, Math.max(0, span - left));
+    }
+    return 0;
+  }
+  function discardNeedsConfirm() {
+    return (timerRunning || timerPaused) && !timerIsBreak && timerProgressMs() >= DISCARD_CONFIRM_MS;
+  }
+  function updateTimerConfirmText() {
+    timerConfirmText.textContent = '已专注 ' + fmtClock(timerProgressMs()) + '，放弃后只记时长、不算一轮';
+  }
+  function syncTimerConfirm() {
+    var busy = timerRunning || timerPaused;
+    if (!busy && pendingTimerDiscard) pendingTimerDiscard = null;
+    // 「要不要问」只在按下放弃入口那一刻判一次：进度是随秒涨的，刚过 1 分钟时问了，
+    // 下一跳就不能再按「已不够久」把问题收掉 —— 秒针一跳确认行就消失，用户根本点不到（真机复现过）
+    if (!pendingTimerDiscard) { rowTimerConfirm.style.display = 'none'; return; }
+    var wasShown = rowTimerConfirm.style.display !== 'none';
+    rowTimerConfirm.style.display = '';
+    updateTimerConfirmText();
+    // 触发点可能在顶部重置、待办行「开始」或底部快捷档；确认行紧随当前行，
+    // 首次出现时滚到可见，避免「点了没反应」。
+    if (!wasShown) {
+      try { rowTimerConfirm.scrollIntoView({ block: 'nearest' }); } catch (err) {}
+    }
+  }
+  function cancelTimerConfirm() {
+    var had = !!pendingTimerDiscard;
+    pendingTimerDiscard = null;
+    rowTimerConfirm.style.display = 'none';
+    // 只在真取消过时才回写下拉：空闲时 updateTimerStatus 每秒都会走到这里，
+    // 每秒给 select 赋值会把用户正展开的模式下拉重置掉
+    if (had) timerSelect.value = timerMode;
+  }
+  function confirmTimerDiscard() {
+    var run = pendingTimerDiscard;
+    pendingTimerDiscard = null;
+    rowTimerConfirm.style.display = 'none';
+    if (run) { settleTimerDiscard(); run(); }
+  }
+  // 放弃出口：重置 / 切模式 / 换待办 / 快捷档都会顶掉当前轮，四个入口各判一次迟早漏一个，
+  // 统一在「真的要把这一轮丢掉」之前记一笔 —— 按实际分钟记，不算一轮（判定在宿主）。
+  // 「放弃」= 没走到预定终点：只有倒计时 / 定时中途停下才算；正计时本来就没有终点，
+  // 用户点停就是正常收尾，标成放弃会让明细里平白多一条「被打断」。
+  // 但不满 1 分钟的正计时同样不值得记（与放弃门槛一致，见 reportFocusSession 的短路）
+  function settleTimerDiscard() {
+    if (!timerRunning && !timerPaused) return; // 空闲/已走完：没有正在进行的轮次要记
+    if (timerMode === 'up' && timerProgressMs() < DISCARD_CONFIRM_MS) return;
+    reportFocusSession({ abandoned: timerMode !== 'up' });
+  }
+  // 需要确认就挂起、不需要就立刻执行。返回是否已执行（调用方一般不需要关心）
+  function requestTimerDiscard(run) {
+    if (typeof run !== 'function') return false;
+    if (!discardNeedsConfirm()) {
+      cancelTimerConfirm();
+      settleTimerDiscard();
+      run();
+      return true;
+    }
+    pendingTimerDiscard = run;
+    timerSelect.value = timerMode;
+    syncTimerConfirm();
+    return false;
+  }
+  // —— 快捷时长 ——
+  function quickStartTimer(mins) {
+    var n = Math.max(1, Math.min(600, Math.round(Number(mins) || 0)));
+    if (!n) return;
+    requestTimerDiscard(function () {
+      timerMode = 'down';
+      timerSelect.value = 'down';
+      var sec = Math.min(TIMER_MAX_SEC, n * 60);
+      timerHour.value = String(Math.floor(sec / 3600));
+      timerMin.value = String(Math.floor((sec % 3600) / 60));
+      timerSec.value = String(sec % 60);
+      startTimer();
+      closeMenu();
+    });
+  }
+  // 把设置页的四档落到芯片。宿主已归一化（固定 4 档、1–600），这里再兜一层缺项补默认；
+  // 只改文案 / data-min、不重建节点 —— 重建会打断正按着的点击，也会丢焦点
+  function applyTimerPresets(list) {
+    var vals = Array.isArray(list) ? list : TIMER_PRESETS_DEFAULT;
+    for (var i = 0; i < timerChipEls.length; i++) {
+      var raw = vals[i];
+      var n = Math.round(Number(raw));
+      var mins = (raw == null || raw === '' || !isFinite(n))
+        ? TIMER_PRESETS_DEFAULT[i]
+        : Math.min(600, Math.max(1, n));
+      var chip = timerChipEls[i];
+      chip.setAttribute('data-min', String(mins));
+      var label = mins + ' 分';
+      if (chip.textContent !== label) chip.textContent = label;
+      chip.title = '倒计时 ' + mins + ' 分钟并立即开始';
+    }
+    syncTimerQuick();
+  }
+  // 快捷档只有「倒计时 / 未开始」时才有意义：正计时与定时没有目标时长可套用。
+  // 当前时长与某一档一致时高亮那一档，让「现在这套参数」在快捷行里也读得出来
+  function syncTimerQuick() {
+    var down = timerMode === 'down';
+    var show = down || timerMode === 'off';
+    rowTimerQuick.style.display = show ? '' : 'none';
+    if (!show) return;
+    var active = 0;
+    if (down) {
+      if (timerRunning || timerPaused) {
+        var runningSec = Math.round(Number(timerArg) || 0);
+        if (runningSec > 0 && runningSec % 60 === 0) active = runningSec / 60;
+      } else {
+        var h = Math.max(0, Math.round(Number(timerHour.value) || 0));
+        var m = Math.max(0, Math.round(Number(timerMin.value) || 0));
+        var s = Math.max(0, Math.round(Number(timerSec.value) || 0));
+        var total = h * 3600 + m * 60 + s;
+        if (total > 0 && total % 60 === 0) active = total / 60;
+      }
+    }
+    for (var i = 0; i < timerChipEls.length; i++) {
+      var on = Number(timerChipEls[i].getAttribute('data-min')) === active;
+      timerChipEls[i].classList.toggle('dshwv-timer-chip-on', on);
+    }
   }
 
   // —— 气泡内容 ——
@@ -2637,14 +3906,23 @@
       showTimerBubble(timerBubbleAutoMs());
       return;
     }
-    // 「只显计时」关闭：点小鲸鱼先显示一眼计时，随后继续常规内容（余额/用量/报时）
+    // 「只显计时」关闭：点小鲸鱼先显示一眼计时，随后继续常规内容（余额/用量/报时）。
+    // peek 还没走完时再点一次 = 用户想「跳过这一眼」，直接切常规内容，而不是把 2 秒重新计一遍
     if (fromUser && timerActive() && !timerFinished) {
+      if (timerPeekDone()) return;
       showTimerBubble(TIMER_PEEK_MS, true);
       return;
     }
+    showNormalBubble();
+  }
+  // 常规内容气泡（余额 / 今日用量 / 报时 / 按压气泡模型），停留 bubbleDwellMs 后按 onExpire 收尾。
+  // onExpire 缺省 hideBubble；「计时中双击看余额」传一个「到点切回计时气泡」的收尾进来
+  function showNormalBubble(onExpire) {
+    if (!bubbleOn) return;
     if (bubbleTimer) { clearTimeout(bubbleTimer); bubbleTimer = null; }
     renderer.cancelGifFade();
     bubbleShown = true;
+    bubbleTimerActive = false;
     bubbleRandomActive = false;
     bubbleRemindActive = false;
     bubbleRemindLines = null;
@@ -2659,19 +3937,34 @@
       bubbleIdx = 0;
       bubbleLastOptionIdx = -1;
       bubbleRenderStep(bubbleItems[0]);
-      bubbleArm(bubbleModelDwellMs, hideBubble);
+      bubbleArm(bubbleModelDwellMs, onExpire || hideBubble);
       return;
     }
     bubbleActive = false;
-    bubbleArm(bubbleDwellMs, hideBubble);
+    bubbleArm(bubbleDwellMs, onExpire || hideBubble);
   }
-  // 「只显计时」关闭时，计时先显示一段后原地切回常规内容（气泡不收起，继续按常规时长停留）
+  // 计时中双击鲸鱼：临时看一眼余额，停留 bubbleDwell 秒后自己切回计时气泡。
+  // 「计时中只显示计时」开着时（默认），单击永远只给计时气泡 —— 这个手势是不改设置也能看余额的入口
+  function showBalancePeek() {
+    showNormalBubble(function () {
+      // 不先 hideBubble：收起再弹会闪一下，直接换行内容更顺；计时已结束就正常收起
+      if (timerActive() && !timerFinished) { showTimerBubble(timerBubbleAutoMs()); return; }
+      hideBubble();
+    });
+  }
+  // 「只显计时」关闭时，计时先显示一段后原地切回常规内容（气泡不收起，继续按常规时长停留）。
+  // 两个入口：peek 到时的定时器（thenNormal=true），以及用户在 peek 期间点了挂件本体
+  // （endDrag 那条路径会先 showBubble(true)，而 showBubble 的前半段只认 timerTakesBubble，于是 peek 又重开一遍
+  // ——不在这里先立刻切回常规内容，用户点了没反应，2s 后还会自己变一次）。
+  // 返回 true 表示「这次确实在 peek 中」，调用方据此决定别再重复开 peek
   function timerPeekDone() {
+    if (!bubbleTimerActive || timerTakesBubble()) return false; // 计时气泡不在，或它本来就该占气泡（只显计时/已到点）
     bubbleTimerActive = false;
     timerClockText = '';
     timerDoneActions.classList.remove('dshwv-actions-open');
-    if (!bubbleShown) return; // 期间已被用户/其他开关收起：不再把它弹回来
+    if (!bubbleShown) return true; // 期间已被用户/其他开关收起：不再把它弹回来
     showBubble(false);
+    return true;
   }
   // 计时气泡：autoHideMs=0 表示常驻（点气泡可收起，计时继续）；thenNormal=true 表示到时切回常规内容
   function showTimerBubble(autoHideMs, thenNormal) {
@@ -2757,6 +4050,8 @@
   }
   var bubbleTtlAction = null;
   function bubbleTtlSweep() {
+    // 下班倒计时复用这个每秒巡检：气泡没开 / 开关关着时 offworkStep 立刻返回，不额外起定时器
+    if (offworkOn) offworkStep();
     if (bubbleTimer) return;            // 前台定时器还活着：正常路径会收，不抢
     if (!bubbleTtlDeadline) return;     // 无 TTL（常驻）或已收起：无事可做
     if (Date.now() < bubbleTtlDeadline) return; // 被提前续期过：还没到点
@@ -2807,11 +4102,35 @@
     if (Date.now() >= n.until) { state.adjustNote = null; return null; }
     return n;
   }
+  // 临时说明要自己到期：render() 只在余额推送时被调用，菜单轮询（每分钟）之外没有人再刷第三行，
+  // 不补这一下，手动刷新的「本次 ±x」会一直挂到下一次余额推送才消失
+  var adjustNoteTimer = null;
+  function armAdjustNoteTimer() {
+    if (adjustNoteTimer) { clearTimeout(adjustNoteTimer); adjustNoteTimer = null; }
+    var n = state.adjustNote;
+    if (!n) return;
+    adjustNoteTimer = setTimeout(function () {
+      adjustNoteTimer = null;
+      if (state.adjustNote !== n) return; // 期间被换成了更新的一条：让它的定时器负责
+      state.adjustNote = null;
+      render();
+    }, Math.max(0, n.until - Date.now()) + 20);
+  }
   function adjustNoteText(a) {
     var money = fmt(Number(a && a.amount), state.currency);
-    return a && a.why === '赠送额度到期/被收回'
+    return a && a.why === '赠送额到期/被收回'
       ? '赠送额到期 ' + money + '，未计用量'
       : '少了 ' + money + ' 太快，未计用量';
+  }
+  // 手动刷新前后的差额，在第三行停留 8s。
+  // 为什么只对手动刷新显示：自动采样每分钟一次、且本来就带数字滚动 + 变动气泡，再标一遍是噪音；
+  // 而手动刷新是用户「主动想知道现在多少」的动作 —— 数字变了却不告诉他变了多少，
+  // 他就得自己记住刷新前那个数。差额为 0 时不显示（「本次 ¥0.00」纯属添乱）
+  // 时长比 ADJUST_NOTE_MS 短：这条是即时反馈，不是需要读完的解释
+  var MANUAL_DELTA_MS = 8000;
+  function manualDeltaText(delta) {
+    if (!delta) return '';
+    return '本次 ' + (delta > 0 ? '+' : '-') + fmt(Math.abs(delta), state.currency);
   }
   // 主显示金额（大字行）的文本：render() 与台词占位符 {balance} 共用同一份状态判断，
   // 免得两处各写一套、日后改口径漏掉一处
@@ -2822,11 +4141,168 @@
     if (state.balance === null) return shown !== null ? fmt(shown, state.currency) : '…';
     return shown !== null ? fmt(shown, state.currency) : fmt(state.balance, state.currency);
   }
+  // 主显示金额的「名分」：余额型 = 余额，额度型 = 剩余额度，Codex = 今日 token。
+  // 菜单顶部与「复制」按钮都靠它，别再写死「余额」（额度型会出现「余额 62%」这种自相矛盾的读法）
+  function mainAmountKind() {
+    if (mainModelId !== 'deepseek') {
+      var m = currentModel();
+      if (m && m.kind === 'quota') return '剩余额度';
+      if (m && m.kind === 'codex') return '今日 token';
+    }
+    return '余额';
+  }
+  // 菜单顶部那行的标签：内置 DeepSeek 只写名分；换成别的模型时**带上模型名** ——
+  // 否则「剩余额度 62%」看不出是哪一家（模型组默认收着，摘要只说「3 个」）。
+  // 命名口径与气泡标题行（defaultLabelText）同源：模型名 + 名分
+  function mainAmountLabel() {
+    var kind = mainAmountKind();
+    if (mainModelId === 'deepseek') return kind;
+    var m = currentModel();
+    return (m && m.name ? m.name + ' ' : '') + kind;
+  }
+  // 「复制余额 / 复制额度 / 复制 token」：按钮文案跟着名分走，点完的临时态也用它复原
+  function copyAmountLabel() {
+    var kind = mainAmountKind();
+    return '复制' + (kind === '剩余额度' ? '额度' : (kind === '今日 token' ? 'token' : '余额'));
+  }
+
+  // —— 下班倒计时：薄壳（时间算法全在共享的 offwork 模块里） ——
+  function offworkCfgObj() {
+    return {
+      start: offworkStart, end: offworkEnd, days: offworkDays,
+      showSec: offworkShowSec, weekendOn: offworkWeekendOn,
+      paydayOn: offworkPaydayOn, paydayDay: offworkPaydayDay,
+    };
+  }
+  function offworkState() {
+    if (!OFFWORK_CORE) return null;
+    try {
+      return OFFWORK_CORE.display(Date.now(), offworkCfgObj());
+    } catch (err) {
+      logErr('[whale][page] 下班倒计时计算失败', err && err.message ? err.message : err);
+      return null;
+    }
+  }
+  // 余额错误的说明后缀必须参与判重：applyOffworkView 每秒会用 ov.hint 重写说明行，
+  // 若判等键里没有它，render() 临时拼上的「余额获取失败」下一秒就被覆盖（错误只活 1 秒）。
+  // 放进 key 后：error 期间每一帧都带上后缀；恢复后后缀消失、key 随之变化，下一帧自动清掉。
+  function offworkErrorSuffix() {
+    return state.status === 'error' ? ' · 余额获取失败' : '';
+  }
+  function offworkKeyOf(ov) {
+    return ov.label + '|' + ov.main + '|' + ov.hint + '|' + (ov.near || '') + offworkErrorSuffix();
+  }
+  // 最后 30 / 10 分钟只给主体轻微变色 / 呼吸（CSS 实现），不弹窗、不响铃
+  function applyOffworkNear(near) {
+    root.classList.toggle('dshwv-offwork-soon', near === 'soon' || near === 'imminent');
+    root.classList.toggle('dshwv-offwork-imminent', near === 'imminent');
+  }
+  // 只有「常规三行」这一路才让倒计时接管：自定义泡泡 / 计时 / 提醒 / 试播 / 随机台词各有优先级
+  function offworkCanRender() {
+    return !!offworkOn && !bubbleModelOn && !bubbleTimerActive && !bubbleRemindActive &&
+      !bubblePreviewActive && !bubbleRandomActive;
+  }
+  // 把倒计时写进主体。每秒巡检只在「阶段 / 秒数 / 临近档位」变化时才碰 DOM
+  function applyOffworkView(force) {
+    if (!offworkCanRender()) { applyOffworkNear(null); return; }
+    var ov = offworkState();
+    if (!ov) return;
+    var key = offworkKeyOf(ov);
+    if (!force && key === offworkLastKey) return;
+    offworkLastKey = key;
+    resetBubbleFont(); // 秒数变短 / 阶段切换后让自适应从基准字号重新算，别沿用上一次的缩小系数
+    labelEl.textContent = ov.label;
+    amountEl.textContent = ov.main;
+    // 倒计时不继承「低余额」红色，也不让余额变动的 flash 类残留
+    amountEl.classList.remove('dshwv-low', 'dshwv-flash-down', 'dshwv-flash-up');
+    hintEl.classList.remove('dshwv-low');
+    applyOffworkNear(ov.near);
+    setHint(ov.hint + offworkErrorSuffix());
+    fitBubbleText();
+  }
+  function offworkStep() {
+    // 后台节流：复用既有的每秒巡检（bubbleTtlSweep），气泡没开时直接返回，不做任何 DOM 操作
+    if (!offworkOn || !bubbleShown) return;
+    applyOffworkView(false);
+  }
+  // 开关 / 配置变化后的运行态切换。关掉时把主体还给余额，并恢复默认标题行
+  function syncOffworkMode() {
+    if (animId) { cancelAnimationFrame(animId); animId = null; }
+    if (animDelayTimer) { clearTimeout(animDelayTimer); animDelayTimer = null; }
+    if (flashTimer) { clearTimeout(flashTimer); flashTimer = null; }
+    amountEl.classList.remove('dshwv-flash-down', 'dshwv-flash-up');
+    if (state.balance !== null) shown = state.balance;
+    offworkLastKey = '';
+    if (offworkOn) {
+      root.classList.add('dshwv-offwork');
+      applyOffworkView(true);
+      return;
+    }
+    root.classList.remove('dshwv-offwork');
+    applyOffworkNear(null);
+    amountEl.classList.remove('dshwv-low');
+    hintEl.classList.remove('dshwv-low');
+    if (!bubbleModelOn && !bubbleTimerActive && !bubbleRemindActive &&
+        !bubblePreviewActive && !bubbleRandomActive) {
+      labelEl.textContent = defaultLabelText();
+    }
+    render();
+  }
+  // 配置八键：宿主已归一过，这里再走一次共享模块的同一套归一（防手改 / 老配置）
+  function applyOffworkConfig(cfg) {
+    if (!OFFWORK_CORE) { offworkOn = false; return; }
+    var wasOn = offworkOn;
+    var changed = false;
+    var oc = OFFWORK_CORE;
+    if (typeof cfg.offworkOn === 'boolean' && cfg.offworkOn !== offworkOn) {
+      offworkOn = cfg.offworkOn; changed = true;
+    }
+    if (cfg.offworkStart !== undefined) {
+      var st = oc.normHm(cfg.offworkStart, offworkStart);
+      if (st !== offworkStart) { offworkStart = st; changed = true; }
+    }
+    if (cfg.offworkEnd !== undefined) {
+      var en = oc.normHm(cfg.offworkEnd, offworkEnd);
+      if (en !== offworkEnd) { offworkEnd = en; changed = true; }
+    }
+    if (cfg.offworkDays !== undefined) {
+      var ds = oc.normDays(cfg.offworkDays, offworkDays);
+      if (ds.join(',') !== offworkDays.join(',')) { offworkDays = ds; changed = true; }
+    }
+    if (cfg.offworkShowSec !== undefined) {
+      var sec = cfg.offworkShowSec !== false;
+      if (sec !== offworkShowSec) { offworkShowSec = sec; changed = true; }
+    }
+    if (cfg.offworkWeekendOn !== undefined) {
+      var we = cfg.offworkWeekendOn === true;
+      if (we !== offworkWeekendOn) { offworkWeekendOn = we; changed = true; }
+    }
+    if (cfg.offworkPaydayOn !== undefined) {
+      var pd = cfg.offworkPaydayOn === true;
+      if (pd !== offworkPaydayOn) { offworkPaydayOn = pd; changed = true; }
+    }
+    if (cfg.offworkPaydayDay !== undefined) {
+      var day = oc.normPayday(cfg.offworkPaydayDay);
+      if (day !== offworkPaydayDay) { offworkPaydayDay = day; changed = true; }
+    }
+    if (!changed) return;
+    // 关着的时候改时间 / 工作日不会影响任何展示，不必触发一次完整 render
+    if (wasOn || offworkOn) syncOffworkMode();
+  }
+
   function render() {
     var hint;
     var note = activeAdjustNote();
-    var amount = mainAmountText();
-    if (mainModelId !== 'deepseek') {
+    armAdjustNoteTimer();
+    // 下班倒计时只接管「常规三行」：自定义泡泡 / 计时 / 提醒 / 试播 / 随机台词各有自己的
+    // 显示优先级，倒计时不能顶掉它们；关掉开关时 offworkView 恒为 null，走与现在完全一致的路径
+    var offworkView = offworkCanRender() ? offworkState() : null;
+    var realAmount = mainAmountText();
+    var amount = offworkView ? offworkView.main : realAmount;
+    if (offworkView) {
+      // 倒计时接管主体时仍保留「余额获取失败」这一条用户需要知道的异常（正常时只显示上下班时刻）
+      hint = offworkView.hint + offworkErrorSuffix();
+    } else if (mainModelId !== 'deepseek') {
       // 主显示是别的模型：DeepSeek 的状态（错误/加载/今日已用/预算/调整说明）都不参与展示
       hint = modelDisplay().hint;
     } else if (state.status === 'error') {
@@ -2840,6 +4316,11 @@
       hint = note ? note.text : usedTodayText(usedText) + (overAmt !== null ? ' · 超预算 ' + fmt(overAmt, state.currency) : '');
     }
     amountEl.textContent = amount;
+    // 菜单「余额」置顶条与各组折叠摘要都跟着同一份状态走（倒计时接管主体时，菜单仍报真实余额）
+    menuBalanceEl.textContent = realAmount;
+    refreshMenuSummaries();
+    // 退出常规三行（切到其它气泡 / 倒计时关闭）时，别让最后 30/10 分钟的变色 / 呼吸留在别人的内容上
+    if (offworkOn && !offworkView) applyOffworkNear(null);
     if (bubbleTimerActive && timerActive()) {
       applyBubbleLines(timerLines());
       timerClockText = timerFinished ? '' : fmtClock(timerRemainMs());
@@ -2852,17 +4333,50 @@
       applyBubbleLines(bubbleRandomLines);
     } else {
       resetBubbleFont(); // 退出气泡文案后恢复默认字号
+      if (offworkView) {
+        labelEl.textContent = offworkView.label;
+        amountEl.classList.remove('dshwv-low');
+        hintEl.classList.remove('dshwv-low');
+        offworkLastKey = offworkKeyOf(offworkView);
+        applyOffworkNear(offworkView.near);
+      } else {
+        applyLowAlert();
+        if (offworkOn) applyOffworkNear(null);
+      }
       setHint(hint);
-      applyLowAlert();
       // 报时/余额文案过长时同样等比缩小，避免超出气泡（与计时/随机台词走同一套适配）
       fitBubbleText();
     }
   }
 
   // —— 余额 ——
+  // 手动刷新的「等结果」视觉态。为什么不能靠 state.status = 'loading' 让文案自己表态：
+  // render() 在 mainModelId !== 'deepseek' 分支里直接用模型自己的 hint，根本不看 status，
+  // 所以主显示换成别的模型后点「刷新余额」，挂件面上一点动静都没有。
+  // 这里改成与主显示模型无关的独立状态，由 refresh() 置位、handleBalance/失败/超时收尾。
+  var refreshMaskTimer = null;
+  var refreshBtnTimer = null;
+  var PENDING_MANUAL_MS = 15000; // 「刷新中…」最长等待：按钮与呼吸圈共用的自愈上限
+  function setRefreshing(on) {
+    if (refreshMaskTimer) { clearTimeout(refreshMaskTimer); refreshMaskTimer = null; }
+    body.classList.toggle('dshwv-refreshing', !!on);
+    // 兜底：宿主那一路若因窗口重建等原因没回推结果，别让呼吸圈一直转
+    if (on) refreshMaskTimer = setTimeout(function () { refreshMaskTimer = null; setRefreshing(false); }, PENDING_MANUAL_MS);
+  }
+  function setRefreshBtnBusy(on) {
+    if (refreshBtnTimer) { clearTimeout(refreshBtnTimer); refreshBtnTimer = null; }
+    refreshBalanceBtn.disabled = !!on;
+    refreshBalanceBtn.textContent = on ? '刷新中…' : '刷新余额';
+    // 等待期在「按钮吃不到这次结果」时自愈：主显示换成别的模型后，DeepSeek 那一路的结果
+    // 会被 handleBalance 提前放行（只收呼吸圈、不碰按钮），不自己解就会一直锁着；
+    // 取 15s 而不是按钮原本的 10s —— 手动刷新跳过缓存，慢网真要这么久，锁太短会让人以为刷新已结束
+    if (on) refreshBtnTimer = setTimeout(function () { refreshBtnTimer = null; setRefreshBtnBusy(false); }, PENDING_MANUAL_MS);
+  }
   function refresh(manual) {
     pendingManual = !!manual;
+    if (manual) setRefreshBtnBusy(true);
     if (manual || state.balance === null) { state.status = 'loading'; render(); }
+    if (manual) setRefreshing(true);
     whaleApi.refresh(manual);
     // 主显示不是内置 DeepSeek 时另外刷该模型：force 让它与 DeepSeek 同频（60s 一次）
     if (mainModelId !== 'deepseek') whaleApi.refreshModels([mainModelId], true);
@@ -2870,12 +4384,20 @@
   function handleBalance(data, manual) {
     // 主显示不是内置 DeepSeek 时，DeepSeek 的余额变动、峰谷/预算/低余额提醒都不该出现：
     // 它的数字滚动动画会直接改写当前显示，提醒气泡也会盖掉模型内容
-    if (mainModelId !== 'deepseek') return;
+    // 但「手动刷新」的呼吸圈要收：那一路的结果来自 whale:models，与这里无关，
+    // 不收的话只能等 15s 兜底，用户会以为刷新卡住了
+    if (mainModelId !== 'deepseek') {
+      if (manual) { setRefreshing(false); setRefreshBtnBusy(false); }
+      return;
+    }
     if (data && data.ok) {
       var nb = Number(data.totalBalance);
       var nc = String(data.currency || 'CNY');
       var changed = state.balance !== null && (nb !== state.balance || nc !== state.currency);
       var currencyChanged = state.currency !== null && nc !== state.currency;
+      // 变动前的旧值必须在赋值前取：早先在赋值后取，prev === nb → 差值恒 0，
+      // 结果「永远绿闪、大额提醒永不触发」（1.13.0 后未提交改动里的真实 bug）
+      var prevBalance = state.balance;
       state.balance = nb;
       state.currency = nc;
       state.message = '';
@@ -2884,10 +4406,16 @@
       state.peakNextAt = Number(data.peakNextAt) || 0;
       // 本轮余额降幅（占位符 {change} 用）：宿主只在自动采样时给非零，手动刷新/缓存副本恒 0
       state.change = Number(data.change) || 0;
-      // 本轮下降被判定为非消费（赠送额到期等）：第三行解释 12s；正常采样不带此字段
+      // 第三行的临时说明，两种来源、后者优先：
+      // 1) 本轮下降被判定为非消费（赠送额到期等）：解释 12s，正常采样不带此字段；
+      // 2) 手动刷新的前后差额：8s。只认这一轮确实是用户手动点的（manual），
+      //    手动刷新之后再来的自动采样不再标 —— 那已经不是用户按下的那一次了；
+      //    币种变了不标（两级金额不可比），差额为 0 也不标
+      var manualDelta = manual && !firstBalance && prevBalance !== null && !currencyChanged
+        ? nb - prevBalance : 0;
       state.adjustNote = (data.adjust && data.adjust.amount)
         ? { text: adjustNoteText(data.adjust), until: Date.now() + ADJUST_NOTE_MS }
-        : null;
+        : (manualDelta ? { text: manualDeltaText(manualDelta), until: Date.now() + MANUAL_DELTA_MS } : null);
       // 峰/谷时段切换：仅在上一次已有状态且发生变化时提醒（首次拉取不弹）
       var peakChanged = lastIsPeak !== null && lastIsPeak !== state.isPeak;
       lastIsPeak = state.isPeak;
@@ -2905,24 +4433,54 @@
       state.lowOver = lowHit;
       if (lowCrossed) showLowRemind();
       if (changed && !currencyChanged) {
-        if (!manual && !firstBalance) {
-          // 自动刷新发现余额变动：气泡弹出，0.3s 后数字滚动
-          // 峰谷提醒优先，避免被余额气泡覆盖；用户正在看随机/拖拽/试播台词时也不顶掉
-          // （那是显式交互，余额变动不紧急，点一下鲸鱼随时能看），数字滚动照常进行
-          if (!bubbleRemindActive && !bubbleRandomActive && !bubblePreviewActive) showBubble();
-          state.status = 'changing';
-          if (animDelayTimer) clearTimeout(animDelayTimer);
-          animDelayTimer = setTimeout(function () {
-            animDelayTimer = null;
-            animateAmount(shown, nb, nc, ANIM_MS);
-          }, 300);
-          setTimeout(function () {
-            if (state.status === 'changing') { state.status = 'ok'; render(); }
-          }, CHANGE_MS + 300);
-        } else {
-          animateAmount(shown, nb, nc, ANIM_MS);
+        if (offworkOn) {
+          // 倒计时接管主体：余额变动不再闪烁 / 滚动 / 自动弹气泡（数字会被滚成余额）；
+          // 状态照常更新，菜单里仍能看到真实余额。峰谷 / 预算 / 低余额提醒气泡不受影响
+          shown = nb;
           state.status = 'ok';
           render();
+        } else {
+          // 余额变动动效：下降闪红+微抖，上升闪绿+微弹。大额变动（>10%）额外弹气泡提醒
+          var balanceDelta = nb - prevBalance;
+          var flashCls = balanceDelta < 0 ? 'dshwv-flash-down' : 'dshwv-flash-up';
+          amountEl.classList.remove('dshwv-flash-down', 'dshwv-flash-up');
+          // 强制 reflow 以重启动画（同一类名连续添加不会重新播放）
+          void amountEl.offsetWidth;
+          amountEl.classList.add(flashCls);
+          if (flashTimer) clearTimeout(flashTimer);
+          flashTimer = setTimeout(function () {
+            flashTimer = null;
+            amountEl.classList.remove('dshwv-flash-down', 'dshwv-flash-up');
+          }, 1300);
+          if (!manual && !firstBalance && prevBalance > 0 && Math.abs(balanceDelta) / prevBalance > 0.1) {
+            var directionText = balanceDelta < 0 ? '下降' : '上升';
+            // 金额带币种：非 CNY 账户光写 3.50 看不出是美元还是别的
+            var deltaText = (balanceDelta < 0 ? '-' : '+') + fmt(Math.abs(balanceDelta), nc);
+            showRemindBubble([
+              { t: '余额大幅' + directionText, s: 'A', c: balanceDelta < 0 ? '#e0433f' : '#2fa24c' },
+              { t: '变动 ' + deltaText, s: 'P', c: balanceDelta < 0 ? '#e0433f' : '#2fa24c' },
+              { t: '请留意账户状态', s: 'C', c: '', w: true },
+            ]);
+          }
+          if (!manual && !firstBalance) {
+            // 自动刷新发现余额变动：气泡弹出，0.3s 后数字滚动
+            // 峰谷提醒优先，避免被余额气泡覆盖；用户正在看随机/拖拽/试播台词时也不顶掉
+            // （那是显式交互，余额变动不紧急，点一下鲸鱼随时能看），数字滚动照常进行
+            if (!bubbleRemindActive && !bubbleRandomActive && !bubblePreviewActive) showBubble();
+            state.status = 'changing';
+            if (animDelayTimer) clearTimeout(animDelayTimer);
+            animDelayTimer = setTimeout(function () {
+              animDelayTimer = null;
+              animateAmount(shown, nb, nc, ANIM_MS);
+            }, 300);
+            setTimeout(function () {
+              if (state.status === 'changing') { state.status = 'ok'; render(); }
+            }, CHANGE_MS + 300);
+          } else {
+            animateAmount(shown, nb, nc, ANIM_MS);
+            state.status = 'ok';
+            render();
+          }
         }
       } else {
         if (animId === null) shown = nb;
@@ -2930,6 +4488,16 @@
         render();
       }
       firstBalance = false;
+      // 恢复提示：之前连续失败 ≥3 次，现在终于拉到了真实数据（recovered 由宿主在恢复那一次标记）
+      if (data.recovered) {
+        showRemindBubble([
+          { t: '网络恢复', s: 'A', c: '#2fa24c' },
+          { t: '余额获取已恢复正常', s: 'P', c: '#2fa24c' },
+          { t: '继续监控中…', s: 'C', c: '', w: true },
+        ]);
+      }
+      lastFailCount = 0;
+      if (manual) { setRefreshing(false); setRefreshBtnBusy(false); }
     } else {
       state.status = 'error';
       // 气泡空间小，错误提示用短句；完整原因在设置页「测试连接」里查看
@@ -2939,58 +4507,81 @@
         : code === 'NO_KEY' ? '未配置 API Key · 请到设置页填写'
         : (data && data.error) ? String(data.error).slice(0, 14) : '获取失败 · 点击重试';
       render();
+      // 连续失败 ≥3 次时弹气泡提醒（只在首次跨过阈值时弹一次，避免每分钟重复打扰）
+      var failCount = (data && data.consecutiveFailures) || 0;
+      if (failCount >= 3 && lastFailCount < 3) {
+        var errTitle = code === 'AUTH' ? 'API Key 无效'
+          : code === 'NO_KEY' ? '未配置 API Key'
+          : '余额获取失败';
+        showRemindBubble([
+          { t: errTitle, s: 'A', c: '#e0433f' },
+          { t: '连续 ' + failCount + ' 次刷新失败', s: 'P', c: '#e0433f' },
+          { t: '请检查网络或 API Key 设置', s: 'C', c: '', w: true },
+        ]);
+      }
+      lastFailCount = failCount;
+      if (manual) { setRefreshing(false); setRefreshBtnBusy(false); }
     }
   }
 
   // —— 多厂商模型（宿主 whale:models 推送）——
-  // 峰谷/预算/用量口径都是 DeepSeek 专属：主显示换成别的模型时把「用量与峰谷」整组收起
+  // 峰谷/预算/用量口径/余额操作都是 DeepSeek 专属：主显示换成别的模型时整组收起。
+  // 余额条不受影响 —— 它在折叠组之外常显，且走 mainAmountText()（主显示换哪个模型就跟哪个）
   function applyModelVisibility() {
     groupUsage.el.style.display = mainModelId === 'deepseek' ? '' : 'none';
+    // 余额条与「复制」按钮的「名分」都跟着主显示类型走：额度型主显示时写「余额 62%」
+    // 说的是和显示的不是一回事（见 mainAmountLabel）
+    var amountLabel = mainAmountLabel();
+    menuBalanceLabelEl.textContent = amountLabel;
+    // 名字过长会被 CSS 的省略号裁掉，悬停给全名
+    menuBalanceLabelEl.title = amountLabel;
+    if (!copyBtnBusy) copyBalanceBtn.textContent = copyAmountLabel();
+    copyBalanceBtn.title = copyAmountLabel() + '到剪贴板';
   }
   function handleModels(data) {
     if (!data || typeof data !== 'object') return;
-    // refreshDone = 宿主刷新流程收尾那次推送（先前那次只是把旧快照推来垫显示）→ 解锁「刷新全部」
-    if (data.refreshDone) setModelsRefreshBusy(false);
+    // refreshDone = 宿主刷新流程收尾那次推送（先前那次只是把旧快照推来垫显示）→ 解锁「刷新全部」，
+    // 同时收掉手动刷新的呼吸圈与「刷新余额」按钮（主显示不是 DeepSeek 时，用户点的刷新结果就在这一路里）
+    if (data.refreshDone) { setModelsRefreshBusy(false); setRefreshing(false); setRefreshBtnBusy(false); }
     var prev = mainModelId;
     models = Array.isArray(data.list) ? data.list : [];
     mainModelId = String(data.mainModelId || 'deepseek');
     renderModelsMenu();
     applyModelVisibility();
     positionMenu(); // 行数变化后重新夹取高度，避免菜单被窗口边缘裁掉
+    // 主显示切换：DeepSeek 侧的比对基准作废。留着旧 state.balance，切回来第一次采样会拿
+    // 切换前的余额当「上一次」再比一遍（误报余额变化 / 大幅波动），今日用量与峰谷、低余额、
+    // 预算的越线记忆同理。重置后首样本只建基线，不触发任何「变化」提示。
+    if (prev !== mainModelId) {
+      state.balance = null;
+      state.todayUsage = null;
+      state.change = 0;
+      state.adjustNote = null;
+      state.lowOver = false;
+      state.budgetOver = false;
+      lastIsPeak = null;
+      firstBalance = true;
+    }
     if (mainModelId !== 'deepseek') {
       render();
     } else if (prev !== mainModelId) {
-      // 切回内置 DeepSeek：状态可能已是一分钟前的，立刻要一次新的（handleBalance 已放行）
-      refresh(true);
+      // 切回内置 DeepSeek：状态可能已是一分钟前的，立刻要一次新的。
+      // 必须 manual=true：宿主对自动刷新有 25s 缓存，不复用缓存才拿得到新余额。
+      // 但不能走 refresh(true) —— 那会点亮手动刷新的呼吸圈与按钮忙碌态，而这是切换触发的
+      try { whaleApi.refresh(true); } catch (err) { logErr('[whale][page] 切回 DeepSeek 刷新失败', err && err.message); }
     }
   }
 
   // —— 配置（菜单改动 → 上报宿主；宿主回推 config 统一 apply） ——
-  function saveCfg() {
-    whaleApi.saveConfig({
-      scale: curScale, vol: soundVol, soundOn: soundOn, soundSet: soundSet,
-      opacity: opacityPct,
-      usageMode: usageMode, peakMode: peakMode, bubbleOn: bubbleOn,
-      timeBubbleOn: timeBubbleOn, peakRemindOn: peakRemindOn, dragLock: dragLock,
-      timerNotifyOn: timerNotifyOn, timerPersistOn: timerPersistOn,
-      // 这两个「邮件」开关本页只读（回填自 applyConfig），但必须原样带回去：
-      // 挂件菜单任何一次改动都会整份 saveCfg → patchConfig 逐字段覆盖，
-      // 漏带就等于用 undefined 把用户在设置页开的邮件通知悄悄关掉
-      timerMailOn: timerMailOn, notifyMailOn: mailOn,
-      // 界面深浅色偏好本页只读（回填自 applyConfig），必须原样带回：
-      // 同上面的「邮件」开关，整份 saveCfg 漏带就等于用 undefined 抹掉设置页的选择
-      uiMode: uiMode,
-      timerMode: timerMode,
-      timerSec: timerSegTotalSec(),
-      timerAt: String(timerTime.value || ''),
-      // 到点要做什么：留言 + 「休息」档。菜单里已无对应输入框，原样提交本地副本
-      // （和上面的「邮件」开关同理，漏带就会被 undefined 抹掉）
-      timerNote: timerNote,
-      timerBreakMin: timerBreakMin,
-      timerRemindSec: timerRemindSec,
-      timerBubblePin: timerBubblePin,
-      timerBubbleOnly: timerBubbleOnly,
-    });
+  // 显式补丁：只提交这次真正改动的键。不能再整份提交 ——
+  // 1) 本页只读的配置（邮件开关 / uiMode / 到点留言 / 休息档…）会被本页的旧副本一起写回，
+  //    设置页刚改完、回推还没到，就被菜单里的任意一次操作盖掉了；
+  // 2) 计时时长 / 模式现在只是「这一轮」的参数，不该借任何一次保存改掉默认值
+  //   （早前 startTimer 整份 saveCfg，点一次快捷档位就把默认时长改了）。
+  // 宿主 patchConfig 对 undefined 键是「不动」，所以只传改动键是安全的。
+  function saveCfg(patch) {
+    if (!patch) return;
+    try { whaleApi.saveConfig(patch); } catch (err) { logErr('[whale][page] 保存配置失败', err && err.message); }
   }
   // 拖动中的实时预览：rAF 合并，只通知宿主改窗口几何，不写存储、不回推
   // 拖拽中不进这里：滚轮 handler 已按 `drag.active` 挡掉实时缩放，而菜单（唯一另一处
@@ -3029,7 +4620,7 @@
     scaleInput.value = String(n);
     scaleVal.textContent = String(n);
     paintScaleTicks(n);
-    if (commit) { cancelLiveSlot(); saveCfg(); }
+    if (commit) { cancelLiveSlot(); saveCfg({ scale: curScale }); }
     else if (live) sendLiveScale();
   }
   function setVol(v, commit) {
@@ -3038,7 +4629,7 @@
     volInput.value = String(next);
     volPct.textContent = Math.round(next * 100) + '%';
     applySoundVolume();
-    if (commit) saveCfg(); // 拖动中只改本地音量，松手才持久化（避免高频存储写入）
+    if (commit) saveCfg({ vol: soundVol }); // 拖动中只改本地音量，松手才持久化（避免高频存储写入）
   }
   function setSoundSet(v) {
     soundSet = (v === 'fx1' || v === 'custom') ? v : 'duck';
@@ -3047,7 +4638,7 @@
     // 切音色会重建 Audio 池（applySoundSet 里 new Audio），新建的 Audio 默认 volume=1；
     // 这里不重落一次音量，切完的第一声会以满音量播，直到下次配置全量推送才纠正（曾踩）
     applySoundVolume();
-    saveCfg();
+    saveCfg({ soundSet: soundSet });
   }
   // 挂件菜单透明度档位（设置页有连续滑块，同一配置字段）
   function setOpacityPreset(v) {
@@ -3055,46 +4646,49 @@
     if (OPACITY_PRESETS.indexOf(n) < 0) return;
     opacityPct = n;
     opacitySelect.value = String(n);
-    saveCfg(); // opacity 随配置广播回本页，applyConfig 把它落到 root 的 CSS opacity
+    saveCfg({ opacity: opacityPct }); // opacity 随配置广播回本页，applyConfig 把它落到 root 的 CSS opacity
   }
   function setSoundOn(v) {
     soundOn = !!v;
     soundToggle.checked = soundOn;
-    saveCfg();
+    saveCfg({ soundOn: soundOn });
   }
   function setUsageMode(v) {
     usageMode = v === 'token' ? 'token' : 'ledger';
     usageSelect.value = usageMode;
-    saveCfg();
+    saveCfg({ usageMode: usageMode });
     refresh(false); // 宿主在 usageMode 变化时已清缓存，会重算今日已用
   }
   function setPeakMode(v) {
     peakMode = (v === 'liangwen' || v === 'qiangqiang') ? v : 'default';
     peakSelect.value = peakMode;
-    saveCfg();
+    saveCfg({ peakMode: peakMode });
   }
   function setBubbleOn(v) {
     bubbleOn = !!v;
     bubbleToggle.checked = bubbleOn;
-    saveCfg();
+    saveCfg({ bubbleOn: bubbleOn });
     if (!bubbleOn) hideBubble();
   }
   function setTimeBubbleOn(v) {
     timeBubbleOn = !!v;
     timeToggle.checked = timeBubbleOn;
-    saveCfg();
-    if (bubbleShown && !bubbleRandomActive && !bubblePreviewActive) labelEl.textContent = defaultLabelText();
+    saveCfg({ timeBubbleOn: timeBubbleOn });
+    // 倒计时接管主体时不抢首行（否则报时开关会把「距离下班」顶成时间）
+    if (bubbleShown && !bubbleRandomActive && !bubblePreviewActive && !offworkCanRender()) {
+      labelEl.textContent = defaultLabelText();
+    }
   }
   function setPeakRemindOn(v) {
     peakRemindOn = !!v;
     remindToggle.checked = peakRemindOn;
-    saveCfg();
+    saveCfg({ peakRemindOn: peakRemindOn });
     if (!peakRemindOn && bubbleRemindActive) hideBubble();
   }
   function setDragLock(v) {
     dragLock = !!v;
     lockToggle.checked = dragLock;
-    saveCfg();
+    saveCfg({ dragLock: dragLock });
   }
   // 请求宿主唤出 uTools 主窗（设置页）。target 可选（如 'quotes' 直达按压气泡卡）
   function openSettings(target) {
@@ -3145,29 +4739,34 @@
       }
       opacitySelect.value = String(best);
     }
-    if (typeof cfg.passThrough === 'boolean' && cfg.passThrough !== passThroughOn) {
-      passThroughOn = cfg.passThrough;
-      // 状态切换：清掉悬停接管的中间态，立即生效（不能等下一次 mousemove —— 鼠标可能正静止）
-      passHoverActive = false;
-      passDwellCancel();
-      passReleaseCancel();
-      // 开关穿透即改变「指针是否与挂件交互」的前提，旧悬停点不再可信（鼠标可能正静止，
-      // 不会有 pointermove 来纠正），作废它，让按钮先收起
-      lastHoverPt = null;
-      menuBtn.classList.remove('dshwv-menu-btn-visible');
-      if (passThroughOn) {
-        if (menuOpen) closeMenu();
-        sendIgnoreMouse(true);
-        if (passNoticeReady) showPassNotice(true);
-      } else {
-        // 关闭穿透：先按安全默认忽略鼠标，指针移到鲸鱼上时悬停逻辑会重新判定
-        // 菜单此刻若开着要一并收起：开启分支已 closeMenu，这里必须对称，
-        // 否则菜单留在屏上、窗口却已 ignoreMouse=true，点了会穿透到下层应用
-        if (menuOpen) closeMenu();
-        sendIgnoreMouse(true);
-        if (passNoticeReady) showPassNotice(false);
+    if (typeof cfg.passThrough === 'boolean') {
+      // 逃生行按「当前值」无条件刷一遍：只在值变化的分支里设，重新 applyConfig 时
+      // 同一个值也要保证显隐与按钮态是对的
+      syncPassRow(cfg.passThrough);
+      if (cfg.passThrough !== passThroughOn) {
+        passThroughOn = cfg.passThrough;
+        // 状态切换：清掉悬停接管的中间态，立即生效（不能等下一次 mousemove —— 鼠标可能正静止）
+        passHoverActive = false;
+        passDwellCancel();
+        passReleaseCancel();
+        // 开关穿透即改变「指针是否与挂件交互」的前提，旧悬停点不再可信（鼠标可能正静止，
+        // 不会有 pointermove 来纠正），作废它，让按钮先收起
+        lastHoverPt = null;
+        menuBtn.classList.remove('dshwv-menu-btn-visible');
+        if (passThroughOn) {
+          if (menuOpen) closeMenu();
+          sendIgnoreMouse(true);
+          if (passNoticeReady) showPassNotice(true);
+        } else {
+          // 关闭穿透：先按安全默认忽略鼠标，指针移到鲸鱼上时悬停逻辑会重新判定
+          // 菜单此刻若开着要一并收起：开启分支已 closeMenu，这里必须对称，
+          // 否则菜单留在屏上、窗口却已 ignoreMouse=true，点了会穿透到下层应用
+          if (menuOpen) closeMenu();
+          sendIgnoreMouse(true);
+          if (passNoticeReady) showPassNotice(false);
+        }
+        passApplyIndicator();
       }
-      passApplyIndicator();
     }
     if (typeof cfg.usageMode === 'string') {
       usageMode = cfg.usageMode === 'token' ? 'token' : 'ledger';
@@ -3232,8 +4831,10 @@
     if (typeof cfg.timeBubbleOn === 'boolean') {
       timeBubbleOn = cfg.timeBubbleOn;
       timeToggle.checked = timeBubbleOn;
-      // 气泡正显示且未切随机/试播台词时，即时更新首行报时文案
-      if (bubbleShown && !bubbleRandomActive && !bubblePreviewActive) labelEl.textContent = defaultLabelText();
+      // 气泡正显示且未切随机/试播台词时，即时更新首行报时文案（倒计时接管时不抢首行）
+      if (bubbleShown && !bubbleRandomActive && !bubblePreviewActive && !offworkCanRender()) {
+        labelEl.textContent = defaultLabelText();
+      }
     }
     if (typeof cfg.peakRemindOn === 'boolean') {
       peakRemindOn = cfg.peakRemindOn;
@@ -3244,26 +4845,30 @@
       dragLock = cfg.dragLock;
       lockToggle.checked = dragLock;
     }
-    if (typeof cfg.timerNotifyOn === 'boolean') {
-      timerNotifyOn = cfg.timerNotifyOn;
-      notifyToggle.checked = timerNotifyOn;
-    }
+    // 到点通知只在设置页改；这里只回填本地副本（到点通知要用）
+    if (typeof cfg.timerNotifyOn === 'boolean') timerNotifyOn = cfg.timerNotifyOn;
     if (typeof cfg.timerMailOn === 'boolean') timerMailOn = cfg.timerMailOn;
     if (typeof cfg.notifyMailOn === 'boolean') mailOn = cfg.notifyMailOn;
     if (typeof cfg.timerPersistOn === 'boolean') timerPersistOn = cfg.timerPersistOn;
-    // 计时偏好：运行中的状态以 timer 状态为准，这里只在空闲时套用。
-    // 注意：宿主每次广播配置都会走到这里，若不加判断就会把「正在编辑中」的输入框
-    // 强行回填 —— 用户打字打到一半被覆盖，看起来就像「输入实时生效」。
-    // 所以凡是当前持有焦点的输入框一律跳过回显，交由 commitOnEnter 在回车/blur 时提交。
-    function editing(el) { return document.activeElement === el; }
+    // 默认时长 / 定时刻：只在宿主值真的变化时才回填。
+    // 宿主每次广播配置都会走到这里（菜单里改音量也会广播），无条件回填会把用户
+    // 刚在菜单里改好的「本轮目标」打回默认值 —— 看起来就像「改了不生效」。
+    // 计时中收到新默认时长先压着（pendingTimerSec），回到空闲由 syncTimerMenu 落地：
+    // 此刻输入框正锁着，当场改写会让「本轮目标」看着变长/变短。
     if (typeof cfg.timerSec === 'number' && isFinite(cfg.timerSec)) {
       var ts = Math.min(TIMER_MAX_SEC, Math.max(0, Math.round(cfg.timerSec))) || TIMER_MIN_DEFAULT * 60;
-      if (!editing(timerHour)) timerHour.value = String(Math.floor(ts / 3600));
-      if (!editing(timerMin)) timerMin.value = String(Math.floor((ts % 3600) / 60));
-      if (!editing(timerSec)) timerSec.value = String(ts % 60);
+      if (ts !== cfgTimerSecSeen) {
+        cfgTimerSecSeen = ts;
+        if (timerRunning || timerPaused) pendingTimerSec = ts;
+        else writeTimerTargetSec(ts);
+      }
     }
-    if (typeof cfg.timerAt === 'string' && /^\d{1,2}:\d{2}$/.test(cfg.timerAt) && !editing(timerTime)) {
-      timerTime.value = cfg.timerAt;
+    if (typeof cfg.timerAt === 'string' && /^\d{1,2}:\d{2}$/.test(cfg.timerAt)) {
+      if (cfg.timerAt !== cfgTimerAtSeen) {
+        cfgTimerAtSeen = cfg.timerAt;
+        // 焦点在定时刻输入框时跳过：用户正在编辑，交由 commitOnEnter 提交
+        if (!timerRunning && !timerPaused && !timerEditing(timerTime)) timerTime.value = cfg.timerAt;
+      }
     }
     // 留言 / 休息档：菜单里已无输入框，只回填本地副本（到点气泡与「休息 N 分钟」按钮用）
     if (typeof cfg.timerNote === 'string') {
@@ -3281,12 +4886,13 @@
       timerLongEvery = Math.min(12, Math.max(2, Math.round(cfg.timerLongEvery)));
     }
     if (typeof cfg.timerAutoNext === 'boolean') timerAutoNext = cfg.timerAutoNext;
+    // 到点气泡停留：设置页改，本地副本供到点气泡 / 通知用
     if (typeof cfg.timerRemindSec === 'number' && isFinite(cfg.timerRemindSec)) {
       var sec = Math.round(cfg.timerRemindSec);
       timerRemindSec = (sec === 0 || sec === 5 || sec === 8 || sec === 15) ? sec : 8;
-      remindSelect.value = String(timerRemindSec);
     }
     var bubblePrefsChanged = false;
+    // 两个气泡开关只在设置页有入口：这里回填本地副本；值变了要让计时气泡立刻按新口径重显
     if (typeof cfg.timerBubblePin === 'boolean' && cfg.timerBubblePin !== timerBubblePin) {
       timerBubblePin = cfg.timerBubblePin;
       bubblePrefsChanged = true;
@@ -3297,8 +4903,13 @@
     }
     // 设置页改了这两个开关：计时中立刻让气泡按新口径重显，不必等下一次刷新
     if (bubblePrefsChanged) applyTimerBubblePrefs();
-    if (!timerActive() && (cfg.timerMode === 'off' || cfg.timerMode === 'up' || cfg.timerMode === 'down' || cfg.timerMode === 'at')) {
-      timerMode = cfg.timerMode;
+    // 默认模式：同样只在宿主值变化时套用。快捷档位 / 待办开始会把本地模式临时切到倒计时，
+    // 若每次广播都按 cfg 重写，随手调一下音量就把这一轮的准备状态打回「关闭」了
+    if (cfg.timerMode === 'off' || cfg.timerMode === 'up' || cfg.timerMode === 'down' || cfg.timerMode === 'at') {
+      if (cfg.timerMode !== cfgTimerModeSeen && !timerActive()) {
+        timerMode = cfg.timerMode;
+        cfgTimerModeSeen = cfg.timerMode;
+      }
     }
     // 挂件形象与气泡配色：值没变时 applySkin/applyTheme 内部自己短路，不必先比对
     if (typeof cfg.skin === 'string') {
@@ -3312,12 +4923,12 @@
       applySkin();
     }
     if (typeof cfg.theme === 'string') {
-      themeId = (cfg.theme === 'dark' || cfg.theme === 'sakura') ? cfg.theme : 'default';
+      themeId = (cfg.theme === 'dark' || cfg.theme === 'sakura' || cfg.theme === 'fantasy') ? cfg.theme : 'default';
       applyTheme();
     }
     // 界面深浅色偏好：值变了就立即重新合成（utoolsDark 缓存已是最新，不用等下一轮推送）
     if (typeof cfg.uiMode === 'string') {
-      var nextUiMode = (cfg.uiMode === 'light' || cfg.uiMode === 'dark') ? cfg.uiMode : 'auto';
+      var nextUiMode = (cfg.uiMode === 'light' || cfg.uiMode === 'dark' || cfg.uiMode === 'fantasy') ? cfg.uiMode : 'auto';
       if (nextUiMode !== uiMode) { uiMode = nextUiMode; applyDark(); }
     }
     // 固定文案池（报时四池 + 动图降级）：挂在按压气泡模型的 system 键上，非空字符串数组才覆盖
@@ -3366,16 +4977,23 @@
         if (typeof cfg.alerts[ak] === 'string' && cfg.alerts[ak]) ALERTS[ak] = cfg.alerts[ak];
       }
     }
-    // 专注记录 / 待办：两个开关互不联动。
-    // 任一变化都要整组重画（显隐 + 专注按钮跟着 focusOn 出现/消失）
+    // 专注记录 / 待办：两个开关各管各的。focusOn 只管记录与统计；
+    // 任务开始 / 气泡尾注 / 到点完成这条都不再受它门控（见 2026-11-01 spec）。
     var todoPrefsChanged = false;
     if (typeof cfg.focusOn === 'boolean' && cfg.focusOn !== focusOn) { focusOn = cfg.focusOn; todoPrefsChanged = true; }
     if (typeof cfg.todoOn === 'boolean' && cfg.todoOn !== todoOn) { todoOn = cfg.todoOn; todoPrefsChanged = true; }
+    // 接力依赖挂件里的待办清单：关掉 todoOn 就退回「时间到」，不留一个指向隐藏清单的下一步
+    if (!todoOn && timerHandoff) {
+      clearTimerHandoff();
+      if (bubbleTimerActive && timerFinished) showTimerBubble(timerRemindMs());
+    }
     // 每日专注目标：0 = 未设置，1–99 有效
     if (typeof cfg.focusGoal === 'number' && isFinite(cfg.focusGoal)) {
       var newGoal = Math.max(0, Math.min(99, Math.round(cfg.focusGoal)));
       if (newGoal !== focusGoal) { focusGoal = newGoal; todoPrefsChanged = true; }
     }
+    // 下班倒计时八键：开关 / 运行态与主体展示都在这里收口（关掉后 render 走原路径）
+    applyOffworkConfig(cfg);
     if (todoPrefsChanged) {
       renderTodoMenu();
       renderFocusStats();
@@ -3386,6 +5004,8 @@
         updateTimerActions();
       }
     }
+    // 快捷档位（设置页可改）：落到四个芯片的文案与可点分钟数
+    if (Array.isArray(cfg.timerPresets)) applyTimerPresets(cfg.timerPresets);
     syncTimerMenu();
     applySoundVolume();
     // 配置落地即首帧就位：放行画面（见 floating.css 的 .dshwv-root:not(.dshwv-ready)）。
@@ -3553,8 +5173,30 @@
   }
 
   // —— 菜单 ——
+  // 滚动边界提示：面板滚到顶端 / 底端时收回对应那一道边影（样式见 floating.css 的 ::before/::after）。
+  // 两端都还剩内容时两道都显示；整个面板装得下（scrollHeight == clientHeight）时两道都不显示
+  function syncMenuScrollEdges() {
+    var top = menuBox.scrollTop;
+    var rest = menuBox.scrollHeight - menuBox.clientHeight - top;
+    // 1px 容差：高分屏下 clientHeight 可能带小数，四舍五入后永远「差一点点」而两边都亮着
+    menuBox.classList.toggle('dshwv-menu-scroll-up', top > 1);
+    menuBox.classList.toggle('dshwv-menu-scroll-down', rest > 1);
+  }
+  menuBox.addEventListener('scroll', syncMenuScrollEdges, { passive: true });
   function toggleMenu() {
-    menuOpen = !menuOpen;
+    // 拖拽中一律不许开菜单：拖动会持续派发 pointermove，菜单既挡鲸鱼又会跟着窗口挪，
+    // 容易误点进菜单项。右键唤菜单已在 contextmenu 里单独挡，这里兜住其余调用点
+    // （触控第二根手指点按钮、外部触发等）。已开着就顺手收起，不留给拖拽结束。
+    if (drag && drag.active) {
+      if (menuOpen) closeMenu();
+      return;
+    }
+    // 关闭必须走 closeMenu 的交还链路（setInputFocus(false) → 宿主 setFocusable(false)+
+    // 重申置顶/任务栏）。旧形态「翻假后跳过打开块」会漏掉交还：焦点一直借著、置顶位掉了
+    // 没人安（真机：点按钮关菜单后 TOPMOST=False 且无「交还」日志），顺带还跳过
+    // resetHideBtn/cancelTimerConfirm 的清理。
+    if (menuOpen) { closeMenu(); return; }
+    menuOpen = true;
     if (menuOpen) {
       menuDirLocked = false; // 新一轮打开：按当前几何重新决定展开方向（见 positionMenu）
       // 每次打开菜单一律回到全折叠：展开组合不落盘、不记忆（见 menuGroup 说明），
@@ -3567,6 +5209,8 @@
       // 计时读数行只在菜单开着时按秒刷新（见 timerStep），开菜单这一刻先补一次，
       // 否则会先看到上次关菜单时的旧读数
       updateTimerStatus();
+      // 余额条同理：打开这一刻先按当前状态补一次（之后随 render 刷新）
+      menuBalanceEl.textContent = mainAmountText();
       // 点开菜单＝最强交互信号，无条件亮起按钮。
       // positionMenu 紧接着要读它的 getBoundingClientRect 当锚点 —— 先亮起再定位最稳。
       // 不能靠位置判定：按钮压在鲸鱼轮廓顶边上沿，位置判定常判成「不在鲸鱼上」而隐藏
@@ -3587,6 +5231,9 @@
       sendIgnoreMouse(false);
     }
     menuBox.classList.toggle('dshwv-menu-open', menuOpen);
+    // 滚动边影的初值：必须等面板真正可见后再量。关闭态 scrollTop 恒为 0 且 scrollHeight/clientHeight
+    // 都是 0，量不出任何东西；而「重开时 scrollTop 已是 0」不会触发 scroll 事件，没人补这一下
+    if (menuOpen) syncMenuScrollEdges();
     menuBtn.setAttribute('aria-expanded', menuOpen ? 'true' : 'false');
     // 开/关都走统一求值：关菜单后若指针已不在鲸鱼/按钮上，会立即隐藏，
     // 不再依赖「用户恰好再动一下鼠标」才清理（这就是按钮偶尔残留的主因）
@@ -3597,6 +5244,7 @@
     menuBox.classList.remove('dshwv-menu-open');
     menuBtn.setAttribute('aria-expanded', 'false');
     resetHideBtn(); // 关菜单即退出「隐藏挂件」确认态，免得下次打开时按钮还停在「再点一次隐藏」
+    cancelTimerConfirm(); // 同理：放弃确认不跨菜单留存，避免下次打开时莫名挂着
     // 焦点归位：面板是 aria-modal，焦点原本在面板内的某个控件上（或已被借到本窗）。
     // 不还回去的话，纯键盘操作关掉菜单后焦点会掉到 body —— 下一次按 Tab 得从整页头开始找。
     // 只在按钮可见时还：菜单按钮被设置页关掉（dshwv-menu-btn-off）时它不可聚焦，focus() 是空操作
@@ -3608,7 +5256,7 @@
   // 所以菜单开着时 Esc 能收到；菜单没开时收不到也不影响原有的「点空白关闭」。
   // 组字期间按 Esc 是输入法的「取消组字」，不能抢着关菜单
   window.addEventListener('keydown', function (e) {
-    if (menuOpen && (e.key === 'Escape' || e.key === 'Esc') && !e.isComposing && e.keyCode !== 229) closeMenu();
+    if (menuOpen && (e.key === 'Escape' || e.key === 'Esc') && !e.isComposing && e.keyCode !== 229) { closeMenu(); return; }
   });
   // 挂件到工作区上/下边缘的空白（宿主随 init / snapped 下发，见 preload/lib/widget.js 的 spaceAround）。
   // 窗口留白（--whale-pad）之外的部分落在屏幕外，菜单摆过去也看不见，必须扣掉
@@ -3883,11 +5531,18 @@
       return;
     }
     var overUI = false;
-    var el = null;
-    try { el = document.elementFromPoint(e.clientX, e.clientY); } catch (err) {}
-    if (el && el.closest) {
-      if (el.closest('.dshwv-menu.dshwv-menu-open')) overUI = true;
-      else if (el.closest('.dshwv-bubble.dshwv-bubble-open')) overUI = true;
+    // 只在菜单 / 气泡**真的打开时**才做 elementFromPoint：它会强制布局，是每帧最贵的一项。
+    // 未打开时那两个选择器也不可能命中 —— class 与 menuOpen / bubbleShown 是同步翻转的
+    // （开菜单 toggle(…, menuOpen)，气泡 add/remove 与 bubbleShown 成对），
+    // 后面的 `overBtn || overWhale || menuOpen` 兜底照旧。写法与 isOverPassUI 同构：
+    // ⚠️ 将来加新的「打开态」class 时，必须同时加标志位，否则这里会漏判
+    if (menuOpen || bubbleShown) {
+      var el = null;
+      try { el = document.elementFromPoint(e.clientX, e.clientY); } catch (err) {}
+      if (el && el.closest) {
+        if (el.closest('.dshwv-menu.dshwv-menu-open')) overUI = true;
+        else if (el.closest('.dshwv-bubble.dshwv-bubble-open')) overUI = true;
+      }
     }
     if (!overUI) overUI = overBtn || overWhale || menuOpen;
     // 菜单开着就绝不穿透：菜单里的输入框要靠窗口本身接收鼠标与键盘，
@@ -3918,7 +5573,14 @@
   // 并为配置变更后的立即重算保留最后一个指针位置
   var hoverRaf = 0, lastHoverPt = null;
   function scheduleHover(e) {
-    if (e && isFinite(e.clientX)) lastHoverPt = { clientX: e.clientX, clientY: e.clientY };
+    // 原地改写同一个对象：这里每次 pointermove 都跑，高频下别每事件造一个新对象。
+    // ⚠️ 首次仍从 null 分配 —— 各处靠 `lastHoverPt === null` 区分「还没有任何可信坐标」
+    //   （如穿透驻留定时器的复核、hoverNow 的早退），不能用一个假的 (0,0) 把它糊过去
+    if (e && isFinite(e.clientX)) {
+      if (!lastHoverPt) lastHoverPt = { clientX: 0, clientY: 0 };
+      lastHoverPt.clientX = e.clientX;
+      lastHoverPt.clientY = e.clientY;
+    }
     if (hoverRaf) return;
     hoverRaf = requestAnimationFrame(function () {
       hoverRaf = 0;
@@ -4054,6 +5716,20 @@
       if (tapAdvance && bubbleShown) {
         if (bubblePreviewActive) { if (!previewSessionNext()) hideBubble(); try { whaleApi.dragEnd(); } catch (err) {} hoverAt(e); return; }
       }
+      // 计时中双击鲸鱼 = 临时看一眼余额（单击仍是计时气泡，行为完全不变）。
+      // 只在「计时气泡正占着气泡」时接管，其它状态双击仍走两次单击的原逻辑
+      if (timerActive() && !timerFinished && timerTakesBubble()) {
+        var nowClick = Date.now();
+        if (nowClick - lastWhaleClickAt <= WHALE_DBLCLICK_MS) {
+          lastWhaleClickAt = 0;
+          showBalancePeek();
+          refresh(true);
+          try { whaleApi.dragEnd(); } catch (err) {}
+          hoverAt(e);
+          return;
+        }
+        lastWhaleClickAt = nowClick;
+      }
       showBubble(true); // 用户点击：计时气泡即使不常驻也要弹出来
       refresh(true);
       // 只是点击、没真正拖动，不会走下面的 dragEnd（那条路才会解冻宿主）。
@@ -4085,6 +5761,9 @@
     try { e.preventDefault(); e.stopPropagation(); } catch (err) {}
   }
   document.addEventListener('pointerdown', onDocPointerDown, true);
+  // 番茄自动衔接的等待期：**不再**「点任何地方都取消」。那条隐式规则会误触 ——
+  // 用户想去点「知道了」，点偏一点自动衔接就静悄悄没了，而且没有任何视觉线索说明是谁取消的。
+  // 现在只认显式操作：动作条上的「取消衔接」按钮，以及动作条其余按钮各自的 cancelPomoAutoNext
   document.addEventListener('pointermove', onDocPointerMove, true);
   // pointerleave 不冒泡，只能挂在 documentElement 上（挂到 document 上永远收不到）
   document.documentElement.addEventListener('pointerleave', onWindowPointerLeave);
@@ -4126,13 +5805,17 @@
   //    那边还要兜住 saveCfg(commit=true) 这条不经本页的路径。两处职责不同，不要合并。
   var wheelCommitTimer = null;
   document.addEventListener('wheel', function (e) {
-    if (dragLock) return;
-    if (drag && drag.active) return;
     // closest 在事件目标被销毁/分离时可能抛错；本监听器在点击链路上，抛错会让后续
     // 缩放逻辑整段中断，故独立兜底为「未命中菜单」继续往下走（isWhaleHit 自身已兜底）
     var inMenu = false;
     try { inMenu = !!(e.target && e.target.closest && e.target.closest('.dshwv-menu')); } catch (err) {}
-    if (inMenu) return; // 菜单内滚动不缩放
+    // 菜单判定必须排在下面两个早退之前：锁定位置时菜单仍可打开，滚轮要能滚菜单
+    if (inMenu) return; // 菜单内滚动不缩放（也不吃默认动作）
+    // 锁定 / 拖拽中不做业务缩放，但仍要吃掉默认动作：Ctrl+滚轮与触控板捏合会以
+    // ctrlKey+wheel 派发到这里，不拦的话默认动作落到 Chromium 的整页缩放上 ——
+    // 窗口尺寸和 scale 读数都不变、画面却整体变大，正是「拖动变大」的观感
+    if (dragLock) { try { e.preventDefault(); } catch (err) {} return; }
+    if (drag && drag.active) { try { e.preventDefault(); } catch (err) {} return; }
     if (!isWhaleHit(e)) return;
     try { e.preventDefault(); } catch (err) {}
     // 滚轮一次走一档（整数档位），再换算成倍率：curScale 可能是吸附前的非整档值，
@@ -4175,11 +5858,15 @@
     // 此时 customSkin 若还是空串，会先闪一下内置形象再换成自定义
     customSkin = data.skin || '';
     customBubbles = toList(data.bubbles);
-    // 共享角色图池也要先于 applyConfig 落地：randimg 段首次渲染就要能从池里抽
-    sharedSkins = toList(data.sharedSkins);
+    // 共享角色图池不在 init 里（整池 52MB base64，读盘+编码+克隆全压在首帧同步段）：
+    // 由宿主在 init 之后单独发一条 whale:shared-skins（只有清单，本体抽到才单张来要），
+    // 见下面的 onSharedSkins / onRandimgData
     // 待办清单先落地：applyConfig 里 todoOn 变化会触发 renderTodoMenu，
     // 晚赋值的话首次渲染拿到的是空清单（会闪一下「还没有待办」）
     todoState = data.todo || { items: [], focusId: '' };
+    // 待办条数上限（宿主 constants.js 的 TODO_MAX，随 init 下发）：满额时页面先拦一道，
+    // 否则宿主会静默丢弃这次 add，用户看到的是「输入框清空但清单没变」
+    todoMax = Number(data.todoMax) || 0;
     // 专注统计先落地：applyConfig 里 focusOn 变化会触发 renderFocusStats
     if (data.focusStats && data.focusStats.summary) {
       focusSummary = data.focusStats.summary;
@@ -4228,6 +5915,26 @@
       updateTimerActions();
     }
   });
+  // 待办到点提醒（宿主经 whale:cmd 推一条）：只弹提醒气泡，不动计时 / 不改清单
+  if (whaleApi.onTodoDue) whaleApi.onTodoDue(function (d) {
+    if (!d || !d.text) return;
+    // 非 force：计时中会被 showRemindBubble 自动跳过（系统通知兜底），与既有提醒优先级一致。
+    // 行必须是 { t, s, c, w } 对象（渲染器按对象取字段），传字符串会把三行全渲染成 undefined
+    var shown = false;
+    try {
+      shown = showRemindBubble([
+        { t: '待办到点', s: 'A', c: '' },
+        { t: String(d.text).slice(0, 60), s: 'P', c: '' },
+        { t: '去设置页可改提醒', s: 'C', c: '', w: true },
+      ], false);
+    } catch (err) {}
+    // 回执：被计时气泡拦下时 shown=false，宿主不写幂等位，下个 tick 还会再投递 ——
+    // once 型提醒被拦一次不会永久丢；系统通知这一侧宿主另有一本账（notifiedFor），发过不重发。
+    // debug 是设置页调试入口触发的演练，回执带上原样标记，宿主据此跳过记账
+    if (whaleApi.todoDueAck) {
+      try { whaleApi.todoDueAck({ id: d.id, dueAt: d.dueAt, shown: shown, debug: d.debug === true }); } catch (err) {}
+    }
+  });
   // 专注统计回推（记录新一轮 / 设置页刷新时宿主推送）
   whaleApi.onFocusStats(function (data) {
     if (data && data.summary) {
@@ -4238,6 +5945,47 @@
       focusGoal = 0;
     }
     renderFocusStats();
+    refreshMenuSummaries(); // 合并组折叠摘要（今日几轮接在计时摘要后面）
+    // 待办行上的「今日 N 轮」来自 focusSummary.todayByTodo：记完一轮要让已打开的菜单同步换数字
+    renderTodoMenu();
+  });
+  // 快捷指令（uTools feature 入口触发）
+  whaleApi.onCmd(function (data) {
+    if (!data || !data.cmd) return;
+    if (data.cmd === 'timer-toggle') {
+      if (timerRunning && !timerPaused) {
+        pauseTimer();
+      } else if (timerPaused) {
+        resumeTimer();
+      } else {
+        startTimer();
+      }
+    } else if (data.cmd === 'refresh-balance') {
+      // 宿主 feature 指令「刷新余额」：由页面发手动刷新，和菜单里的「刷新余额」同一路径。
+      // 走 refresh(true) 而不是直接 whaleApi.refresh：这样挂件本体上的呼吸圈与兜底超时也一并生效
+      try { refresh(true); } catch (err) { logErr('[whale][page] 指令刷新余额失败', err && err.message); }
+    } else if (data.cmd === 'show-focus') {
+      // 用户主动按的快捷键：计时进行中也要弹（第二参数 force），否则按了毫无反馈。
+      // 到点态例外（!timerFinished 为 false）：那里气泡下缘挂着动作条，不能顶掉
+      if (!focusOn || !focusSummary) {
+        showRemindBubble([
+          { t: '专注统计', s: 'A', c: '' },
+          { t: focusOn ? '还没有专注记录' : '专注记录未开启', s: 'P', c: '' },
+          { t: focusOn ? '跑一段计时就自动记上' : '设置页开启「专注记录」', s: 'C', c: '', w: true },
+        ], !timerFinished);
+      } else {
+        var today = focusSummary.today || {};
+        var r = today.r || 0;
+        var m = today.m || 0;
+        var streak = focusSummary.streak || 0;
+        var goalLine = focusGoal > 0 ? '目标 ' + focusGoal + ' 轮' : '未设目标';
+        showRemindBubble([
+          { t: '今日专注', s: 'A', c: '' },
+          { t: r + ' 轮 · ' + m + ' 分钟' + (streak > 0 ? ' · 连续 ' + streak + ' 天' : ''), s: 'P', c: '' },
+          { t: goalLine, s: 'C', c: '', w: true },
+        ], !timerFinished);
+      }
+    }
   });
   whaleApi.onBubblePreview(function (data) { showBubblePreviewBubble(data); });
   whaleApi.onSounds(function (data) {
@@ -4262,8 +6010,14 @@
     customBubbles = toList(data);
   });
   if (whaleApi.onSharedSkins) whaleApi.onSharedSkins(function (data) {
-    // 设置页下载/删除共享角色后宿主重推；没有「当前用哪张」，下次抽到 randimg 段自然生效
-    sharedSkins = toList(data);
+    // 设置页下载/删除共享角色后宿主重推**清单**；没有「当前用哪张」，下次抽到 randimg 段自然生效
+    applySharedPool(data);
+  });
+  if (whaleApi.onRandimgData) whaleApi.onRandimgData(function (data) {
+    // 单张本体的回包（要那张就回那张，取不到时 url 为空串）。挂到 randimg 段上是异步的：
+    // 这一泡多半已经按「没图」画完了，落地后下一次按压才用得上 —— 所以不必重画气泡
+    if (!data || typeof data.id !== 'string' || !data.id) return;
+    takeSharedImg(data.id, data.url);
   });
   whaleApi.onSnapped(function (data) {
     flipped = !!(data && data.flipped);
@@ -4271,6 +6025,13 @@
     // 吸附后位置变了，菜单展开方向要跟着重算（开着就解锁重摆，否则面板停在旧几何上）
     if (data && data.space) menuSpace = data.space;
     if (menuOpen) { menuDirLocked = false; positionMenu(); }
+  });
+  // 光标探测回包：窗口平时是 ignoreMouse，指针若本来就停在鲸鱼上（页面刚重建 / 挂件刚被拖到
+  // 光标下），没有 pointermove 就建立不了悬停 —— 用户点一下会被穿透到下层应用，看着像「点了没反应」。
+  // 这里拿宿主给的坐标补一次命中测试，等价于「刚发生过一次 pointermove」
+  whaleApi.onCursor(function (pt) {
+    if (!pt || !isFinite(pt.x) || !isFinite(pt.y)) return;
+    hoverAt({ clientX: Number(pt.x), clientY: Number(pt.y) });
   });
   // 深浅色跟 uTools 走（preload 轮询 isDarkColors 后本地推送）：挂 <html> 的 dark 类，
   // 菜单/计时条等面板的深色形态全在 floating.css 的 html.dark 系列规则里。
@@ -4281,8 +6042,12 @@
     applyDark();
   });
   function applyDark() {
-    var dark = uiMode === 'auto' ? utoolsDark : uiMode === 'dark';
-    try { document.documentElement.classList.toggle('dark', dark); } catch (err) {}
+    var fantasy = uiMode === 'fantasy';
+    var dark = fantasy || (uiMode === 'auto' ? utoolsDark : uiMode === 'dark');
+    try {
+      document.documentElement.classList.toggle('dark', dark);
+      document.documentElement.classList.toggle('fantasy', fantasy);
+    } catch (err) {}
   }
   try {
     utoolsDark = !!(window.whale && window.whale.isDark && window.whale.isDark());
@@ -4306,4 +6071,30 @@
   // 放在 ready() 之前：宿主收到 ready 后会回推 init/balance，但那都只是改数字，不会换回内置形象
   if (typeof whaleApi.show === 'function') whaleApi.show();
   whaleApi.ready();
+  // 页面重建时指针可能正停在鲸鱼上：没有 pointermove 就建立不了悬停，第一下点击会被穿透丢掉。
+  // 稍等一下（窗口显示 + 首次布局完成）再问宿主光标位置，补一次命中测试
+  setTimeout(function () { try { whaleApi.probeCursor(); } catch (err) {} }, 350);
+
+  // —— 穿透死锁看门狗 ——
+  // 真机实证：窗口可能被留在 WS_EX_TRANSPARENT(0x20) 上，而 Electron 的 forward 转发钩子已经失效，
+  // 页面收不到任何 pointermove；可悬停接管（含上面那次补命中测试）全靠 pointermove 驱动，
+  // 350ms 那次探测只在启动时问一次 → 之后再没机会，挂件「看得见、点不着」。
+  // 处理：穿透待命期低频主动问一次光标（等价于补一次 pointermove）；窗口获焦/失焦/页面重新可见时
+  // 立刻补问。指针若压在鲸鱼上，驻留 PASS_DWELL_MS 后会自动接管并下发 ignore=false，把窗口捞回来。
+  // 宿主侧另有一条重申路径（lib/widget.js reassertIgnoreMouse）负责把 forward 钩子重新装回去。
+  function probeCursorSoon() {
+    if (!passThroughOn || passHoverActive) return;
+    if (menuOpen || (drag && drag.active)) return;
+    // 页面隐藏（挂件被收起 / 全屏自动隐藏）时不问：隐藏态既没有可点的鲸鱼，
+    // 问了反而可能在不可见时把 ignore=false 接管上，重新显示后先吞一次点击。
+    // 重新可见由下面的 visibilitychange 补问，不靠这个低频轮询。
+    if (document.hidden) return;
+    try { whaleApi.probeCursor(); } catch (err) {}
+  }
+  setInterval(probeCursorSoon, 2500);
+  try {
+    window.addEventListener('focus', probeCursorSoon);
+    window.addEventListener('blur', probeCursorSoon);
+    document.addEventListener('visibilitychange', function () { if (!document.hidden) probeCursorSoon(); });
+  } catch (err) {}
 })();

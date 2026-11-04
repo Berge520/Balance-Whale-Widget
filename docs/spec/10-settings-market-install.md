@@ -22,3 +22,9 @@
     - **修法 ①：卡片新增「已装包」折叠区**（`dshMarketInstalledList` / `dshMarketInstalledFold` / `dshMarketInstalledSummary`），逐行列出 `dshMarketStatus.installed` 的每个键，按「`inDeps` 在前」分组（组内按名字），`inDeps` 决定有没有「彻底删除」，便于看清哪些能真删。每行复用 `dshMarketPreviewUninstall`：**「禁用（留包）」只在 `inPatch` 为真时给**（宿主 `dshPatchToggle` 要求 id 已存在，做不到新加；包不在 patch 里时想禁，得先让它在 patch 里出现，那属于「插件开关」卡的活），**「彻底删除」只在 `inDeps` 为真时给**（不在依赖里时 `pnpm remove` 没东西可删）。
     - **⚠️ 位置必须在「进入市场」之前**：这份清单是**纯本地**的（读 profile/package.json + patch），与联网、目录加载无关。放在 `dshMarketRevealed` 之内等于要求用户先点一次「进入市场」才看得到卸载入口，而多数人根本不进市场，盲区照旧。
     - **修法 ②：放宽目录条目的门禁**，`p.specKind &&` 从已装分支撤掉：卸载走 npm 包名（`marketUninstall` 的 `remove: true` 分支只认 `npm`，spec 反查不到时用 `realDepKey` 按依赖表取回键名），**根本不需要目录 spec**；原判据是把「安装能力」当「卸载能力」。**但「更新」仍需要 specKind**（更新 = 按目录 spec 重装），故单独判 `v-if="p.specKind && dshMarketHasUpdate(p)"`：撤掉外层把关后必须自己判，否则认不出 spec 的条目会摆出点了必报错的「更新」。
+  - **⚠️ 彻底删除会顺带清掉 patch 里的残留条目**（对齐上游 dsh-market #799；`patchRowsOf` / `cleanupPatchRows`，`settings.js`）：
+    - **为什么必须清**：包删了、patch 条目还在，dsh 每次启动都往 stderr 打 `patch: entry "X" not found`（V2：退出码 0、永不报错，用户完全看不见）；日后重装同名插件还会莫名其妙带着旧 config。
+    - **⚠️ 采集必须在 `pnpm remove` 之前**：条目 id 是**用户当初手写进 patch 的名字**（可能是去 scope 的短名），要靠「已装清单 + 包名」反查；包一删，profile/package.json 里的键就没了，反查锚点随之消失。候选 = `oid`（界面 dryRun 算好的 id）∪ `npm` ∪ `shortName(npm, installed)`，**且只保留 patch 里真实存在的 id**（否则「包名恰好等于别的插件 id」会被误删）。
+    - **删整段、不区分是否有 config**：`dsh-patch.removeItem` 把该 id 的**所有段**（含 `config:` 子块、同 id 多段）从 `lineIndex` 删到 `endLineIndex`，块间空行与块内注释一并走。与「启用」不同 —— 那时还得保住用户的 config，这里包都没了。
+    - **清理失败不回滚、不把整体判失败**：包确实卸掉了，回滚只会让用户把刚删的插件装回来。结论放在返回体的 `patchCleanup: { ok, removed, ids, error? }` 里如实回报，界面念一句「没清干净 + 去哪儿处理」（指向快照回滚 / 手改文件，**不指插件开关卡 —— 那张卡没有删除条目能力**）。
+    - 清理走 `removeItem` → `writeFileAtomicSync` → **回读确认一条不剩**（同 E2 / E3 的回读口径）。

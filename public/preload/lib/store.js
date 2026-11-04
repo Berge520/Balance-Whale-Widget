@@ -6,10 +6,12 @@ const {
   TOKEN_PRICE_DEFAULT, TOKEN_PRICE_MAX, TOKEN_RATE_MAX, TOKEN_PRICE_MODELS_MAX, TIMER_NOTE_MAX,
   TODO_TEXT_MAX, TODO_MAX,
   NEWEST_VERSION, DSH_PORT_DEFAULT, SKIN_PACK_PREFIX_MAX,
-  TIMER_LONG_EVERY_DEFAULT, TIMER_LONG_BREAK_DEFAULT, FOCUS_GOAL_MAX,
+  TIMER_LONG_EVERY_DEFAULT, TIMER_LONG_BREAK_DEFAULT, TIMER_PRESETS_DEFAULT, FOCUS_GOAL_MAX,
 } = require('./constants')
 const { logErr } = require('./log')
 const { errMsg, isIpv4 } = require('./util')
+const reminders = require('./reminders')
+const offwork = require('./offwork')
 
 // GitHub 加速 IP 表归一化：domain 去空白转小写限长、ip 必须是合法 IPv4，非法条目丢弃。
 // 传 null/非数组 = 空表（不再内置 IP 快照：没有拿得到新鲜 IP 的途径时，宁可不写 hosts 也不写一批
@@ -469,8 +471,12 @@ function normBubbleMod(v) {
   if (isFinite(row) && row >= 1 && row <= BUBBLE_ROW_MAX) out.row = row
   const tpl = String(v.tpl == null ? '' : v.tpl).slice(0, BUBBLE_TEXT_MAX)
   if (type === 'text') {
-    const text = String(v.text == null ? '' : v.text).trim().slice(0, BUBBLE_TEXT_MAX)
-    if (!text) return null
+    // 保留原串、只用 trim 判空：设置页是逐键回抛的（每敲一个字 → 宿主整份归一化 + 写库 + 回填），
+    // 这里若 trim，刚敲下的尾部空格会被立刻吃掉 —— 打「hello world」时先到「hello 」被 trim 成
+    // 「hello」，再敲的 world 就粘成了「helloworld」，空格永远打不出来。
+    // 纯空白仍视为空内容（空模块渲染出来是个空泡，没有意义）。
+    const text = String(v.text == null ? '' : v.text).slice(0, BUBBLE_TEXT_MAX)
+    if (!text.trim()) return null
     out.text = text
   } else if (type === 'random') {
     const lines = normBubbleLines(v.lines)
@@ -480,7 +486,11 @@ function normBubbleMod(v) {
     const url = String(v.url == null ? '' : v.url).trim().slice(0, BUBBLE_URL_MAX2)
     if (!url) return null
     out.url = url
-    out.text = String(v.text == null ? '' : v.text).trim().slice(0, BUBBLE_TEXT_MAX) || url
+    // 显示文字：同样保留原串（逐键回抛下 trim 会让空格打不出来），纯空白存空串 ——
+    // 渲染侧是 `text || url` 回落，所以留空 = 显示链接本身；这里**不要**再把 url 塞进 text，
+    // 否则用户清空输入框后回填，会看到链接被灌进「显示文字」里。
+    const text = String(v.text == null ? '' : v.text).slice(0, BUBBLE_TEXT_MAX)
+    out.text = text.trim() ? text : ''
   } else if (type === 'image') {
     out.imgId = String(v.imgId == null ? '' : v.imgId).trim().slice(0, 120)
     const imgScale = clampNum(v.imgScale, BUBBLE_IMG_SCALE_MIN, BUBBLE_IMG_SCALE_MAX, 1)
@@ -609,7 +619,8 @@ function normBubbleLib(v) {
     const module = normBubbleMod(it.module)
     if (!module) continue
     let id = String(it.id == null ? '' : it.id).trim().slice(0, 40)
-    if (!id || seen[id]) id = 'bmod_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6)
+    // 补号后缀与 bubble-edit.js 的 newLibId 同长（10 位）：4 位在同毫秒批量补号时会撞号
+    if (!id || seen[id]) id = 'bmod_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 12)
     seen[id] = true
     const name = String(it.name == null ? '' : it.name).trim().slice(0, BUBBLE_LIB_NAME_MAX) || ('模块' + (out.length + 1))
     out.push(Object.assign(passOwn(it, ['id', 'name', 'module']), { id: id, name: name, module: module }))
@@ -731,8 +742,72 @@ function normAlertVols(v, dft) {
   }
   return out
 }
+// 自定义显示：Tab 顺序。只做「去空白 / 去空串 / 去重 / 限长」，**不校验 key 合法性** ——
+// 合法 Tab 清单在设置页的 display.ts，宿主不认识；手改配置塞进来的野 key 由设置页
+// 渲染时自然忽略（拼不上任何 Tab 就不参与排序）。上限 32 远大于实际的 7 个 Tab，
+// 只是挡住「手改配置塞进超大数组」这种把配置写胖的情况。
+const TAB_ORDER_MAX = 32
+function normTabOrder(v) {
+  if (!Array.isArray(v)) return []
+  const out = []
+  for (const s of v) {
+    if (out.length >= TAB_ORDER_MAX) break
+    const t = typeof s === 'string' ? s.trim() : ''
+    if (t && !out.includes(t)) out.push(t)
+  }
+  return out
+}
+// 置顶卡片：与 tabOrder 同构（卡片 id 列表，越靠前越先显示），共用同一套归一化 ——
+// 两者都是「一串 id + 去空 / 去重 / 上限」，各写一份只会漂移。卡片实际只有 20 余张，
+// TAB_ORDER_MAX 的上限对它同样够用。
+function normPinnedCards(v) {
+  return normTabOrder(v)
+}
+// 卡片自定义顺序：{ TabKey: [cardKey, ...] }，只存非置顶卡（置顶卡的位置由 pinnedCards 决定）。
+// 比 tabOrder 多一层「按分组」，故单独归一化：只收对象、每组只收字符串数组、去空去重；
+// 空数组直接丢掉（等于「这一组按模板顺序」），免得存一堆没意义的空键。
+// 上限口径与 tabOrder 一致（远大于实际用量），只挡「手改配置塞进超大数组」把配置写胖
+const CARD_ORDER_TABS_MAX = 16
+const CARD_ORDER_MAX = 64
+function normCardOrder(v) {
+  const out = {}
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return out
+  let tabs = 0
+  for (const tab of Object.keys(v)) {
+    if (tabs >= CARD_ORDER_TABS_MAX) break
+    const list = v[tab]
+    if (!Array.isArray(list)) continue
+    const keys = []
+    for (const k of list) {
+      if (keys.length >= CARD_ORDER_MAX) break
+      const t = typeof k === 'string' ? k.trim() : ''
+      if (t && !keys.includes(t)) keys.push(t)
+    }
+    if (!keys.length) continue
+    out[tab] = keys
+    tabs++
+  }
+  return out
+}
+// 每张卡的默认展开态：{ foldKey: boolean }。非布尔一律丢掉 ——
+// 宁可回落到模板默认，也不让 'false' 这种字符串变成「真」把卡片全展开
+const FOLD_DEFAULTS_MAX = 64
+function normFoldDefaults(v) {
+  const out = {}
+  if (!v || typeof v !== 'object' || Array.isArray(v)) return out
+  let n = 0
+  for (const k of Object.keys(v)) {
+    if (n >= FOLD_DEFAULTS_MAX) break
+    if (typeof v[k] !== 'boolean') continue
+    const key = String(k).trim()
+    if (!key) continue
+    out[key] = v[k]
+    n++
+  }
+  return out
+}
 function defaultConfig() {
-  return { scale: 1.3, vol: 0.9, soundOn: true, soundSet: 'duck', usageMode: 'ledger', peakMode: 'default', peakRemindOn: true, bubbleOn: true, menuBtn: true, onTop: true, lowAlertOn: true, lowAlertAmount: LOW_ALERT_BY_CURRENCY.CNY, budgetOn: false, budgetAmount: 0, dropAlertOn: false, dropAlertAmount: 5, remindSec: 8, quietOn: false, quietFrom: '23:00', quietTo: '07:00', timeBubbleOn: true, updateCheckOn: false, dragLock: false, bubbleDwell: 5, dragLines: null, tapAdvance: false, enterMode: 'both', timerNotifyOn: true, timerMailOn: true, timerPersistOn: true, timerMode: 'off', timerSec: 1500, timerAt: '07:30', timerNote: '', timerBreakMin: 5, timerRemindSec: 8, timerBubblePin: true, timerBubbleOnly: true, timerPomoOn: false, timerLongBreakMin: TIMER_LONG_BREAK_DEFAULT, timerLongEvery: TIMER_LONG_EVERY_DEFAULT, timerAutoNext: false, focusOn: false, todoOn: false, focusGoal: 0, guideDone: false, dshNodeDir: '', dshKeepAlive: false, dshPort: DSH_PORT_DEFAULT, dshRegistry: '', dshVersion: '', dshReinstall: false, dshNoOpen: true, dshMarketUrl: '', dshMarketMirror: true, dshMarketRegistry: '', dshMarketOfficial: false, dshExportCred: false, dshExportNoMod: true, avoidTaskbar: true, edgeTop: 0, edgeRight: 0, edgeBottom: 0, edgeLeft: 0, scrollGapOn: false, scrollGapPx: SCROLL_GAP_DEFAULT, snapMode: 'ratio', snapRatio: SNAP_RATIO_DEFAULT, opacity: 100, passThrough: false, skin: 'DSniang1', theme: 'default', uiMode: 'auto', bubble: normBubble(null, null, null), alerts: normAlerts(null), alertVols: normAlertVols(null), quotaTotal: 0, quotaReset: 'monthly', tokenPrice: normTokenPrice(null), historyKeepDays: HISTORY_KEEP_DEFAULT, models: [], mainModelId: DEFAULT_MAIN_MODEL, dshBackupKeep: DSB_KEEP_DEFAULT, ghAccelOn: false, ghAccelIps: normIps(null), ghAccelRefreshedAt: 0, ghAccelSrc: normGhAccelSrc(null), skinPackSrc: '', randomIncludeBuiltin: true, notifySystemOn: true, notifyMailOn: false, mailFrom: '', mailTo: '', mailFromName: '小鲸鱼余额挂件', mailSubjectPrefix: '[小鲸鱼余额挂件]', hiddenTabs: [], hiddenCards: [] }
+  return { scale: 1.3, vol: 0.9, soundOn: true, soundSet: 'duck', usageMode: 'ledger', peakMode: 'default', peakRemindOn: true, bubbleOn: true, menuBtn: true, onTop: true, lowAlertOn: true, lowAlertAmount: LOW_ALERT_BY_CURRENCY.CNY, budgetOn: false, budgetAmount: 0, dropAlertOn: false, dropAlertAmount: 5, remindSec: 8, quietOn: false, quietFrom: '23:00', quietTo: '07:00', timeBubbleOn: true, updateCheckOn: false, dragLock: false, bubbleDwell: 5, dragLines: null, tapAdvance: false, enterMode: 'both', timerNotifyOn: true, timerMailOn: true, timerPersistOn: true, timerMode: 'off', timerSec: 1500, timerAt: '07:30', timerNote: '', timerBreakMin: 5, timerRemindSec: 8, timerBubblePin: true, timerBubbleOnly: true, timerPomoOn: false, timerLongBreakMin: TIMER_LONG_BREAK_DEFAULT, timerLongEvery: TIMER_LONG_EVERY_DEFAULT, timerAutoNext: false, timerPresets: TIMER_PRESETS_DEFAULT.slice(), focusOn: false, todoOn: false, focusGoal: 0, offworkOn: false, offworkStart: offwork.DEFAULTS.start, offworkEnd: offwork.DEFAULTS.end, offworkDays: offwork.DEFAULTS.days.slice(), offworkShowSec: true, offworkWeekendOn: false, offworkPaydayOn: false, offworkPaydayDay: offwork.DEFAULTS.paydayDay, debugTools: false, guideDone: false, dshNodeDir: '', dshKeepAlive: false, dshElevated: false, dshPort: DSH_PORT_DEFAULT, dshRegistry: '', dshVersion: '', dshReinstall: false, dshNoOpen: true, dshMarketUrl: '', dshMarketMirror: true, dshMarketRegistry: '', dshMarketOfficial: false, dshExportCred: false, dshExportNoMod: true, avoidTaskbar: true, edgeTop: 0, edgeRight: 0, edgeBottom: 0, edgeLeft: 0, scrollGapOn: false, scrollGapPx: SCROLL_GAP_DEFAULT, snapMode: 'ratio', snapRatio: SNAP_RATIO_DEFAULT, opacity: 100, passThrough: false, skin: 'DSniang1', theme: 'default', uiMode: 'auto', bgMode: 'off', bgMediaId: '', bgScrim: 45, bgBlur: 0, bgBrightness: 100, bgVignette: 100, bgFit: 'cover', bgFocusX: 50, bgFocusY: 50, bgZoom: 100, bootIntroOn: false, bootIntroClean: false, bootIntroSource: 'auto', bootIntroMediaId: '', bubble: normBubble(null, null, null), alerts: normAlerts(null), alertVols: normAlertVols(null), quotaTotal: 0, quotaReset: 'monthly', tokenPrice: normTokenPrice(null), historyKeepDays: HISTORY_KEEP_DEFAULT, models: [], mainModelId: DEFAULT_MAIN_MODEL, dshBackupKeep: DSB_KEEP_DEFAULT, ghAccelOn: false, ghAccelIps: normIps(null), ghAccelRefreshedAt: 0, ghAccelSrc: normGhAccelSrc(null), skinPackSrc: '', randomIncludeBuiltin: true, notifySystemOn: true, notifyMailOn: false, mailFrom: '', mailTo: '', mailFromName: '小鲸鱼余额挂件', mailSubjectPrefix: '[小鲸鱼余额挂件]', hiddenTabs: [], hiddenCards: [], tabOrder: [], pinnedCards: [], cardOrder: {}, foldDefaults: {}, foldRemember: true }
 }
 // dsh Web UI 监听端口（默认 3080）。
 // ⚠️ 为什么必须能配：3080 属于 Windows/Hyper-V 的「动态端口保留段」，被系统预留时
@@ -798,6 +873,18 @@ function normScale(v, dft) {
 function normTimerNote(v) {
   return String(v == null ? '' : v).replace(/\s+/g, ' ').trim().slice(0, TIMER_NOTE_MAX)
 }
+// 快捷时长四档（分钟）：固定输出 TIMER_PRESETS_DEFAULT.length 个整数，挂件 chips 永远一行四个。
+// 每档独立归一：1–600 取整，非数值回该位置默认（0 会让「点了没反应」，NaN 会渲染成空按钮）。
+// 非数组 = 未配置过，整组回默认；缺项补默认、多项截掉。
+function normTimerPresets(v) {
+  if (!Array.isArray(v)) return TIMER_PRESETS_DEFAULT.slice()
+  return TIMER_PRESETS_DEFAULT.map((dft, i) => {
+    const raw = v[i]
+    const n = Number(raw)
+    if (raw == null || raw === '' || !isFinite(n)) return dft
+    return Math.round(Math.min(600, Math.max(1, n)))
+  })
+}
 // 随包分发的内置形象：v1.7.x 起只留默认那张（约 39KB），其余改为用户按需从 GitHub
 // Release 下载 —— 目的是把插件包从约 2.7MB 压到约 1.7MB。（v1.8.0 起可下载包再从 12 张
 // 精简为 1 张 DSniang02，其余 11 张与共享角色包同图、改由共享角色包提供。）
@@ -829,12 +916,30 @@ function normSkin(v) {
 }
 // 气泡配色主题
 function normTheme(v) {
-  return v === 'dark' || v === 'sakura' ? v : 'default'
+  return v === 'dark' || v === 'sakura' || v === 'fantasy' ? v : 'default'
 }
-// 界面深浅色（设置页与挂件面板的配色形态）：'auto' 跟 uTools / 'light' / 'dark'。
+// 界面深浅色（设置页与挂件面板的配色形态）：'auto' 跟 uTools / 'light' / 'dark' / 'fantasy'（未至之境，暗色专用）。
 // 与 theme（气泡配色主题）是两条线，名字也刻意区分开；非法值回 'auto'（旧行为，不做就近猜测）
 function normUiMode(v) {
-  return v === 'light' || v === 'dark' ? v : 'auto'
+  return v === 'light' || v === 'dark' || v === 'fantasy' ? v : 'auto'
+}
+// 背景氛围（仅「未至之境」生效）：'off' / 'deep' 深海光晕 / 'aurora' 极光 / 'video' 鲸鱼娘视频壁纸 / 'custom' 用户媒体。
+// 前三种是纯 CSS/内置素材；video 与 custom 的背景层在设置页。非法值回 'off'（不就近猜测）
+function normBgMode(v) {
+  return v === 'deep' || v === 'aurora' || v === 'stars' || v === 'mist' || v === 'polar' || v === 'warm'
+    || v === 'video' || v === 'custom' ? v : 'off'
+}
+// 自定义媒体构图：cover 铺满裁切 / contain 完整显示；焦点 0–100；缩放 100–130%
+function normBgFit(v) {
+  return v === 'contain' ? 'contain' : 'cover'
+}
+// 媒体库 id：会拼进 userData/whale-media 文件名，只允许安全字符；空串 = 未选
+function normMediaId(v) {
+  return typeof v === 'string' && /^[A-Za-z0-9_-]{1,40}$/.test(v) ? v : ''
+}
+// 片头来源：auto 跟随背景 / media 指定片头视频 / css 纯 HUD
+function normBootIntroSource(v) {
+  return v === 'media' || v === 'css' ? v : 'auto'
 }
 // 额度（资源包 / 订阅）的重置周期：'never' 不重置 / 'daily' 每日 / 'monthly' 每月
 function normQuotaReset(v) {
@@ -999,7 +1104,9 @@ function readConfig() {
     menuBtn: p.menuBtn !== false,
     onTop: p.onTop !== false,
     lowAlertOn: p.lowAlertOn !== false,
-    lowAlertAmount: clampNum(p.lowAlertAmount, 0, 1e9, dft.lowAlertAmount),
+    // 低余额阈值：0 / 非法值一律回落默认阈值。api 侧的低余额提醒要求阈值 > 0，若把「清空输入框」
+    // 得到的 0 原样存下，开关开着也永远不会提醒（用户完全无感）；想关提醒请关上面的开关
+    lowAlertAmount: clampNum(p.lowAlertAmount, 0, 1e9, dft.lowAlertAmount) || dft.lowAlertAmount,
     budgetOn: p.budgetOn === true,
     budgetAmount: clampNum(p.budgetAmount, 0, 1e9, dft.budgetAmount),
     dropAlertOn: p.dropAlertOn === true,
@@ -1040,17 +1147,30 @@ function readConfig() {
     timerLongBreakMin: Math.round(clampNum(p.timerLongBreakMin, 1, 60, dft.timerLongBreakMin)),
     timerLongEvery: Math.round(clampNum(p.timerLongEvery, 2, 12, dft.timerLongEvery)),
     timerAutoNext: p.timerAutoNext === true,
+    // 快捷时长四档（分钟）：设置页可改，挂件 chips 直接读它
+    timerPresets: normTimerPresets(p.timerPresets),
     // 专注记录 / 待办：默认全关，不勾时挂件行为与未加这两个功能前完全一致。
-    // 专注记录只有一个开关：开着就「倒计时走完自动记一轮」，不再拆「是否自动记」
+    // 专注记录只有一个开关：开着就把每段计时记成明细，走完的倒计时才计一轮（口径见 lib/focus.js 的 isRound）
     focusOn: p.focusOn === true,
     todoOn: p.todoOn === true,
     // 每日专注目标（轮数，0 = 未设置/关闭）。达成时弹一次提醒（notifyDaily kind='goal'）
     focusGoal: Math.round(clampNum(p.focusGoal, 0, FOCUS_GOAL_MAX, 0)),
+    // 下班倒计时（默认关）：只在挂件主体显示，不改余额 / 专注 / 计时的既有分支。
+    // offworkDays 用 JS getDay() 口径（0=周日…6=周六），归一去重升序、至少保留一天
+    offworkOn: p.offworkOn === true,
+    offworkStart: offwork.normHm(p.offworkStart, dft.offworkStart),
+    offworkEnd: offwork.normHm(p.offworkEnd, dft.offworkEnd),
+    offworkDays: offwork.normDays(p.offworkDays, dft.offworkDays),
+    offworkShowSec: p.offworkShowSec !== false,
+    offworkWeekendOn: p.offworkWeekendOn === true,
+    offworkPaydayOn: p.offworkPaydayOn === true,
+    offworkPaydayDay: offwork.normPayday(p.offworkPaydayDay),
     // 首次运行引导是否已结束（点「开始使用」或「跳过」）——默认 false 表示还没走过引导。
-    // 只认 true：老配置里没有这个键，若不这样归一，升级上来的老用户会被当成新装用户弹一次引导
+    // 只认 true：老配置里没有这个键，若不这样归一，升级上来的老用户会被当成新装用户弹一次设置页的凭据引导
     guideDone: p.guideDone === true,
     dshNodeDir: typeof p.dshNodeDir === 'string' ? p.dshNodeDir.slice(0, 260) : dft.dshNodeDir,
     dshKeepAlive: p.dshKeepAlive === true,
+    dshElevated: p.dshElevated === true,
     dshPort: normDshPort(p.dshPort),
     dshRegistry: normRegistry(p.dshRegistry),
     dshVersion: normVersion(p.dshVersion),
@@ -1083,6 +1203,20 @@ function readConfig() {
     skin: normSkin(p.skin),
     theme: normTheme(p.theme),
     uiMode: normUiMode(p.uiMode),
+    bgMode: normBgMode(p.bgMode),
+    bootIntroOn: p.bootIntroOn === true,
+    bootIntroClean: p.bootIntroClean === true,
+    bgMediaId: normMediaId(p.bgMediaId),
+    bgScrim: Math.round(clampNum(p.bgScrim, 0, 80, 45)),
+    bgBlur: Math.round(clampNum(p.bgBlur, 0, 20, 0)),
+    bgBrightness: Math.round(clampNum(p.bgBrightness, 50, 120, 100)),
+    bgVignette: Math.round(clampNum(p.bgVignette, 0, 100, 100)),
+    bgFit: normBgFit(p.bgFit),
+    bgFocusX: Math.round(clampNum(p.bgFocusX, 0, 100, 50)),
+    bgFocusY: Math.round(clampNum(p.bgFocusY, 0, 100, 50)),
+    bgZoom: Math.round(clampNum(p.bgZoom, 100, 130, 100)),
+    bootIntroSource: normBootIntroSource(p.bootIntroSource),
+    bootIntroMediaId: normMediaId(p.bootIntroMediaId),
     // 按压气泡（独立模型，见 normBubble 注释）：固定文案池（报时/降级）就挂在它的 system 键上；
     // 老配置的 config.quotes 在这里一次性迁进 bubble.system（第三参），此后 quotes 老键不再读写
     bubble: normBubble(p.bubble, dft.bubble, p.quotes),
@@ -1114,6 +1248,9 @@ function readConfig() {
     // 邮件凭据（服务器/端口/账号/授权码）不在配置里，见 readSecretMail —— 只这里存「非敏感」的收发件人与信头
     notifySystemOn: p.notifySystemOn !== false,
     notifyMailOn: p.notifyMailOn === true,
+    // 调试工具总开关（默认关，只在设置页「开发者」Tab 里可见）：开启后才出现「立即触发提醒」
+    // 与「注入旧数据」两个回归入口，且入口内部还会再校验一次，生产 UI 不出现
+    debugTools: p.debugTools === true,
     mailFrom: typeof p.mailFrom === 'string' ? p.mailFrom.trim().slice(0, 200) : dft.mailFrom,
     mailTo: typeof p.mailTo === 'string' ? p.mailTo.trim().slice(0, 200) : dft.mailTo,
     mailFromName: typeof p.mailFromName === 'string' ? p.mailFromName.trim().slice(0, 60) : dft.mailFromName,
@@ -1121,6 +1258,16 @@ function readConfig() {
     // 自定义显示：隐藏的 Tab 和卡片列表（空数组 = 全部显示）。老配置没有这两个字段，归一化为空数组
     hiddenTabs: Array.isArray(p.hiddenTabs) ? p.hiddenTabs.filter(k => typeof k === 'string') : [],
     hiddenCards: Array.isArray(p.hiddenCards) ? p.hiddenCards.filter(k => typeof k === 'string') : [],
+    // 自定义显示：Tab 顺序（空数组 = 按 TABS 默认顺序）
+    tabOrder: normTabOrder(p.tabOrder),
+    // 自定义显示：置顶卡片（空数组 = 不置顶）
+    pinnedCards: normPinnedCards(p.pinnedCards),
+    // 自定义显示：卡片自定义顺序（{} = 全部按模板顺序，只含非置顶卡）
+    cardOrder: normCardOrder(p.cardOrder),
+    // 自定义显示：每张卡的默认展开态（{} = 全部按模板默认）
+    foldDefaults: normFoldDefaults(p.foldDefaults),
+    // 自定义显示：是否记住每张卡上次的展开态（缺省视为开）
+    foldRemember: p.foldRemember !== false,
   }
 }
 function writeConfig(cfg) {
@@ -1173,12 +1320,22 @@ function writeConfig(cfg) {
       timerLongBreakMin: Math.round(clampNum(cfg.timerLongBreakMin, 1, 60, TIMER_LONG_BREAK_DEFAULT)),
       timerLongEvery: Math.round(clampNum(cfg.timerLongEvery, 2, 12, TIMER_LONG_EVERY_DEFAULT)),
       timerAutoNext: cfg.timerAutoNext === true,
+      timerPresets: normTimerPresets(cfg.timerPresets),
       focusOn: cfg.focusOn === true,
       todoOn: cfg.todoOn === true,
       focusGoal: Math.round(clampNum(cfg.focusGoal, 0, FOCUS_GOAL_MAX, 0)),
+      offworkOn: cfg.offworkOn === true,
+      offworkStart: offwork.normHm(cfg.offworkStart, offwork.DEFAULTS.start),
+      offworkEnd: offwork.normHm(cfg.offworkEnd, offwork.DEFAULTS.end),
+      offworkDays: offwork.normDays(cfg.offworkDays),
+      offworkShowSec: cfg.offworkShowSec !== false,
+      offworkWeekendOn: cfg.offworkWeekendOn === true,
+      offworkPaydayOn: cfg.offworkPaydayOn === true,
+      offworkPaydayDay: offwork.normPayday(cfg.offworkPaydayDay),
       guideDone: cfg.guideDone === true,
       dshNodeDir: typeof cfg.dshNodeDir === 'string' ? cfg.dshNodeDir.slice(0, 260) : '',
       dshKeepAlive: cfg.dshKeepAlive === true,
+      dshElevated: cfg.dshElevated === true,
       dshPort: normDshPort(cfg.dshPort),
       dshRegistry: normRegistry(cfg.dshRegistry),
       dshVersion: normVersion(cfg.dshVersion),
@@ -1204,6 +1361,20 @@ function writeConfig(cfg) {
       skin: normSkin(cfg.skin),
       theme: normTheme(cfg.theme),
       uiMode: normUiMode(cfg.uiMode),
+      bgMode: normBgMode(cfg.bgMode),
+      bootIntroOn: cfg.bootIntroOn === true,
+      bootIntroClean: cfg.bootIntroClean === true,
+      bgMediaId: normMediaId(cfg.bgMediaId),
+      bgScrim: Math.round(clampNum(cfg.bgScrim, 0, 80, 45)),
+      bgBlur: Math.round(clampNum(cfg.bgBlur, 0, 20, 0)),
+      bgBrightness: Math.round(clampNum(cfg.bgBrightness, 50, 120, 100)),
+      bgVignette: Math.round(clampNum(cfg.bgVignette, 0, 100, 100)),
+      bgFit: normBgFit(cfg.bgFit),
+      bgFocusX: Math.round(clampNum(cfg.bgFocusX, 0, 100, 50)),
+      bgFocusY: Math.round(clampNum(cfg.bgFocusY, 0, 100, 50)),
+      bgZoom: Math.round(clampNum(cfg.bgZoom, 100, 130, 100)),
+      bootIntroSource: normBootIntroSource(cfg.bootIntroSource),
+      bootIntroMediaId: normMediaId(cfg.bootIntroMediaId),
       bubble: normBubble(cfg.bubble),
       alerts: normAlerts(cfg.alerts),
       quotaTotal: clampNum(cfg.quotaTotal, 0, 1e9, 0),
@@ -1221,13 +1392,19 @@ function writeConfig(cfg) {
       randomIncludeBuiltin: cfg.randomIncludeBuiltin !== false,
       notifySystemOn: cfg.notifySystemOn !== false,
       notifyMailOn: cfg.notifyMailOn === true,
+      debugTools: cfg.debugTools === true,
       mailFrom: String(cfg.mailFrom || '').trim().slice(0, 200),
       mailTo: String(cfg.mailTo || '').trim().slice(0, 200),
       mailFromName: String(cfg.mailFromName || '').trim().slice(0, 60),
       mailSubjectPrefix: String(cfg.mailSubjectPrefix || '').trim().slice(0, 60),
-      // 自定义显示：隐藏的 Tab 和卡片列表
+      // 自定义显示：隐藏的 Tab 和卡片列表 + Tab 顺序
       hiddenTabs: Array.isArray(cfg.hiddenTabs) ? cfg.hiddenTabs.filter(k => typeof k === 'string') : [],
       hiddenCards: Array.isArray(cfg.hiddenCards) ? cfg.hiddenCards.filter(k => typeof k === 'string') : [],
+      tabOrder: normTabOrder(cfg.tabOrder),
+      pinnedCards: normPinnedCards(cfg.pinnedCards),
+      cardOrder: normCardOrder(cfg.cardOrder),
+      foldDefaults: normFoldDefaults(cfg.foldDefaults),
+      foldRemember: cfg.foldRemember !== false,
       updatedAt: new Date().toISOString(),
       })
   } catch (err) {
@@ -1253,7 +1430,9 @@ function patchConfig(patch) {
   if (p.menuBtn !== undefined) cfg.menuBtn = !!p.menuBtn
   if (p.onTop !== undefined) cfg.onTop = !!p.onTop
   if (p.lowAlertOn !== undefined) cfg.lowAlertOn = !!p.lowAlertOn
-  if (p.lowAlertAmount !== undefined) cfg.lowAlertAmount = clampNum(p.lowAlertAmount, 0, 1e9, cfg.lowAlertAmount)
+  // 低余额阈值：清空输入框会送来 0，此时保留原值（与 readConfig 的「0 回落默认」同口径），
+  // 免得用户清一下数字，提醒就静默失效了
+  if (p.lowAlertAmount !== undefined) cfg.lowAlertAmount = clampNum(p.lowAlertAmount, 0, 1e9, cfg.lowAlertAmount) || cfg.lowAlertAmount
   // 今日预算（0 = 未设置，不提醒）与「点按依次播放」台词
   if (p.budgetOn !== undefined) cfg.budgetOn = !!p.budgetOn
   if (p.budgetAmount !== undefined) cfg.budgetAmount = clampNum(p.budgetAmount, 0, 1e9, cfg.budgetAmount)
@@ -1299,16 +1478,28 @@ function patchConfig(patch) {
   if (p.timerLongBreakMin !== undefined) cfg.timerLongBreakMin = Math.round(clampNum(p.timerLongBreakMin, 1, 60, cfg.timerLongBreakMin))
   if (p.timerLongEvery !== undefined) cfg.timerLongEvery = Math.round(clampNum(p.timerLongEvery, 2, 12, cfg.timerLongEvery))
   if (p.timerAutoNext !== undefined) cfg.timerAutoNext = p.timerAutoNext === true
+  // 非数组视为「没传」保持现值（与 tabOrder / pinnedCards 同一条坑：传字符串曾被当成空数组清掉）
+  if (p.timerPresets !== undefined && Array.isArray(p.timerPresets)) cfg.timerPresets = normTimerPresets(p.timerPresets)
   // 专注记录 / 待办：两个独立开关，互不联动
   if (p.focusOn !== undefined) cfg.focusOn = p.focusOn === true
   if (p.todoOn !== undefined) cfg.todoOn = p.todoOn === true
   // 每日专注目标（轮数，0 = 关闭）
   if (p.focusGoal !== undefined) cfg.focusGoal = Math.round(clampNum(p.focusGoal, 0, FOCUS_GOAL_MAX, cfg.focusGoal))
+  // 下班倒计时：时间非法回现值（不静默改用户已存的值），工作日至少保留一天
+  if (p.offworkOn !== undefined) cfg.offworkOn = p.offworkOn === true
+  if (p.offworkStart !== undefined) cfg.offworkStart = offwork.normHm(p.offworkStart, cfg.offworkStart)
+  if (p.offworkEnd !== undefined) cfg.offworkEnd = offwork.normHm(p.offworkEnd, cfg.offworkEnd)
+  if (p.offworkDays !== undefined) cfg.offworkDays = offwork.normDays(p.offworkDays, cfg.offworkDays)
+  if (p.offworkShowSec !== undefined) cfg.offworkShowSec = p.offworkShowSec !== false
+  if (p.offworkWeekendOn !== undefined) cfg.offworkWeekendOn = p.offworkWeekendOn === true
+  if (p.offworkPaydayOn !== undefined) cfg.offworkPaydayOn = p.offworkPaydayOn === true
+  if (p.offworkPaydayDay !== undefined) cfg.offworkPaydayDay = offwork.normPayday(p.offworkPaydayDay)
   // 首次运行引导只允许单向置为「已完成」：写回 undefined 之外的任何值都按 bool 处理，
   // 但不提供「重新弹出引导」的入口，免得误触让老用户再走一遍
   if (p.guideDone !== undefined) cfg.guideDone = p.guideDone === true
   if (p.dshNodeDir !== undefined) cfg.dshNodeDir = String(p.dshNodeDir || '').trim().slice(0, 260)
   if (p.dshKeepAlive !== undefined) cfg.dshKeepAlive = !!p.dshKeepAlive
+  if (p.dshElevated !== undefined) cfg.dshElevated = !!p.dshElevated
   if (p.dshPort !== undefined) cfg.dshPort = normDshPort(p.dshPort)
   if (p.dshRegistry !== undefined) cfg.dshRegistry = normRegistry(p.dshRegistry)
   if (p.dshVersion !== undefined) cfg.dshVersion = normVersion(p.dshVersion)
@@ -1345,6 +1536,22 @@ function patchConfig(patch) {
   if (p.theme !== undefined) cfg.theme = normTheme(p.theme)
   // 界面深浅色：auto 跟 uTools / light / dark（设置页与挂件面板共用这一个字段）
   if (p.uiMode !== undefined) cfg.uiMode = normUiMode(p.uiMode)
+  // 背景氛围：off / deep / aurora / video（仅「未至之境」生效）
+  if (p.bgMode !== undefined) cfg.bgMode = normBgMode(p.bgMode)
+  // 设置页启动片头 + 背景/片头媒体：只影响设置页，默认关闭/未选；挂件不参与
+  if (p.bootIntroOn !== undefined) cfg.bootIntroOn = p.bootIntroOn === true
+  if (p.bootIntroClean !== undefined) cfg.bootIntroClean = p.bootIntroClean === true
+  if (p.bgMediaId !== undefined) cfg.bgMediaId = normMediaId(p.bgMediaId)
+  if (p.bgScrim !== undefined) cfg.bgScrim = Math.round(clampNum(p.bgScrim, 0, 80, cfg.bgScrim))
+  if (p.bgBlur !== undefined) cfg.bgBlur = Math.round(clampNum(p.bgBlur, 0, 20, cfg.bgBlur))
+  if (p.bgBrightness !== undefined) cfg.bgBrightness = Math.round(clampNum(p.bgBrightness, 50, 120, cfg.bgBrightness))
+  if (p.bgVignette !== undefined) cfg.bgVignette = Math.round(clampNum(p.bgVignette, 0, 100, cfg.bgVignette))
+  if (p.bgFit !== undefined) cfg.bgFit = normBgFit(p.bgFit)
+  if (p.bgFocusX !== undefined) cfg.bgFocusX = Math.round(clampNum(p.bgFocusX, 0, 100, cfg.bgFocusX))
+  if (p.bgFocusY !== undefined) cfg.bgFocusY = Math.round(clampNum(p.bgFocusY, 0, 100, cfg.bgFocusY))
+  if (p.bgZoom !== undefined) cfg.bgZoom = Math.round(clampNum(p.bgZoom, 100, 130, cfg.bgZoom))
+  if (p.bootIntroSource !== undefined) cfg.bootIntroSource = normBootIntroSource(p.bootIntroSource)
+  if (p.bootIntroMediaId !== undefined) cfg.bootIntroMediaId = normMediaId(p.bootIntroMediaId)
   // 按压气泡（独立模型）：传对象 = 只改它带的键，其余沿用现值；传 null = 整份回内置默认。
   // 固定文案池（报时/降级）走它的 system 键；老配置若还有 quotes 老键，这里也当迁移源
   if (p.bubble !== undefined) cfg.bubble = normBubble(p.bubble, cfg.bubble, p.quotes)
@@ -1389,6 +1596,7 @@ function patchConfig(patch) {
   // 通知渠道开关 + 邮件的非敏感字段（SMTP 服务器/授权码走 saveMailSecrets，不经这里）
   if (p.notifySystemOn !== undefined) cfg.notifySystemOn = !!p.notifySystemOn
   if (p.notifyMailOn !== undefined) cfg.notifyMailOn = !!p.notifyMailOn
+  if (p.debugTools !== undefined) cfg.debugTools = p.debugTools === true
   if (p.mailFrom !== undefined) cfg.mailFrom = String(p.mailFrom || '').trim().slice(0, 200)
   if (p.mailTo !== undefined) cfg.mailTo = String(p.mailTo || '').trim().slice(0, 200)
   if (p.mailFromName !== undefined) cfg.mailFromName = String(p.mailFromName || '').trim().slice(0, 60)
@@ -1396,6 +1604,14 @@ function patchConfig(patch) {
   // 自定义显示：隐藏的 Tab 和卡片列表（数组，非法值忽略保留原值）
   if (p.hiddenTabs !== undefined) cfg.hiddenTabs = Array.isArray(p.hiddenTabs) ? p.hiddenTabs.filter(k => typeof k === 'string') : cfg.hiddenTabs
   if (p.hiddenCards !== undefined) cfg.hiddenCards = Array.isArray(p.hiddenCards) ? p.hiddenCards.filter(k => typeof k === 'string') : cfg.hiddenCards
+  // 非数组视作「没给」保留原值 —— 与上面 hiddenTabs / hiddenCards 同一口径
+  if (p.tabOrder !== undefined && Array.isArray(p.tabOrder)) cfg.tabOrder = normTabOrder(p.tabOrder)
+  if (p.pinnedCards !== undefined && Array.isArray(p.pinnedCards)) cfg.pinnedCards = normPinnedCards(p.pinnedCards)
+  // 卡片顺序 / 折叠默认值：非对象（含数组）视作「没给」保留原值；「清空」请显式传 {}。
+  // 折叠记忆开关只认布尔 —— 传 'false' 这类字符串不算关（否则手改配置的半个真值会静默生效）
+  if (p.cardOrder !== undefined && p.cardOrder && typeof p.cardOrder === 'object' && !Array.isArray(p.cardOrder)) cfg.cardOrder = normCardOrder(p.cardOrder)
+  if (p.foldDefaults !== undefined && p.foldDefaults && typeof p.foldDefaults === 'object' && !Array.isArray(p.foldDefaults)) cfg.foldDefaults = normFoldDefaults(p.foldDefaults)
+  if (typeof p.foldRemember === 'boolean') cfg.foldRemember = p.foldRemember
   // 写失败必须让调用方知道：writeConfig 是**返回 false 而不抛错**（见上面的注释），
   // 早先这里直接忽略返回值，于是全项目 13 个 patchConfig 调用点（设置页保存、hosts 表龄、
   // 保留份数…）都拿不到「没落盘」这件事 —— writeConfig 里辛苦加的 logErr 只落到了日志里，
@@ -1487,7 +1703,11 @@ function readLedger() {
   try {
     const led = utools.dbStorage.getItem(K.ledger)
     if (led && typeof led === 'object' && typeof led.date === 'string') raw = led
-  } catch (err) {}
+  } catch (err) {
+    // 读失败回落空账本本身是预期分支，但**必须留痕**：账本读不出来会让今日用量 / 历史
+    // 看起来「凭空清零」，用户只会当成数据丢了。日志能区分「真没数据」与「读炸了」
+    logErr('[whale][ledger] 读账本失败，按空账本处理', err && err.message)
+  }
   if (!raw) return freshLedger()
   const numOr = (v, d) => (typeof v === 'number' && isFinite(v) ? v : d)
   return {
@@ -1679,7 +1899,7 @@ function setTodayUsage(amount) {
 // 由悬浮窗在开始/停止/到点时上报；宿主只做落库，重建挂件后回推给页面恢复。
 // 传 null 表示清除（用户关掉「计时保存」开关时）。
 function readTimer() {
-  const dft = { mode: 'off', running: false, paused: false, startAt: 0, endAt: 0, elapsed: 0, remain: 0, arg: '', isBreak: false, back: 0, cycle: 0, cycleDate: '', breakLong: false }
+  const dft = { mode: 'off', running: false, paused: false, startAt: 0, endAt: 0, elapsed: 0, remain: 0, arg: '', isBreak: false, back: 0, cycle: 0, cycleDate: '', span: 0 }
   try {
     const t = utools.dbStorage.getItem(K.timer)
     if (t && typeof t === 'object') {
@@ -1695,11 +1915,11 @@ function readTimer() {
         // 休息轮必须一起存：重载后恢复成专注轮会把休息记成专注，且「继续专注」会按休息时长重启
         isBreak: t.isBreak === true,
         back: isFinite(Number(t.back)) ? Math.max(0, Number(t.back)) : 0,
-        // 番茄循环：cycle = 本轮是第几个番茄（0 = 未开始/非番茄模式），cycleDate = 记录 cycle 的日期（YYYY-MM-DD，跨日归零），
-        // breakLong = 上一次休息是否为长休（用于每 N 轮判断下一轮是短休还是长休）
+        // 番茄循环：cycle = 本轮是第几个番茄（0 = 未开始/非番茄模式），cycleDate = 记录 cycle 的日期（YYYY-MM-DD，跨日归零）；
+        // span = 「定时」模式的总跨度（毫秒），挂件环形进度条用它算比例（定时没有固定秒数可当总量）
         cycle: isFinite(Number(t.cycle)) ? Math.max(0, Math.round(Number(t.cycle))) : 0,
         cycleDate: typeof t.cycleDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(t.cycleDate) ? t.cycleDate : '',
-        breakLong: t.breakLong === true,
+        span: isFinite(Number(t.span)) ? Math.max(0, Math.round(Number(t.span))) : 0,
       }
     }
   } catch (err) {}
@@ -1738,11 +1958,32 @@ function normTodoItem(it, fallbackAt) {
   // doneAt 只在「已完成」时有意义；从完成改回未完成时一律归零，免得统计拿到脏时间
   const doneAt = done && isFinite(Number(it.doneAt)) && Number(it.doneAt) > 0 ? Math.round(Number(it.doneAt)) : 0
   // 预估番茄轮数（est）与实际完成轮数（rounds）：默认 0 = 未设置。est 由用户在设置页填，
-  // rounds 由挂件专注结束时自动 +1（仅当该条是当前 focusId 指向的条目）。
+  // rounds 是会话明细的派生缓存，由 syncTodoRounds 回填，不在这里自己累加。
   // 两者都 clamp 到 0–99：避免脏数据撑爆显示区，且与 FOCUS_GOAL_MAX 同量级便于对齐
   const est = isFinite(Number(it.est)) ? Math.max(0, Math.min(99, Math.round(Number(it.est)))) : 0
   const rounds = isFinite(Number(it.rounds)) ? Math.max(0, Math.min(99, Math.round(Number(it.rounds)))) : 0
-  return { id, text, done, at, doneAt, est, rounds }
+  // 每条待办自己的计时方式（学番茄 todo）：'down' 倒计时 / 'up' 正计时 / '' 不计时。
+  // 老数据没有这两个字段时按「倒计时 25 分钟」（标准番茄）补，不写回 —— 用户不改就一直是默认。
+  // mins 只在倒计时时有意义，仍按 1–600 clamp：脏数据别把计时器撑成几小时
+  const tm = it.tm === 'up' || it.tm === '' ? it.tm : 'down'
+  const mins = isFinite(Number(it.mins)) ? Math.max(1, Math.min(600, Math.round(Number(it.mins)))) : 25
+  const remind = reminders.normRemind(it)
+  const remindedRaw = Math.round(Number(it.remindedFor))
+  const remindedFor = Number.isFinite(remindedRaw) && remindedRaw > 0 ? remindedRaw : 0
+  // 两套幂等位：notifiedFor = 系统通知/邮件已处理；remindedFor = 挂件气泡已真正展示。
+  // 老数据只有 remindedFor，那时的语义是「整轮已完成」—— 同时当通知位用，否则升级后
+  // 每条历史提醒都会被系统通知重发一遍（scanDue 里也有一层同样的 max 兜底）。
+  const notifiedRaw = Math.round(Number(it.notifiedFor))
+  const notifiedFor = Math.max(Number.isFinite(notifiedRaw) && notifiedRaw > 0 ? notifiedRaw : 0, remindedFor)
+  return {
+    id, text, done, at, doneAt, est, rounds, tm, mins,
+    remindOn: remind.remindOn,
+    remindKind: remind.remindKind,
+    remindAt: remind.remindAt,
+    remindDow: remind.remindDow,
+    remindedFor,
+    notifiedFor,
+  }
 }
 function readTodo() {
   const dft = { items: [], focusId: '' }
@@ -1776,36 +2017,53 @@ function clearTodo() {
 }
 
 // ──────────────────────────────────────────────
-// 专注轮次统计（按天聚合）
+// 专注记录（会话明细 = 唯一事实源，天表由它派生）
 // ──────────────────────────────────────────────
-// 结构：{ days: { 'YYYY-MM-DD': { r, m } } }，r = 完成轮次、m = 专注分钟。
+// 结构：{ v: 2, days: { 'YYYY-MM-DD': { r, m } }, sessions: [{ id, d, s, t, m, k, b?, a?, todoId?, todoText? }] }
+//   r = 合格轮（倒计时、非休息、非放弃）、m = 专注分钟；days 只是画图的聚合视图，
+//   sessions 才是事实本身（设置页记录列表、待办轮数、备份回放都从它来）。
+// 老形状（v1 的 {d,t,m} 明细 + 自己累加的 days）由 focus.normSessions / deriveDays 在读盘时升级，
+// 不需要单独跑一遍迁移写盘：读出来就是新形状，写回去自然带上 v: 2。
 // 与「计时状态」不同：这是用户的长期记录，**进备份**（丢了等于抹掉专注历史）。
-// 裁剪窗口固定在 lib/focus.js 里做（FOCUS_KEEP_DAYS），这里只做形状归一。
+// 裁剪窗口固定在 lib/focus.js 里做（FOCUS_KEEP_DAYS），这里只负责「进出存储都过一遍派生」，
+// 保证存储里的天表不可能自己漂出来跟明细对不上。
+const { withDerived, roundsByTodo } = require('./focus')
 function readFocus() {
-  const dft = { days: {} }
   let raw = null
   try { raw = utools.dbStorage.getItem(K.focus) } catch (err) {}
-  if (!raw || typeof raw !== 'object' || !raw.days || typeof raw.days !== 'object') return dft
-  const days = {}
-  for (const k of Object.keys(raw.days)) {
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(k)) continue
-    const d = raw.days[k]
-    if (!d || typeof d !== 'object') continue
-    const r = Math.max(0, Math.round(Number(d.r) || 0))
-    const m = Math.max(0, Math.round(Number(d.m) || 0))
-    if (!r && !m) continue // 两个数都是 0 的天不留空壳
-    days[k] = { r, m }
-  }
-  return { days }
+  return withDerived(raw)
 }
 function writeFocus(state) {
-  try { utools.dbStorage.setItem(K.focus, state); return true } catch (err) {
+  // 写前再派生一次：备份恢复、老版本写过的数据都走这里，不给「自己算天表」留第二条路
+  try { utools.dbStorage.setItem(K.focus, withDerived(state)); return true } catch (err) {
     logErr('[whale][focus] 写专注统计失败', err && err.message)
     return false
   }
 }
 function clearFocus() {
   try { utools.dbStorage.removeItem(K.focus) } catch (err) { logErr('[whale][focus] 清除专注统计失败', err && err.message) }
+}
+
+// 待办上的「N 轮」= 会话明细的派生缓存（不是第三条账）。
+// 早前是「完成一轮就 rounds +1」：那个计数器与会话各记各的，任务裁剪、恢复备份、
+// 写盘失败都不会回头修正，设置页与挂件的数字迟早对不上明细列表。
+// 但覆盖只能是「往上补」：rounds 语义是**终身累计**，而明细只保留 90 天、还会被
+// 备份恢复 / 任务裁剪改变。v1 用户的历史轮数没有明细可依据，一旦该任务出现第一条新明细，
+// 整值覆盖会把 9 轮清成 1 轮 —— 所以取 max(历史, 派生)，宁高不低。
+// 回 false 表示「没变化或写失败」，调用方据此决定要不要重推待办，不假报成功。
+function syncTodoRounds() {
+  const st = readTodo()
+  const byTodo = roundsByTodo(readFocus())
+  let changed = false
+  for (const it of st.items) {
+    if (!Object.prototype.hasOwnProperty.call(byTodo, it.id)) continue
+    const derived = Math.max(0, Math.min(99, Math.round(Number(byTodo[it.id]) || 0)))
+    const legacy = Math.max(0, Math.min(99, Math.round(Number(it.rounds) || 0)))
+    const r = Math.max(derived, legacy)
+    if (it.rounds !== r) { it.rounds = r; changed = true }
+  }
+  if (!changed) return false
+  return writeTodo(st)
 }
 
 // ──────────────────────────────────────────────
@@ -1903,6 +2161,7 @@ module.exports = {
   readFocus,
   writeFocus,
   clearFocus,
+  syncTodoRounds,
   readModelState,
   writeModelState,
   dropModelState,
@@ -1914,7 +2173,9 @@ module.exports = {
   resetAnchorCache,
   // 纯函数，仅导出给单测：归一化写错不会抛错，只会让填的值悄悄变形（见 test/store.test.mjs）
   normTokenPrice,
+  normTheme,
   normUiMode,
+  normBgMode,
   // GitHub 加速 IP 表归一化：hosts.js 写块 / 刷新结果与 store 配置共用
   normIps,
   // dsh 快照保留份数的边界（设置页输入框与 dsh-backup.js 的兜底共用同一组数字）

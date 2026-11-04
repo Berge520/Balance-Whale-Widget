@@ -1,5 +1,5 @@
 <script lang="ts" setup>
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { msgCls, useFlash, type Flash } from '../composables/useFlash'
 import { useFold } from '../composables/useFold'
 import { barHeightOf } from '../utils/format'
@@ -445,7 +445,7 @@ defineExpose({ applyHistory, refreshTodayModels, refreshDetail })
          整块收进折叠：多数人用不到，但展开后有四列价格网格 + 按模型覆盖的列表，很长。
          默认展开（与「位置类默认收起」不同——本块只在令牌模式下出现，进来的就是来改价的） -->
     <div v-if="cfg.usageMode === 'token'" class="price-box">
-      <button class="link-btn utils-btn utils-secondary" type="button" @click="priceFold = !priceFold">
+      <button class="link-btn utils-btn utils-secondary fold-toggle" type="button" :aria-expanded="priceFold" @click="priceFold = !priceFold">
         {{ priceFold ? '收起自定义单价' : '自定义单价（调价没跟上 / 按自己的价目结算）' }}
       </button>
       <div v-if="priceFold">

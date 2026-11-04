@@ -501,7 +501,10 @@ export function setModule(rows, ri, mi, patch) {
 // 但这里主动生成，避免依赖宿主补号（补号发生在落库时，编辑器里就得先有 id 才能引用）
 // ──────────────────────────────────────────────
 export function newLibId() {
-  return 'bmod_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 6)
+  // 随机后缀取 10 位而非 4 位：4 位 base36 约 1.7M 组合，同一毫秒内连生成 200 个的
+  // 生日碰撞概率约 1.1%，会让 bubble-editor.test.mjs 的「两次生成不重复」用例随机泛红。
+  // 10 位下同毫秒碰撞概率约 1e-9，测试与真实使用都够稳
+  return 'bmod_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 12)
 }
 
 // 入库存的是一个模块的深拷贝（脱钩，之后改泡里那份不会动到库）

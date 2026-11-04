@@ -39,6 +39,7 @@ function writeSample(dir) {
     '  <!-- 注释里的 data-search="ghost" 不该被算数 -->',
     '  <section class="card" data-search="alpha">',
     '    <h2>Alpha 标题</h2>',
+    '    <h3 class="card-sub">休息与番茄</h3>',
     '    <span class="label">音量（0–100%）</span>',
     '  </section>',
     '  <section class="card" data-search="beta">',
@@ -71,7 +72,7 @@ test('生成器：能从模板提取卡片文本并生成归一化索引', () =>
   run({ GSI_APP: path.join(dir, 'App.vue'), GSI_DISPLAY_CONST: path.join(dir, 'constants/display.ts'), GSI_OUT: out })
   const gen = fs.readFileSync(out, 'utf8')
   // h2 + label 主干被抽出、括号说明被剥掉、归一化（小写无空白）
-  assert.match(gen, /alpha: "alpha标题音量"/, 'alpha 卡应含 h2 与 label 主干（括号说明剥掉）')
+  assert.match(gen, /alpha: "alpha标题休息与番茄音量"/, 'h3 分区标题也要进索引（卡内 h2 移除后靠它兜标题词）')
   // fold-title 卡头 + label 字段名（插值/箭头剥掉）。SEARCH_INDEX 的 label 不并入产物——
   // 运行时第三档匹配本就把 label 并进命中并集（x = t || s || hits(w, text)），并进去是纯冗余
   assert.match(gen, /beta: "画廊卡头smtp服务器端口"/, 'beta 卡应含 fold-title 卡头与 label 字段名')

@@ -13,7 +13,7 @@ const props = defineProps<{
   services: Partial<WhaleServices>
 }>()
 const emit = defineEmits<{
-  (e: 'cleared', picked: { secrets: boolean; config: boolean; ledger: boolean; window: boolean; sounds: boolean; skins: boolean; bubbles: boolean; bubble: boolean; todo: boolean }): void
+  (e: 'cleared', picked: { secrets: boolean; config: boolean; ledger: boolean; window: boolean; sounds: boolean; skins: boolean; bubbles: boolean; media: boolean; bubble: boolean; todo: boolean }): void
 }>()
 
 // 统一的消息态（Flash）：msg=文案、err=是否错误态；模板用 msgCls(f) 生成 class。
@@ -31,12 +31,14 @@ const anyClearItem = computed(() => clearItems.secrets || clearItems.config || c
 // 二次确认时把「将清除哪些项」写清楚，避免误删
 const clearItemNames = computed(() => {
   const names: string[] = []
-  if (clearItems.secrets) names.push('凭据')
+  // 凭据不止 API Key / 平台 Token：whale:secrets 里还存着各模型密钥与邮件 SMTP 凭据，
+  // 二次确认必须写全，否则用户只当清掉两把钥匙，实际把发信配置和模型密钥一起清了
+  if (clearItems.secrets) names.push('凭据（含各模型密钥 / 邮件 SMTP）')
   if (clearItems.config) names.push('挂件设置')
   if (clearItems.ledger) names.push('账本用量记录')
   if (clearItems.window) names.push('窗口位置与更新缓存')
   if (clearItems.bubble) names.push('按压气泡（文案 + 配图）')
-  if (clearItems.assets) names.push('导入的素材（形象 / 气泡图 / 音效）')
+  if (clearItems.assets) names.push('导入的素材（形象 / 气泡图 / 音效 / 背景与片头媒体）')
   if (clearItems.todo) names.push('待办与专注记录')
   return names.join('、')
 })
@@ -61,7 +63,7 @@ function clearSelectedData() {
     return
   }
   clearConfirm.value = false
-  const picked = { secrets: clearItems.secrets, config: clearItems.config, ledger: clearItems.ledger, window: clearItems.window, bubble: clearItems.bubble, sounds: clearItems.assets, skins: clearItems.assets, bubbles: clearItems.assets, todo: clearItems.todo }
+  const picked = { secrets: clearItems.secrets, config: clearItems.config, ledger: clearItems.ledger, window: clearItems.window, bubble: clearItems.bubble, sounds: clearItems.assets, skins: clearItems.assets, bubbles: clearItems.assets, media: clearItems.assets, todo: clearItems.todo }
   try {
     const r = props.services.clearAllData?.(picked) || { ok: false }
     dataFlash.err = !(r && r.ok)
@@ -70,15 +72,16 @@ function clearSelectedData() {
       // 不清的话重开插件仍停在上次选的区间，看着像账本没清（实际数据没了，只是区间还被记着）
       if (picked.ledger) { try { localStorage.removeItem('whale:usageRange') } catch (err) {} }
       const names: string[] = []
-      if (picked.secrets) names.push('凭据')
+      if (picked.secrets) names.push('凭据（含各模型密钥 / 邮件 SMTP）')
       if (picked.config) names.push('挂件设置')
       if (picked.ledger) names.push('账本用量记录')
       if (picked.window) names.push('窗口位置与更新缓存')
       if (picked.bubble) names.push('按压气泡')
       if (clearItems.assets) names.push('导入的素材')
       if (picked.todo) names.push('待办与专注记录')
+      // 宿主只在挂件原本可见时才销毁重建（隐藏状态保持隐藏），别写成「一定重建」骗用户去找挂件
       dataFlash.msg = `已清除：${names.join('、')}。`
-        + (picked.config || picked.window ? '挂件已按默认配置重建。' : '')
+        + (picked.config || picked.window ? '挂件已按默认值重置（原本隐藏则仍隐藏）。' : '')
       // 页面回显刷新（凭据置空 / 设置回填 / 账本重读）读父级全局状态，交回父级做
       emit('cleared', picked)
     } else {
@@ -102,14 +105,14 @@ function clearSelectedData() {
       </h2>
     </div>
     <template v-if="cardFold.open">
-    <p class="hint">API Key 与平台 Token 通过 uTools 加密存储，账本、窗口位置与导入的素材（形象 / 气泡图 / 音效）也只保存在本机，不会上传到任何第三方服务器。</p>
+    <p class="hint">API Key、平台 Token、各模型密钥与邮件 SMTP 凭据均通过 uTools 加密存储，账本、窗口位置与导入的素材（形象 / 气泡图 / 音效 / 背景与片头媒体）也只保存在本机，不会上传到任何第三方服务器。</p>
     <p class="hint">卸载 uTools 插件不会自动删除这些数据，需要彻底清除时请勾选下方要清除的内容（<strong>清除前建议先导出一份备份</strong>，见下方「备份与恢复」）：</p>
     <label class="field row check">
-      <span class="label">凭据 <em>（API Key / 平台 Token）</em></span>
+      <span class="label">凭据 <em>（API Key / 平台 Token / 各模型密钥 / 邮件 SMTP 凭据）</em></span>
       <input type="checkbox" v-model="clearItems.secrets" @change="clearConfirm = false" />
     </label>
     <label class="field row check">
-      <span class="label">挂件设置 <em>（大小 / 音效 / 开关等，清除后按默认值重建挂件；含节假日联网更新表）</em></span>
+      <span class="label">挂件设置 <em>（大小 / 音效 / 开关等，清除后按默认值重置挂件；含节假日联网更新表）</em></span>
       <input type="checkbox" v-model="clearItems.config" @change="clearConfirm = false" />
     </label>
     <label class="field row check">
@@ -125,7 +128,7 @@ function clearSelectedData() {
       <input type="checkbox" v-model="clearItems.bubble" @change="clearConfirm = false" />
     </label>
     <label class="field row check">
-      <span class="label">导入的素材 <em>（形象 / 气泡图 / 音效文件，删后回退为内置；等同「资源」页的「清除全部素材」）</em></span>
+      <span class="label">导入的素材 <em>（形象 / 气泡图 / 音效 / 背景与片头媒体，删后回退为内置；等同「资源」页的「清除全部素材」）</em></span>
       <input type="checkbox" v-model="clearItems.assets" @change="clearConfirm = false" />
     </label>
     <label class="field row check">

@@ -1,7 +1,12 @@
 <script lang="ts" setup>
 import { reactive } from 'vue'
 import { msgCls, useFlash, type Flash } from '../composables/useFlash'
+import { useFold } from '../composables/useFold'
+import { useHotkey } from '../composables/useHotkey'
 import type { WhaleServices } from '../types/services'
+
+// 整卡折叠：说明类内容低频，默认收起（收起态摘要提示里面有什么）
+const cardFold = useFold('help', false)
 
 // 「使用帮助」整卡：全局快捷键说明 / 新手引导重开入口 / 使用说明折叠 / 挂件故障排查
 // （复制诊断日志、打开日志文件） / 挂件窗口创建错误详情。从设置页 App.vue 抽出。
@@ -30,6 +35,9 @@ const emit = defineEmits<{
 }>()
 
 // 统一的消息态（Flash）：定义收口在 composables/useFlash.ts，各卡不再各持一份。
+
+// 当前实际绑定的全局快捷键（uTools 8.0 的 getCmdHotKey；旧版本回空串 → 显示「未绑定」）
+const { hotkey } = useHotkey(props.services, '显示/隐藏挂件')
 
 // 使用说明 / 故障排查的折叠态（默认收起，点标题才展开）
 const widgetFolds = reactive({ help: false, trouble: false, displayManager: false })
@@ -78,41 +86,53 @@ function openLogFile() {
        这些原先都堆在「挂件窗口」卡尾（一次性配置 + 排查 + 说明），日常要调的窗口项被埋在一堆说明下面。
        这里叫「挂件故障排查」以区别 dsh 卡里的「dsh 故障排查」—— 前者是插件自身日志，后者是 dsh 子进程日志 -->
   <section class="card" data-search="help">
-    <h2>使用帮助</h2>
+    <div class="card-head">
+      <h2 class="card-toggle" @click="cardFold.open = !cardFold.open">
+        <span class="caret">{{ cardFold.open ? '▾' : '▸' }}</span>使用帮助
+        <span v-if="!cardFold.open" class="card-sum">快捷键 · 使用说明 · 故障排查</span>
+      </h2>
+    </div>
+    <template v-if="cardFold.open">
     <p class="hint">给「显示/隐藏挂件」绑定一个全局快捷键（想给「鼠标穿透」也绑一个，见「外观」组的「挂件窗口」卡）。</p>
     <div class="btn-row">
       <button class="secondary utils-btn utils-secondary" @click="emit('copy-cmd')">复制指令名</button>
       <button class="secondary utils-btn utils-secondary" @click="emit('add-hotkey')">新增快捷键</button>
     </div>
+    <!-- 绑定状态：告诉用户「到底绑没绑、绑的是什么键」，省得自己去 uTools 设置里翻 -->
+    <p class="hint">
+      当前绑定：<strong>{{ hotkey || '未检测到' }}</strong>
+      <span v-if="!hotkey">（点「新增快捷键」后按下组合键即可）</span>
+    </p>
     <!-- 新手引导入口：首次引导只弹一次（guideDone），之后从帮助 Tab 重开。
          与「使用说明」「故障排查」同为折叠块、同一视觉语言，不额外占版面 -->
     <div class="fold">
       <button class="link-btn utils-btn utils-secondary" @click="emit('guide-reopen')">新手引导（填 DeepSeek 凭据）</button>
     </div>
     <div class="fold">
-      <button class="link-btn utils-btn utils-secondary" @click="widgetFolds.help = !widgetFolds.help">{{ widgetFolds.help ? '收起使用说明' : '使用说明' }}</button>
+      <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="widgetFolds.help" @click="widgetFolds.help = !widgetFolds.help">{{ widgetFolds.help ? '收起使用说明' : '使用说明' }}</button>
       <div v-if="widgetFolds.help" class="guide">
         <p class="guide-use"><strong>进入插件时：</strong>选含挂件的模式后，挂件出现时会抢走焦点、本设置窗口自动收起；改设置请点挂件右上角菜单（或右键）→「打开设置」唤回本窗口。</p>
         <p class="guide-use"><strong>挂件操作：</strong>可拖拽到屏幕四边吸附（吸附区宽度与开关见「挂件窗口」卡片），鲸鱼始终朝屏幕内侧；点击鲸鱼刷新余额，悬停后点右上角菜单调整设置。</p>
+        <p class="guide-use"><strong>设置页导航：</strong>Ctrl+1~7 直达第 N 个分组、Ctrl+K 聚焦搜索、Alt+←/→ 切相邻分组；切组会自动回到页首，并记住上次停留的分组（弹层打开时快捷键让位）。</p>
         <p class="guide-use"><strong>快捷键：</strong>按 Ctrl+, 打开 uTools 设置 → 全局功能 → 新增 → 指令填「显示/隐藏挂件」→ 按下组合键。可点上方「复制指令名」快速复制。想给「鼠标穿透」也绑一个，指令名填「切换鼠标穿透」。</p>
         <p class="guide-use"><strong>常驻：</strong>退出到后台挂件保留；关闭 Ctrl+D 分离窗口会直接结束插件运行、挂件消失，分离后请用「最小化」；重进插件会自动重建，配置不丢。</p>
       </div>
     </div>
     <!-- 自定义显示：如何恢复隐藏的卡片 -->
     <div class="fold">
-      <button class="link-btn utils-btn utils-secondary" @click="widgetFolds.displayManager = !widgetFolds.displayManager">{{ widgetFolds.displayManager ? '收起' : '如何恢复隐藏的卡片？' }}</button>
+      <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="widgetFolds.displayManager" @click="widgetFolds.displayManager = !widgetFolds.displayManager">{{ widgetFolds.displayManager ? '收起' : '如何恢复隐藏的卡片？' }}</button>
       <div v-if="widgetFolds.displayManager" class="guide">
         <p class="guide-use">如果您不小心隐藏了某个设置项（Tab 或卡片），可以通过以下方式恢复：</p>
         <ol class="guide-list">
-          <li>点击 Tab 栏右侧的 <strong>⚙ 图标</strong>（管理显示内容）</li>
+          <li>点击 Tab 栏右侧的 <strong>⚙ 显示管理</strong>按钮</li>
           <li>在弹出的"管理显示内容"窗口中，勾选需要显示的 Tab 或卡片</li>
-          <li>点击窗口底部的"恢复默认显示"按钮可一键恢复所有隐藏项</li>
+          <li>点击窗口底部的"恢复默认"按钮可一键恢复所有隐藏项（会同时清空卡片置顶、还原分组顺序）</li>
         </ol>
-        <p class="guide-use"><strong>提示：</strong>有三张核心卡片（DeepSeek 凭据、挂件窗口、挂件外观）不可隐藏，因为隐藏它们会导致核心功能无法使用。</p>
+        <p class="guide-use"><strong>提示：</strong>有三张核心卡片（DeepSeek 凭据、挂件窗口、挂件外观）不可隐藏，它们所在的 Tab（数据 / 窗口 / 外观）也不能整组隐藏，否则核心功能会没法用。</p>
       </div>
     </div>
     <div v-if="diagReady" class="fold">
-      <button class="link-btn utils-btn utils-secondary" @click="widgetFolds.trouble = !widgetFolds.trouble">{{ widgetFolds.trouble ? '收起挂件故障排查' : '挂件故障排查' }}</button>
+      <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="widgetFolds.trouble" @click="widgetFolds.trouble = !widgetFolds.trouble">{{ widgetFolds.trouble ? '收起挂件故障排查' : '挂件故障排查' }}</button>
       <div v-if="widgetFolds.trouble" class="guide">
         <!-- 标题与日志按钮都带「挂件」前缀：dsh 卡里另有一块「dsh 故障排查」讲 dsh 子进程日志，
              两块都叫「故障排查」时用户会把两处的日志当成同一份 -->
@@ -134,6 +154,7 @@ function openLogFile() {
     </div>
     <button v-else class="link-btn utils-btn utils-secondary" @click="emit('check-widget-error')">挂件异常？查看错误详情</button>
     <p v-if="errFlash.msg" class="msg" :class="msgCls(errFlash)">{{ errFlash.msg }}</p>
+    </template>
   </section>
 </template>
 

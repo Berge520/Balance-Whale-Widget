@@ -15,10 +15,10 @@
  */
 const fs = require('fs')
 const path = require('path')
-const os = require('os')
 const { K } = require('./constants')
 const { logErr } = require('./log')
 const { errMsg } = require('./util')
+const { dataDir } = require('./data-dir')
 
 // Chromium 能直接渲染的位图格式（不要 SVG：外部 SVG 可带脚本，且挂件是本地页面，没必要开这个口子）
 // apng 的 MIME 与签名都是 image/png，Chromium 原生播放动画
@@ -35,11 +35,14 @@ const MAX_ITEMS = 8
 // 超预算的跳过并留日志 —— 气泡图正常几百 KB，撞到这个上限只可能是误导入了大图
 const PUSH_BUDGET = 20 * 1024 * 1024
 
+// 推送缓存：整池 base64 只在内容变化时重读重编码。
+// pushInit 在开窗冷启动的同步链路上，不缓存就是每次打开挂件都把图池重搬一遍。
+// 失效点必须覆盖「池子内容会变」的每一条 —— 写路径都经 writeRaw，clearAll 另走 removeItem，
+// 所以只有这两处需要作废；缩略图单独写（writeThumb）不改图片本体，不作废。
+let pushCache = null
+
 function bubblesDir() {
-  let base = ''
-  try { base = utools.getPath('userData') } catch (err) {}
-  if (!base) base = os.tmpdir()
-  return path.join(base, 'whale-bubbles')
+  return dataDir('whale-bubbles')
 }
 
 // 图片体积（读取时派生，不落存储）：设置页要显示占多大；文件缺失回 0
@@ -77,6 +80,7 @@ function readRaw() {
 }
 
 function writeRaw(items) {
+  pushCache = null
   try { utools.dbStorage.setItem(K.bubbles, items) } catch (err) { logErr('[whale][bubbles] 写气泡图信息失败', err && err.message) }
 }
 
@@ -193,9 +197,13 @@ function removeBubble(id) {
   return { ok: true, left: items.length }
 }
 
-// 清除全部气泡图（供设置页「清除选中数据」/「清除全部素材」调用）
+// 清除全部气泡图（供设置页「清除选中数据」/「清除全部素材」调用）。
+// 删不动（被占用）不影响清除结果，但必须 logErr 留痕（与 skins.js / sounds.js 对齐）
 function clearAll() {
-  try { fs.rmSync(bubblesDir(), { recursive: true, force: true }) } catch (err) {}
+  pushCache = null
+  try { fs.rmSync(bubblesDir(), { recursive: true, force: true }) } catch (err) {
+    logErr('[whale][bubbles] 清除气泡图文件失败', err && err.message)
+  }
   try { utools.dbStorage.removeItem(K.bubbles) } catch (err) { logErr('[whale][bubbles] 清除气泡图信息失败', err && err.message) }
   return { ok: true }
 }
@@ -203,6 +211,7 @@ function clearAll() {
 // 推给挂件的全部图片（base64 data URL 数组）：挂件点气泡时随机抽一张。
 // 文件缺失（用户手动清理了 userData）的项直接跳过，页面拿到几张用几张
 function getBubbleData() {
+  if (pushCache !== null) return pushCache
   const out = []
   let budget = PUSH_BUDGET
   for (const it of readRaw()) {
@@ -216,6 +225,7 @@ function getBubbleData() {
     budget -= buf.length
     out.push('data:' + (MIME[it.ext] || 'image/png') + ';base64,' + buf.toString('base64'))
   }
+  pushCache = out
   return out
 }
 

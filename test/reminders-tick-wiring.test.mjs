@@ -1,0 +1,47 @@
+// test/reminders-tick-wiring.test.mjs
+import test from 'node:test'
+import assert from 'node:assert/strict'
+import fs from 'node:fs'
+
+const read = (rel) => fs.readFileSync(new URL(`../${rel}`, import.meta.url), 'utf8')
+const services = read('public/preload/services.js')
+const ipc = read('public/preload/lib/ipc.js')
+const api = read('public/preload/lib/api.js')
+
+test('services 起 30s 到点扫描并在退出时清理', () => {
+  assert.match(services, /runDueTick/)
+  assert.match(services, /setInterval\([^)]*,\s*30000\s*\)/)
+  assert.match(services, /clearInterval/)
+})
+
+test('到点扫描只在 isKill=true 真退出时停表（关分离设置窗不停）', () => {
+  // 非 kill 的 onPluginOut（关设置窗 / 失焦）不能再无条件停表，否则挂件还在、提醒先哑了
+  const at = services.indexOf("log('[whale][lifecycle] onPluginOut'")
+  assert.ok(at >= 0, '找不到 onPluginOut 处理块')
+  const head = services.slice(at, services.indexOf('if (isKill) {', at))
+  assert.doesNotMatch(head, /stopReminders\(\)/, '停表前面不能再有裸调用')
+  assert.match(services, /if \(isKill\) \{\s*stopReminders\(\)\s*\} else if \(!remindTimer\) \{[\s\S]{0,200}?startReminders\(\)/)
+})
+
+test('whale:todo 不再接受已无生产端的 op:due（提醒只从设置页 todoSetDue 改）', () => {
+  assert.doesNotMatch(ipc, /op !== 'due'/)
+  assert.doesNotMatch(ipc, /op === 'due'/)
+})
+
+test('到点气泡回执只在 shown:true 时写幂等位', () => {
+  assert.match(ipc, /whale:todo-due-ack/)
+  assert.match(ipc, /if \(d\.shown !== true\) return/)
+})
+
+test('两套幂等位分开记账：回执写 remindedFor，并把通知位一并推进；调试回执不记账', () => {
+  assert.match(ipc, /it\.remindedFor = dueAt/)
+  assert.match(ipc, /it\.notifiedFor = dueAt/)
+  assert.match(ipc, /if \(d\.debug === true\) return/)
+  // 调试回执必须带标记，否则演练会把真实幂等位写脏
+  assert.match(read('public/preload/floating.js'), /debug:\s*p\.debug === true/)
+})
+
+test('到点扫描把免打扰算进 silent（时段内只弹气泡，不弹系统通知）', () => {
+  assert.match(api, /^\s*inQuietHours,\s*$/m, 'api.js 需导出 inQuietHours 供宿主扫描使用')
+  assert.match(services, /silent:\s*inQuietHours\(cfg\)/)
+})

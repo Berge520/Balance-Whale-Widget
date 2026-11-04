@@ -12,7 +12,7 @@
  * whale-bubbles），所以只要把 userData 指到临时目录，整条链路就走真实文件系统、
  * 不碰真实用户数据。showSaveDialog / showOpenDialog 用可编程的桩控制「保存到哪 / 选哪个文件 / 取消」。
  */
-import test from 'node:test'
+import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
 import os from 'node:os'
 import path from 'node:path'
@@ -46,6 +46,10 @@ const MAGIC = 'WHALEASSET1'
 const KIND = 'balance-whale-widget-assets'
 const HEAD_BYTES = MAGIC.length + 4
 const outDir = fs.mkdtempSync(path.join(os.tmpdir(), 'whale-assets-out-'))
+// 两座临时目录（素材落盘根 + 导出目标）跑完即废。不删的话每轮 npm test 在 %TEMP% 里各攒一个
+after(() => {
+  for (const dir of [TMP, outDir]) fs.rmSync(dir, { recursive: true, force: true })
+})
 
 // 造一张最小合法 PNG 字节（内容无关，只要非空、格式在 skins 白名单里）
 const pngBytes = (n) => Buffer.alloc(n, 0x89)

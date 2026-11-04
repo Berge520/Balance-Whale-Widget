@@ -255,3 +255,29 @@ test('端到端：log() 落盘的凭据已被掩码，磁盘上看不到明文',
   log('裸 token 形式 sk-abcdefghijklmn 出现')
   assert.doesNotMatch(readLog(dir), /sk-abcdefghijklmn/, '裸形态的 sk- 也必须被掩码')
 })
+
+// ── 14. 时间戳钟面：本地时间 + 显式偏移 ──
+//
+// ⚠️ 为什么这条值得钉住：原先直接写 `new Date().toISOString()`，落的是 **UTC 钟面**。
+//    用户对着自己的挂钟读日志会差一个时区（东八区凌晨 02:16 的操作记成「前一天 18:16」），
+//    取证时就会把「刚刚发生的」当成「昨晚发生的」，甚至误判某条路径压根没跑过。
+//    改成 ISO 8601 的「本地钟面 + 偏移」：既能直接对挂钟，也仍能精确还原瞬间。
+test('stamp：本地钟面 + 显式偏移，且能还原成同一瞬间', () => {
+  const { stamp } = loadLog(mkTmp())
+  const ms = Date.UTC(2026, 9, 30, 18, 16, 21, 123)
+  const s = stamp(ms)
+  assert.match(s, /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2}$/)
+  assert.equal(Date.parse(s), ms, '钟面 + 偏移必须能算回原瞬间')
+  // 钟面的小时必须是本机的，不是 UTC 的（UTC 时区下偏移正好是 +00:00，用例照样成立）
+  assert.equal(Number(s.slice(11, 13)), new Date(ms).getHours())
+})
+
+test('端到端：落盘行的时间戳不再只用 UTC 钟面', () => {
+  const dir = mkTmp()
+  const { log } = loadLog(dir)
+  log('钟面检查')
+  const m = readLog(dir).match(/^\[([^\]]+)\]/)
+  assert.ok(m, '首行应以 [时间戳] 开头')
+  assert.doesNotMatch(m[1], /Z$/, '纯 UTC 钟面不许再回到落盘格式里')
+  assert.ok(Math.abs(Date.parse(m[1]) - Date.now()) < 5000, '时间戳对应的瞬间就是刚才')
+})

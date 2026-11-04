@@ -233,10 +233,12 @@ test('App.vue 的 data-search 与 SEARCH_INDEX 一一对应', () => {
   const labelOf = {}
   for (const m of block[1].matchAll(/^\s{2}([A-Za-z0-9_]+):\s*\{[^}]*?label:\s*'([^']*)'/gm)) labelOf[m[1]] = m[2]
   const noComment = appSrc.replace(/<!--[\s\S]*?-->/g, '')
-  // 所有卡片的起始位置（<section ... data-search="key" ...>）
+  // 所有卡片的起始位置：边界取任意 <section>（合并卡这类有卡头、不带 data-search 的容器也要截断，
+  // 否则它的 h2 会漏进上一张卡的分段，被当成那张卡的卡头）
   const sections = []
-  for (const m of noComment.matchAll(/<section\b[^>]*data-search="([A-Za-z0-9_]+)"[^>]*>/g)) {
-    sections.push({ key: m[1], start: m.index + m[0].length })
+  for (const m of noComment.matchAll(/<section\b[^>]*>/g)) {
+    const km = m[0].match(/data-search="([A-Za-z0-9_]+)"/)
+    sections.push({ key: km ? km[1] : '', start: m.index + m[0].length, at: m.index })
   }
   const h2Of = {}
   const stripTags = (s) => s
@@ -246,7 +248,8 @@ test('App.vue 的 data-search 与 SEARCH_INDEX 一一对应', () => {
     .replace(/\s+/g, ' ')
     .trim()
   for (let i = 0; i < sections.length; i++) {
-    const seg = noComment.slice(sections[i].start, sections[i + 1] ? sections[i + 1].start : undefined)
+    if (!sections[i].key) continue
+    const seg = noComment.slice(sections[i].start, sections[i + 1] ? sections[i + 1].at : undefined)
     const h = seg.match(/<h2[^>]*>([\s\S]*?)<\/h2>/)
     if (h) h2Of[sections[i].key] = stripTags(h[1])
   }
@@ -291,11 +294,12 @@ test('卡内每个字段名都能被该卡的搜索索引命中（label/keys 覆
   // 与运行时 normSearch 一致：小写 + 删空白（App.vue 是中文界面，lowercase 只影响英文词）
   const norm = (s) => s.toLowerCase().replace(/\s+/g, '')
 
-  // 卡片分段（同上一测试）：按 <section … data-search="key"> 切片
+  // 卡片分段（同上一测试）：边界取任意 <section>，只有带 data-search 的段落才算某张卡的字段
   const noComment = appSrc.replace(/<!--[\s\S]*?-->/g, '')
   const sections = []
-  for (const m of noComment.matchAll(/<section\b[^>]*data-search="([A-Za-z0-9_]+)"[^>]*>/g)) {
-    sections.push({ key: m[1], start: m.index + m[0].length })
+  for (const m of noComment.matchAll(/<section\b[^>]*>/g)) {
+    const km = m[0].match(/data-search="([A-Za-z0-9_]+)"/)
+    sections.push({ key: km ? km[1] : '', start: m.index + m[0].length, at: m.index })
   }
 
   // 每张卡的用户可见字段名：只抠 <span class="label">（允许带修饰类）。动作按钮（删除 / 取消 /
@@ -305,7 +309,8 @@ test('卡内每个字段名都能被该卡的搜索索引命中（label/keys 覆
   // 主干不足 2 字的（「·」、动态插值剥完剩下的空壳）也不是检索目标，直接丢弃。
   const fieldNamesOf = {}
   for (let i = 0; i < sections.length; i++) {
-    const seg = noComment.slice(sections[i].start, sections[i + 1] ? sections[i + 1].start : undefined)
+    if (!sections[i].key) continue
+    const seg = noComment.slice(sections[i].start, sections[i + 1] ? sections[i + 1].at : undefined)
     const raws = []
     for (const m of seg.matchAll(/<span class="label[^"]*">([\s\S]*?)<\/span>/g)) raws.push(m[1])
     const coreOf = (s) => s

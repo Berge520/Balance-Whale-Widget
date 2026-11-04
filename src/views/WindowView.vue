@@ -1,7 +1,12 @@
 <script lang="ts" setup>
 import { ref, watch } from 'vue'
 import { msgCls, type Flash } from '../composables/useFlash'
+import { useFold } from '../composables/useFold'
+import { useHotkey } from '../composables/useHotkey'
 import type { WhaleServices } from '../types/services'
+
+// 整卡折叠：窗口行为高频但内容多，默认展开；收起态摘要提示包含哪些项
+const cardFold = useFold('window', true)
 
 // 「挂件窗口」整卡：进入模式 / 显隐 / 置顶锁定 / 透明度 / 鼠标穿透 / 任务栏避让 /
 // 贴边间距 / 吸附与翻转 / 滚动条避让 / 复位，从设置页 App.vue 抽出。
@@ -21,6 +26,9 @@ const props = defineProps<{
   taskbarText: string
   // 与「使用帮助」卡共用的操作反馈槽（父级写入，本卡只显示）
   widgetFlash: Flash
+  // 挂件当前是否显示（父级每 2s 轮询宿主校正）：显隐两只按钮长得像、动作又互补，
+  // 点错或点到「已经是这个状态」的那只时没有任何可见差别，故把状态常显出来
+  widgetVisible: boolean
 }>()
 const emit = defineEmits<{
   (e: 'patch', p: Record<string, any>): void
@@ -32,6 +40,9 @@ const emit = defineEmits<{
 }>()
 
 // 统一的消息态（Flash）：定义收口在 composables/useFlash.ts，各卡不再各持一份。
+
+// 「切换鼠标穿透」当前绑定的全局快捷键（uTools 8.0 的 getCmdHotKey；旧版本回空串）
+const { hotkey: passHotkey } = useHotkey(props.services, '切换鼠标穿透')
 
 // 吸附区宽度（可用区宽/高的百分比）上下限，同宿主 store.js 的 SNAP_RATIO_*
 const SNAP_RATIO_MIN = 1
@@ -77,7 +88,13 @@ function onOpacityCommit() {
   <!-- [外观] 挂件窗口：显隐、位置与窗口属性（使用说明 / 故障排查在「帮助」组）。
        与「挂件外观」同属外观组：那边管挂件长什么样、这边管它怎么摆与怎么响应鼠标 -->
   <section class="card" data-search="window">
-    <h2>挂件窗口</h2>
+    <div class="card-head">
+      <h2 class="card-toggle" @click="cardFold.open = !cardFold.open">
+        <span class="caret">{{ cardFold.open ? '▾' : '▸' }}</span>挂件窗口
+        <span v-if="!cardFold.open" class="card-sum">进入方式 · 位置 · 穿透 · 吸附</span>
+      </h2>
+    </div>
+    <template v-if="cardFold.open">
     <label class="field row">
       <span class="label">进入插件时</span>
       <select :value="cfg.enterMode" @change="onTextChange('enterMode', $event)">
@@ -90,6 +107,7 @@ function onOpacityCommit() {
       <button class="utils-btn utils-primary" @click="emit('show-widget')">显示挂件</button>
       <button class="secondary utils-btn utils-secondary" @click="emit('hide-widget')">隐藏挂件</button>
     </div>
+    <p class="hint">当前状态：<em>{{ widgetVisible ? '挂件已显示' : '挂件已隐藏' }}</em></p>
 
     <label class="field row check">
       <span class="label">窗口置顶</span>
@@ -120,6 +138,9 @@ function onOpacityCommit() {
       <button class="secondary utils-btn utils-secondary" @click="emit('copy-cmd', '切换鼠标穿透')">复制「穿透」指令名</button>
       <button class="secondary utils-btn utils-secondary" @click="emit('add-hotkey', '切换鼠标穿透')">新增「穿透」快捷键</button>
     </div>
+    <p class="hint">
+      当前绑定：<strong>{{ passHotkey || '未检测到' }}</strong>
+    </p>
 
     <label class="field row check">
       <span class="label">自动避让任务栏 <em>（实时识别任务栏隐藏/显示，弹出时让位、收起后贴回）</em></span>
@@ -132,7 +153,7 @@ function onOpacityCommit() {
 
     <!-- 位置与吸附：低频项收进一个默认收起的折叠（贴边间距 / 吸附 / 滚动条 / 复位） -->
     <div class="fold">
-      <button class="link-btn utils-btn utils-secondary" type="button" @click="posFold = !posFold">
+      <button class="link-btn utils-btn utils-secondary fold-toggle" type="button" :aria-expanded="posFold" @click="posFold = !posFold">
         {{ posFold ? '收起位置与吸附' : '位置与吸附（贴边间距 / 吸附与翻转 / 避让滚动条 / 复位）' }}
       </button>
       <div v-if="posFold" class="guide">
@@ -185,6 +206,7 @@ function onOpacityCommit() {
       </div>
     </div>
     <p v-if="widgetFlash.msg" class="msg" :class="msgCls(widgetFlash)">{{ widgetFlash.msg }}</p>
+    </template>
   </section>
 </template>
 

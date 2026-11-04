@@ -1,8 +1,10 @@
 ## 六、存储结构（续）· 通知方式 / 额度 / 多厂商模型
 
 **通知方式**（通知渠道，`lib/notify.js`）：把原先散落在七八处（余额预警 / 预算 / 波动 / 模型低余额 / 峰谷与穿透切换 / 计时到点 / 更新提示）的 `utools.showNotification` **收口成统一出口** `notify(text, cfg)`，新增渠道只需加配置开关，调用方无需感知。两个渠道：**系统通知**（`cfg.notifySystemOn`，默认 true = 沿用旧行为）+ **邮件通知**（`cfg.notifyMailOn`，默认 false，需先配好 SMTP）。设置页「通知方式」管渠道总开关，上方各提醒开关管「哪几类要提醒」，两组正交。
+**调试开关** `cfg.debugTools`（默认 false）：打开后「开发者」Tab 才出现「立即触发指定提醒」「注入旧数据」两个回归入口（入口未注册成卡片，hide/搜索里都不会出现；服务层入口还会再校验一次开关）。
 
 - **两条铁律**：① **免打扰时段由调用方判断**（`notifyDaily` / `notifyNow` / `notifyModelLow` 进入前就 `return`），统一出口不重复判断，否则「免打扰只静默系统通知、邮件却照发」：免打扰时段内邮件一并静默；② **邮件失败绝不影响主流程**：整条发送链丢进 Promise，错误只 `logErr` 留痕。提醒是副作用，不因 SMTP 不通就失败主流程。
+- **待办到点提醒的免打扰口径**：`services.js` 把 `inQuietHours(cfg)` 作为 `silent` 传给 `reminders.runDueTick`，时段内**不发系统通知/邮件、只推挂件气泡**（气泡不受免打扰影响）；气泡回执 `shown:true` 才算该轮完成。两套幂等位见 `05-ipc.md` 的 `whale:todo-due-ack`。
 - **计时到点是例外**：由挂件页面发起（`whale:timer-done`），页面侧按 `timerNotifyOn || (timerMailOn && notifyMailOn)` 判断要不要发，两者是「或」：只开邮件渠道时也要能通知出去。页面只管「发不发」，走哪个渠道由宿主出口按配置决定。
 - **手写最小 SMTP 客户端**（`class SmtpClient`，Node `net` / `tls`）：只实现发一封信的命令流 EHLO → STARTTLS(可选) → AUTH LOGIN → MAIL/RCPT/DATA → QUIT。**不用 nodemailer**：preload 是 CommonJS 且不可压缩混淆，引第三方包要额外处理依赖打包；这里只需纯文本单收件人。`mailSecure`（默认 true）= `tls.connect` 直连 465；false = `net.connect` 明文握手，EHLO 响应含 `STARTTLS` 且端口非 25 时升级（升级会换 socket，**必须清掉旧缓冲与等待者**，否则残留数据会串行错位）。超时三重兜底：单步 `SMTP_STEP_MS` 8s、连接 `SMTP_TIMEOUT_MS` 15s、`sendMail` 另有总超时 guard，任一步卡死都不会让 Promise 永久挂起。
   - **`read()` 返回的是「一次响应的全部行」，状态码只看 `last()`**。这是最易踩的坑：多行响应（EHLO 能力表、带提示的 `334`）首行 `250-xxx`、末行才是结论。早先 `feed()` 只 resolve 末行、丢掉前面行，`AUTH LOGIN` 拿到 `334 VXNlcm5hbWU6` 而校验期望 `334`，直接判失败，**所有需认证的服务器都发不出信**。判断能力关键字（如 STARTTLS）用 `has()` 扫全部行。

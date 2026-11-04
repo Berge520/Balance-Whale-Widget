@@ -150,7 +150,7 @@ function modelBarWidth(tokens?: number) {
   <p v-else class="hint">{{ emptyMsg }}</p>
 
   <div v-if="props.showModels !== false" class="fold">
-    <button class="link-btn utils-btn utils-secondary" @click="modelsOpen = !modelsOpen">{{ modelsOpen ? '收起各模型用量' : '各模型用量' }}</button>
+    <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="modelsOpen" @click="modelsOpen = !modelsOpen">{{ modelsOpen ? '收起各模型用量' : '各模型用量' }}</button>
     <div v-if="modelsOpen" class="guide">
       <!-- 模型行原先是一条长长的 .field：名字靠左、后面紧跟「4.2M tokens · 73 次调用 · 输出 26K · ¥ 0.00」
            一长串，右缘参差不齐，也没法横向比各模型。改成四列定宽的排行榜：

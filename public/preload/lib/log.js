@@ -66,6 +66,26 @@ const LOG_FILE = (function () {
 let fsMod = null
 try { fsMod = require('fs') } catch (err) { fsMod = null }
 
+// 时间戳：ISO 8601 的「本地钟面 + 时区偏移」，而不是 toISOString() 的 UTC 钟面。
+// 为什么改：这份日志是用户自己也会打开对时间的取证材料（%TEMP%\whale-debug.log）。
+// 纯 UTC 钟面在东八区会让「凌晨 02:16 的reload」写成「前一天 18:16」，读的人会把它当成
+// 昨晚发生的事，进而误判某条路径没跑过——本轮排查置顶时就真的被它带偏过一次。
+// 尾巴上的偏移保证瞬间仍可精确还原（Date.parse 可逆），同一时区内字典序也等于时间序。
+function pad(n, w) {
+  let s = String(n)
+  while (s.length < w) s = '0' + s
+  return s
+}
+function stamp(ms) {
+  const d = new Date(ms === undefined ? Date.now() : ms)
+  const offMin = -d.getTimezoneOffset()
+  const abs = Math.abs(offMin)
+  return d.getFullYear() + '-' + pad(d.getMonth() + 1, 2) + '-' + pad(d.getDate(), 2) +
+    'T' + pad(d.getHours(), 2) + ':' + pad(d.getMinutes(), 2) + ':' + pad(d.getSeconds(), 2) +
+    '.' + pad(d.getMilliseconds(), 3) +
+    (offMin < 0 ? '-' : '+') + pad(Math.floor(abs / 60), 2) + ':' + pad(abs % 60, 2)
+}
+
 // 已写入字节数的乐观计数：避免每次 log() 都 statSync（磁盘 IO + 大文件时开销明显）。
 // 只在计数逼近上限时才真去 stat 复核，防止长时间运行后计数与磁盘实际值漂移。
 let bytesWritten = 0
@@ -220,11 +240,11 @@ function write(level, args) {
     const repeat = rec && rec.pendingRepeat
     if (repeat) {
       rec.pendingRepeat = 0
-      const note = '[' + new Date(now).toISOString() + '][' + level + '] （上次同键又重复 ' + repeat + ' 次，已折叠）\n'
+      const note = '[' + stamp(now) + '][' + level + '] （上次同键又重复 ' + repeat + ' 次，已折叠）\n'
       fsMod.appendFileSync(LOG_FILE, note)
       bytesWritten += Buffer.byteLength(note)
     }
-    const line = '[' + new Date(now).toISOString() + '][' + level + '] ' + joined + '\n'
+    const line = '[' + stamp(now) + '][' + level + '] ' + joined + '\n'
     fsMod.appendFileSync(LOG_FILE, line)
     bytesWritten += Buffer.byteLength(line)
     // 只有逼近上限才走统计/轮转，常态写入零额外 IO
@@ -235,4 +255,4 @@ function write(level, args) {
 function log() { write('LOG', Array.prototype.slice.call(arguments)) }
 function logErr() { write('ERR', Array.prototype.slice.call(arguments)) }
 
-module.exports = { DEV, LOG_FILE, log, logErr, sanitize }
+module.exports = { DEV, LOG_FILE, log, logErr, sanitize, stamp }

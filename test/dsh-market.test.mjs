@@ -25,6 +25,7 @@ const {
   parseInstallSpec, specKindOf, specNeedsBuild,
   realizedVersionBySpec,
   parseVer, cmpVer, rangeAllows, lowerBoundOf, updateState,
+  isUpdatablePlugin, bundleBaseName,
   registryLatest,
   clearCache, OFFICIAL_URL, MIRROR_PKG, MIRROR_REGISTRY,
 } = dshMarket
@@ -382,6 +383,30 @@ test('rangeAllows：>= / > 比较器', () => {
   assert.equal(rangeAllows('>1.2.0', '1.2.1'), true)
 })
 
+// ⚠️ 回归（上游 a4febfa）：同一 comparator 串里的上界必须一起判。
+//    早先只判 `>=` 下界，`>=0.1.5 <0.3` 对 0.4.0 返 true（市场放行、宿主拒装）。
+test('rangeAllows：>= / > 串里的 < / <= 上界按合取判（含部分版本）', () => {
+  // connector 插件族的真实写法
+  assert.equal(rangeAllows('>=0.1.5 <0.3', '0.1.5'), true)
+  assert.equal(rangeAllows('>=0.1.5 <0.3', '0.2.9'), true)
+  assert.equal(rangeAllows('>=0.1.5 <0.3', '0.3.0'), false, '上界 0.3 等价 0.3.0，等于上界不放行')
+  assert.equal(rangeAllows('>=0.1.5 <0.3', '0.4.0'), false, '只判下界会把 0.4.0 误放行')
+  // `<=` 是闭区间
+  assert.equal(rangeAllows('>=0.1.5 <=0.3', '0.3.0'), true)
+  assert.equal(rangeAllows('>=0.1.5 <=0.3', '0.3.1'), false)
+  // prerelease 下界 + 部分上界（`>=0.1.7-rc <2`）
+  assert.equal(rangeAllows('>=0.1.7-rc <2', '0.2.0-rc.2', { includePrerelease: true }), true)
+  assert.equal(rangeAllows('>=0.1.7-rc <2', '2.0.0', { includePrerelease: true }), false)
+  // 纯 `>` 下界也吃上界
+  assert.equal(rangeAllows('>0.1.5 <0.3', '0.1.5'), false)
+  assert.equal(rangeAllows('>0.1.5 <0.3', '0.2.0'), true)
+  // `||` 各分支各自合取：其它段仍可放行
+  assert.equal(rangeAllows('>=0.1.5 <0.3 || >=0.4', '0.4.0'), true)
+  assert.equal(rangeAllows('>=0.1.5 <0.3 || >=0.4', '0.3.5'), false)
+  // 上界认不出时保守放行（与整条认不出同口径）
+  assert.equal(rangeAllows('>=0.1.5 <workspace:*', '0.4.0'), true)
+})
+
 test('rangeAllows：认不出的形态一律判「在范围内」（保守，宁可漏报不误报）', () => {
   // workspace:* / npm: 别名 / file: 这些我们没实现比较，不能瞎判成有更新
   assert.equal(rangeAllows('workspace:*', '9.9.9'), true)
@@ -543,6 +568,82 @@ test('updateState：只认 ==="update"，"unknown" 不能进可更新计数', ()
   const n = list.filter((v) => updateState('^0.5.11', v, '0.5.11').state === 'update').length
   // 0.6.0 > 0.5.11 → update；'' → unknown；0.5.13 > 0.5.11 → update。共 2
   assert.equal(n, 2)
+})
+
+// ── 纯依赖判定（isUpdatablePlugin，对齐上游 #793）──
+//
+// 背景：更新通道装的是 **BUNDLE**。把纯依赖（只带 bin、没有 dsh 字段的 CLI / 库）
+// 列成「可更新」后，用户一点就得到宿主 `not-bundle` + 回滚提示，看起来像 profile 被弄坏了。
+// 判据三条（任一条成立即「是插件」），且**所有不确定都判「是插件」** ——
+// 误删一条提议只是少提示一次，误留一条提议会让用户白折腾一次。
+
+// 造一份「三条证据都是确切否定」的信息：manifest 读了但没 dsh 字段、名单空、patch 空
+const plainInfo = { manifest: { name: 'dsh-x' }, hasDshField: false }
+
+test('isUpdatablePlugin：三条证据都确切否定时才判纯依赖', () => {
+  assert.equal(isUpdatablePlugin('dsh-x', plainInfo, [], []), false)
+})
+
+test('isUpdatablePlugin：① manifest 带 dsh 字段 → 是插件', () => {
+  assert.equal(isUpdatablePlugin('dsh-x', { manifest: {}, hasDshField: true }, [], []), true)
+})
+
+test('isUpdatablePlugin：② profile 的 bundles 列出它 → 是插件', () => {
+  assert.equal(isUpdatablePlugin('dsh-x', plainInfo, ['dsh-x'], []), true)
+})
+
+test('isUpdatablePlugin：③ 用户 patch 里有条目按名加载它 → 是插件', () => {
+  assert.equal(isUpdatablePlugin('dsh-x', plainInfo, [], ['dsh-x']), true)
+})
+
+test('isUpdatablePlugin：bundles / patch 里的作用域包与短名互通（界面与宿主必须同口径）', () => {
+  // 包名是作用域包、名单写短名 → 靠 candidateNames 的短名兜底命中
+  assert.equal(isUpdatablePlugin('@scope/dsh-x', plainInfo, ['dsh-x'], []), true)
+  assert.equal(isUpdatablePlugin('@scope/dsh-x', plainInfo, [], ['dsh-x']), true)
+  // 包名是短名、名单写完整作用域名 → 只按**名单**归一会漏（bundleBaseName 保留 scope），
+  // 所以两侧都要进 candidateNames：这是与 matchInstalledBySpec 同一套口径
+  assert.equal(isUpdatablePlugin('dsh-x', plainInfo, ['@scope/dsh-x'], []), true)
+})
+
+test('isUpdatablePlugin：bundles 条目带版本/子路径时也能对上', () => {
+  assert.equal(isUpdatablePlugin('dsh-x', plainInfo, ['dsh-x@1.2.3'], []), true)
+  assert.equal(isUpdatablePlugin('dsh-x', plainInfo, ['dsh-x/dist/index.js'], []), true)
+  assert.equal(isUpdatablePlugin('@scope/dsh-x', plainInfo, ['@scope/dsh-x@1.2.3'], []), true)
+})
+
+test('isUpdatablePlugin：读不到 manifest / 名单 / patch 一律判「是插件」（不确定必须保留旧行为）', () => {
+  // manifest 缺失：包目录不存在或 package.json 坏了
+  assert.equal(isUpdatablePlugin('dsh-x', { manifest: null }, [], []), true)
+  assert.equal(isUpdatablePlugin('dsh-x', {}, [], []), true)
+  // bundles / patchIds 传 null 表示「读不到」，与传 []（确切没有）语义不同
+  assert.equal(isUpdatablePlugin('dsh-x', plainInfo, null, []), true)
+  assert.equal(isUpdatablePlugin('dsh-x', plainInfo, [], null), true)
+  assert.equal(isUpdatablePlugin('dsh-x', plainInfo, null, null), true)
+})
+
+test('isUpdatablePlugin：没有名字 → 判「是插件」（无从判断就不删提议）', () => {
+  assert.equal(isUpdatablePlugin('', plainInfo, [], []), true)
+  assert.equal(isUpdatablePlugin(null, plainInfo, [], []), true)
+  assert.equal(isUpdatablePlugin(undefined, plainInfo, [], []), true)
+})
+
+test('isUpdatablePlugin：坏入参不抛异常（info 非对象按空对象处理）', () => {
+  assert.equal(isUpdatablePlugin('dsh-x', null, [], []), true) // info 为空 → manifest 读不到
+  assert.equal(isUpdatablePlugin('dsh-x', plainInfo, 'not-array', []), true)
+  assert.equal(isUpdatablePlugin('dsh-x', plainInfo, [null, '', '  '], []), false) // 空条目跳过
+})
+
+test('bundleBaseName：去 #hash、去非首字符 @版本、按 / 保留包名段', () => {
+  assert.equal(bundleBaseName('dsh-x'), 'dsh-x')
+  assert.equal(bundleBaseName('dsh-x@1.2.3'), 'dsh-x')
+  assert.equal(bundleBaseName('dsh-x#abc1234'), 'dsh-x')
+  assert.equal(bundleBaseName('dsh-x/dist'), 'dsh-x')
+  // 作用域包：首字符就是 @，不能被当版本分隔切掉
+  assert.equal(bundleBaseName('@scope/x'), '@scope/x')
+  assert.equal(bundleBaseName('@scope/x@1.2.3'), '@scope/x')
+  assert.equal(bundleBaseName('@scope/x/dist'), '@scope/x')
+  assert.equal(bundleBaseName(''), '')
+  assert.equal(bundleBaseName(null), '')
 })
 
 // ── 实装版本查表（realizedVersionBySpec）──
@@ -884,6 +985,81 @@ test('untarOne：跳过其它成员与填充字节，找到目标', () => {
 test('untarOne：没有目标成员返回 null', () => {
   const tar = makeTar('package/other.json', '{}')
   assert.equal(dshMarket._untarOne(tar, 'package/plugins.json'), null)
+})
+
+// ── readBodyStall（镜像 tarball 的停滞看门狗）──
+//
+// ⚠️ 口径是「多久没收到新字节」而不是「总共给了多久」：镜像抖动到几十 KB/s 时
+//    链路仍在传字节，一刀切的总时限会把下载杀掉（上游 b766e2a 的真实事故）。
+//    这里用可注入的毫秒级阈值，把四种结局都压成能在单测里跑完的时序。
+
+// 造一个流式响应替身。hold=true 时最后一次 read 永不结束（模拟「字节停了」）
+function fakeStream(chunks, opts) {
+  const o = opts || {}
+  let i = 0
+  return {
+    body: {
+      getReader() {
+        return {
+          read: async () => {
+            if (i >= chunks.length) {
+              if (o.hold) await new Promise(() => {})
+              return { done: true, value: undefined }
+            }
+            if (o.gapMs) await new Promise((r) => setTimeout(r, o.gapMs))
+            return { done: false, value: new Uint8Array(Buffer.from(chunks[i++])) }
+          },
+          cancel: async () => {},
+        }
+      },
+    },
+  }
+}
+
+test('readBodyStall：字节一直在来就放行，哪怕总耗时远超停滞阈值', async () => {
+  const res = fakeStream(['ab', 'cd', 'ef', 'gh', 'ij'], { gapMs: 10 })
+  const buf = await dshMarket._readBodyStall(res, '镜像 tarball', {
+    stallMs: 15, totalMs: 5000, maxBytes: 1024,
+  })
+  // 总耗时约 50ms > stallMs 15ms —— 若按「总时长一刀切」这里会失败
+  assert.equal(buf.toString('utf8'), 'abcdefghij')
+})
+
+test('readBodyStall：中途停住以「连续无新数据」拒绝，并报出已收字节数', async () => {
+  await assert.rejects(
+    dshMarket._readBodyStall(fakeStream(['abcde', 'fghij'], { hold: true }), '镜像 tarball', {
+      stallMs: 20, totalMs: 5000, maxBytes: 1024,
+    }),
+    /没有收到新数据（已收到 10 字节）/,
+  )
+})
+
+test('readBodyStall：超体积上限拒绝（异常镜像不能把进程撑死）', async () => {
+  await assert.rejects(
+    dshMarket._readBodyStall(fakeStream(['abc', 'de'], {}), '镜像 tarball', {
+      stallMs: 5000, totalMs: 5000, maxBytes: 4,
+    }),
+    /超过体积上限/,
+  )
+})
+
+test('readBodyStall：整体上限兜底（每 15s 吐一字节的镜像不能永远拖住）', async () => {
+  await assert.rejects(
+    dshMarket._readBodyStall(fakeStream(['a', 'b', 'c', 'd'], { gapMs: 30 }), '镜像 tarball', {
+      stallMs: 5000, totalMs: 50, maxBytes: 1024,
+    }),
+    /整体下载超过/,
+  )
+})
+
+test('readBodyStall：没有流式 body 时退回 arrayBuffer，体积上限仍生效', async () => {
+  const plain = (text) => ({ arrayBuffer: async () => Buffer.from(text, 'utf8') })
+  const ok = await dshMarket._readBodyStall(plain('abcdef'), '镜像 tarball', { maxBytes: 100 })
+  assert.equal(ok.toString('utf8'), 'abcdef')
+  await assert.rejects(
+    dshMarket._readBodyStall(plain('abcdef'), '镜像 tarball', { maxBytes: 4 }),
+    /超过体积上限/,
+  )
 })
 
 // ── loadCatalog（注入 fake fetch）──

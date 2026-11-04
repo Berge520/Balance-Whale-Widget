@@ -1,15 +1,18 @@
 <script lang="ts" setup>
 import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
-import type { AlertRole, BubbleMeta, CodexWindow, CodexWindows, DshMarketPlugin, SkinGallery, SkinMeta, SoundMeta, SoundRole, WhaleModel, WhaleModelRow, WhaleModelTemplate, WhalePriceModel, WhaleServices, WhaleTokenPrice } from './types/services'
+import type { CSSProperties } from 'vue'
+import type { AlertRole, BubbleMeta, CodexWindow, CodexWindows, DshMarketPlugin, MediaItem, SkinGallery, SkinMeta, SoundMeta, SoundRole, WhaleModel, WhaleModelRow, WhaleModelTemplate, WhalePriceModel, WhaleServices, WhaleTokenPrice } from './types/services'
 import SkinCropper from './components/SkinCropper.vue'
 import SoundTrimmer from './components/SoundTrimmer.vue'
 import FirstRunGuide from './components/FirstRunGuide.vue'
+import BootIntro from './components/BootIntro.vue'
 import UsageChart from './components/UsageChart.vue'
 import DisplayManager from './components/DisplayManager.vue'
-import { msgCls, useFlash, type Flash } from './composables/useFlash'
+import { msgCls, useFlash, useFlashShow, type Flash } from './composables/useFlash'
+import { useFold, setFoldPrefs } from './composables/useFold'
 import { assetSize, fetchAsDataUrl, pad2, sharedSkinThumb } from './utils/format'
 // 自定义显示：Tab/卡片/依赖关系常量（供 DisplayManager.vue 等组件共享）
-import { TABS, SEARCH_INDEX, CORE_CARDS, CARD_DEPENDENCIES, type TabKey } from './constants/display'
+import { TABS, SEARCH_INDEX, CORE_TABS, CORE_CARDS, sortByOrder, isCardHidden as cardHiddenByCfg, pinnedInTab as pinnedInTabOf, CARD_FOLDS, cardRootKey, type TabKey } from './constants/display'
 // 卡片「全文」索引：scripts/gen-search-index.mjs 在构建期从模板提取每张卡的可见文本
 // （h2 卡头 + label 字段名），搜索第三档兜底用。模板改了没重新生成会被 prebuild 拦下
 import { CARD_TEXT } from './search-index.gen'
@@ -49,23 +52,30 @@ const BubbleView = defineAsyncComponent(() => import('./views/BubbleView.vue'))
 // 窗口聚焦 / 挂载 / 恢复备份 / 清除数据后父级都要主动刷新，故这里用 props 收、emit 触发；
 // 卡片内需要父级同步结果的回填（账本截取所需数据）经 defineExpose 暴露方法，父级用模板 ref 调用。
 import UsageView from './views/UsageView.vue'
-// 「提醒与通知」整卡。计时时长 / 提醒开关与阈值 / 通知渠道 / SMTP 配置 / 提醒音音量 / 提醒文案
-// 都内聚在组件内；applyConfig 回填后要落「未保存」基线、备份恢复后要刷新计时三段展示，这两处
-// 父级驱动，故组件用 defineExpose 暴露 syncAlertsBaseline / syncTimerHms，父级用模板 ref 调用。
+// 「提醒与通知」整卡。提醒开关与阈值 / 通知渠道 / SMTP 配置 / 提醒音音量 / 提醒文案
+// 都内聚在组件内（计时配置已迁到 TimerView）；applyConfig 回填后要落「未保存」基线、备份恢复后
+// 要刷新展示，这两处父级驱动，故组件用 defineExpose 暴露 syncAlertsBaseline，父级用模板 ref 调用。
 // SMTP 凭据改由组件自己 onMounted 读回（父级 onMounted 时它的 ref 还没建立，会空转），
 // 故 loadMailSecrets 仍保留在 defineExpose 里备用，但父级不再调。保存 / 恢复默认提醒文案需父级整份
 // applyConfig，故 emit('save-alerts')。
 import NotifyView from './views/NotifyView.vue'
+// 「计时」整卡：计时功能的全部配置（默认时长 / 快捷档位 / 到点提醒 / 休息与番茄 / 气泡与状态）。
+// 原先寄居在「提醒与通知」卡的折叠分区里，搜索到也不容易看见；拆成独立卡后挂件菜单的
+// 「计时设置」深链（target='timer'）可直达。落盘走 emit('patch')，跨卡跳转走 emit('go-card')。
+import TimerView from './views/TimerView.vue'
 // 「模型与余额」整卡。行内表单 / 展开态 / 删除确认 / 测试 / 刷新 / 增删改都内聚在组件内；
 // 跨卡共享的运行时快照（models）、配置清单（modelConfigs）、主显示 id（modelsMainId）、
 // 模板与上限、以及 fmtTokens / codexWinText 仍留父级，故按 props 下传；保存 / 删除 / 刷新后
 // 需要父级 reloadModels 重新取快照，故 emit('reload')；主显示切换经 update:mainId 上抛。
 // 按需异步加载：expose 的 closeModelForm 仅组件内部使用，父级无 ref 调用点，异步安全。
 const ModelsView = defineAsyncComponent(() => import('./views/ModelsView.vue'))
-// 「专注与待办」整卡：专注记录开关 + 近 7 天统计 + 待办清单编辑面。
+// 「专注与待办」整卡：今日概览 + 待办清单 + 专注统计/明细；计时默认值沉底。
 // 待办与统计都归宿主（preload 的 settings.js），本卡只读写快照、订阅宿主推送；
 // 输入法组字守卫与其它卡共用父级的 isImeComposing，故按 props 下传。
 import FocusView from './views/FocusView.vue'
+// 「下班倒计时」整卡：上下班时间 / 工作日 / 显示秒 / 可选附加倒计时（周末、发薪日）。
+// 开关关闭时挂件完全走原路径（余额 / 专注 / 计时不受影响），本卡只负责写 cfg 并交给宿主归一。
+import OffworkView from './views/OffworkView.vue'
 // 「使用帮助」整卡：使用说明 / 快捷键绑定 / 挂件故障排查 / 挂件创建错误详情。
 // 卡片自身的折叠态与诊断日志入口内聚在组件内；挂件错误状态（errDetail / errFlash）与
 // checkWidgetError 由父级 onMounted、showWidget 驱动，故按 props 收、emit 触发；
@@ -100,6 +110,29 @@ const TIMER_NOTE_MAX = 60
 const TIMER_LONG_BREAK_DEFAULT = 15
 // 番茄循环：每 N 轮进入长休，是宿主 constants.js TIMER_LONG_EVERY_DEFAULT 的同值副本
 const TIMER_LONG_EVERY_DEFAULT = 4
+// 挂件计时组快捷时长四档（分钟）的默认值，是宿主 constants.js TIMER_PRESETS_DEFAULT 的同值副本
+const TIMER_PRESETS_DEFAULT = [15, 25, 45, 60]
+
+// 下班倒计时配置归一：与宿主 offwork.js 的 normHm / normDays 同口径（时 0–23、分 0–59、
+// 工作日 0–6 去重升序、空数组回默认周一至周五）。设置页拿不到 preload 模块，只能留一份同值副本
+function normOffworkHm(v: any, dft: string) {
+  const s = typeof v === 'string' ? v.trim() : ''
+  const m = /^([01]?\d|2[0-3]):([0-5]\d)$/.exec(s)
+  if (!m) return dft
+  return (m[1].length < 2 ? '0' + m[1] : m[1]) + ':' + m[2]
+}
+function normOffworkDays(v: any, dft: number[]) {
+  if (!Array.isArray(v)) return dft.slice()
+  const out = Array.from(new Set(v.filter((x) => Number.isInteger(x) && x >= 0 && x <= 6))).sort((a, b) => a - b)
+  return out.length ? out : dft.slice()
+}
+function normOffworkPayday(v: any) {
+  return Number.isInteger(v) && v >= 1 && v <= 31 ? v : 10
+}
+const OFFWORK_DEFAULTS = {
+  start: '09:00', end: '18:00', days: [1, 2, 3, 4, 5],
+  showSec: true, weekendOn: false, paydayOn: false, paydayDay: 10,
+}
 
 // 随包内置形象 id（= public/whale/ 下的图片文件名），数组顺序即「形象」下拉的顺序。
 // 也是同值副本：宿主 store.js 的 BUILTIN_SKINS 与挂件页面 floating-page.js 的 BUILTIN_SKINS
@@ -197,7 +230,10 @@ const secrets = reactive({ apiKey: '', platformToken: '' })
 const guides = reactive({ apiKey: false, token: false })
 // 「帮助」组里使用说明 / 故障排查的折叠态已随 HelpView 迁走
 // 长卡片内部的折叠态：凭据（填一次就不动，默认收起）
-const toolOpen = reactive({ credentials: false })
+// 走 useFold：卡片级折叠要能被「管理显示内容」的默认展开/收起与记忆开关管到
+const credentialsFold = useFold('credentials', false)
+// 合并卡「专注与待办」的整卡折叠：主卡默认展开，收起态摘要提示三段内容
+const focusTimerFold = useFold('focusTimer', true)
 // —— 设置页顶部 Tab ——
 // 原先 12 张卡片竖排一屏到底（模板近千行），找一项要滚很久；按主题分 7 组，一次只看一组。
 // 每张卡片用 v-if="activeTab === 'xxx'" 归到组里（不额外套容器层）。组内顺序 = 卡片在模板里的先后；
@@ -205,10 +241,25 @@ const toolOpen = reactive({ credentials: false })
 // 所以看模板不要以为同一组的卡挨在一起 —— 渲染顺序由下面 TABS 的 key 决定，与源码位置无关。
 // desc 是分组说明：凭据、备份这类「不常用但找不到会着急」的项靠它暴露位置；
 // 它得与卡片实际**顺序和数量**对得上（按错顺序写、漏掉某张卡，用户按描述找就会找不到）。
-const activeTab = ref<TabKey>('look')
+// 记住上次停留的分组：重开设置页 / 重启插件后回到原位置。
+// 只放 localStorage、不进配置与备份 —— 这是纯 UI 偏好，写坏了最多回默认组，不值得进 dbStorage。
+// 值为空 / 非法 / 存储被禁时一律回 'look'（冷启动仍从外观开始）。
+const LAST_TAB_KEY = 'whale:lastTab'
+function readLastTab(): TabKey | '' {
+  try {
+    const v = localStorage.getItem(LAST_TAB_KEY)
+    return TABS.some((t) => t.key === v) ? (v as TabKey) : ''
+  } catch (err) { return '' }
+}
+const activeTab = ref<TabKey>(readLastTab() || 'look')
+// 写入失败（存储被禁 / 隐私模式）不影响使用，静默回默认即可
+watch(activeTab, (v) => { try { localStorage.setItem(LAST_TAB_KEY, v) } catch (err) {} })
 const activeTabDesc = computed(() => TABS.find((t) => t.key === activeTab.value)?.desc || '')
-// 自定义显示：过滤掉用户隐藏的 Tab（devOnly 的 Tab 始终显示，因为它的显隐由其他逻辑控制）
-const visibleTabs = computed(() => TABS.filter((t) => !cfg.hiddenTabs.includes(t.key)))
+// 自定义显示：过滤掉用户隐藏的 Tab，并按用户自定义顺序排列（空顺序 = TABS 默认顺序）。
+// devOnly 的 Tab 始终显示，因为它的显隐由其他逻辑控制
+const visibleTabs = computed(() =>
+  sortByOrder(TABS.filter((t) => !cfg.hiddenTabs.includes(t.key)), cfg.tabOrder, (t) => t.key),
+)
 
 // —— 卡片搜索（跨 Tab 找卡片）——
 // 痛点：卡片按主题分了 7 组、共 20 余张，还大量用 .fold 折叠；找一项要「先猜在哪组、再翻折叠」。
@@ -217,6 +268,8 @@ const visibleTabs = computed(() => TABS.filter((t) => !cfg.hiddenTabs.includes(t
 // 搜的是这份索引而不是实时 DOM —— 因为卡片是 v-if 渲染的，未激活的 Tab 根本没进 DOM，抓不到文本；
 // 且折叠区默认收起、DOM 里也读不到里面的字。索引与模板同处一文件，改卡片时顺手改这行，不会漂移。
 const searchQuery = ref('')
+// Ctrl+K 聚焦搜索用；没有它只能在页面里先找到输入框再点
+const searchInputEl = ref<HTMLInputElement | null>(null)
 const searchActive = computed(() => searchQuery.value.trim().length > 0)
 // 归一化：去空白、英文小写，让「API Key」「api key」「apikey」等价
 function normSearch(s: string) {
@@ -294,8 +347,179 @@ const searchHits = computed(() => {
 function cardOn(tab: string, key: string) {
   // 隐藏的卡片始终不渲染（无论搜索态还是正常态）
   if (cfg.hiddenCards.includes(key)) return false
+  // Tab 被隐藏时，它下面的卡片一并隐藏（搜索命中仍会列出，但会标「已隐藏」并可一键取消）
+  if (cfg.hiddenTabs.includes(tab)) return false
   if (searchActive.value) return searchHits.value.includes(key)
   return activeTab.value === tab
+}
+// —— 卡片置顶 ——
+// 痛点：一张 Tab 里可能压着 6 张卡，最常用的那张往往不在最前（如「用量」组的提醒 / 模型）。
+// 置顶**不改模板结构、也不搬 DOM**：只给卡根写 CSS `order`，`.pin-scope` 是 flex 列容器，
+// 负 order 的卡自然排到组首。跨组卡片永远串不到一起，分组语义不变；
+// 代价是没法把 A 组的卡排进 B 组 —— 那本来也不是需求。
+//
+// ⚠️ 为什么不能用 insertBefore 搬卡（真机事故，2026-11-02）：早先的实现把卡根搬到组首，
+// dev 下看着正常，生产构建里却会「切哪一组都只看到挂件外观和设置页视觉」，回来后旧卡还在、
+// 甚至重复一份。原因是 Vue 的 v-if 分支靠注释锚点定位（runtime-core 的 getNextHostNode 取
+// `vnode.anchor || vnode.el` 的 nextSibling），把正在渲染的组件根节点/多根组件的片段子节点
+// 搬离锚点后，卸载和重挂都会算错位置。结论：**凡是 Vue 管理的节点，只许改样式，不许换位置**。
+const pinnedCards = computed((): string[] => cfg.pinnedCards || [])
+// 置顶作用域：syncPinned 只在这里面查卡根、写 order
+const pinScopeEl = ref<HTMLElement | null>(null)
+// 按卡根判：合并卡配置里可能存的是 focus 也可能历史存成 timer（同一张卡），
+// 否则「置顶计时」不会给整卡挂上 .card-pinned
+function isPinned(key: string) {
+  const root = cardRootKey(key)
+  return pinnedCards.value.some((k) => cardRootKey(k) === root)
+}
+// 当前 Tab 里的置顶卡（保持用户定的顺序），供置顶区标题用；搜索态不显示标题（卡片是跨组混排的）。
+// 判定收在 display.ts，与 DisplayManager 的置顶计数共用一份 —— 否则两处「哪张算置顶」迟早说岔
+const pinnedInTab = computed(() =>
+  pinnedInTabOf(pinnedCards.value, activeTab.value, cfg.hiddenTabs, cfg.hiddenCards),
+)
+// 供模板 .card :class 用：置顶卡挂 .card-pinned（左侧竖条标记）。位置由 order 排，
+// class 只负责「长什么样」，不负责「排在哪」。
+function cardCls(key: string) {
+  return { 'card-pinned': isPinned(key) }
+}
+// 已写过 order 的元素。每轮先清空：常驻组件（如「资源」组的外包容器）不会随 Tab 卸载，
+// 不清就会把上一组的负序号带到新一组去。
+const pinOrderEls = new Set<HTMLElement>()
+function clearPinOrder() {
+  for (const el of pinOrderEls) el.style.removeProperty('order')
+  pinOrderEls.clear()
+}
+// 置顶卡的 order 基数：取负值排到 0 的普通卡之前，又要远大于行内说明的固定负值
+// （三段先后见下方 .pin-scope 的样式注释）。多张置顶按点击先后递增。
+const PIN_ORDER_BASE = -1000
+// 普通卡自定义顺序的起点：正值，排在 order 0 的分区标题 / 分隔线之后。
+// 步长 10 只为可读（插入时留空档），当前不依赖空档做插值
+const CARD_ORDER_BASE = 10
+const CARD_ORDER_STEP = 10
+function setPinOrder(el: HTMLElement, order: number) {
+  el.style.setProperty('order', String(order))
+  pinOrderEls.add(el)
+}
+// 祖先容器（如「资源」组的 .assets-scope）取子卡里最小的 order：
+// order 只在同一个 flex 容器内比较，容器本身不提前，里面的卡写再小的值也只在容器内部生效
+function bumpAncestors(root: HTMLElement, order: number, scope: HTMLElement) {
+  let parent = root.parentElement
+  while (parent && parent !== scope) {
+    const cur = parent.style.getPropertyValue('order')
+    if (!cur || Number(cur) > order) setPinOrder(parent, order)
+    parent = parent.parentElement
+  }
+}
+// 给当前 Tab 的卡根写 order。两级：
+//  1. 置顶卡写负 order（按 pinnedCards 先后），未置顶的卡不再被动
+//  2. 用户拖过顺序的 Tab，普通卡按 cfg.cardOrder 写正 order；没拖过的 Tab 保持 DOM（模板）顺序
+// 取消置顶 / 恢复默认时把 order 清掉，卡自然回到原位，不需要另记一份模板序。
+// 合并卡（计时 + 专注）一个卡根挂两个 data-search：按**卡根**算、把根上所有 key 都纳入判断，
+// 否则「置顶计时」会被当成没有对应卡根，或者把子块从卡里搬出去。
+function syncPinned() {
+  const scope = pinScopeEl.value
+  if (!scope) return
+  // 搜索态卡片跨组混排，保持命中顺序，置顶 / 自定义顺序都不参与 —— 先清掉上一轮写的 order
+  clearPinOrder()
+  if (searchActive.value) return
+  // 卡根 → 它挂的全部 data-search key（Map 的插入序即 DOM 顺序，下面补尾要用）
+  const keysOfRoot = new Map<HTMLElement, string[]>()
+  const seenRoots = new Set<HTMLElement>()
+  for (const el of Array.from(scope.querySelectorAll<HTMLElement>('[data-search]'))) {
+    const key = el.dataset.search || ''
+    if (SEARCH_INDEX[key]?.tab !== activeTab.value) continue
+    const root = (el.closest('.card') as HTMLElement) || el
+    if (seenRoots.has(root)) {
+      const keys = keysOfRoot.get(root)
+      if (keys && !keys.includes(key)) keys.push(key)
+      continue
+    }
+    seenRoots.add(root)
+    keysOfRoot.set(root, [key])
+  }
+  if (!keysOfRoot.size) return
+  // 1) 置顶卡
+  const list = pinnedInTab.value
+  const pinnedRoots = new Set<HTMLElement>()
+  for (const [root, keys] of keysOfRoot) {
+    // 合并卡的两个子块都算：取 list 里更靠前的那个下标，点「计时」也整卡提前
+    let idx = -1
+    for (const k of keys) {
+      // pinnedInTab 返回的是卡根代表键，按 root 匹配才对得上（合并卡的 timer 行也走这里）
+      const i = list.indexOf(cardRootKey(k))
+      if (i >= 0 && (idx < 0 || i < idx)) idx = i
+    }
+    if (idx < 0) continue
+    pinnedRoots.add(root)
+    const o = PIN_ORDER_BASE + idx
+    setPinOrder(root, o)
+    bumpAncestors(root, o, scope)
+  }
+  // 2) 普通卡的自定义顺序
+  const order = (cfg.cardOrder && cfg.cardOrder[activeTab.value]) || []
+  if (!order.length) return
+  // 卡根代表键 → 名次（同一卡根只认第一次出现的名次）
+  const rankOf = new Map<string, number>()
+  order.forEach((k, i) => {
+    const rk = cardRootKey(k)
+    if (!rankOf.has(rk)) rankOf.set(rk, i)
+  })
+  // 没进 order 的卡按 DOM 原序补在最后（与 Tab 的 sortByOrder 同一套补尾规则）
+  const ranked = Array.from(keysOfRoot.keys())
+    .filter((root) => !pinnedRoots.has(root))
+    .map((root, domIdx) => {
+      let rank = Infinity
+      for (const k of keysOfRoot.get(root) || []) {
+        const r = rankOf.get(cardRootKey(k))
+        if (r !== undefined && r < rank) rank = r
+      }
+      return { root, domIdx, rank }
+    })
+  ranked.sort((a, b) => {
+    if (a.rank !== b.rank) return a.rank < b.rank ? -1 : 1
+    return a.domIdx - b.domIdx
+  })
+  ranked.forEach((it, i) => {
+    const o = CARD_ORDER_BASE + i * CARD_ORDER_STEP
+    setPinOrder(it.root, o)
+    bumpAncestors(it.root, o, scope)
+  })
+}
+// 依赖变化后重排：等 DOM 更新完（nextTick）再写 order，否则此时拿到的还是上一轮的节点。
+// 切 Tab / 搜索 / 改显隐 / 改置顶都会触发（pinnedInTab 已把这些状态都算进去了）。
+// ⚠️ 不带 immediate：本 watch 的 getter 读 cfg，而 cfg 在下方才声明 —— immediate 会立刻求值并撞 TDZ
+// （与 applyUtoolsDark 同一条教训）。首屏那次由 cfg 声明之后调用 watchPinned() 时的挂载 watch 负责：
+// 配置从宿主回填会改 cfg.pinnedCards，那一次同样走本 watch。
+function watchPinned() {
+  watch(
+    () => [
+      activeTab.value,
+      searchQuery.value,
+      cfg.pinnedCards.join(','),
+      cfg.hiddenCards.join(','),
+      cfg.hiddenTabs.join(','),
+      // 卡片自定义顺序：对象引用每次 applyConfig 都会换，序列化后比较才不会白重排
+      JSON.stringify(cfg.cardOrder || {}),
+    ],
+    () => { nextTick(syncPinned) },
+  )
+}
+// 置顶 / 取消置顶（由 DisplayManager 调用）。顺序即显示顺序：新的置顶卡排在已有置顶卡之后，
+// 用户连点几张时得到的是「点击顺序」，不用再自己排。
+function togglePin(key: string, pinned: boolean) {
+  if (!SEARCH_INDEX[key]) return
+  // 按卡根去重 / 取消：合并卡的 focus 与 timer 是同一张卡，历史配置里可能两键都在，
+  // 否则点「计时」置顶会在 pinnedCards 里塞第二个键，取消时又只删掉一个
+  const root = cardRootKey(key)
+  const cur = cfg.pinnedCards || []
+  const has = cur.some((k) => cardRootKey(k) === root)
+  if (pinned) {
+    if (has) return
+    saveHidden({ pinnedCards: [...cur, key] })
+  } else {
+    if (!has) return
+    saveHidden({ pinnedCards: cur.filter((k) => cardRootKey(k) !== root) })
+  }
 }
 // 卡片在搜索结果里的来源标签（如「用量」），用于告诉用户这张卡本来在哪一组
 function cardTabLabel(key: string) {
@@ -307,51 +531,199 @@ function clearSearch() {
   searchQuery.value = ''
 }
 
+// —— Tab 交互：回顶 / 快捷键 ——
+// 切 Tab 回到页面顶部：否则从长分组（用量 / 开发者）切到短分组时，页面可能停在空白处，
+// 用户以为切坏了。深链定位卡片（onBubbleNavigate / goAssetsTab）不走这里，它们自己滚到目标卡。
+function scrollPageTop() {
+  try { window.scrollTo({ top: 0, left: 0, behavior: 'auto' }) } catch (err) {}
+}
+// 点击 / 快捷键的统一入口：清搜索 → 切组 → 回顶。点当前组也回顶（顺手当「回到顶部」用）。
+function onTabClick(key: TabKey) {
+  clearSearch()
+  activeTab.value = key
+  scrollPageTop()
+}
+// Alt+←/→ 切相邻分组；首尾不循环（按一下跳到另一头容易误操作）
+function switchAdjacentTab(delta: number) {
+  const list = visibleTabs.value
+  const i = list.findIndex((t) => t.key === activeTab.value)
+  const j = Math.min(list.length - 1, Math.max(0, (i < 0 ? 0 : i) + delta))
+  const t = list[j]
+  if (t && t.key !== activeTab.value) onTabClick(t.key)
+}
+// Ctrl+1..7 直达「当前可见」的第 N 组（隐藏组自动跳过，顺序 = 用户自定义顺序）
+function switchTabByIndex(n: number) {
+  const t = visibleTabs.value[n - 1]
+  if (t) onTabClick(t.key)
+}
+// Ctrl+K：聚焦搜索并全选已有词，直接重打
+function focusSearch() {
+  nextTick(() => {
+    searchInputEl.value?.focus()
+    searchInputEl.value?.select()
+  })
+}
+// 弹层打开时快捷键一律让位 —— 否则会在弹窗背后悄悄切组 / 抢焦点
+function anyModalOpen() {
+  return !!document.querySelector('.whale-overlay, .display-manager-overlay, .boot-intro, .media-preview-box')
+}
+// 设置页快捷键：Ctrl+1..7 切组 / Ctrl+K 搜索 / Alt+←→ 相邻切组。
+// Alt+方向键在输入框 / 下拉里是原生「按词跳转 / 换选项」，命中这些控件时一律不拦截。
+function onSettingsKeydown(e: KeyboardEvent) {
+  if (e.defaultPrevented || e.isComposing || anyModalOpen()) return
+  if ((e.ctrlKey || e.metaKey) && !e.altKey) {
+    if (e.key === 'k' || e.key === 'K') { e.preventDefault(); focusSearch(); return }
+    if (/^[1-9]$/.test(e.key)) { e.preventDefault(); switchTabByIndex(Number(e.key)) }
+    return
+  }
+  if (e.altKey && !e.ctrlKey && !e.metaKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight')) {
+    const t = e.target as HTMLElement | null
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return
+    e.preventDefault()
+    switchAdjacentTab(e.key === 'ArrowRight' ? 1 : -1)
+  }
+}
+
+// —— 配置保存回执 ——
+// 保存失败必须「当场、看得见」地告诉用户。宿主 store.patchConfig 在写盘失败时会抛
+// （见 store.js 里那句「写失败必须让调用方知道」），但设置页此前所有 patchCfg 调用都直接
+// 丢掉返回值 / 不接异常 —— 存储写满时用户照样看到开关翻转、重启后又变回去，只能当成「功能坏了」。
+//
+// 为什么做成「整条常驻 + 可点重试」而不是 3 秒就消失的一行字：
+//   · 存储写满/被拒绝是**持续**状态，不会自愈；提示闪一下就没了等于没提示
+//   · 用户此刻做的改动是**已知没落盘**的，得给一个一键再试的入口（重试的仍是最后这次改动，
+//     不重放历史，否则「先改 A 失败、再改 B 成功」会莫名其妙把 A 又写一遍）
+//   · 文案要说清「没保存上」而不是笼统的「操作失败」—— 用户要判断的是「我刚才那下算不算数」
+const saveFail = reactive({ msg: '', patch: null as Record<string, any> | null, retrying: false })
 // —— 自定义显示管理 ——
 // DisplayManager 弹窗的显隐
 const showDisplayManager = ref(false)
-// 判断卡片是否被隐藏（用于搜索结果标记）
+// 显示管理的回执（3 秒自动消失）：这类动作的提示很短（「已隐藏 XX 分组，已切到 YY」），
+// 不需要长期停留；与上面的常驻失败条是两回事，别合并 —— 后者必须一直挂着直到处理好
+const { flash: displayFlash, show: showDisplayMsg } = useFlashShow(3000)
+// 判断卡片是否被隐藏（卡片自身被隐藏，或它所属的 Tab 被隐藏 —— 对用户都是「看不见」）。
+// 判定实现收在 display.ts（App.vue / DisplayManager 共用一份），这里只做参数绑定
 function isCardHidden(key: string): boolean {
-  return cfg.hiddenCards.includes(key)
+  return cardHiddenByCfg(cfg.hiddenTabs, cfg.hiddenCards, key)
+}
+// 写隐藏列表并回执失败（不返回值给组件，组件按动作 emit，界面由配置回推驱动）
+function saveHidden(patch: Record<string, any>) {
+  // 异常已在 patchCfg 内统一处理（重试 + 常驻失败条 + 回滚界面），这里只补一条就地回执：
+  // 用户是在「显示管理」弹层里勾选的，弹层盖住了页头那条失败条 —— 不在这里说一声，
+  // 他会以为勾选成功了（界面回滚后勾选框会变回去，但容易被当成「点了没反应」）
+  if (!patchCfg(patch)) showDisplayMsg('保存失败：这次勾选没存上，重开设置会恢复原样', true)
 }
 // 切换卡片显隐（由 DisplayManager 组件调用）
-async function toggleCardVisibility(key: string, hidden: boolean) {
+function toggleCardVisibility(key: string, hidden: boolean) {
   const current = new Set(cfg.hiddenCards)
   if (hidden) current.add(key)
   else current.delete(key)
-  try {
-    await patchConfig({ hiddenCards: [...current] })
-  } catch (err) {
-    flash('保存失败', 'err')
-  }
+  saveHidden({ hiddenCards: [...current] })
 }
-// 切换 Tab 显隐（由 DisplayManager 组件调用）
-async function toggleTabVisibility(tabKey: TabKey, hidden: boolean) {
+// 切换 Tab 显隐（由 DisplayManager 组件调用）。隐藏当前 Tab 时由 watch(visibleTabs) 统一切走
+function toggleTabVisibility(tabKey: TabKey, hidden: boolean) {
   const current = new Set(cfg.hiddenTabs)
   if (hidden) current.add(tabKey)
   else current.delete(tabKey)
-  try {
-    await patchConfig({ hiddenTabs: [...current] })
-    // 如果当前激活的 Tab 被隐藏了，切到第一个可见的 Tab
-    if (hidden && activeTab.value === tabKey) {
-      const visible = TABS.filter((t) => !cfg.hiddenTabs.includes(t.key) && (t.key !== 'dev' || devMode.value))
-      if (visible.length) activeTab.value = visible[0].key
-    }
-  } catch (err) {
-    flash('保存失败', 'err')
-  }
+  saveHidden({ hiddenTabs: [...current] })
 }
-// 恢复默认显示（全部显示）
-async function resetDisplayToDefault() {
-  try {
-    await patchConfig({ hiddenTabs: [], hiddenCards: [] })
-  } catch (err) {
-    flash('保存失败', 'err')
-  }
+// 恢复默认：显示全放出来 + Tab / 卡片顺序复位 + 置顶清空 + 折叠默认值与记忆开关复位
+//（「恢复默认」对用户就是「回到刚装好时的样子」，只清隐藏、留着自定义顺序等于只恢复了一半；
+//  折叠默认值同属「显示内容」的自定义，留着不清同样只恢复一半）
+function resetDisplayToDefault() {
+  saveHidden({
+    hiddenTabs: [], hiddenCards: [], tabOrder: [], pinnedCards: [],
+    cardOrder: {}, foldDefaults: {}, foldRemember: true,
+  })
 }
-// DisplayManager 更新后的回调（目前不需要额外处理，配置已实时生效）
-function onDisplayManagerUpdate() {
-  // 配置已通过 patchConfig 实时更新，无需额外操作
+// Tab 上移 / 下移（由 DisplayManager 调用）。基于**完整顺序**（含已隐藏的 Tab）交换 ——
+// 隐藏某个 Tab 不该把它在顺序里的位置丢掉；换完把整份顺序落配置，空数组 = 默认顺序。
+function moveTab(key: string, delta: number) {
+  const order: string[] = sortByOrder(TABS, cfg.tabOrder, (t) => t.key).map((t) => t.key)
+  const i = order.indexOf(key)
+  const j = i + delta
+  if (i < 0 || j < 0 || j >= order.length) return
+  order[i] = order[j]
+  order[j] = key
+  saveHidden({ tabOrder: order })
+}
+// 搜索结果里点「已隐藏」的卡片 = 一键取消隐藏：卡片和它所属 Tab 一起放出来，
+// 否则只放卡片、Tab 还藏着，卡片仍然渲染不出来（README 里承诺的「一键取消」）
+function unhideCard(key: string) {
+  const patch: Record<string, any> = {}
+  if (cfg.hiddenCards.includes(key)) patch.hiddenCards = cfg.hiddenCards.filter((k) => k !== key)
+  const tab = SEARCH_INDEX[key]?.tab
+  if (tab && cfg.hiddenTabs.includes(tab)) patch.hiddenTabs = cfg.hiddenTabs.filter((k) => k !== tab)
+  if (Object.keys(patch).length) saveHidden(patch)
+}
+// DisplayManager 的变更统一入口：组件只按动作 emit('update', { type, key?, hidden?, delta? })，
+// 状态与落盘全在本层（组件不直接改 cfg，避免 props 被改写的反模式）
+type DisplayAction = {
+  type: 'tab' | 'card' | 'cards' | 'reset' | 'showAll' | 'tabMove' | 'pin' | 'cardOrder' | 'pinOrder' | 'foldDefault' | 'foldRemember'
+  key?: string
+  hidden?: boolean
+  delta?: number
+  pinned?: boolean
+  // type='foldDefault' / 'foldRemember' 时：true = 展开 / 开启记忆
+  open?: boolean
+  list?: string[]
+}
+// 某个 Tab 的模板默认卡片顺序（SEARCH_INDEX 组内声明序 == 模板卡片先后，由 test/display.test.mjs 钉死）。
+// 合并卡（focus/timer）按代表键去重 —— 它们共用一个卡根，顺序表里只该出现一次
+function defaultCardOrderOf(tab: string): string[] {
+  const out: string[] = []
+  for (const [k, v] of Object.entries(SEARCH_INDEX)) {
+    if (v.tab !== tab) continue
+    const root = cardRootKey(k)
+    if (!out.includes(root)) out.push(root)
+  }
+  return out
+}
+// 卡片顺序落配置：与模板默认顺序一致时删掉该 Tab 的键（避免存一份「等于默认」的冗余顺序，
+// 后续模板加卡时也不会被这份旧顺序顶到末尾）。
+// 置顶卡也要留在顺序表里：这份表记的是「用户拖出来的名次」，取消置顶时靠它回到原位置。
+// 若把置顶根剔掉，用户随后拖别的卡会把它的名次从配置里抹掉，取消置顶就只能补到组尾
+//（显示上置顶卡仍排组首，那是 syncPinned 另外写的负 order，与这份表无关）
+function applyCardOrder(tab: string, list: string[]) {
+  const valid: string[] = []
+  for (const k of list) {
+    if (typeof k !== 'string' || SEARCH_INDEX[k]?.tab !== tab) continue
+    const root = cardRootKey(k)
+    if (!valid.includes(root)) valid.push(root)
+  }
+  const next = { ...cfg.cardOrder }
+  const def = defaultCardOrderOf(tab)
+  if (valid.length && (valid.length !== def.length || valid.some((k, i) => k !== def[i]))) next[tab] = valid
+  else delete next[tab]
+  saveHidden({ cardOrder: next })
+}
+function onDisplayManagerUpdate(act: DisplayAction) {
+  if (!act) return
+  if (act.type === 'reset') { resetDisplayToDefault(); return }
+  // 全部显示：只清隐藏，不动自定义顺序（用户只是想把藏起来的都放出来，没说顺序也重来）
+  if (act.type === 'showAll') { saveHidden({ hiddenTabs: [], hiddenCards: [] }); return }
+  // 整组放出：组件已算好完整隐藏清单，这里原样落地（只做核心卡白名单过滤）
+  if (act.type === 'cards') {
+    saveHidden({ hiddenCards: (act.list || []).filter((k) => typeof k === 'string' && !CORE_CARDS.includes(k)) })
+    return
+  }
+  if (act.type === 'tabMove' && act.key) { moveTab(act.key, act.delta === 1 ? 1 : -1); return }
+  if (act.type === 'pin' && act.key) { togglePin(act.key, act.pinned === true); return }
+  // 普通区拖拽后的整份顺序（key = TabKey）
+  if (act.type === 'cardOrder' && act.key) { applyCardOrder(act.key, act.list || []); return }
+  // 置顶区内部拖拽后的整份置顶顺序（组件已按当前可见性算好）
+  if (act.type === 'pinOrder') {
+    saveHidden({ pinnedCards: (act.list || []).filter((k) => typeof k === 'string' && !!SEARCH_INDEX[k]) })
+    return
+  }
+  // 单张卡的默认展开态（key = 折叠键，见 CARD_FOLDS）
+  if (act.type === 'foldDefault' && act.key) {
+    saveHidden({ foldDefaults: { ...cfg.foldDefaults, [act.key]: act.open === true } })
+    return
+  }
+  if (act.type === 'foldRemember') { saveHidden({ foldRemember: act.open === true }); return }
+  if (act.type === 'tab' && act.key) { toggleTabVisibility(act.key as TabKey, act.hidden === true); return }
+  if (act.type === 'card' && act.key) toggleCardVisibility(act.key, act.hidden === true)
 }
 
 // 输入法组字守卫：组字期间按 Enter/Esc 是「确认候选词 / 取消组字」，不该触发输入框上挂的
@@ -363,9 +735,10 @@ function isImeComposing(e: Event | undefined) {
 // 点命中标签 → 滚到那张卡。卡片在搜索结果里按 SEARCH_INDEX 顺序渲染，标签与之同序，
 // 故直接按 key 找模板上的 data-search（跨 Tab 渲染出的卡都在 DOM 里，能选到）。
 // 滚动用 scrollIntoView({block:'start'}) 把卡顶到视口顶部；吸顶的 .tab-bar 会挡住卡头，
-// 故用 scroll-margin-top 预留出它的高度。高度不写死：吸顶区是「Tab 行 + 搜索框 + desc」
-// 三段之和，随 desc 换行（窄窗口）而变，写死一个数就会露头或留一大截空白 ——
+// 故用 scroll-margin-top 预留出它的高度。高度不写死：窄窗口下 Tab 行会换行、搜索框也可有可无
+//（非搜索态没有），写死一个数就会露头或留一大截空白 ——
 // 由下面的 ResizeObserver 实测后写进 --tab-bar-h，.card 的 scroll-margin-top 读它。
+// 注意 desc 不在吸顶区内（它在 .pin-scope 里，随内容滚走），所以不该算进这个高度。
 const tabBarEl = ref<HTMLElement | null>(null)
 let tabBarRO: ResizeObserver | null = null
 onMounted(() => {
@@ -392,20 +765,371 @@ function scrollToCard(key: string) {
   el.classList.add('search-flash')
   el.addEventListener('animationend', () => el.classList.remove('search-flash'), { once: true })
 }
+
+// 从外观页跳到资源页的背景与片头卡
+function goAssetsTab() {
+  activeTab.value = 'assets'
+  nextTick(() => scrollToCard('assetsMedia'))
+}
 // 平台判定：仅用于 dev Tab 里那几处 Windows 专属文案（Hyper-V 端口段 / UAC 提权）。
 // 宿主 preload 不往页面透传平台，uTools 在渲染进程直接可用（本文件已有 utools.dbStorage 用法）。
 // 取不到时按非 Windows 处理：这些文案只在 Windows 才成立，宁可不显示也不误导。
 const IS_WIN = (() => { try { return utools.isWindows() } catch (err) { return false } })()
 
-// 深浅色判定：生效值 = uiMode 合成（auto 取 uTools 实际值，手动 light/dark 直接用偏好）。
+// 深浅色判定：生效值 = uiMode 合成（auto 取 uTools 实际值，手动 light/dark 直接用偏好；
+// fantasy「未至之境」恒为暗色，另挂 fantasy 类供主题令牌覆写）。
 // uTools 实际值来自 utools.isDarkColors()，不跟系统 —— main.css 的 html.dark 系列规则是消费端。
 // uTools 没有主题变更事件/API，只能轮询；isDarkColors 是同步布尔读，开销可忽略。
 // 轮询间隔取 1s：auto 模式下 uTools 主题切换后最迟 1s 跟上，体感即时。
 function applyUtoolsDark() {
   let utoolsDark = false
   try { utoolsDark = !!utools.isDarkColors() } catch (err) { /* 非 uTools 环境按浅色 */ }
-  const dark = cfg.uiMode === 'auto' ? utoolsDark : cfg.uiMode === 'dark'
+  const fantasy = cfg.uiMode === 'fantasy'
+  const dark = fantasy || (cfg.uiMode === 'auto' ? utoolsDark : cfg.uiMode === 'dark')
   document.documentElement.classList.toggle('dark', dark)
+  document.documentElement.classList.toggle('fantasy', fantasy)
+}
+// 背景氛围：deep / aurora 是纯 CSS，video 是内置视频，custom 是用户导入的图片/视频；
+// 都只加类，实际显示条件与配色在 main.css 的 html.dark.bg-* / html:not(.dark).bg-* 里。
+function applyBg() {
+  const modes = ['deep', 'aurora', 'stars', 'mist', 'polar', 'warm', 'video', 'custom']
+  const mode = modes.includes(cfg.bgMode) ? cfg.bgMode : 'off'
+  for (const m of modes) document.documentElement.classList.toggle('bg-' + m, mode === m)
+}
+
+// —— 内置视频壁纸：只在设置页渲染，深色 / 浅色 / 未至之境都可用 ——
+// 素材不随包，宿主按需下载到 userData/whale-bg；这里把 data URL 转 blob 后交给 <video>。
+// 用 blob 而不是直接塞 data URL：视频循环播放时 blob 可被浏览器按媒体流处理，
+// 不必把 1.8MB base64 字符串一直留在 DOM 属性里。
+const bgVideoEl = ref<HTMLVideoElement | null>(null)
+const bgVideoUrl = ref('')
+const bgReduceMotion = typeof window !== 'undefined' && window.matchMedia
+  ? window.matchMedia('(prefers-reduced-motion: reduce)')
+  : null
+const bgVideoPaused = ref(true)
+const bgVideoReduced = ref(bgReduceMotion ? bgReduceMotion.matches === true : false)
+const bgVideoError = ref('')
+let bgVideoLoading = false
+let bgVideoSeq = 0
+// 选中视频背景即视为用户明确要动态；减少动态效果只影响启动片头
+let bgVideoWantPlay = false
+// 自定义背景（media 库）：图片 / 视频；与内置视频共用遮罩/模糊/亮度与播放兜底
+const bgCustomEl = ref<HTMLVideoElement | null>(null)
+const bgCustomImgEl = ref<HTMLImageElement | null>(null)
+const bgCustomUrl = ref('')
+const bgCustomKind = ref<'image' | 'video'>('image')
+const bgCustomPaused = ref(false)
+const bgCustomError = ref('')
+let bgCustomLoading = false
+let bgCustomSeq = 0
+let bgCustomWantPlay = false
+// 当前已挂载的媒体 id：切换「用作背景」时 url 还在，不能靠 url 是否为空判断要不要重载
+let bgCustomId = ''
+// 只有媒体真的挂上后才让 body 透明、露出画面；未下载 / 读取失败时保留深海底色与淡光晕
+watch([bgVideoUrl, bgCustomUrl], ([v, c]) => {
+  document.documentElement.classList.toggle('bg-media-on', !!v || !!c)
+})
+
+function bgVideoWanted() {
+  return cfg.bgMode === 'video'
+}
+function bgCustomWanted() {
+  return cfg.bgMode === 'custom' && !!cfg.bgMediaId
+}
+function releaseBgVideo() {
+  bgVideoSeq++
+  bgVideoLoading = false
+  bgVideoWantPlay = false
+  bgVideoPaused.value = true
+  bgVideoError.value = ''
+  if (bgVideoUrl.value) {
+    try { URL.revokeObjectURL(bgVideoUrl.value) } catch (err) {}
+    bgVideoUrl.value = ''
+  }
+}
+// 宿主回的是 base64 data URL（见 lib/bg-video.js#readData、lib/media.js#data）。
+// 直接解码成 Blob，不走 fetch(data:)：设置页没有 CSP，但少一条异步链路、
+// 也少一次字符串驻留。MIME 从 data URL 里取，图片/视频共用。
+function dataUrlToBlob(dataUrl: string): Blob {
+  const comma = dataUrl.indexOf(',')
+  const meta = comma >= 0 ? dataUrl.slice(0, comma) : ''
+  const m = /^data:([^;,]+);base64$/i.exec(meta)
+  if (comma < 0 || !m) throw new Error('媒体数据格式不对')
+  const bin = atob(dataUrl.slice(comma + 1))
+  const bytes = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+  return new Blob([bytes], { type: m[1] })
+}
+function bgVideoErrorText(err: any) {
+  const name = String((err && err.name) || '')
+  if (name === 'NotSupportedError') return '浏览器不支持这个视频编码'
+  if (name === 'NotAllowedError') return '浏览器拦截了自动播放，点按钮重试'
+  return '视频播放失败' + (err && err.message ? '：' + err.message : '')
+}
+function syncBgVideo() {
+  if (!bgVideoWanted()) { releaseBgVideo(); return }
+  if (bgVideoUrl.value || bgVideoLoading) return
+  const seq = ++bgVideoSeq
+  bgVideoLoading = true
+  bgVideoError.value = ''
+  try {
+    const r = services.bgVideoData?.()
+    if (!r || !r.ok || !r.dataUrl) return
+    const url = URL.createObjectURL(dataUrlToBlob(r.dataUrl))
+    // 读盘 / 解码期间用户可能已切走：序号变了就不再挂 blob，避免留下永远不会被释放的 URL
+    if (seq !== bgVideoSeq || !bgVideoWanted()) {
+      try { URL.revokeObjectURL(url) } catch (err) {}
+      return
+    }
+    bgVideoUrl.value = url
+    // 用户选了视频背景 = 明确要动态：打开即尝试播放，减少动态效果只影响片头
+    bgVideoWantPlay = true
+  } catch (err) {
+    // 读不到视频不阻断设置页：CSS 的深海底色仍是完整可用的回退
+  } finally {
+    if (seq === bgVideoSeq) bgVideoLoading = false
+  }
+}
+function syncBgVideoSoon() {
+  window.requestAnimationFrame(() => { syncBgVideo() })
+}
+function playBgVideo() {
+  const v = bgVideoEl.value
+  bgVideoWantPlay = true
+  bgVideoError.value = ''
+  if (!v) return
+  try {
+    v.muted = true
+    v.defaultMuted = true
+    // 已在播放时再点「重新播放」从头开始，避免用户以为按钮没反应
+    if (!v.paused) v.currentTime = 0
+    const p = v.play?.()
+    if (p && typeof p.catch === 'function') p.catch((err) => { bgVideoError.value = bgVideoErrorText(err) })
+  } catch (err: any) {
+    bgVideoError.value = bgVideoErrorText(err)
+  }
+}
+function applyBgVideoMotion() {
+  const v = bgVideoEl.value
+  if (!v) return
+  v.muted = true
+  v.defaultMuted = true
+  if (bgReduceMotion?.matches && !bgVideoWantPlay) {
+    try { v.pause() } catch (err) {}
+    return
+  }
+  try {
+    const p = v.play?.()
+    if (p && typeof p.catch === 'function') p.catch((err) => { bgVideoError.value = bgVideoErrorText(err) })
+  } catch (err: any) {
+    bgVideoError.value = bgVideoErrorText(err)
+  }
+}
+function onBgVideoMotionChange() {
+  bgVideoReduced.value = bgReduceMotion ? bgReduceMotion.matches === true : false
+  applyBgVideoMotion()
+  applyBgCustomMotion()
+}
+// 自动播放被浏览器策略拦下时，用户在页面上的第一次点击/按键就是一次合法交互：
+// 顺势把当前背景视频接上（暂停或报错时才补一次，避免每次点击都从头重播）。
+function onBgMediaGesture() {
+  if (cfg.bgMode === 'custom') {
+    const v = bgCustomEl.value
+    if (bgCustomKind.value === 'video' && v && (v.paused || bgCustomError.value)) playBgCustom()
+    return
+  }
+  const v = bgVideoEl.value
+  if (v && (v.paused || bgVideoError.value)) playBgVideo()
+}
+// 配置里的 bgMode / uiMode 变化后同步视频层：切走要立刻释放，切进来等首帧后再读盘。
+// （watch 必须挂在 cfg 声明之后，见下方 watchPinned 同款 TDZ 注释）
+// 首次 applyConfig 也走这里，避免把 1.8MB 读取挤进设置页首帧。
+// 下载 / 删除完成后由 LookView 通知：重新读一次宿主缓存（删除时 release 掉旧 blob）
+function onBgVideoUpdated() {
+  releaseBgVideo()
+  if (bgVideoWanted()) syncBgVideo()
+}
+
+// —— 自定义背景（media 库） ——
+// 图片/视频共用同一个 blob 层；视频沿用内置视频的自动播放与显式播放兜底。
+function releaseBgCustom() {
+  bgCustomSeq++
+  bgCustomLoading = false
+  bgCustomWantPlay = false
+  bgCustomPaused.value = false
+  bgCustomError.value = ''
+  bgCustomId = ''
+  // 媒体已卸载，类型回到图片：否则清空 bgMediaId 后设置页还残留「播放 / 暂停视频」一行
+  bgCustomKind.value = 'image'
+  if (bgCustomUrl.value) {
+    try { URL.revokeObjectURL(bgCustomUrl.value) } catch (err) {}
+    bgCustomUrl.value = ''
+  }
+}
+function syncBgCustom() {
+  if (!bgCustomWanted()) { releaseBgCustom(); return }
+  if (bgCustomUrl.value || bgCustomLoading) return
+  const seq = ++bgCustomSeq
+  bgCustomLoading = true
+  bgCustomError.value = ''
+  try {
+    const r = services.mediaData?.(cfg.bgMediaId)
+    if (!r || !r.ok || !r.dataUrl) return
+    const url = URL.createObjectURL(dataUrlToBlob(r.dataUrl))
+    if (seq !== bgCustomSeq || !bgCustomWanted()) {
+      try { URL.revokeObjectURL(url) } catch (err) {}
+      return
+    }
+    // 以 data URL 的 MIME 兜底判断类型：宿主元信息缺失时也不会把视频当图片
+    const isVideo = r.type === 'video' || /^data:video\//i.test(r.dataUrl)
+    bgCustomKind.value = isVideo ? 'video' : 'image'
+    bgCustomPaused.value = isVideo
+    bgCustomUrl.value = url
+    bgCustomId = cfg.bgMediaId
+    bgCustomWantPlay = isVideo
+  } catch (err) {
+    // 读不到媒体不阻断设置页：深海底色回退
+  } finally {
+    if (seq === bgCustomSeq) bgCustomLoading = false
+  }
+}
+function syncBgCustomSoon() {
+  window.requestAnimationFrame(() => { syncBgCustom() })
+}
+function playBgCustom() {
+  const v = bgCustomEl.value
+  bgCustomWantPlay = true
+  bgCustomError.value = ''
+  if (!v) return
+  try {
+    v.muted = true
+    v.defaultMuted = true
+    if (!v.paused) v.currentTime = 0
+    const p = v.play?.()
+    if (p && typeof p.catch === 'function') p.catch((err) => { bgCustomError.value = bgVideoErrorText(err) })
+  } catch (err: any) {
+    bgCustomError.value = bgVideoErrorText(err)
+  }
+}
+function applyBgCustomMotion() {
+  const v = bgCustomEl.value
+  if (!v) return
+  v.muted = true
+  v.defaultMuted = true
+  if (bgReduceMotion?.matches && !bgCustomWantPlay) {
+    try { v.pause() } catch (err) {}
+    return
+  }
+  try {
+    const p = v.play?.()
+    if (p && typeof p.catch === 'function') p.catch((err) => { bgCustomError.value = bgVideoErrorText(err) })
+  } catch (err: any) {
+    bgCustomError.value = bgVideoErrorText(err)
+  }
+}
+// 片头/背景共用的当前播放目标：给 LookView 的「播放视频」按钮用
+function playCurrentBgMedia() {
+  if (cfg.bgMode === 'custom') playBgCustom()
+  else playBgVideo()
+}
+function pauseCurrentBgMedia() {
+  try {
+    if (cfg.bgMode === 'custom') bgCustomEl.value?.pause()
+    else bgVideoEl.value?.pause()
+  } catch (err) {}
+}
+// 资产删除/媒体变化后由资源页通知：重新读一次宿主缓存（当前媒体被删时配置已由宿主回退）
+function onMediaChanged() {
+  if (cfg.bgMode === 'custom') {
+    releaseBgCustom()
+    if (bgCustomWanted()) syncBgCustom()
+  }
+}
+
+// —— 设置页启动片头（可选，默认关闭） ——
+// 触发：每次插件进程启动后首次打开设置页；由宿主 bootIntroConsume 做进程内消费，
+// 设置窗关闭重开不会重播，插件重启才会。素材优先复用未至之境视频，没有则播轻量 CSS HUD。
+const bootIntroOpen = ref(false)
+const bootIntroAutoPlayed = ref(false)
+const bootIntroVideoUrl = ref('')
+let bootIntroOwnsUrl = false
+
+function loadBootIntroVideo() {
+  const source = cfg.bootIntroSource === 'media' || cfg.bootIntroSource === 'css' ? cfg.bootIntroSource : 'auto'
+  if (source === 'css') return
+  if (source === 'media') { loadBootIntroMedia(cfg.bootIntroMediaId); return }
+  // auto：跟随当前背景；背景不是视频就退回 CSS HUD
+  if (cfg.bgMode === 'video') {
+    if (bgVideoUrl.value) { bootIntroVideoUrl.value = bgVideoUrl.value; bootIntroOwnsUrl = false; return }
+    loadBootIntroBuiltin()
+    return
+  }
+  if (cfg.bgMode === 'custom') {
+    if (bgCustomKind.value === 'video' && bgCustomUrl.value) {
+      bootIntroVideoUrl.value = bgCustomUrl.value
+      bootIntroOwnsUrl = false
+      return
+    }
+    loadBootIntroMedia(cfg.bgMediaId)
+  }
+}
+function loadBootIntroBuiltin() {
+  try {
+    const r = services.bgVideoData?.()
+    if (r && r.ok && r.dataUrl) {
+      bootIntroVideoUrl.value = URL.createObjectURL(dataUrlToBlob(r.dataUrl))
+      bootIntroOwnsUrl = true
+    }
+  } catch (err) { /* 没视频就走 CSS 片头 */ }
+}
+function loadBootIntroMedia(id: string) {
+  if (!id) return
+  try {
+    const r = services.mediaData?.(id)
+    if (r && r.ok && r.type === 'video' && r.dataUrl) {
+      bootIntroVideoUrl.value = URL.createObjectURL(dataUrlToBlob(r.dataUrl))
+      bootIntroOwnsUrl = true
+    }
+  } catch (err) { /* 没视频就走 CSS 片头 */ }
+}
+// 片头期间是否隐藏设置页：index.html 首帧会先加 boot-intro-pending，
+// App 确认这次真的播后才切到 boot-intro-clean；不播 / 播完 / 跳过时两处都清掉。
+function bootIntroRevealPage() {
+  document.documentElement.classList.remove('boot-intro-pending', 'boot-intro-clean')
+}
+function bootIntroCleanPage(clean: boolean = cfg.bootIntroClean) {
+  if (clean) document.documentElement.classList.add('boot-intro-clean')
+  document.documentElement.classList.remove('boot-intro-pending')
+}
+function maybePlayBootIntro() {
+  if (bootIntroOpen.value || !cfg.bootIntroOn) { bootIntroRevealPage(); return }
+  // 片头是用户显式开启的功能：减少动态效果只关闭转场/CSS 扫描动画，不再把整个片头跳过
+  let ok = false
+  try { ok = services.bootIntroConsume?.() === true } catch (err) { ok = false }
+  if (!ok) { bootIntroRevealPage(); return }
+  bootIntroAutoPlayed.value = true
+  bootIntroCleanPage()
+  loadBootIntroVideo()
+  bootIntroOpen.value = true
+}
+function playBootIntroPreview(clean: boolean = cfg.bootIntroClean) {
+  if (bootIntroOpen.value) return
+  bootIntroCleanPage(clean)
+  loadBootIntroVideo()
+  bootIntroOpen.value = true
+}
+// 片头开始退场时先让设置页回来，避免退场那 200–460ms 露出纯黑底
+function onBootIntroClosing() {
+  bootIntroRevealPage()
+}
+function finishBootIntro() {
+  bootIntroOpen.value = false
+  bootIntroRevealPage()
+  if (bootIntroOwnsUrl && bootIntroVideoUrl.value) {
+    try { URL.revokeObjectURL(bootIntroVideoUrl.value) } catch (err) {}
+  }
+  bootIntroVideoUrl.value = ''
+  bootIntroOwnsUrl = false
 }
 // 注意：applyUtoolsDark 不能在这里立即调用 —— 它读 cfg.uiMode，而 cfg 在下方才声明，
 // 先调用会撞 TDZ（ReferenceError），整个 <script setup> 崩掉、设置页白屏（2026-10-03 踩过）。
@@ -413,9 +1137,36 @@ function applyUtoolsDark() {
 // 下拉改动：本地立即应用一次再落库 —— 等下一轮轮询或配置回推才变化，会让人以为没生效
 function onUiModeChange(mode: string) {
   // 下拉改动：本地立即应用一次再落库 —— 等下一轮轮询或配置回推才变化，会让人以为没生效
-  cfg.uiMode = mode === 'light' || mode === 'dark' ? mode : 'auto'
+  cfg.uiMode = mode === 'light' || mode === 'dark' || mode === 'fantasy' ? mode : 'auto'
   applyUtoolsDark()
   patchCfg({ uiMode: cfg.uiMode })
+}
+// 纯净片头开关：本地立即生效再落库，否则点「预览片头」时 cfg 还没回填，页面不会隐藏
+function onBootIntroCleanChange(on: boolean) {
+  cfg.bootIntroClean = on === true
+  patchCfg({ bootIntroClean: cfg.bootIntroClean })
+}
+// 打开系统「减少动态效果」设置页；老宿主没有专用服务时退回 ms-settings 快捷方式
+function openSystemAnimationSettings() {
+  try {
+    const r = services.openSystemAnimationSettings?.()
+    if (r && r.ok) return
+  } catch (err) {}
+  try { services.openExternal?.('ms-settings:easeofaccess-display') } catch (err) {}
+}
+// 背景调节滑杆：本地先应用再落库，拖动时画面立即跟手（不等宿主配置回推）
+function onBgTune(p: { bgScrim?: number; bgBlur?: number; bgBrightness?: number; bgVignette?: number; bgFit?: 'cover' | 'contain'; bgFocusX?: number; bgFocusY?: number; bgZoom?: number }) {
+  if (p.bgScrim !== undefined) cfg.bgScrim = Math.max(0, Math.min(80, Math.round(Number(p.bgScrim) || 0)))
+  if (p.bgBlur !== undefined) cfg.bgBlur = Math.max(0, Math.min(20, Math.round(Number(p.bgBlur) || 0)))
+  if (p.bgBrightness !== undefined) {
+    cfg.bgBrightness = Math.max(50, Math.min(120, Math.round(Number(p.bgBrightness) || 100)))
+  }
+  if (p.bgVignette !== undefined) cfg.bgVignette = Math.max(0, Math.min(100, Math.round(Number(p.bgVignette) || 0)))
+  if (p.bgFit !== undefined) cfg.bgFit = p.bgFit === 'contain' ? 'contain' : 'cover'
+  if (p.bgFocusX !== undefined) cfg.bgFocusX = Math.max(0, Math.min(100, Math.round(Number(p.bgFocusX) || 0)))
+  if (p.bgFocusY !== undefined) cfg.bgFocusY = Math.max(0, Math.min(100, Math.round(Number(p.bgFocusY) || 0)))
+  if (p.bgZoom !== undefined) cfg.bgZoom = Math.max(100, Math.min(130, Math.round(Number(p.bgZoom) || 100)))
+  patchCfg(p)
 }
 // 统一的消息态（Flash）：定义收口在 composables/useFlash.ts（合并原先 11 组 msg/err ref）。
 // 本文件既自己用，也把 useFlash 注入 useDsh 供 dsh 各卡共用，故仍需 import 进来。
@@ -427,6 +1178,11 @@ const showGuide = ref(false)
 // 弹层是「首次自动弹出」还是「用户手动重开」：决定标题口径（欢迎使用 / 配置凭据），
 // 也决定关闭时要不要写 guideDone —— 手动重开时它本来就是 true，不必再写
 const guideReopen = ref(false)
+// 本次引导「保存成功」：置位后组件才推进到第三步（完成页）。
+// 为什么不让组件点完「保存」自己跳：保存可能失败（异常落 guideFlash.err），
+// 乐观跳步会让用户在完成页看到「配置已保存」的红字回执，以为已经存上了。
+// 每次打开弹层都要复位 —— 否则上次存成功留下的 true 会让手动重开直接落在完成页
+const guideSaved = ref(false)
 const testing = ref(false)
 const testResults = ref<Array<{ label: string; ok: boolean; msg: string }>>([])
 const lastTestAt = ref(0)
@@ -500,24 +1256,54 @@ const cfg = reactive({
   passThrough: false,
   // 挂件形象：内置形象 id（见 BUILTIN_SKINS）/ 'custom' 用户导入
   skin: DEFAULT_SKIN,
-  // 气泡配色主题：'default' | 'dark' | 'sakura'
+  // 气泡配色主题：'default' | 'dark' | 'sakura' | 'fantasy'
   theme: 'default',
-  // 界面深浅色：'auto' 跟 uTools / 'light' / 'dark'（设置页与挂件面板共用；与气泡主题是两条线）
+  // 界面深浅色：'auto' 跟 uTools / 'light' / 'dark' / 'fantasy'（设置页与挂件面板共用；与气泡主题是两条线）
   uiMode: 'auto',
+  // 背景氛围（浅色 / 深色 / 未至之境都生效）：'off' / 'deep' / 'aurora' / 'video'（视频需按需下载）
+  bgMode: 'off',
+  bgMediaId: '',
+  bgScrim: 45,
+  bgBlur: 0,
+  bgBrightness: 100,
+  bgVignette: 100,
+  bgFit: 'cover',
+  bgFocusX: 50,
+  bgFocusY: 50,
+  bgZoom: 100,
+  // 设置页启动片头：默认关闭；每次插件进程启动后首次打开设置页自动播一次
+  bootIntroOn: false,
+  bootIntroClean: false,
+  bootIntroSource: 'auto',
+  bootIntroMediaId: '',
   timerNotifyOn: true,
   // 计时到点的邮件通知（邮件总开关 notifyMailOn 未开时不生效）
   timerMailOn: true,
   timerPersistOn: true,
-  // 计时气泡常驻 / 计时中气泡只显示计时（原先只在挂件菜单里改，已挪到本页）
+  // 计时气泡常驻 / 计时中气泡只显示计时（只在设置页改，挂件菜单读本地副本）
   timerBubblePin: true,
   timerBubbleOnly: true,
-  // 计时时长（秒）与到点要做什么：留言 + 休息档。与挂件菜单「计时」组同一份配置
+  // 到点气泡停留秒数（0 = 常驻），四档与宿主 store 的归一化同口径
+  timerRemindSec: 8,
+  // 默认计时时长（秒）与到点要做什么：留言 + 休息档。
+  // 这里是「默认值」的唯一写入方：挂件菜单里改时长只影响那一轮，不回写本键
   timerSec: 1500,
   timerNote: '',
   timerBreakMin: 5,
+  // 番茄循环（v1.13.0）：倒计时结束后自动进入休息，休息结束按开关衔接下一轮。
+  // 默认值与宿主 constants.js 同值（check-shared 钉住），故直接引用上方常量而不是写死数字。
+  timerPomoOn: false,
+  timerLongBreakMin: TIMER_LONG_BREAK_DEFAULT,
+  timerLongEvery: TIMER_LONG_EVERY_DEFAULT,
+  timerAutoNext: false,
+  // 挂件计时组快捷时长四档（分钟）：设置页可改，挂件 chips 读它
+  timerPresets: TIMER_PRESETS_DEFAULT.slice(),
   enterMode: 'both',
   dshNodeDir: '',
   dshKeepAlive: false,
+  // 以管理员身份启动 dsh（默认关；仅 Windows 显示这个开关）。
+  // 开启后每次启动都会弹 UAC —— 运行中的进程无法就地提权，只能 runas 拉新实例（见 dsh.js startMode）
+  dshElevated: false,
   // dsh Web UI 监听端口（默认 3080 = DEFAULT_DSH_PORT）。空输入由输入框自己兜回默认，
   // 真正落到配置前还要过宿主 store 的 normDshPort（非法值一律退回默认）
   dshPort: DEFAULT_DSH_PORT,
@@ -553,7 +1339,7 @@ const cfg = reactive({
   ghAccelRefreshedAt: 0,
   // IP 获取来源开关 + 两段优先级顺序：sources = 社区源表内部顺序，order = 来源层候选链顺序。
   // 与宿主 normGhAccelSrc 同结构；默认全 true + 两段空数组 = 宿主默认候选链，与升级前行为一致
-  ghAccelSrc: { doh: true, community: true, manual: true, sources: [] as string[], order: [] as string[] },
+  ghAccelSrc: { doh: true, community: true, manual: true, sources: [] as string[], order: [] as string[], customSources: [] as string[] },
   // 形象素材包下载源：用户自填的加速前缀（如 'https://ghfast.top/'），空 = 只用内置候选链
   // （默认 ghfast.top → 直连 github.com 兜底）。与 ghAccelSrc 无关，只作用于「按需下载形象」
   skinPackSrc: '',
@@ -563,6 +1349,7 @@ const cfg = reactive({
   // 邮件的收发件人/显示名/主题前缀属于「配置」进这里；服务器、账号、授权码属于凭据，走 mail 表单
   notifySystemOn: true,
   notifyMailOn: false,
+  debugTools: false,
   mailFrom: '',
   mailTo: '',
   mailFromName: '小鲸鱼余额挂件',
@@ -572,17 +1359,132 @@ const cfg = reactive({
   // BubbleView 读 cfg.bubble.items，回填缺失 → 恒读 undefined → items 恒为 []，
   // 于是「加一步」按下去宿主其实存成功了，设置页却永远显示 0 步，看着就是按钮点不动。
   bubble: { v: 1, on: false, items: [] as any[], lib: [] as any[], tapAdvance: false, dwell: 5, dragLines: [] as string[], system: {} as Record<string, string[]> },
+  // 专注记录 / 待办 / 每日专注目标（v1.13.0）：默认全关，不勾时挂件行为与 1.12.0 一致
+  focusOn: false,
+  todoOn: false,
+  focusGoal: 0,
+  // 下班倒计时（v1.14.0）：默认关闭；八键与宿主 offwork.DEFAULTS / store.js 保持一致
+  offworkOn: false,
+  offworkStart: '09:00',
+  offworkEnd: '18:00',
+  offworkDays: [1, 2, 3, 4, 5],
+  offworkShowSec: true,
+  offworkWeekendOn: false,
+  offworkPaydayOn: false,
+  offworkPaydayDay: 10,
+  // 自定义显示：用户隐藏的 Tab 与卡片（空数组 = 全部显示）+ Tab 顺序（空数组 = 默认顺序）
+  // + 置顶卡片（空数组 = 无置顶；顺序即组内置顶顺序）
+  hiddenTabs: [] as string[],
+  hiddenCards: [] as string[],
+  tabOrder: [] as string[],
+  pinnedCards: [] as string[],
+  // 卡片自定义顺序：{ TabKey: [cardKey, ...] }，空对象 = 全部按模板顺序。
+  // 只记普通卡（置顶卡的顺序由 pinnedCards 决定），未列出的卡按模板序补在后面
+  cardOrder: {} as Record<string, string[]>,
+  // 逐卡「默认展开」覆盖：{ foldKey: boolean }，空对象 = 全部用 FOLD_DEFAULTS 出厂值
+  foldDefaults: {} as Record<string, boolean>,
+  // 是否记忆每张卡上次的展开 / 收起状态。关掉 = 不读也不写 localStorage，永远回落到默认值
+  foldRemember: true,
 })
+// applyConfig 每次保存后都会再跑一遍；只有首屏那一次算「注入」，之后都算用户改了折叠默认值。
+// 两者对缓存的处理相反（首屏要让「记住的上次状态」优先，改动要让新默认值立刻生效），故用这个开关区分
+let foldPrefsReady = false
 // 深浅色启动应用 + 轮询（必须在 cfg 声明之后：applyUtoolsDark 读 cfg.uiMode，见上方 TDZ 注释）
 applyUtoolsDark()
+applyBg()
+// 视频壁纸的同步 watch（必须在 cfg 声明之后：getter 会立即求值，提前访问 cfg 会 TDZ）
+watch([() => cfg.bgMode, () => cfg.uiMode], () => {
+  if (!bgVideoWanted()) { releaseBgVideo(); return }
+  if (!bgVideoUrl.value && !bgVideoLoading) syncBgVideoSoon()
+})
+// 自定义媒体背景：媒体 id / 模式变化后同步（切走立刻释放；换了一张也要先释放旧的）
+watch([() => cfg.bgMode, () => cfg.bgMediaId, () => cfg.uiMode], () => {
+  if (!bgCustomWanted()) { releaseBgCustom(); return }
+  if (bgCustomId !== cfg.bgMediaId) { releaseBgCustom(); syncBgCustomSoon(); return }
+  if (!bgCustomUrl.value && !bgCustomLoading) syncBgCustomSoon()
+})
+// LookView 的「播放视频」按钮：当前自定义视频或内置视频的暂停态
+const bgMediaPaused = computed(() => (cfg.bgMode === 'custom' ? bgCustomPaused.value : bgVideoPaused.value))
+// 当前背景是否为视频（自定义媒体要等 mediaData 回来才知道类型）
+const bgMediaIsVideo = computed(() => (cfg.bgMode === 'custom' ? bgCustomKind.value === 'video' : cfg.bgMode === 'video'))
+// 视频解码 / 自动播放失败的文案（给设置页提示）
+const bgMediaError = computed(() => (cfg.bgMode === 'custom' ? bgCustomError.value : bgVideoError.value))
+// 背景遮罩/模糊/亮度统一走 CSS 变量，图片与视频共用
+const bgMediaStyle = computed(() => ({
+  '--bg-scrim': String((Number(cfg.bgScrim) || 45) / 100),
+  '--bg-blur': `${Number(cfg.bgBlur) || 0}px`,
+  '--bg-brightness': String((Number(cfg.bgBrightness) || 100) / 100),
+  '--bg-vignette': String((Number(cfg.bgVignette) || 100) / 100),
+}))
+// 自定义媒体的构图：cover/contain、焦点、缩放（内置视频保持自己的固定构图）
+const bgCustomFrameStyle = computed<CSSProperties>(() => ({
+  objectFit: cfg.bgFit === 'contain' ? 'contain' : 'cover',
+  objectPosition: `${Math.max(0, Math.min(100, Number(cfg.bgFocusX) || 50))}% ${Math.max(0, Math.min(100, Number(cfg.bgFocusY) || 50))}%`,
+}))
+const bgCustomZoomStyle = computed(() => ({
+  '--bg-zoom': String(1.02 * (Math.max(100, Math.min(130, Number(cfg.bgZoom) || 100)) / 100)),
+}))
+// 智能适配：读当前背景首帧的平均亮度，给一个更稳的遮罩值（用户在滑杆上仍可微调）
+function sampleBgLuminance(el: HTMLImageElement | HTMLVideoElement | null): number | null {
+  if (!el) return null
+  try {
+    const w = 32
+    const h = 18
+    const c = document.createElement('canvas')
+    c.width = w
+    c.height = h
+    const ctx = c.getContext('2d')
+    if (!ctx) return null
+    const sw = el instanceof HTMLVideoElement ? el.videoWidth : el.naturalWidth
+    const sh = el instanceof HTMLVideoElement ? el.videoHeight : el.naturalHeight
+    if (!sw || !sh) return null
+    ctx.drawImage(el, 0, 0, w, h)
+    const data = ctx.getImageData(0, 0, w, h).data
+    let sum = 0
+    for (let i = 0; i < data.length; i += 4) {
+      sum += 0.2126 * data[i] + 0.7152 * data[i + 1] + 0.0722 * data[i + 2]
+    }
+    return sum / (data.length / 4) / 255
+  } catch (err) { return null }
+}
+function autoTuneBgMedia() {
+  const el = cfg.bgMode === 'custom'
+    ? (bgCustomKind.value === 'video' ? bgCustomEl.value : bgCustomImgEl.value)
+    : bgVideoEl.value
+  const lum = sampleBgLuminance(el)
+  // 亮度越高越需要压暗；限制在 20%–65%，避免一键调成纯黑/纯透
+  const scrim = lum === null ? 45 : Math.max(20, Math.min(65, Math.round((0.25 + lum * 0.4) * 100)))
+  onBgTune({ bgScrim: scrim })
+}
+// 置顶重排的 watch 同理必须在 cfg 声明之后挂（getter 读 cfg.pinnedCards）
+watchPinned()
+// 当前 Tab 被隐藏后自动切到相邻的可见 Tab：否则 Tab 栏没有高亮、内容还停在已隐藏那组，
+// 显示管理看起来就像「勾了没反应」；配置到达（applyConfig 替换 hiddenTabs）时也会触发这里。
+// 落点取「原位置右侧最近的可见组，没有就左侧」——统一跳第一组会让用户以为页面自己乱跳。
+// **必须放在 cfg 声明之后**：watch 创建时会立刻求值 visibleTabs，提前访问 cfg 会触发 TDZ
+// （与上方 applyUtoolsDark 同一条教训，运行时实测报过「Cannot access before initialization」）
+watch(visibleTabs, (list, prev) => {
+  if (!list.length) return
+  const cur = activeTab.value
+  if (list.some((t) => t.key === cur)) return
+  const idx = prev ? prev.findIndex((t) => t.key === cur) : -1
+  const target = list[Math.min(Math.max(idx, 0), list.length - 1)] || list[0]
+  activeTab.value = target.key
+  scrollPageTop() // 自动跳组同样回顶，别让页面停在被隐藏分组的滚动位置
+  const lostLabel = prev && prev.find((t) => t.key === cur)?.label
+  // 复用显示管理的回执条（Tab 下方那行说明文字位置），不另起一套 toast。
+  // 措辞用「已隐藏」而不是「已隐藏了」：配置回填（备份恢复 / 手改配置）也可能触发这里，
+  // 不能暗示是用户刚刚点的隐藏。
+  showDisplayMsg(`「${lostLabel || '当前'}」分组已隐藏，已切到「${target.label}」`)
+})
 const darkPollTimer = window.setInterval(applyUtoolsDark, 1000)
 onUnmounted(() => { window.clearInterval(darkPollTimer) })
 // 「提醒与通知」卡片的模板 ref：applyConfig 回填后要落「未保存」基线、挂载时要读回 SMTP 凭据、
-// 备份恢复 / 挂件菜单推送后要刷新计时三段展示 —— 这三处都由父级生命周期驱动，故用 ref 调组件暴露的方法。
+// 备份恢复 / 宿主配置推送后要刷新计时三段展示 —— 这两处都由父级生命周期驱动，故用 ref 调组件暴露的方法。
 // 保存 / 恢复默认提醒文案要先写配置再整份 applyConfig 回读，涉及父级 onConfigChange 通路，故仍留父级。
-const notifyViewRef = ref<{ syncAlertsBaseline: () => void; loadMailSecrets: () => void; syncTimerHms: () => void } | null>(null)
+const notifyViewRef = ref<{ syncAlertsBaseline: () => void; loadMailSecrets: () => void } | null>(null)
 // 提醒文案保存 / 恢复默认：子组件整理好整份内容（或 null = 恢复默认）上抛，这里落盘并回读。
-// 与父级 patchCfg 同口径直接调用（宿主 saveConfig 是可选调用，失败由宿主侧留痕），子组件负责回显结果
+// 失败回执由 patchCfg 统一处理（失败条常驻，见 saveFail），这里不必再判返回值
 function onSaveAlerts(alerts: Record<string, string> | null) {
   patchCfg({ alerts })
   applyConfig(services.getConfig?.())
@@ -617,7 +1519,31 @@ function usePolling(fn: () => void, ms: number, immediate = false) {
 // 两张统计卡默认收起，首次「展开」时才读取：宿主是同步扫文件（会话日志可能几十 MB），
 // 不看不读，避免每次进开发者 Tab 都无条件付一次扫描成本；展开后即读，也不用手动再点一下。
 // 收起时摘要只在「本会话已读过」之后才显示（否则露「点击展开查看」），保证折叠 = 不预读。
-const devFolds = reactive({ dshUsage: false, diagnose: false, dshDump: false, dshIsolate: false, dshMarket: false, dshExport: false })
+// 六张开发卡的折叠态走 useFold：保留「默认收起 + 首次展开才读」的原行为，
+// 同时让「管理显示内容」里的默认展开/收起与记忆开关能管到它们。
+// 模板与 toggleDevCard 里大量用 devFolds.xxx 读写，故用 getter/setter 转给各自的实例
+const devFoldStates = {
+  dshUsage: useFold('dshUsage', false),
+  diagnose: useFold('dshDiagnose', false),
+  dshDump: useFold('dshDump', false),
+  dshIsolate: useFold('dshIsolate', false),
+  dshMarket: useFold('dshMarket', false),
+  dshExport: useFold('dshExport', false),
+}
+const devFolds = reactive({
+  get dshUsage() { return devFoldStates.dshUsage.open },
+  set dshUsage(v: boolean) { devFoldStates.dshUsage.open = v },
+  get diagnose() { return devFoldStates.diagnose.open },
+  set diagnose(v: boolean) { devFoldStates.diagnose.open = v },
+  get dshDump() { return devFoldStates.dshDump.open },
+  set dshDump(v: boolean) { devFoldStates.dshDump.open = v },
+  get dshIsolate() { return devFoldStates.dshIsolate.open },
+  set dshIsolate(v: boolean) { devFoldStates.dshIsolate.open = v },
+  get dshMarket() { return devFoldStates.dshMarket.open },
+  set dshMarket(v: boolean) { devFoldStates.dshMarket.open = v },
+  get dshExport() { return devFoldStates.dshExport.open },
+  set dshExport(v: boolean) { devFoldStates.dshExport.open = v },
+})
 // 读过的卡 → 读完那一刻的时间戳（0 = 没读过）。用时间戳而非布尔（P5，2026-10-09）：
 // 布尔是「本会话读过了」的永久态，而宿主侧的 dsh 数据是**会变的** —— 用户本页收起卡、
 // 去别处 dsh 装了插件 / 换了 profile，回来时折叠标题上的摘要还是旧数字，看着像插件没刷新。
@@ -785,6 +1711,8 @@ const {
   dshMarketLatestTargets,
   dshMarketLatestText,
   dshMarketLatestTip,
+  dshMarketPlainDep,
+  dshMarketPlainDepTip,
   dshMarketList,
   dshMarketLoad,
   dshMarketLoaded,
@@ -1053,10 +1981,77 @@ function onScaleCommit() {
   const n = Math.max(1, Math.min(SCALE_STEPS, Math.round(Number(cfg.scaleNum) || 1)))
   cfg.scaleNum = n
   cfg.scale = numToScale(n)
-  services.saveConfig?.({ scale: cfg.scale })
+  // 走 patchCfg 而不是直连 saveConfig：倍率同样是用户改动，保存失败必须回执
+  // （早先这里裸调，写盘失败时挂件尺寸已按新值改过、存储却没记住，重启就「莫名变回原大小」）
+  patchCfg({ scale: cfg.scale })
 }
-function patchCfg(p: Record<string, any>) {
-  services.saveConfig?.(p)
+// 设置页所有配置写入的唯一入口。返回是否落盘成功（调用方基本不看 —— 失败回执在本函数内统一处理）。
+//
+// 为什么失败要重试一次：dbStorage 的写失败偶发（并发写、瞬时配额），一次就放弃会让用户
+// 白改一遍。重试仍失败才置失败条 —— 这时基本可以确定是持续状态（存储满 / 被拒绝）。
+//
+// 为什么失败后要 applyConfig 回读：patchCfg 的调用方几乎都是「先改本地 cfg、再落盘」，
+// 落盘失败时本地已经显示成新值了。不回读的话界面会一直显示「假的新值」（开关翻着、
+// 实际存储还是旧值），用户看着像是生效了。
+//
+// —— 调试工具（config.debugTools 默认关，只在「开发者」Tab 且开关打开时渲染）——
+// 「立即触发提醒」只演练一次投递（通知 + 气泡），不写幂等位；
+// 「注入旧数据」会真写入并回推，用来替代「拖拽 / 改 leveldb」这类没法让用户做的验证操作。
+const debugTodoId = ref('')
+const debugMsg = ref('')
+const debugTodos = computed(() => {
+  if (!cfg.debugTools) return []
+  try {
+    return (services.todoGet?.().items || []).filter((x) => !x.done)
+  } catch (err) {
+    return []
+  }
+})
+function doDebugTodoDue() {
+  const id = debugTodoId.value
+  if (!id) return
+  const r = services.debugTodoDue?.(id)
+  debugMsg.value = r && r.ok
+    ? '已投递一条到点提醒（不写幂等位，可在挂件里看气泡）'
+    : ((r && r.error) || '宿主未提供该调试入口')
+}
+function doDebugInjectLegacy() {
+  const r = services.debugInjectLegacy?.()
+  if (r && r.ok) {
+    debugMsg.value = '已注入旧数据：待办 ' + (r.todoId || '') + '、置顶 [focus, timer]、幽灵媒体 ' + (r.ghostId || '')
+  } else {
+    debugMsg.value = (r && r.error) || '宿主未提供该调试入口'
+  }
+}
+function patchCfg(p: Record<string, any>): boolean {
+  let lastErr: any = null
+  for (let i = 0; i < 2; i++) {
+    try {
+      services.saveConfig?.(p)
+      return true
+    } catch (err) {
+      lastErr = err
+    }
+  }
+  saveFail.patch = p
+  saveFail.msg = '有一处设置没保存上（' + String((lastErr as Error)?.message || lastErr) + '）。'
+    + '界面上的值可能已经变回去了 —— 存储空间不足或被占用时会这样。'
+  // 失败回滚成已落盘的真实值（理由见函数头注释）
+  applyConfig(services.getConfig?.())
+  return false
+}
+// 失败条上的「重试」：只重放最后这一次改动（不重放历史，理由见 saveFail 的注释）。
+// 成功就收掉提示条；仍失败则保留换新文案（patchCfg 会覆盖），免得用户以为「点了没反应」。
+function retrySaveCfg() {
+  if (!saveFail.patch || saveFail.retrying) return
+  const p = saveFail.patch
+  saveFail.retrying = true
+  // 给按钮一个「正在试」的可见状态再动手：写盘是同步的，直接调用会把这段时间吞掉，
+  // 用户点完看不到任何动静会以为按钮坏了、连点几下
+  window.setTimeout(() => {
+    saveFail.retrying = false
+    if (patchCfg(p)) { saveFail.msg = ''; saveFail.patch = null }
+  }, 0)
 }
 // —— 自定义音效（按压/释放两段 + 四类提醒各一组，文件复制进本地数据目录） ——
 // 每个槽位只保留一段：再导入就是替换掉旧的（挂件端不再有「随机播」这回事）
@@ -1820,8 +2815,8 @@ const soundUnused = computed(() => (soundsMeta.value.press.length > 0 || soundsM
 // 清完把形象/音色从「自定义」回退为内置，避免停在「自定义」却无素材可用。
 //
 // ⚠️ 形象这一条必须走 removeSkins（批量），不能 for 循环逐张 removeSkin：
-// 后者每张都做一次 readRaw + writeRaw（整份画廊 JSON 序列化落盘），还会推两次挂件，
-// 其中 getBuiltinData() 要把每张内置/共享角色读成 base64 data URL（单张 0.9~2.7MB）。
+// 后者每张都做一次 readRaw + writeRaw（整份画廊 JSON 序列化落盘），还会推两次挂件
+//（其中一次是共享角色图池；曾经连本体一起搬 —— 单张 0.9~2.7MB 读成 base64，现在只推清单，见 skins.js）。
 // 36 张共享角色就是 36 次全量写盘 + 72 次挂件推送，渲染进程主线程被压住 —— 这就是「清了半天」的来源。
 // removeSkins 内部一趟读改写盘，且只在真删掉东西时推一次挂件（见 settings.js）。
 // 气泡图 / 音效本就走「一次调用清一类」的口子，逐张 / 逐槽循环的开销在槽位数量级，不必改。
@@ -1849,9 +2844,14 @@ function doClearAssets() {
       const r = services.removeSound?.(role)
       if (!r || !r.ok) failed = failed || SOUND_ROLE_LABEL[role]
     }
+    // 背景/片头媒体也属于「导入的素材」；clearAll 会把它引用的背景/片头配置回退
+    const mediaR = services.mediaClearAll?.()
+    if (!mediaR || !mediaR.ok) failed = failed || '背景/片头媒体'
+    mediaRefreshTick.value++
     refreshSkin()
     refreshBubbles()
     refreshSounds()
+    releaseBgCustom()
     // 形象卡里的「已下载」态由资产页自己在下一次渲染时重拉（组件常挂载，无需父级代劳）
     skinPicked.value = []
     if (failed) {
@@ -1876,6 +2876,8 @@ function doClearAssets() {
 
 // —— 「资源」Tab 素材包 / 下载进度（模板已迁至 AssetsView.vue；此处保留被其它域共用的部分） ——
 const assetsBusy = ref(false)
+// 背景/片头媒体列表的外部刷新信号（清除数据、概览清空时自增；AssetsView 据此重拉）
+const mediaRefreshTick = ref(0)
 // 「展开形象卡」指令计数器：AssetsView 内部 watch 它自增即展开（折叠态是本组件私有，父级改不了）
 const browseSkinsTick = ref(0)
 
@@ -1923,7 +2925,13 @@ function doClearUnused() {
   // 先快照：删完 computed 会变 0，消息里的数量得用删除前的
   const skinIds = unusedSkinIds.value.slice()
   const roles = unusedSoundRoles.value.slice()
-  if (!skinIds.length && !roles.length) return
+  let unusedMedia: MediaItem[] = []
+  try {
+    const list = services.mediaList?.()
+    unusedMedia = (list && list.ok ? list.items : []).filter((m) =>
+      m.id !== cfg.bgMediaId && m.id !== cfg.bootIntroMediaId)
+  } catch (err) { unusedMedia = [] }
+  if (!skinIds.length && !roles.length && !unusedMedia.length) return
   skinFlash.msg = ''
   soundFlash.msg = ''
   skinFlash.err = false
@@ -1939,6 +2947,13 @@ function doClearUnused() {
       const r = services.removeSound?.(role)
       if (!r || !r.ok) failed = failed || SOUND_ROLE_LABEL[role]
     }
+    let mediaRemoved = 0
+    for (const m of unusedMedia) {
+      const r = services.mediaRemove?.(m.id)
+      if (!r || !r.ok) failed = failed || '背景/片头媒体'
+      else mediaRemoved++
+    }
+    if (unusedMedia.length) mediaRefreshTick.value++
     refreshSkin()
     refreshSounds()
     // 同上：形象卡的下载态由资产页自管
@@ -1948,7 +2963,7 @@ function doClearUnused() {
       skinFlash.msg = `部分素材清除失败：${failed}`
       return
     }
-    skinFlash.msg = `已清除 ${skinIds.length + roles.length} 项未使用素材（正在使用的已保留）`
+    skinFlash.msg = `已清除 ${skinIds.length + roles.length + mediaRemoved} 项未使用素材（正在使用的已保留）`
   } catch (err: any) {
     skinFlash.err = true
     skinFlash.msg = '清除失败：' + String(err?.message || err)
@@ -2021,14 +3036,16 @@ function onGuideSave(p: { apiKey: string; platformToken: string; enterMode: stri
     cfg.enterMode = p.enterMode as typeof cfg.enterMode
     patchCfg({ enterMode: p.enterMode })
     services.finishFirstRunGuide?.()
-    showGuide.value = false
-    guideReopen.value = false
+    // 保存成功**不关弹层**，只把组件推进到第三步（完成页），由用户点「开始使用 / 去挑形象」关闭。
+    // 原先这里直接 showGuide = false，于是第三步的完成页与「去挑形象」入口从来没显示过（死代码）。
+    // guideReopen 也不动：完成页的标题口径应与打开时一致，否则重开引导的人会突然看到「欢迎使用」
+    guideSaved.value = true
     if (r && !r.hasApiKey) {
-      // 没填 API Key：引导仍算走完（否则每次打开都弹），但要明确告诉用户挂件还显示不出余额
+      // 没填 API Key：引导仍算走完（否则每次打开都弹），但要把用户送到能补的地方。
+      // 不再额外弹 secretsFlash —— 完成页本身就有「没有填 API Key」的红字说明，
+      // 而弹层此时还盖在上面，那条 4 秒后自动消失的回执多半等不到用户看见
       activeTab.value = 'data'
-      toolOpen.credentials = true
-      secretsFlash.msg = '已保存（未填写 API Key，挂件将提示未配置）'
-      setTimeout(() => { secretsFlash.msg = '' }, 4000)
+      credentialsFold.open = true
     }
   } catch (err: any) {
     guideFlash.msg = String(err?.message || err)
@@ -2052,12 +3069,14 @@ function onGuideSkip() {
   } catch (err) {}
   showGuide.value = false
   guideReopen.value = false
+  guideSaved.value = false
 }
 // 手动重开引导（数据 Tab 凭据卡里的入口）：不改 guideDone，纯粹再展示一次 ——
 // 用户回来多半是想换个 Key 或忘了进入方式在哪调
 function onGuideReopen() {
   guideFlash.msg = ''
   guideFlash.err = false
+  guideSaved.value = false
   guideReopen.value = true
   showGuide.value = true
 }
@@ -2130,15 +3149,16 @@ function copyWidgetError() {
 // 清除数据（勾选与二次确认）已内聚到 PrivacyView.vue，由它调用 services.clearAllData；
 // 这里只做「清除成功后的回显刷新」——要读父级全局状态（secrets / cfg / 账本 / 各素材卡片）。
 // picked 由组件按同一语义拆好：素材三项（sounds/skins/bubbles）同开关一起下发。
-function onDataCleared(picked: { secrets: boolean; config: boolean; ledger: boolean; window: boolean; sounds: boolean; skins: boolean; bubbles: boolean; bubble: boolean; todo: boolean }) {
+function onDataCleared(picked: { secrets: boolean; config: boolean; ledger: boolean; window: boolean; sounds: boolean; skins: boolean; bubbles: boolean; media: boolean; bubble: boolean; todo: boolean }) {
   if (picked.secrets) {
     secrets.apiKey = ''
     secrets.platformToken = ''
     secretsFlash.msg = ''
   }
   // 清音效/形象可能改了音色与形象（自定义 → 内置），因此与清设置一样要重新套用配置；
-  // 「按压气泡」重置了文案/开关（也在配置里），同样要重新套用
-  if (picked.config || picked.sounds || picked.skins || picked.bubble) applyConfig(services.getConfig?.())
+  // 「按压气泡」重置了文案/开关（也在配置里），同样要重新套用；媒体清空会回退背景/片头
+  if (picked.config || picked.sounds || picked.skins || picked.bubble || picked.media) applyConfig(services.getConfig?.())
+  if (picked.media) { releaseBgCustom(); mediaRefreshTick.value++ }
   if (picked.ledger) usageHistory.value = []
   else refreshHistory()
   if (picked.sounds) refreshSounds() // 音效卡片（音色「自定义」）回显为「未导入」
@@ -2184,7 +3204,9 @@ function doCheckUpdate(force: boolean) {
     .then((r: any) => {
       updateResult.value = r || null
       if (!r || !r.ok) updateMsg.value = '检查失败：' + ((r && r.error) || '未知错误')
-      else if (r.hasUpdate) updateMsg.value = '发现新版本 v' + r.latest + '（当前 v' + r.current + '），可在插件市场更新'
+      // 版本比较的基准是 GitHub 主线，可能领先于 uTools 市场 —— 只写「去市场更新」会让
+      // 市场尚未同步的用户白跑一趟，所以同时指出项目主页这条路
+      else if (r.hasUpdate) updateMsg.value = '发现新版本 v' + r.latest + '（当前 v' + r.current + '），可在插件市场更新；市场尚未同步时可到「项目主页」下载'
       else updateMsg.value = '已是最新版本'
     })
     .catch((err: any) => {
@@ -2214,6 +3236,11 @@ function applyConfig(c: any) {
       cfg.alertVols[r].volSet = av.volSet === true
     }
   }
+  // 提醒文案：NotifyView 的 textarea 直接读 cfg.alerts，漏了这一步保存后重开设置页会整体显示为空
+  const al = c.alerts && typeof c.alerts === 'object' ? c.alerts : {}
+  for (const k of Object.keys(cfg.alerts)) {
+    cfg.alerts[k] = typeof al[k] === 'string' ? al[k] : ''
+  }
   cfg.soundOn = c.soundOn !== false
   cfg.soundSet = c.soundSet
   cfg.usageMode = c.usageMode
@@ -2237,12 +3264,35 @@ function applyConfig(c: any) {
   // 内置（随包）与历史内置 id 都原样保留：老配置可能是已移出包的 id，下载回来就能用，
   // 这里打回默认会让「一下载就发现我选的形象被改了」
   cfg.skin = c.skin === 'custom' || LEGACY_BUILTIN_SKINS.includes(c.skin) ? c.skin : DEFAULT_SKIN
-  cfg.theme = c.theme === 'dark' || c.theme === 'sakura' ? c.theme : 'default'
+  cfg.theme = c.theme === 'dark' || c.theme === 'sakura' || c.theme === 'fantasy' ? c.theme : 'default'
   // 界面深浅色回填：非法值按 auto 处理（与宿主 normUiMode 同口径）。
   // 回填后立即重应用：启动首次应用拿的是本地默认 auto，存储里的手动 light/dark 这时才到达，
   // 不重应用要等下一轮 1s 轮询才变对；挂件菜单改 uiMode 经配置推送过来也靠这里即时生效
-  cfg.uiMode = c.uiMode === 'light' || c.uiMode === 'dark' ? c.uiMode : 'auto'
+  cfg.uiMode = c.uiMode === 'light' || c.uiMode === 'dark' || c.uiMode === 'fantasy' ? c.uiMode : 'auto'
+  cfg.bgMode = ['deep', 'aurora', 'stars', 'mist', 'polar', 'warm', 'video', 'custom'].includes(c.bgMode)
+    ? c.bgMode
+    : 'off'
+  cfg.bgMediaId = typeof c.bgMediaId === 'string' && /^[A-Za-z0-9_-]{1,40}$/.test(c.bgMediaId) ? c.bgMediaId : ''
+  cfg.bgScrim = typeof c.bgScrim === 'number' && isFinite(c.bgScrim) ? Math.max(0, Math.min(80, Math.round(c.bgScrim))) : 45
+  cfg.bgBlur = typeof c.bgBlur === 'number' && isFinite(c.bgBlur) ? Math.max(0, Math.min(20, Math.round(c.bgBlur))) : 0
+  cfg.bgBrightness = typeof c.bgBrightness === 'number' && isFinite(c.bgBrightness)
+    ? Math.max(50, Math.min(120, Math.round(c.bgBrightness)))
+    : 100
+  cfg.bgVignette = typeof c.bgVignette === 'number' && isFinite(c.bgVignette)
+    ? Math.max(0, Math.min(100, Math.round(c.bgVignette)))
+    : 100
+  cfg.bgFit = c.bgFit === 'contain' ? 'contain' : 'cover'
+  cfg.bgFocusX = typeof c.bgFocusX === 'number' && isFinite(c.bgFocusX) ? Math.max(0, Math.min(100, Math.round(c.bgFocusX))) : 50
+  cfg.bgFocusY = typeof c.bgFocusY === 'number' && isFinite(c.bgFocusY) ? Math.max(0, Math.min(100, Math.round(c.bgFocusY))) : 50
+  cfg.bgZoom = typeof c.bgZoom === 'number' && isFinite(c.bgZoom) ? Math.max(100, Math.min(130, Math.round(c.bgZoom))) : 100
+  cfg.bootIntroOn = c.bootIntroOn === true
+  cfg.bootIntroClean = c.bootIntroClean === true
+  cfg.bootIntroSource = c.bootIntroSource === 'media' || c.bootIntroSource === 'css' ? c.bootIntroSource : 'auto'
+  cfg.bootIntroMediaId = typeof c.bootIntroMediaId === 'string' && /^[A-Za-z0-9_-]{1,40}$/.test(c.bootIntroMediaId)
+    ? c.bootIntroMediaId
+    : ''
   applyUtoolsDark()
+  applyBg()
   cfg.remindSec = c.remindSec === 0 || c.remindSec === 5 || c.remindSec === 15 ? c.remindSec : 8
   cfg.quietOn = c.quietOn === true
   cfg.quietFrom = typeof c.quietFrom === 'string' && c.quietFrom ? c.quietFrom : '23:00'
@@ -2256,13 +3306,96 @@ function applyConfig(c: any) {
   cfg.timerPersistOn = c.timerPersistOn !== false
   cfg.timerBubblePin = c.timerBubblePin !== false
   cfg.timerBubbleOnly = c.timerBubbleOnly !== false
+  // 回填必须带档位校验：不合法的值一律回默认 8，否则 TimerView 的下拉框会空选
+  cfg.timerRemindSec = c.timerRemindSec === 0 || c.timerRemindSec === 5 || c.timerRemindSec === 8 || c.timerRemindSec === 15
+    ? c.timerRemindSec
+    : 8
   cfg.timerSec = typeof c.timerSec === 'number' && c.timerSec > 0 ? Math.round(c.timerSec) : 1500
   cfg.timerNote = typeof c.timerNote === 'string' ? c.timerNote : ''
   cfg.timerBreakMin = typeof c.timerBreakMin === 'number' ? c.timerBreakMin : 5
-  notifyViewRef.value?.syncTimerHms()
+  // 番茄循环（v1.13.0）：与宿主 store 的归一化同口径（长休 1–60 分钟、每 2–12 轮一次）。
+  // **必须回填**：漏了这几行，Setting 页保存后重开开关会自己弹回去，看着像没保存
+  cfg.timerPomoOn = c.timerPomoOn === true
+  cfg.timerLongBreakMin = typeof c.timerLongBreakMin === 'number' && isFinite(c.timerLongBreakMin)
+    ? Math.min(60, Math.max(1, Math.round(c.timerLongBreakMin)))
+    : TIMER_LONG_BREAK_DEFAULT
+  cfg.timerLongEvery = typeof c.timerLongEvery === 'number' && isFinite(c.timerLongEvery)
+    ? Math.min(12, Math.max(2, Math.round(c.timerLongEvery)))
+    : TIMER_LONG_EVERY_DEFAULT
+  cfg.timerAutoNext = c.timerAutoNext === true
+  // 快捷时长四档：与宿主 normTimerPresets 同口径（固定 4 档、1–600 分钟、缺项补默认）。
+  // 必须回填：TimerView 的四个输入框读的是这里，漏了会「改完重开又变回去」
+  cfg.timerPresets = Array.isArray(c.timerPresets)
+    ? TIMER_PRESETS_DEFAULT.map((dft, i) => {
+      const n = Number(c.timerPresets[i])
+      return c.timerPresets[i] == null || c.timerPresets[i] === '' || !isFinite(n)
+        ? dft
+        : Math.round(Math.min(600, Math.max(1, n)))
+    })
+    : TIMER_PRESETS_DEFAULT.slice()
+  // 专注记录 / 待办 / 每日目标（v1.13.0）：同样必须回填，否则 FocusView 的开关与目标输入框读不到已存值
+  cfg.focusOn = c.focusOn === true
+  cfg.todoOn = c.todoOn === true
+  cfg.focusGoal = typeof c.focusGoal === 'number' && isFinite(c.focusGoal)
+    ? Math.min(99, Math.max(0, Math.round(c.focusGoal)))
+    : 0
+  // 下班倒计时（v1.14.0）：八键同样必须回填，否则 OffworkView 的开关 / 时间 / 工作日在重开设置页后看着像没保存
+  cfg.offworkOn = c.offworkOn === true
+  cfg.offworkStart = normOffworkHm(c.offworkStart, OFFWORK_DEFAULTS.start)
+  cfg.offworkEnd = normOffworkHm(c.offworkEnd, OFFWORK_DEFAULTS.end)
+  cfg.offworkDays = normOffworkDays(c.offworkDays, OFFWORK_DEFAULTS.days)
+  cfg.offworkShowSec = c.offworkShowSec !== false
+  cfg.offworkWeekendOn = c.offworkWeekendOn === true
+  cfg.offworkPaydayOn = c.offworkPaydayOn === true
+  cfg.offworkPaydayDay = normOffworkPayday(c.offworkPaydayDay)
+  // 自定义显示：隐藏列表原样回填（空数组 = 全部显示）。漏了这里，DisplayManager 勾选后
+  // 本地 cfg 永远不变，界面看着像「点不动」。
+  // 含核心卡片的 Tab 与核心卡片本身一律剔掉：老备份 / 手改配置可能带着它们，
+  // 不能让核心卡片被整体藏没（DisplayManager 只在勾选侧禁用，配置回填这道闸不能省）
+  cfg.hiddenTabs = Array.isArray(c.hiddenTabs)
+    ? c.hiddenTabs.filter((k: any) => typeof k === 'string' && !CORE_TABS.includes(k))
+    : []
+  cfg.hiddenCards = Array.isArray(c.hiddenCards)
+    ? c.hiddenCards.filter((k: any) => typeof k === 'string' && !CORE_CARDS.includes(k))
+    : []
+  // Tab 顺序同样必须回填：visibleTabs 按 cfg.tabOrder 排序，漏了就「调完顺序重开又变回去」
+  cfg.tabOrder = Array.isArray(c.tabOrder)
+    ? c.tabOrder.filter((k: any) => typeof k === 'string' && TABS.some((t) => t.key === k))
+    : []
+  // 置顶卡片同理：漏了就「置顶完重开又掉回去」。只认索引里真实存在的卡片 id，
+  // 卸载掉的旧卡 / 手改配置里的野 id 一律剔掉（否则置顶区标题会冒出空 label）
+  cfg.pinnedCards = Array.isArray(c.pinnedCards)
+    ? c.pinnedCards.filter((k: any) => typeof k === 'string' && !!SEARCH_INDEX[k])
+    : []
+  // 卡片自定义顺序：只认索引里真实存在、且确实属于该 Tab 的卡；
+  // 顺序本身由宿主归一（去重 / 限长），这里再做一道 Tab 归属校验 ——
+  // 跨 Tab 的野 key 混进来会让「另一个 Tab 的卡」在排序里占位，补尾时被跳过，用户看着像丢了一张
+  const rawOrder = c.cardOrder && typeof c.cardOrder === 'object' && !Array.isArray(c.cardOrder) ? c.cardOrder : {}
+  const nextCardOrder: Record<string, string[]> = {}
+  for (const t of TABS) {
+    const list = rawOrder[t.key]
+    if (!Array.isArray(list)) continue
+    const valid = list.filter((k: any) => typeof k === 'string' && SEARCH_INDEX[k]?.tab === t.key)
+    if (valid.length) nextCardOrder[t.key] = valid
+  }
+  cfg.cardOrder = nextCardOrder
+  // 逐卡默认展开/收起：key 是折叠键（不是卡片键，合并卡两行共用一个），只认表里有的键
+  const foldKeys = new Set(Object.values(CARD_FOLDS))
+  const rawFolds = c.foldDefaults && typeof c.foldDefaults === 'object' && !Array.isArray(c.foldDefaults) ? c.foldDefaults : {}
+  const nextFoldDefaults: Record<string, boolean> = {}
+  for (const k of Object.keys(rawFolds)) {
+    if (foldKeys.has(k) && typeof rawFolds[k] === 'boolean') nextFoldDefaults[k] = rawFolds[k]
+  }
+  cfg.foldDefaults = nextFoldDefaults
+  cfg.foldRemember = c.foldRemember !== false
+  // 推给已挂载的 useFold 实例。initial 只在首屏回填时为 true ——
+  // 后续每次保存都会再走一遍 applyConfig，那时是用户真的改了默认值 / 关了记忆，要立刻生效
+  setFoldPrefs({ remember: cfg.foldRemember, defaults: cfg.foldDefaults, initial: !foldPrefsReady })
+  foldPrefsReady = true
   cfg.enterMode = c.enterMode === 'widget' || c.enterMode === 'settings' ? c.enterMode : 'both'
   cfg.dshNodeDir = typeof c.dshNodeDir === 'string' ? c.dshNodeDir : ''
   cfg.dshKeepAlive = c.dshKeepAlive === true
+  cfg.dshElevated = c.dshElevated === true
   // 端口：宿主 store 的 normDshPort 已保证是 1–65535，这里的兜底只为「宿主没给这个键」的旧配置
   cfg.dshPort = typeof c.dshPort === 'number' && c.dshPort >= 1 && c.dshPort <= 65535 ? Math.round(c.dshPort) : DEFAULT_DSH_PORT
   cfg.dshRegistry = typeof c.dshRegistry === 'string' ? c.dshRegistry : ''
@@ -2315,10 +3448,10 @@ function applyConfig(c: any) {
     ? c.ghAccelIps.filter((it: any) => it && typeof it === 'object').map((it: any) => ({ domain: String(it.domain || ''), ip: String(it.ip || '') }))
     : []
   cfg.ghAccelRefreshedAt = typeof c.ghAccelRefreshedAt === 'number' && c.ghAccelRefreshedAt > 0 ? c.ghAccelRefreshedAt : 0
-  // 来源开关 + 两段顺序。这里**必须整对象回填**（order 与 sources 都不能漏）：
-  // AccelView 的来源顺序取自 props.cfg.ghAccelSrc.order、源表顺序取自 .sources，
-  // 漏回填的话点「上移 / 下移」落盘后父级 cfg 不变，子组件拿到的 props 仍是旧顺序 ——
-  // 表现就是「点了没反应」，而宿主侧读的也是这份 cfg，刷新时同样按旧顺序走
+  // 来源开关 + 两段顺序 + 自定义源清单。这里**必须整对象回填**（order / sources / customSources
+  // 一个都不能漏）：AccelView 的来源顺序取自 props.cfg.ghAccelSrc.order、源表顺序取自 .sources、
+  // 自定义源列表取自 .customSources，漏回填的话落盘后父级 cfg 不变，子组件拿到的 props 仍是旧值 ——
+  // 表现就是「点了没反应」或「加一条后列表只剩一条」，而宿主侧读的也是这份 cfg
   const gs = c.ghAccelSrc && typeof c.ghAccelSrc === 'object' ? c.ghAccelSrc : {}
   cfg.ghAccelSrc = {
     doh: gs.doh !== false,
@@ -2326,6 +3459,7 @@ function applyConfig(c: any) {
     manual: gs.manual !== false,
     sources: Array.isArray(gs.sources) ? gs.sources.filter((s: any) => typeof s === 'string') : [],
     order: Array.isArray(gs.order) ? gs.order.filter((s: any) => typeof s === 'string') : [],
+    customSources: Array.isArray(gs.customSources) ? gs.customSources.filter((s: any) => typeof s === 'string') : [],
   }
   // 形象下载源前缀：宿主已归一化（非法串回空），这里只做类型兜底
   cfg.skinPackSrc = typeof c.skinPackSrc === 'string' ? c.skinPackSrc : ''
@@ -2334,6 +3468,7 @@ function applyConfig(c: any) {
   // 通知渠道：系统通知默认开（沿用旧行为）；邮件通知的服务器/授权码不在这里（走 secrets）
   cfg.notifySystemOn = c.notifySystemOn !== false
   cfg.notifyMailOn = c.notifyMailOn === true
+  cfg.debugTools = c.debugTools === true
   cfg.mailFrom = typeof c.mailFrom === 'string' ? c.mailFrom : ''
   cfg.mailTo = typeof c.mailTo === 'string' ? c.mailTo : ''
   cfg.mailFromName = typeof c.mailFromName === 'string' ? c.mailFromName : ''
@@ -2365,13 +3500,25 @@ const taskbarText = computed(() => {
   }
   return '未识别到任务栏，挂件按屏幕边缘贴边'
 })
+// 挂件可见性同步（宿主实时判定：窗口不存在 → false；存在但被 uTools 连带 hide → false）。
+// ⚠️ 必须「反复同步」而不是挂载时读一次：插件进入时宿主是先让设置页挂载、再在 onPluginEnter
+//    里 createBrowserWindow，挂载那一刻挂件窗口往往还没建出来 —— 一次性读取会永久停在 false，
+//    按压气泡卡就会一直显示「挂件还没显示」、试播按钮永久灰掉（真机复现）。挂件也可能被
+//    全局快捷键 / 挂件菜单 / uTools 主窗隐藏等方式改变显隐，本页收不到任何通知。
+//    故与任务栏状态同频（2s）轮询，并在一键显示/隐藏时先乐观置位、由下一轮轮询校正。
+function widgetVisibleSync() {
+  widgetVisible.value = services.isWidgetVisible?.() !== false
+}
+
 // 任务栏状态每 2s 同步一次（immediate：启动时先同步一次，不必等第一个间隔）
-const taskbarPolling = usePolling(taskbarSync, 2000, true)
+const taskbarPolling = usePolling(() => { taskbarSync(); widgetVisibleSync() }, 2000, true)
 
 // 宿主推送的配置变更订阅（挂件菜单改设置时，让本页开关同步）
 let unsubConfig: (() => void) | undefined
-// 挂件菜单「气泡设置」→ 宿主 showMainWindow + emitNavigate('bubble') → 这里切到「外观」Tab 并滚到
-// 「按压气泡」卡；「管理待办」→ emitNavigate('focus') → 切到「用量」Tab 并滚到「专注与待办」卡。
+// 卡片导航的统一入口，两个来源共用：
+//   · 挂件菜单深链（宿主 emitNavigate）：'bubble' 切「外观」滚到按压气泡卡；
+//     'focus' / 'usage' / 'models' / 'timer' 切「用量」滚到对应卡。
+//   · 设置页内的跨卡链接（TimerView / FocusView 的 emit('go-card')）：与深链同名同语义。
 // 订阅放父级（与 onConfigChange 同处），不放进 BubbleView / FocusView：
 // 卡片是 v-if 渲染的（未激活 Tab 根本不挂载），订阅一旦跟着卡走就会「卡没渲染 = 收不到导航」。
 // 切换 Tab 后卡片要等下一帧才进 DOM，scrollToCard 必须 nextTick 之后再调，否则 querySelector 落空
@@ -2383,10 +3530,10 @@ function onBubbleNavigate(target: string) {
     nextTick(() => scrollToCard('bubbleCustom'))
     return
   }
-  if (target === 'focus') {
+  if (target === 'focus' || target === 'timer' || target === 'usage' || target === 'models') {
     activeTab.value = 'usage'
     clearSearch()
-    nextTick(() => scrollToCard('focus'))
+    nextTick(() => scrollToCard(target))
   }
 }
 // 本窗口重新可见/重新聚焦时刷新趋势（挂件刷新余额后账本可能已变）
@@ -2398,6 +3545,7 @@ function onWindowActive() {
   // 只在开发者 Tab 轮询着 dsh 状态时才需要补 deep 探测（可能在挂件菜单里启停过）
   if (activeTab.value === 'dev') { dshStatus(true); refreshStaleDevCards() }
   taskbarSync() // 顺带同步任务栏显隐状态
+  widgetVisibleSync() // 挂件可能在挂件菜单 / 全局快捷键里被显示或隐藏
 }
 
 // 回到本窗口时，把**已读过但已过期**的开发者卡重读一遍（P5，2026-10-09）。
@@ -2423,6 +3571,7 @@ onMounted(() => {
     // ── 首帧关键路径：只做「轻量、必现」的同步读取 ──
     // 这些要么是纯内存读（配置/凭据/版本），要么决定首屏骨架（开关状态），必须同步拿。
     applyConfig(services.getConfig?.())
+    try { bootIntroAutoPlayed.value = services.bootIntroHasPlayed?.() === true } catch (err) {}
     // 挂件菜单勾选/取消 → 宿主广播 → 刷新本页开关
     unsubConfig = services.onConfigChange?.(applyConfig)
     // 挂件菜单「气泡设置」→ 切到「外观」Tab 的按压气泡卡（宿主 emitNavigate，见 onBubbleNavigate）
@@ -2434,7 +3583,7 @@ onMounted(() => {
     }
     // SMTP 凭据不在这里读：NotifyView 归「用量」Tab、默认 Tab 是「外观」，此刻它的 ref 还是 null，
     // 父级调 loadMailSecrets() 是空转。改由 NotifyView 自己 onMounted 读（见该组件注释）
-    widgetVisible.value = services.isWidgetVisible?.() !== false
+    widgetVisibleSync() // 见 widgetVisibleSync 注释：此刻挂件窗口可能还没被宿主创建，靠轮询校正
     checkWidgetError(true)
     appVersion.value = services.getVersion?.() || ''
     // dsh 状态不在挂载时轮询：等切到「开发者」Tab 再启（见 watch(activeTab)）；
@@ -2445,6 +3594,13 @@ onMounted(() => {
   } catch (err) {}
   window.addEventListener('focus', onWindowActive)
   document.addEventListener('visibilitychange', onWindowActive)
+  // 系统「减少动态效果」切换时同步暂停 / 恢复视频；视频本身在 syncBgVideo 后挂载
+  bgReduceMotion?.addEventListener?.('change', onBgVideoMotionChange)
+  // 浏览器默认自动播放策略会拦下静音视频；用户第一次点页面/按键时补一次 play
+  document.addEventListener('pointerdown', onBgMediaGesture, { passive: true })
+  document.addEventListener('keydown', onBgMediaGesture)
+  // 设置页导航快捷键（Ctrl+1..7 / Ctrl+K / Alt+←→），弹层打开时自动让位
+  window.addEventListener('keydown', onSettingsKeydown)
   // ── 非关键路径：延后到首帧之后 ──
   // 原先 refreshSkin/refreshBubbles/refreshSounds/refreshHistory 等直接在 onMounted 里同步跑，
   // 但它们是同步 IPC，且 refreshSkin → getSkinData/listSkins、refreshBubbles → listBubbles
@@ -2465,13 +3621,19 @@ onMounted(() => {
     // 更新检查与首次引导也一并后置：它们都涉及网络/弹窗，不能挡住首屏
     try { if (cfg.updateCheckOn) doCheckUpdate(false) } catch (err) {}
     // 首次运行引导：放在最后弹，避免与前面的初始化抢渲染。
-    // 判据在宿主侧（guideDone 未置位 + 没填 API Key），老用户升级上来不会被打扰
-    try {
-      if (services.needFirstRunGuide?.()) {
-        guideReopen.value = false
-        showGuide.value = true
-      }
-    } catch (err) {}
+    // 判据在宿主侧（guideDone 未置位 + 没填 API Key），老用户升级上来不会被打扰。
+    // 引导弹层优先：首启不叠启动片头，避免两层全屏遮罩互相抢焦点。
+    let firstRun = false
+    try { firstRun = services.needFirstRunGuide?.() === true } catch (err) {}
+    if (firstRun) {
+      // 首次引导优先：首帧可能已按「纯净片头」把设置页藏了，先放出来再弹引导
+      bootIntroRevealPage()
+      guideReopen.value = false
+      guideSaved.value = false
+      showGuide.value = true
+    } else {
+      maybePlayBootIntro()
+    }
   })
 })
 
@@ -2482,61 +3644,120 @@ onUnmounted(() => {
   taskbarPolling.stop()
   window.removeEventListener('focus', onWindowActive)
   document.removeEventListener('visibilitychange', onWindowActive)
+  bgReduceMotion?.removeEventListener?.('change', onBgVideoMotionChange)
+  document.removeEventListener('pointerdown', onBgMediaGesture)
+  document.removeEventListener('keydown', onBgMediaGesture)
+  window.removeEventListener('keydown', onSettingsKeydown)
+  finishBootIntro()
+  releaseBgVideo()
+  releaseBgCustom()
 })
 </script>
 
 <template>
   <div class="page">
+    <!-- 内置视频壁纸：仅设置页，深浅色 / 未至之境都可用；层在内容之下并禁用命中。
+         素材 CC BY-NC-SA 4.0（stushansusu），由设置页按需下载，不随包分发。 -->
+    <div v-if="bgVideoUrl" class="bg-video-layer" :style="bgMediaStyle" aria-hidden="true">
+      <video ref="bgVideoEl" class="bg-video-el" :src="bgVideoUrl" muted loop autoplay playsinline
+             preload="auto" disablepictureinpicture @loadeddata="applyBgVideoMotion"
+             @error="bgVideoError = '视频文件无法解码'"
+             @play="bgVideoPaused = false" @playing="bgVideoPaused = false" @pause="bgVideoPaused = true"></video>
+      <div class="bg-video-veil"></div>
+      <div class="bg-video-scrim"></div>
+    </div>
+    <!-- 用户导入的背景媒体（图片 / 视频），与内置视频共用遮罩、模糊、亮度 -->
+    <div v-if="bgCustomUrl" class="bg-custom-layer" :style="[bgMediaStyle, bgCustomZoomStyle]" aria-hidden="true">
+      <video v-if="bgCustomKind === 'video'" ref="bgCustomEl" class="bg-custom-el" :src="bgCustomUrl"
+             :style="bgCustomFrameStyle"
+             muted loop autoplay playsinline preload="auto" disablepictureinpicture
+             @loadeddata="applyBgCustomMotion" @error="bgCustomError = '视频文件无法解码'"
+             @play="bgCustomPaused = false"
+             @playing="bgCustomPaused = false" @pause="bgCustomPaused = true"></video>
+      <img v-else ref="bgCustomImgEl" class="bg-custom-el" :src="bgCustomUrl" :style="bgCustomFrameStyle" alt="" />
+      <div class="bg-custom-veil"></div>
+      <div class="bg-custom-scrim"></div>
+    </div>
     <h1>🐳 小鲸鱼余额挂件</h1>
     <p class="sub">桌面透明置顶小窗 · 显示 DeepSeek 余额</p>
 
-    <!-- 顶部 Tab：一次只显示一组卡片 -->
-    <nav class="tab-bar" ref="tabBarEl">
+    <!-- 顶部 Tab：一次只显示一组卡片；Ctrl+1..7 直达第 N 组、Alt+←/→ 切相邻组（见 onSettingsKeydown） -->
+    <nav class="tab-bar" ref="tabBarEl" aria-label="设置分组">
       <div class="tab-row">
-        <button v-for="t in visibleTabs" :key="t.key" type="button" class="tab"
-                :class="{ 'tab-on': !searchActive && activeTab === t.key }" @click="clearSearch(); activeTab = t.key">{{ t.label }}</button>
-        <!-- 自定义显示管理入口：齿轮图标，点击打开 DisplayManager 弹窗 -->
-        <button type="button" class="display-manager-btn" @click="showDisplayManager = true" title="自定义显示">⚙</button>
+        <button v-for="(t, i) in visibleTabs" :key="t.key" type="button" class="tab"
+                :class="{ 'tab-on': !searchActive && activeTab === t.key }"
+                :aria-current="!searchActive && activeTab === t.key ? 'page' : undefined"
+                :title="`${t.label}（快捷键 Ctrl+${i + 1}）`"
+                @click="onTabClick(t.key)">{{ t.label }}</button>
+        <!-- 自定义显示管理入口：齿轮 + 文字（纯图标用户看不出这是什么，历史反馈里被当成"设置"）
+             放在 Tab 行末尾，与分组标签同一行，不额外占一行 -->
+        <button type="button" class="display-manager-btn" @click="showDisplayManager = true" title="管理显示内容：隐藏分组 / 卡片、调整分组顺序">⚙ 显示管理</button>
       </div>
-      <!-- 卡片搜索：输入即跨 Tab 过滤出命中的卡片（见 SEARCH_INDEX）。清空 / Esc 回到正常 Tab 视图 -->
+      <!-- 卡片搜索：输入即跨 Tab 过滤出命中的卡片（见 SEARCH_INDEX）。清空 / Esc 回到正常 Tab 视图；
+           Ctrl+K 直接聚焦这里（不用先找输入框） -->
       <div class="search-row">
-        <input class="search-input" type="search" v-model="searchQuery" placeholder="搜索设置项（如：穿透 / 音效 / 备份 / dsh）"
+        <input ref="searchInputEl" class="search-input" type="search" v-model="searchQuery"
+               placeholder="搜索设置项（如：穿透 / 音效 / 备份 / dsh）" title="聚焦搜索（Ctrl+K）"
                @keydown.esc="!isImeComposing($event) && clearSearch()" />
         <button v-if="searchActive" class="search-clear utils-btn utils-secondary" type="button" @click="clearSearch">清除</button>
       </div>
+    </nav>
+
+    <!-- 配置没保存上：整条常驻、可点重试。放在所有回执之前、且不跟随 Tab 切换消失 ——
+         它描述的是「你刚才那下没落盘」，属全局状态，不该只在外观 Tab 才看得见 -->
+    <p v-if="saveFail.msg" class="save-fail" role="alert">
+      <span class="save-fail-text">{{ saveFail.msg }}</span>
+      <button type="button" class="utils-btn utils-secondary save-fail-retry"
+              :disabled="saveFail.retrying" @click="retrySaveCfg">{{ saveFail.retrying ? '正在重试…' : '重试' }}</button>
+      <button type="button" class="link-btn save-fail-close" title="先不管（下次改设置失败会再出现）"
+              @click="saveFail.msg = ''; saveFail.patch = null">忽略</button>
+    </p>
+
+    <!-- 置顶作用域（.pin-scope）：包住「Tab 描述 + 全部卡片」。它是卡片搬动的作用域 ——
+         syncPinned() 只在这里面查卡片、搬节点，组外的东西一概不碰。
+         置顶区标题也在这里：由 syncPinned() 搬到组首（搬的是卡片的根节点，不碰子组件内部）。 -->
+    <div class="pin-scope" ref="pinScopeEl">
       <p class="tab-desc">
-        <template v-if="searchActive">
+        <!-- 显示管理的回执优先占用这一行：隐藏当前分组后必须让用户看见"跳到哪去了"，
+             否则只看到页面自己换了一组，像是点坏了 -->
+        <span v-if="displayFlash.msg" :class="{ 'desc-err': displayFlash.err }">{{ displayFlash.msg }}</span>
+        <template v-else-if="searchActive">
           {{ searchHits.length ? `找到 ${searchHits.length} 张卡片（跨分组）` : '没有匹配的卡片，换个关键词试试' }}
         </template>
         <template v-else>{{ activeTabDesc }}</template>
       </p>
-    </nav>
 
-    <!-- 搜索结果为空时的指引：搜索是跨组过滤，匹配不到任何卡的可见文本 -->
-    <p v-if="searchActive && !searchHits.length" class="card search-empty">
-      没找到含「{{ searchQuery.trim() }}」的卡片。搜索匹配的是卡片标题与关键词（含同义词），
-      试试更短或更常见的词，如「形象」「用量」「通知」「hosts」。
-    </p>
-    <!-- 搜索态下每张命中卡标出「本来在哪一组」，点标签直接滚到那张卡（命中卡按索引顺序渲染、不带分组名会找不到北） -->
-    <div v-if="searchActive && searchHits.length" class="search-hits">
-      <button v-for="k in searchHits" :key="k" type="button" class="search-hit-tag" :class="{ hidden: isCardHidden(k) }" @click="scrollToCard(k)">
-        {{ cardTabLabel(k) }} · {{ SEARCH_INDEX[k].label }}
-        <span v-if="isCardHidden(k)" class="hidden-badge">（已隐藏）</span>
-      </button>
-    </div>
-
-    <!-- [数据] 凭据：填一次就不动，默认收起（展开状态见 toolOpen.credentials） -->
-    <section v-if="cardOn('data', 'credentials')" class="card" data-search="credentials">
-      <div class="fold">
-        <button class="link-btn utils-btn utils-secondary" @click="toolOpen.credentials = !toolOpen.credentials">
-          {{ toolOpen.credentials ? '收起凭据设置' : 'DeepSeek 凭据（API Key / 平台 Token）' }}
+      <!-- 搜索结果为空时的指引：搜索是跨组过滤，匹配不到任何卡的可见文本 -->
+      <p v-if="searchActive && !searchHits.length" class="card search-empty">
+        没找到含「{{ searchQuery.trim() }}」的卡片。搜索匹配的是卡片标题与关键词（含同义词），
+        试试更短或更常见的词，如「形象」「用量」「通知」「hosts」。
+      </p>
+      <!-- 搜索态下每张命中卡标出「本来在哪一组」，点标签直接滚到那张卡（命中卡按索引顺序渲染、不带分组名会找不到北） -->
+      <div v-if="searchActive && searchHits.length" class="search-hits">
+        <button v-for="k in searchHits" :key="k" type="button" class="search-hit-tag" :class="{ hidden: isCardHidden(k) }" @click="isCardHidden(k) ? unhideCard(k) : scrollToCard(k)">
+          {{ cardTabLabel(k) }} · {{ SEARCH_INDEX[k].label }}
+          <span v-if="isCardHidden(k)" class="hidden-badge">（已隐藏）</span>
         </button>
-        <div v-if="toolOpen.credentials" class="guide">
+      </div>
+
+      <!-- 置顶区标题：位置由 CSS order 顶到置顶卡块之前（见 .pin-scope 的样式注释），
+           不搬 DOM —— v-if 节点被搬离锚点会让 Vue 在切 Tab 时丢节点 -->
+      <p v-if="!searchActive && pinnedInTab.length" class="pin-head">
+        📌 置顶 · {{ pinnedInTab.map((k) => SEARCH_INDEX[k]?.label).join(' · ') }}
+      </p>
+
+    <!-- [数据] 凭据：填一次就不动，默认收起（展开状态见 credentialsFold.open） -->
+    <section v-if="cardOn('data', 'credentials')" class="card" :class="cardCls('credentials')" data-search="credentials">
+      <div class="fold">
+        <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="credentialsFold.open" @click="credentialsFold.open = !credentialsFold.open">
+          {{ credentialsFold.open ? '收起凭据设置' : 'DeepSeek 凭据（API Key / 平台 Token）' }}
+        </button>
+        <div v-if="credentialsFold.open" class="guide">
           <label class="field">
             <span class="label">API Key</span>
             <input v-model="secrets.apiKey" type="password" placeholder="sk-..." autocomplete="off" />
           </label>
-          <button class="link-btn utils-btn utils-secondary" @click="guides.apiKey = !guides.apiKey">
+          <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="guides.apiKey" @click="guides.apiKey = !guides.apiKey">
             {{ guides.apiKey ? '收起教程' : '如何获取 API Key？' }}
           </button>
           <div v-if="guides.apiKey" class="guide2">
@@ -2554,7 +3775,7 @@ onUnmounted(() => {
             <span class="label">平台 Token <em>（可选，「实时·令牌」用量模式需要）</em></span>
             <input v-model="secrets.platformToken" type="password" placeholder="platform.deepseek.com 令牌" autocomplete="off" />
           </label>
-          <button class="link-btn utils-btn utils-secondary" @click="guides.token = !guides.token">
+          <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="guides.token" @click="guides.token = !guides.token">
             {{ guides.token ? '收起教程' : '如何获取平台 Token？' }}
           </button>
           <div v-if="guides.token" class="guide2">
@@ -2588,11 +3809,16 @@ onUnmounted(() => {
       </div>
     </section>
 
-    <!-- [外观] 挂件外观：大小 / 形象 / 气泡（主题 · 峰谷文案 · 开关）/ 音效（开关 · 音色 · 音量）。
+    <!-- [外观] 挂件外观 + 设置页视觉：两张可独立命中 / 置顶的卡在 LookView 内，
+         故整个块不加 v-if，显隐逐卡按 cardOn('look', key) 判定（与 AssetsView 同款）
+         挂件外观 = 大小 / 形象 / 气泡（主题 · 峰谷文案 · 开关）/ 音效（开关 · 音色 · 音量）。
          素材的「导入 / 删除 / 试听 / 素材包」都在「资源」页，这里只选「用哪个」——
          所以素材说明统一放在卡片开头一句，各设置项下面只留「当前用的是什么」的状态 -->
-    <LookView v-if="cardOn('look', 'look')"
+    <LookView v-if="cardOn('look', 'look') || cardOn('look', 'pageVisual')"
               :cfg="cfg"
+              :card-on="cardOn"
+              :pinned="pinnedCards"
+              :search-active="searchActive"
               :services="services"
               :builtin-skins="BUILTIN_SKINS"
               :legacy-builtin-skins="LEGACY_BUILTIN_SKINS"
@@ -2606,18 +3832,32 @@ onUnmounted(() => {
               :sound-unused="soundUnused"
               :scale-steps="SCALE_STEPS"
               :builtin-sound-sets="BUILTIN_SOUND_FILES"
+              :bg-media-paused="bgMediaPaused"
+              :bg-media-is-video="bgMediaIsVideo"
+              :bg-media-error="bgMediaError"
+              :boot-intro-auto-played="bootIntroAutoPlayed"
               @patch="patchCfg"
               @scale-num-live="onScaleNumLive"
               @scale-commit="onScaleCommit"
               @random-skin="doRandomSkin"
               @toggle-include-builtin="onToggleIncludeBuiltin"
               @preview-builtin-sound="doPreviewBuiltinSound"
+              @bg-video-updated="onBgVideoUpdated"
+              @bg-media-play="playCurrentBgMedia"
+              @bg-media-pause="pauseCurrentBgMedia"
+              @bg-auto-tune="autoTuneBgMedia"
+              @bg-tune="onBgTune"
+              @preview-boot-intro="playBootIntroPreview"
+              @boot-intro-clean-change="onBootIntroCleanChange"
+              @open-system-animation-settings="openSystemAnimationSettings"
+              @go-assets="goAssetsTab"
               @ui-mode-change="onUiModeChange" />
 
     <!-- [外观] 按压气泡（自定义泡泡）：点小鲸鱼时按顺序弹的泡泡队列。
          挂在「挂件外观」之下、与它同属 look 组（挂件菜单的「气泡设置」按钮按 target='bubble' 直达本卡）。
          卡内是独立整块（队列 + 泡 + 行 + 模块四层），故单独成组件，不塞进 LookView -->
     <BubbleView v-if="cardOn('look', 'bubbleCustom')"
+                :class="cardCls('bubbleCustom')"
                 :cfg="cfg"
                 :widget-visible="widgetVisible"
                 @patch="patchCfg" />
@@ -2629,6 +3869,7 @@ onUnmounted(() => {
     <AssetsView
       :cfg="cfg"
       :card-on="cardOn"
+      :pinned="pinnedCards"
       :search-active="searchActive"
       :services="services"
       :skin-gallery="skinGallery"
@@ -2647,12 +3888,14 @@ onUnmounted(() => {
       :skin-unused="skinUnused"
       :sound-unused="soundUnused"
       :assets-busy="assetsBusy"
+      :media-refresh-tick="mediaRefreshTick"
       :shared-skin-thumb-data-url="sharedSkinThumbDataUrl"
       :builtin-skins="BUILTIN_SKINS"
       :legacy-builtin-skins="LEGACY_BUILTIN_SKINS"
       :shared-skin-pack-skins="SHARED_SKIN_PACK_SKINS"
       :browse-skins-tick="browseSkinsTick"
       @patch="patchCfg"
+      @media-changed="onMediaChanged"
       @import-skin="doImportSkin"
       @use-skin="doUseSkin"
       @pick-skin="pickSkin"
@@ -2688,6 +3931,7 @@ onUnmounted(() => {
     <!-- [用量] 用量与账本：用量口径（记账 / 令牌）+ 趋势 + 明细 + 额度 + 校准。
          口径原先在「挂件行为」卡片里，与它影响的图表分家，现在挪到图表上方 -->
     <UsageView v-if="cardOn('usage', 'usage')" ref="usageViewRef"
+               :class="cardCls('usage')"
                :cfg="cfg" :services="services"
                :usage-history="usageHistory" :usage-currency="usageCurrency"
                :fmt-money="fmtMoney" :hhmm="hhmm" :is-ime-composing="isImeComposing"
@@ -2698,38 +3942,68 @@ onUnmounted(() => {
                @refresh="refreshHistory" @add-price-model="addPriceModel"
                @remove-price-model="removePriceModel" />
 
-    <!-- [用量] 提醒与通知：四类自动提醒（峰谷切换 / 低余额 / 今日预算 / 余额大幅波动）+ 计时通知 + 提醒文案。
-         原先开关挤在「挂件行为」那张 106 行的卡里、文案挂在「外观 → 文案」卡里，调一类提醒要跳两个 Tab，
-         现在按「提醒」这个主题收成一张卡，文案作为卡内折叠 -->
-    <NotifyView v-if="cardOn('usage', 'notify')" ref="notifyViewRef"
-                :cfg="cfg" :services="services" :usage-currency="usageCurrency"
-                :timer-note-max="TIMER_NOTE_MAX"
-                :alert-sound-roles="ALERT_SOUND_ROLES" :sound-role-label="SOUND_ROLE_LABEL"
-                @patch="patchCfg" @save-alerts="onSaveAlerts" />
-
-    <!-- [用量] 多厂商模型：注册表存配置、余额存运行时快照；挂件菜单里可切换主显示的是哪一个 -->
+    <!-- [用量] 多厂商模型：注册表存配置、余额存运行时快照；挂件菜单里可切换主显示的是哪一个。
+         放在「提醒与通知」之前：查余额 / 切主显示是高频动作，提醒是低频配置 -->
     <ModelsView v-if="cardOn('usage', 'models')"
+                :class="cardCls('models')"
                 :services="services" :models="models" :model-configs="modelConfigs"
                 :models-main-id="modelsMainId" :model-tpls="modelTpls" :model-max="modelMax"
                 :low-alert-default="LOW_ALERT_DEFAULT"
                 :fmt-tokens="fmtTokens" :codex-win-text="codexWinText"
                 @reload="reloadModels" @update:main-id="onModelsMainChange" />
 
-    <!-- [用量] 专注与待办：专注记录（开关 + 近 7 天统计）+ 待办清单编辑面。
-         挂件菜单的「管理待办」导航到本卡（target='focus'），故卡上挂 data-search="focus" -->
-    <FocusView v-if="cardOn('usage', 'focus')"
-               :cfg="cfg" :services="services" :is-ime-composing="isImeComposing"
-               @patch="patchCfg" />
+    <!-- [用量] 提醒与通知：四类自动提醒（峰谷切换 / 低余额 / 今日预算 / 余额大幅波动）+ 通知渠道 + 提醒文案。
+         原先开关挤在「挂件行为」那张 106 行的卡里、文案挂在「外观 → 文案」卡里，调一类提醒要跳两个 Tab，
+         现在按「提醒」这个主题收成一张卡，文案作为卡内折叠。计时类配置已迁到下面的「计时」卡 -->
+    <NotifyView v-if="cardOn('usage', 'notify')" ref="notifyViewRef"
+                :class="cardCls('notify')"
+                :cfg="cfg" :services="services" :usage-currency="usageCurrency"
+                :alert-sound-roles="ALERT_SOUND_ROLES" :sound-role-label="SOUND_ROLE_LABEL"
+                @patch="patchCfg" @save-alerts="onSaveAlerts" />
+
+    <!-- [用量] 专注与待办：今日/待办/统计/明细在前，计时默认值沉底。
+         子块仍各自带 data-search，显示管理 / 搜索 / 置顶键不变 -->
+    <section v-if="cardOn('usage', 'timer') || cardOn('usage', 'focus')"
+             class="card focus-timer-card"
+             :class="{ 'card-pinned': isPinned('timer') || isPinned('focus') }">
+      <div class="card-head">
+        <h2 class="card-toggle" @click="focusTimerFold.open = !focusTimerFold.open">
+          <span class="caret">{{ focusTimerFold.open ? '▾' : '▸' }}</span>{{ cardOn('usage', 'focus') ? '专注与待办' : '计时' }}
+          <span v-if="!focusTimerFold.open" class="card-sum">{{ cardOn('usage', 'focus') ? (cardOn('usage', 'timer') ? '今日专注 · 待办 · 计时设置' : '专注记录 · 待办 · 统计') : '默认时长 · 快捷 · 到点提醒' }}</span>
+        </h2>
+      </div>
+      <template v-if="focusTimerFold.open">
+      <p v-if="cardOn('usage', 'focus')" class="hint">开启专注记录后，一轮计时会记成专注；待办可挂提醒或直接开始计时。</p>
+      <FocusView v-if="cardOn('usage', 'focus')" class="card-embedded"
+                 :cfg="cfg" :services="services" :is-ime-composing="isImeComposing"
+                 :search-active="searchActive"
+                 @patch="patchCfg" />
+      <TimerView v-if="cardOn('usage', 'timer')" class="card-embedded"
+                 :cfg="cfg" :timer-note-max="TIMER_NOTE_MAX"
+                 :timer-presets-default="TIMER_PRESETS_DEFAULT"
+                 :search-active="searchActive"
+                 @patch="patchCfg" />
+      </template>
+    </section>
+
+    <!-- [用量] 下班倒计时：可开关的独立展示形态；关闭时挂件完全走原路径（余额 / 专注 / 计时不受影响） -->
+    <OffworkView
+      v-if="cardOn('usage', 'offwork')"
+      :class="cardCls('offwork')"
+      :cfg="cfg"
+      @patch="patchCfg" />
 
     <!-- [窗口] 挂件窗口：显隐、位置与窗口属性（使用说明 / 故障排查已挪到「帮助」组）。
          模板已迁至 WindowView.vue：widgetFlash / 显隐 / 复位 / 复制指令 / 新增快捷键
          都写与「使用帮助」卡共用的消息槽，故仍留在父级，这里用 emit 触发 -->
     <WindowView
       v-if="cardOn('window', 'window')"
+      :class="cardCls('window')"
       :cfg="cfg"
       :services="services"
       :taskbar-text="taskbarText"
       :widget-flash="widgetFlash"
+      :widget-visible="widgetVisible"
       @patch="patchCfg"
       @show-widget="showWidget"
       @hide-widget="hideWidget"
@@ -2743,6 +4017,7 @@ onUnmounted(() => {
          与窗口卡共用父级消息槽，故按 props 收、emit 触发 -->
     <HelpView
       v-if="cardOn('help', 'help')"
+      :class="cardCls('help')"
       :services="services"
       :err-detail="errDetail"
       :err-flash="errFlash"
@@ -2753,31 +4028,33 @@ onUnmounted(() => {
       @copy-widget-error="copyWidgetError"
     />
 
+    <!-- [数据] 备份与恢复。原先折在「数据与隐私」卡的 .fold 里，但「数据」组 desc 一直把它
+         当并列的第三张卡来写（「凭据设置 · 清除数据 · 备份与恢复」），搜索索引里也没提它 ——
+         即 desc 承诺是卡、实际是别人卡里的折叠。提升为独立卡，三者对齐；也更好找。
+         卡内内容原样搬来，交互与状态（backupFlash 等）不变。
+         放在「清除数据」之前：备份 / 恢复比销毁性操作常用，破坏性卡片沉底。 -->
+    <BackupView v-if="cardOn('data', 'backup')" :class="cardCls('backup')" :services="services" @applied="onBackupApplied" />
+
     <!-- [数据] 数据与隐私：按项清除 + 备份与恢复 -->
     <!-- [数据] 数据与隐私：模板已迁至 PrivacyView.vue。清除动作与勾选项内聚在组件内，
          清除成功后的回显刷新（secrets / cfg / 账本 / 各素材卡片）读父级全局状态，故用 emit('cleared') 交回 -->
     <PrivacyView
       v-if="cardOn('data', 'privacy')"
+      :class="cardCls('privacy')"
       :services="services"
       @cleared="onDataCleared"
     />
 
-    <!-- [数据] 备份与恢复。原先折在「数据与隐私」卡的 .fold 里，但「数据」组 desc 一直把它
-         当并列的第三张卡来写（「凭据设置 · 清除数据 · 备份与恢复」），搜索索引里也没提它 ——
-         即 desc 承诺是卡、实际是别人卡里的折叠。提升为独立卡，三者对齐；也更好找。
-         卡内内容原样搬来，交互与状态（backupFlash 等）不变。 -->
-    <BackupView v-if="cardOn('data', 'backup')" :services="services" @applied="onBackupApplied" />
-
     <!-- [开发者] DeepSeek Harness（dsh） -->
-    <section v-if="cardOn('dev', 'dshMain')" class="card dsh-card" data-search="dshMain">
+    <section v-if="cardOn('dev', 'dshMain')" class="card dsh-card" :class="cardCls('dshMain')" data-search="dshMain">
       <div class="card-head">
-        <h2 class="card-toggle" @click="dshMainFold = !dshMainFold">
-          <span class="caret">{{ dshMainFold ? '▾' : '▸' }}</span>DeepSeek Harness（dsh）
+        <h2 class="card-toggle" @click="dshMainFold.open = !dshMainFold.open">
+          <span class="caret">{{ dshMainFold.open ? '▾' : '▸' }}</span>DeepSeek Harness（dsh）
           <!-- 收起态摘要：状态本来就是启动后自动查的（不额外读盘），所以这里直接报，不像其他卡要等首次展开 -->
-          <span v-if="!dshMainFold" class="card-sum">{{ dshStateText }}</span>
+          <span v-if="!dshMainFold.open" class="card-sum">{{ dshStateText }}</span>
         </h2>
       </div>
-      <template v-if="dshMainFold">
+      <template v-if="dshMainFold.open">
       <p class="hint">在挂件菜单「dsh」分组或本卡片里 启动 / 重启 / 结束 / 更新 dsh 并打开它的 Web UI（默认 <code>http://127.0.0.1:{{ DEFAULT_DSH_PORT }}</code>，可在下方「高级选项」里改端口）。<strong>优先用你已全局安装的那份</strong>（零重复占用、终端与插件同一版本），没有才装到插件数据目录。</p>
 
       <label class="field row">
@@ -2828,7 +4105,7 @@ onUnmounted(() => {
            标题不叫「诊断信息」：「dsh 环境诊断」那张卡才是排查启动失败的检查项，
            两块都带「诊断」二字时用户分不清点哪个，这里本质是运行状态详情 -->
       <div class="fold">
-        <button class="link-btn utils-btn utils-secondary" @click="dshToggleVersions">
+        <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="dshFolds.versions" @click="dshToggleVersions">
           {{ dshFolds.versions ? '收起运行详情' : '运行详情（版本 / 命令 / 地址 / 日志）' }}
         </button>
         <div v-if="dshFolds.versions" class="guide">
@@ -2932,7 +4209,7 @@ onUnmounted(() => {
             </button>
             <!-- 日志按钮都带 dsh 前缀：帮助 Tab 里另有一处「复制诊断日志 / 打开日志文件」，
                  那是插件自身的 whale-debug.log，与这里的 dsh 子进程日志是两回事 -->
-            <button class="secondary utils-btn utils-secondary" @click="dshLogOpen = !dshLogOpen">{{ dshLogOpen ? '收起 dsh 日志' : '查看 dsh 日志' }}</button>
+            <button class="secondary utils-btn utils-secondary" :aria-expanded="dshLogOpen" @click="dshLogOpen = !dshLogOpen">{{ dshLogOpen ? '收起 dsh 日志' : '查看 dsh 日志' }}</button>
           </div>
           <div class="btn-row row-link">
             <button class="link-btn utils-btn utils-secondary" @click="dshStatus(true)">刷新状态</button>
@@ -2955,7 +4232,7 @@ onUnmounted(() => {
            真出问题时用户根本滚不到。标题带 dsh 前缀：帮助 Tab 里另有一块也叫「故障排查」，
            讲的是插件自身（whale-debug.log），不写前缀会让人以为是一回事。 -->
       <div class="fold">
-        <button class="link-btn utils-btn utils-secondary" @click="dshToggleTrouble">{{ dshFolds.trouble ? '收起 dsh 故障排查' : 'dsh 故障排查' }}</button>
+        <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="dshFolds.trouble" @click="dshToggleTrouble">{{ dshFolds.trouble ? '收起 dsh 故障排查' : 'dsh 故障排查' }}</button>
         <div v-if="dshFolds.trouble" class="guide">
           <p class="guide-use"><strong>结束 / 重启：</strong>不只管本插件启动的进程 —— 只要 dsh 端口上跑着 dsh（含在别的终端里启动的）都能被结束；非 dsh 占用端口时会拒绝执行，避免误杀。</p>
           <p class="guide-use"><strong>首次安装很慢：</strong>要下载约 500 个包，国内建议把「npm 注册源」改成淘宝镜像；等待期间状态行会显示「已等待 x 秒」。</p>
@@ -2984,7 +4261,7 @@ onUnmounted(() => {
       <p v-if="dshFlash.msg" class="msg" :class="msgCls(dshFlash)">{{ dshFlash.msg }}</p>
 
       <div class="fold">
-        <button class="link-btn utils-btn utils-secondary" @click="dshFolds.advanced = !dshFolds.advanced">{{ dshFolds.advanced ? '收起高级选项' : '高级选项（端口 / 注册源 / Node 目录 / 行为）' }}</button>
+        <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="dshFolds.advanced" @click="dshFolds.advanced = !dshFolds.advanced">{{ dshFolds.advanced ? '收起高级选项' : '高级选项（端口 / 注册源 / Node 目录 / 行为）' }}</button>
         <div v-if="dshFolds.advanced" class="guide">
           <!-- 「dsh 版本」已移到上面的「更新版本」行：它是安装/更新的入参，属于动作的一部分；
                留在这里会让一次「装指定版本」横跨三个折叠区（运行详情查版本 → 这里选版本 → 上面点更新），
@@ -3029,11 +4306,17 @@ onUnmounted(() => {
             <span class="label">uTools 退出后保留 dsh <em>（不勾选＝插件退出时自动结束，避免占着端口）</em></span>
             <input type="checkbox" v-model="cfg.dshKeepAlive" @change="patchCfg({ dshKeepAlive: cfg.dshKeepAlive })" />
           </label>
+          <!-- 以管理员身份启动：只在 Windows 出现（非 Windows 没有 UAC，也没有 runas 这条路） -->
+          <label v-if="IS_WIN" class="field row check">
+            <span class="label">以管理员身份启动 <em>（给需要管理员权限的 dsh 插件用；改完要重启 dsh 才生效）</em></span>
+            <input type="checkbox" v-model="cfg.dshElevated" @change="patchCfg({ dshElevated: cfg.dshElevated })" />
+          </label>
+          <p v-if="IS_WIN && cfg.dshElevated" class="hint">开启后<strong>每次启动都会弹一次 UAC</strong>；弹窗里点「否」会回落成普通权限启动（不会卡在半启动状态）。运行中的进程无法就地提权，所以这是「runas 起新实例 + 旧实例退出」的结果。结束这种实例同样要管理员权限，会再弹一次 UAC；「重启 / 更新」会先结束再启动，等于两次弹窗。<span v-if="dsh.admin">当前 uTools 已是管理员，启动时不会再弹。</span><br /><strong>uTools 退出时不会自动结束这种实例</strong>（免得退出流程被 UAC 卡住），它会继续跑并占着端口；下次启动若提示「端口已被占用」，就在本页点「结束」手动清掉（同样会弹 UAC）。<br />想完全免弹窗，可以改用「以最高权限运行」的计划任务启动 dsh；思路、<code>schtasks</code> 参数、凭证风险与回滚方式见 <code>docs/guide-dsh-admin.md</code>（系统层配置，本插件不代为创建）。</p>
         </div>
       </div>
 
       <div class="fold">
-        <button class="link-btn utils-btn utils-secondary" @click="dshFolds.help = !dshFolds.help">{{ dshFolds.help ? '收起使用说明' : '使用说明' }}</button>
+        <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="dshFolds.help" @click="dshFolds.help = !dshFolds.help">{{ dshFolds.help ? '收起使用说明' : '使用说明' }}</button>
         <div v-if="dshFolds.help" class="guide">
           <p class="guide-use"><strong>启动：</strong>直接 <code>node &lt;那份 dsh&gt;/lib/bin.js web [--no-open]</code>（有全局安装就用全局那份，否则用插件目录的）—— 不再经过 npx，也就不会再堆缓存副本。</p>
           <p class="guide-use"><strong>更新：</strong>结束正在运行的 dsh → 重新安装「dsh 版本」里选定的版本（自动＝latest）→ 原本在跑就用新版重新启动；已有全局安装时更新的就是全局那份（<code>npm i -g</code>）。</p>
@@ -3043,7 +4326,7 @@ onUnmounted(() => {
       </template>
     </section>
     <!-- [dsh] dsh 只读诊断：五项本地检查，纯只读、不改任何配置、不联网 -->
-    <section v-if="cardOn('dev', 'dshDiagnose')" class="card dsh-card" data-search="dshDiagnose">
+    <section v-if="cardOn('dev', 'dshDiagnose')" class="card dsh-card" :class="cardCls('dshDiagnose')" data-search="dshDiagnose">
       <div class="card-head">
         <h2 class="card-toggle" @click="toggleDevCard('diagnose')">
           <span class="caret">{{ devFolds.diagnose ? '▾' : '▸' }}</span>dsh 环境诊断
@@ -3109,7 +4392,7 @@ onUnmounted(() => {
         </label>
 
         <div class="fold">
-          <button class="link-btn utils-btn utils-secondary" @click="diagnoseFolds.help = !diagnoseFolds.help">{{ diagnoseFolds.help ? '收起说明' : '说明' }}</button>
+          <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="diagnoseFolds.help" @click="diagnoseFolds.help = !diagnoseFolds.help">{{ diagnoseFolds.help ? '收起说明' : '说明' }}</button>
           <div v-if="diagnoseFolds.help" class="guide">
             <!-- 与「配置转储」「插件开关」两张卡分工：这张只回答「哪里坏了」，
                  转储卡回答「这个条目是谁改的」，插件开关卡负责动手改。
@@ -3125,7 +4408,7 @@ onUnmounted(() => {
       </template>
     </section>
     <!-- [dsh] dsh 配置转储：一次 CLI 读取，摊开 patch 分层与生效/默认树差异，纯只读、不改配置、不联网 -->
-    <section v-if="cardOn('dev', 'dshDump')" class="card dsh-card" data-search="dshDump">
+    <section v-if="cardOn('dev', 'dshDump')" class="card dsh-card" :class="cardCls('dshDump')" data-search="dshDump">
       <div class="card-head">
         <h2 class="card-toggle" @click="toggleDevCard('dshDump')">
           <span class="caret">{{ devFolds.dshDump ? '▾' : '▸' }}</span>dsh 配置转储
@@ -3166,7 +4449,7 @@ onUnmounted(() => {
 
         <!-- D1：patch 分层。层数等于 dump 里的来源数，不固定为五，避免硬套模型失真 -->
         <div class="fold">
-          <button class="link-btn utils-btn utils-secondary" @click="dshDumpFolds.layers = !dshDumpFolds.layers">{{ dshDumpFolds.layers ? '收起分层' : '展开分层' }}（{{ dshDump.layers?.length || 0 }} 层）</button>
+          <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="dshDumpFolds.layers" @click="dshDumpFolds.layers = !dshDumpFolds.layers">{{ dshDumpFolds.layers ? '收起分层' : '展开分层' }}（{{ dshDump.layers?.length || 0 }} 层）</button>
           <div v-if="dshDumpFolds.layers" class="layer-list">
             <div v-for="l in dshDump.layers" :key="l.order" class="layer-item" :class="dshDumpLayerCls(l)">
               <p class="layer-head">
@@ -3185,7 +4468,7 @@ onUnmounted(() => {
 
         <!-- D2：生效树 vs 默认树差异。默认树读失败时降级为只展示分层，不整卡失败 -->
         <div class="fold">
-          <button class="link-btn utils-btn utils-secondary" @click="dshDumpFolds.diff = !dshDumpFolds.diff">{{ dshDumpFolds.diff ? '收起差异' : '展开差异' }}</button>
+          <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="dshDumpFolds.diff" @click="dshDumpFolds.diff = !dshDumpFolds.diff">{{ dshDumpFolds.diff ? '收起差异' : '展开差异' }}</button>
           <div v-if="dshDumpFolds.diff">
             <p v-if="dshDump.diffError" class="hint">默认树读取失败，未能比对：{{ dshDump.diffError }}</p>
             <p v-else-if="dshDump.diff && !dshDump.diff.changedTotal && !dshDump.diff.addedTotal && !dshDump.diff.removedTotal" class="hint">生效树与默认树完全一致，没有额外改动。</p>
@@ -3209,7 +4492,7 @@ onUnmounted(() => {
         </div>
 
         <div class="fold">
-          <button class="link-btn utils-btn utils-secondary" @click="dshDumpFolds.help = !dshDumpFolds.help">{{ dshDumpFolds.help ? '收起说明' : '说明' }}</button>
+          <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="dshDumpFolds.help" @click="dshDumpFolds.help = !dshDumpFolds.help">{{ dshDumpFolds.help ? '收起说明' : '说明' }}</button>
           <div v-if="dshDumpFolds.help" class="guide">
             <!-- 与「环境诊断」卡的分工：这张解释「谁改的 / 默认长什么样」，
                  诊断卡负责判「坏了没」。读一次转储同时给诊断卡提供 patch 判据，
@@ -3231,7 +4514,7 @@ onUnmounted(() => {
          这张卡全量、为了搬运。所以不复用那张卡，也不共用回执。
          位置紧邻「诊断 / 转储」：这三张同属「只读、不改 dsh 任何状态」的取证族，
          而下面的开关 / 市场会写配置或装插件 —— 把只读族与写入族分开，翻页时更好找。 -->
-    <section v-if="cardOn('dev', 'dshExport')" class="card dsh-card" data-search="dshExport">
+    <section v-if="cardOn('dev', 'dshExport')" class="card dsh-card" :class="cardCls('dshExport')" data-search="dshExport">
       <div class="card-head">
         <h2 class="card-toggle" @click="toggleDevCard('dshExport')">
           <span class="caret">{{ devFolds.dshExport ? '▾' : '▸' }}</span>dsh 全量导出
@@ -3337,7 +4620,7 @@ onUnmounted(() => {
       </template>
     </section>
     <!-- [dsh] dsh 本地用量统计：读 ~/.dsh 下 dsh-usage 的账本与会话投影缓存，纯本地、不联网 -->
-    <section v-if="cardOn('dev', 'dshUsage')" class="card dsh-card" data-search="dshUsage">
+    <section v-if="cardOn('dev', 'dshUsage')" class="card dsh-card" :class="cardCls('dshUsage')" data-search="dshUsage">
       <div class="card-head">
         <h2 class="card-toggle" @click="toggleDevCard('dshUsage')">
           <span class="caret">{{ devFolds.dshUsage ? '▾' : '▸' }}</span>dsh 用量统计
@@ -3435,7 +4718,7 @@ onUnmounted(() => {
         />
 
         <div class="fold">
-          <button class="link-btn utils-btn utils-secondary" @click="dshUsageFolds.help = !dshUsageFolds.help">{{ dshUsageFolds.help ? '收起说明' : '说明' }}</button>
+          <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="dshUsageFolds.help" @click="dshUsageFolds.help = !dshUsageFolds.help">{{ dshUsageFolds.help ? '收起说明' : '说明' }}</button>
           <div v-if="dshUsageFolds.help" class="guide">
             <p class="guide-use"><strong>数据来源：</strong>优先读 <code>dsh-usage/usage-ledger.json</code>（dsh-usage 插件的按天账本，能画趋势）；账本还没有数据时回落到 <code>storages/session_projcache/sessions/*.json</code>，按「会话创建日」把该会话的全部用量记在一天里。两者不会同时累加，避免同一批 token 被算两遍。</p>
             <p class="guide-use"><strong>花费：</strong>账本里的 <code>cost</code> 只有 DeepSeek 官方那档有值（单位人民币），其它 provider 未定价恒为 0，所以不会混币种。</p>
@@ -3451,7 +4734,7 @@ onUnmounted(() => {
          合并理由：两卡改的是**同一个文件、同一个 profile、同一套快照**，差别只在粒度与候选范围。
          而候选范围不一致是会让人迷路的 —— E2 只列 patch 里已有的 12 条，用户想禁的第三方插件
          往往不在其中，在 E2 卡里根本找不到，得切到 E3 卡才行，而 E2 卡完全没提示这一点。 -->
-    <section v-if="cardOn('dev', 'dshIsolate')" class="card dsh-card" data-search="dshIsolate">
+    <section v-if="cardOn('dev', 'dshIsolate')" class="card dsh-card" :class="cardCls('dshIsolate')" data-search="dshIsolate">
       <div class="card-head">
         <h2 class="card-toggle" @click="toggleDevCard('dshIsolate')">
           <span class="caret">{{ devFolds.dshIsolate ? '▾' : '▸' }}</span>dsh 插件开关
@@ -3509,7 +4792,7 @@ onUnmounted(() => {
 
           <template v-else>
             <div class="fold">
-              <button class="link-btn utils-btn utils-secondary" @click="dshIsolateFolds.list = !dshIsolateFolds.list">
+              <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="dshIsolateFolds.list" @click="dshIsolateFolds.list = !dshIsolateFolds.list">
                 {{ dshIsolateFolds.list ? '收起候选' : '展开候选' }}（已勾 {{ dshIsolatePicked.size }} / 共 {{ dshIsolate.items.length }} 条）
               </button>
               <!-- 用小胶囊样式而不是 .btn-row：上一行是 12px 的下划线链接，
@@ -3589,6 +4872,7 @@ onUnmounted(() => {
                         <span class="patch-id" :title="it.source === 'patch' ? `patch 第 ${it.line} 行` : `不在 patch 里，隔离会新加一条${it.bundle ? '（来自 ' + it.bundle + '）' : ''}`">{{ it.id }}</span>
                         <span v-if="it.source === 'plugin'" class="patch-tag">新加</span>
                         <span v-if="it.hasConfig" class="patch-tag">带 config</span>
+                        <span v-if="it.expression" class="patch-tag" title="启用状态由 !!js 表达式决定，市场不会覆盖它">表达式</span>
                         <span
                           class="patch-state"
                           :class="it.disabled === true ? 'state-off' : it.disabled === false ? 'state-on' : 'state-unknown'"
@@ -3635,7 +4919,7 @@ onUnmounted(() => {
              早先它夹在说明与候选之间，把「预览改动 → 确认隔离」这条动作链硬生生截断，
              用户从预览滚到确认要跨过整块快照管理（份数/还原/命名/删除/清理）。 -->
         <div class="fold">
-          <button class="link-btn utils-btn utils-secondary" @click="dshBackupToggleList()">
+          <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="dshBackupFolds.list" @click="dshBackupToggleList()">
             {{ dshBackupFolds.list ? '收起快照' : '展开快照' }}（{{ dshBackups?.snapshots?.length || 0 }} 份，保留最近 {{ dshBackups?.max ?? 20 }} 份）
           </button>
           <div v-if="dshBackupFolds.list">
@@ -3727,7 +5011,7 @@ onUnmounted(() => {
         </div>
 
         <div class="fold">
-          <button class="link-btn utils-btn utils-secondary" @click="dshIsolateFolds.help = !dshIsolateFolds.help">{{ dshIsolateFolds.help ? '收起说明' : '说明' }}</button>
+          <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="dshIsolateFolds.help" @click="dshIsolateFolds.help = !dshIsolateFolds.help">{{ dshIsolateFolds.help ? '收起说明' : '说明' }}</button>
           <div v-if="dshIsolateFolds.help" class="guide">
             <p class="guide-use"><strong>为什么清单里有 200 多条：</strong>候选是<strong>用户层 patch 里已有的条目</strong> ∪ <strong>组装树里读到的插件</strong>。前者是「你已经写过的」，后者写进去等于<strong>新加</strong>一条 patch —— 只列前者的话，你想禁的第三方插件往往根本不在清单里，会找不到入口。加起来实测常有 200 条以上，用上面的分组轴收窄。</p>
             <p class="guide-use"><strong>为什么候选要读组装树：</strong>实测写一个<strong>不存在的 id</strong>，dsh 只在 stderr 打一行 <code>patch: entry "X" not found</code>、退出码 0、启动照常 —— 也就是「写坏了不报错」。所以候选先拿一份真实存在的条目，让你<strong>勾不到拼错的 id</strong>。读不到组装树时降级为「只有 patch 里的条目」，不把整件事判死。</p>
@@ -3749,7 +5033,7 @@ onUnmounted(() => {
          所以这张反过来必须显式声明会联网，且**默认一个请求都不发**：
          展开只读一次本地已装状态，要点「进入市场」+「加载目录」才出站（见 dshMarketRevealed）。
          联网警示在「进入市场」前后各留一份（文案不同）—— 出站点在后面，不能只在入口说一次。 -->
-    <section v-if="cardOn('dev', 'dshMarket')" class="card dsh-card" data-search="dshMarket">
+    <section v-if="cardOn('dev', 'dshMarket')" class="card dsh-card" :class="cardCls('dshMarket')" data-search="dshMarket">
       <div class="card-head">
         <h2 class="card-toggle" @click="toggleDevCard('dshMarket')">
           <span class="caret">{{ devFolds.dshMarket ? '▾' : '▸' }}</span>dsh 插件市场
@@ -3790,8 +5074,8 @@ onUnmounted(() => {
               事实 —— 已装但不在目录里、或 install 字段认不出的包，在目录列表里永远找不到行。
               这里直接列 installed 表，把两类盲区一次补齐。 -->
       <div v-if="dshMarketStatus" class="fold">
-        <button class="link-btn utils-btn utils-secondary" @click="dshMarketInstalledFold = !dshMarketInstalledFold">
-          {{ dshMarketInstalledFold ? '▸' : '▾' }} 已装包（{{ dshMarketInstalledSummary }}）
+        <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="!dshMarketInstalledFold" @click="dshMarketInstalledFold = !dshMarketInstalledFold">
+          已装包（{{ dshMarketInstalledSummary }}）
         </button>
         <div v-if="!dshMarketInstalledFold && dshMarketInstalledList.length" class="patch-list">
           <p class="hint">
@@ -3842,7 +5126,7 @@ onUnmounted(() => {
            两段来源说明（竞速机制 + 设置不触发抓取）合并成一段放进折叠里 ——
            说明与设置放一起，展开就看到全部上下文，不用回到上面找。 -->
       <div class="fold">
-        <button class="link-btn utils-btn utils-secondary" @click="dshMarketFolds.source = !dshMarketFolds.source">
+        <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="dshMarketFolds.source" @click="dshMarketFolds.source = !dshMarketFolds.source">
           {{ dshMarketFolds.source ? '收起来源设置' : '来源设置' }}（{{ dshMarketSourceShort }}）
         </button>
         <div v-if="dshMarketFolds.source" class="guide">
@@ -3878,7 +5162,7 @@ onUnmounted(() => {
            这段是「为什么可以信它」的解释，不是操作步骤，常驻两行会压住下面的列表；
            但它关系到用户敢不敢点安装，所以不能删，做成一行提示 + 可展开。 -->
       <div class="fold">
-        <button class="link-btn utils-btn utils-secondary" @click="dshMarketFolds.install = !dshMarketFolds.install">
+        <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="dshMarketFolds.install" @click="dshMarketFolds.install = !dshMarketFolds.install">
           {{ dshMarketFolds.install ? '收起安装说明' : '安装说明' }}（快照 + 回读校验；装完需重启 dsh）
         </button>
         <div v-if="dshMarketFolds.install" class="guide">
@@ -3960,7 +5244,7 @@ onUnmounted(() => {
 
         <!-- 筛选器收进折叠：浏览的主体是列表，三个筛选控件常驻会把列表挤下去 -->
         <div class="fold">
-          <button class="link-btn utils-btn utils-secondary" @click="dshMarketFolds.filters = !dshMarketFolds.filters">
+          <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="dshMarketFolds.filters" @click="dshMarketFolds.filters = !dshMarketFolds.filters">
             {{ dshMarketFolds.filters ? '收起筛选' : '筛选与排序' }}
           </button>
           <div v-if="dshMarketFolds.filters" class="guide">
@@ -4136,6 +5420,10 @@ onUnmounted(() => {
                 <!-- 「可更新」只在**确定**有新版时出（state==='update'）：
                      目录没给版本的条目 state 是 'unknown'，不能标成可更新 -->
                 <span v-if="dshMarketHasUpdate(p)" class="patch-tag tag-update" :title="dshMarketUpdateTip(p)">可更新</span>
+                <!-- 纯依赖（不是 dsh 插件）：市场更新通道装不了它（宿主 not-bundle 会回滚）。
+                     标出来是为了回答「为什么它明明落后却没有『可更新』」—— 不标的话用户只会
+                     以为市场漏判了，然后去点更新、白折腾一次。悬停给出版本差与处置建议 -->
+                <span v-if="dshMarketPlainDep(p)" class="patch-tag" :title="dshMarketPlainDepTip(p)">普通依赖·不可更新</span>
                 <span v-if="dshMarketHitAt(p)?.disabled" class="patch-state state-off">已禁用</span>
                 <span v-else-if="dshMarketHitAt(p)?.inDeps && !dshMarketHitAt(p)?.inPatch" class="patch-state state-unknown">包在磁盘，未写 patch</span>
                 <!-- ⚠️ 「需构建」与「不认识」是两回事，必须分开说：
@@ -4403,7 +5691,7 @@ onUnmounted(() => {
         </template>
 
         <div class="fold">
-          <button class="link-btn utils-btn utils-secondary" @click="dshMarketFolds.help = !dshMarketFolds.help">{{ dshMarketFolds.help ? '收起说明' : '说明' }}</button>
+          <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="dshMarketFolds.help" @click="dshMarketFolds.help = !dshMarketFolds.help">{{ dshMarketFolds.help ? '收起说明' : '说明' }}</button>
           <div v-if="dshMarketFolds.help" class="guide">
             <p class="guide-use"><strong>目录从哪来：</strong>默认走 npm 镜像（<code>registry.npmmirror.com</code> 的 <code>dsh-plugin-catalog</code>，与官方同源但只有 1.09MB）。勾「官方源」会让 <code>awesome-dsh-plugin.com/plugins.json</code>（4.37MB）一起参赛。多源<strong>并发竞速、先到先用</strong>；全挂则用本地副本并标「可能已过期」。也可填自定义 URL（优先于镜像）。</p>
             <p class="guide-use"><strong>为什么默认不联网：</strong>本 Tab 其余卡片展开即读本地文件，唯独这张要发 HTTP。所以展开只读已装状态，点「进入市场」→「加载目录」才抓取；来源单选只改偏好，不触发抓取。</p>
@@ -4421,14 +5709,18 @@ onUnmounted(() => {
     </section>
     <!-- [dsh] Codex 本地会话统计：读 ~/.codex/sessions 的 rollout JSONL，纯本地、不联网。
          上方 7 张卡都属于 dsh，这张不是 —— 用一条纯分界线隔开即可，不写字：
-         写字会和紧邻的卡标题「Codex 会话统计」重复，反而更啰嗦。 -->
-    <hr v-if="!searchActive && activeTab === 'dev'" class="group-sep">
+         写字会和紧邻的卡标题「Codex 会话统计」重复，反而更啰嗦。
+         用户在「管理显示内容」里给开发者 Tab 拖过卡片顺序后就不再画这条线：
+         它代表「dsh 组 / 非 dsh 组」的固定分组，一旦卡片被自由重排，这层分组已不存在，
+         留着会变成一条夹在任意两张卡之间的野生横线。 -->
+    <hr v-if="!searchActive && activeTab === 'dev' && !(cfg.cardOrder.dev || []).length" class="group-sep">
     <!-- [dsh] Codex 本地会话统计：模板已迁至 CodexView.vue。父级用一条 hr.group-sep 隔开
          （依赖 searchActive / activeTab，留父级）。fmtTokens / codexWinText / codexDayLabel
          与图表档位仍留父级（跨卡共享），按 props 下传；本卡是否有窗口数据经 emit('windows') 上抛，
          并入父级的倒计时心跳 codexTickNeed。 -->
     <CodexView
       v-if="cardOn('dev', 'codex')"
+      :class="cardCls('codex')"
       :services="services"
       :ranges="DSH_USAGE_RANGES"
       :fmt-tokens="fmtTokens"
@@ -4441,6 +5733,7 @@ onUnmounted(() => {
          留在父级（onMounted 里有启动时自动检查一次，不随卡片可见性而跑），这里用 emit 触发 -->
     <AboutView
       v-if="cardOn('help', 'about')"
+      :class="cardCls('about')"
       :cfg="cfg"
       :services="services"
       :app-version="appVersion"
@@ -4456,11 +5749,38 @@ onUnmounted(() => {
     <!-- [帮助] GitHub 加速（hosts 方案）：已抽成独立组件，显隐仍由本页的 Tab / 搜索态决定 -->
     <AccelView
       v-if="cardOn('help', 'ghAccel')"
+      :class="cardCls('ghAccel')"
       :cfg="cfg"
       :services="services"
       :active-tab="activeTab"
       @patch="patchCfg"
     />
+    <!-- 调试工具：不注册成卡片（否则会出现在「管理显示内容」与搜索结果里，违背「生产 UI 不出现」）。
+         只在「开发者」Tab、非搜索态渲染；入口本身还要 config.debugTools 打开才显示。
+         「立即触发提醒」是纯投递演练（不写幂等位）；「注入旧数据」会真写入并回推，用于回归。 -->
+    <section v-if="!searchActive && activeTab === 'dev'" class="card">
+      <h2 class="card-title">调试工具 <em>（默认关闭 · 仅回归测试用）</em></h2>
+      <label class="field row check">
+        <span class="label">启用调试工具 <em>（正常使用请保持关闭）</em></span>
+        <input type="checkbox" :checked="cfg.debugTools" @change="patchCfg({ debugTools: ($event.target as HTMLInputElement).checked })" />
+      </label>
+      <template v-if="cfg.debugTools">
+        <label class="field row">
+          <span class="label">立即触发指定提醒</span>
+          <select :value="debugTodoId" @change="debugTodoId = ($event.target as HTMLSelectElement).value">
+            <option value="">选择一条待办…</option>
+            <option v-for="it in debugTodos" :key="it.id" :value="it.id">{{ it.text }}</option>
+          </select>
+          <button class="btn" :disabled="!debugTodoId" @click="doDebugTodoDue">立即触发</button>
+        </label>
+        <label class="field row">
+          <span class="label">注入旧数据 <em>（remindedFor=0 的重复提醒 + focus/timer 双置顶 + 幽灵媒体项）</em></span>
+          <button class="btn" @click="doDebugInjectLegacy">注入</button>
+        </label>
+        <p class="hint">调试结果：{{ debugMsg || '（未执行）' }}。提醒演练不写幂等位；旧数据注入会真写入，可在「专注与待办」「管理显示内容」「背景与片头」里核对。</p>
+      </template>
+    </section>
+    </div>
 
     <!-- 导入裁剪弹层：宿主选完文件（还没落盘）才显示，确认后才写盘 -->
     <SkinCropper
@@ -4480,6 +5800,12 @@ onUnmounted(() => {
       @cancel="soundTrim = null"
     />
 
+    <!-- 设置页启动片头：可选、默认关闭；挂到 body 保证盖住吸顶条与弹层 -->
+    <Teleport to="body">
+      <BootIntro v-if="bootIntroOpen" :video-url="bootIntroVideoUrl" :reduce="bgVideoReduced"
+                 @closing="onBootIntroClosing" @done="finishBootIntro" />
+    </Teleport>
+
     <!-- 首次运行引导：新装用户进设置页时弹一次，保存凭据或跳过都置位 guideDone，之后不再弹 -->
     <FirstRunGuide
       v-if="showGuide"
@@ -4492,6 +5818,7 @@ onUnmounted(() => {
       :flash-msg="guideFlash.msg"
       :flash-err="guideFlash.err"
       :reopen="guideReopen"
+      :saved="guideSaved"
       @save="onGuideSave"
       @test="onGuideTest"
       @skip="onGuideSkip"
@@ -4502,16 +5829,13 @@ onUnmounted(() => {
     <!-- 自定义显示管理弹窗 -->
     <DisplayManager
       v-if="showDisplayManager"
+      :visible="showDisplayManager"
+      :cfg="cfg"
       :tabs="TABS"
       :search-index="SEARCH_INDEX"
-      :core-cards="CORE_CARDS"
-      :card-dependencies="CARD_DEPENDENCIES"
-      :hidden-tabs="cfg.hiddenTabs"
-      :hidden-cards="cfg.hiddenCards"
+      :flash-msg="displayFlash.msg"
+      :flash-err="displayFlash.err"
       @close="showDisplayManager = false"
-      @toggle-tab="toggleTabVisibility"
-      @toggle-card="toggleCardVisibility"
-      @reset="resetDisplayToDefault"
       @update="onDisplayManagerUpdate"
     />
   </div>
@@ -4535,6 +5859,11 @@ onUnmounted(() => {
 /* 深浅色不跟系统、跟 uTools：html.dark 由脚本按 utools.isDarkColors() 切（见 main.css 同名注释） */
 html.dark .page {
   color-scheme: dark;
+}
+/* 「未至之境」：深海军蓝 + HUD 细线（fantasy 类由 applyUtoolsDark 挂，恒为暗色） */
+html.fantasy .tab-bar {
+  border-bottom: 1px solid rgba(58, 123, 255, 0.22);
+  box-shadow: inset 0 -1px 0 rgba(57, 255, 209, 0.18);
 }
 /* 深色下悬停浮出的轨道：main.css 默认给的是浅色系灰，深底上会显脏，这里换成冷白 */
 html.dark .log-box:hover::-webkit-scrollbar-track,
@@ -4562,23 +5891,20 @@ h1 {
   padding: 6px 0 8px;
   background: var(--bar-bg);
 }
-/* Tab 行：7 个分组等分整行宽。窄窗口下等分会把「开发者」三字压到字叠字，
-   所以给每个 Tab 设 min-width 并让整行可横向滚动（滚动条隐藏，见下）——
-   宁可滑动，也不要文字挤压到读不出 */
+/* Tab 行：7 个分组等分整行宽。窄窗口下**换行成两排**，不再横向滚动 ——
+   横向滚动会把「帮助 / 开发者」藏在屏幕外，用户根本不知道右边还有组；
+   换行最多多占一行，吸顶高度由 ResizeObserver 实测写进 --tab-bar-h，滚动定位不受影响。
+   每个 Tab 保留 min-width，避免「开发者」被压到字叠字。 */
 .tab-row {
   display: flex;
+  flex-wrap: wrap;
   gap: 3px;
   padding: 3px;
   border: 1px solid var(--line);
   border-radius: 10px;
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-.tab-row::-webkit-scrollbar {
-  display: none;
 }
 .tab {
-  flex: 1 0 auto;
+  flex: 1 1 auto;
   min-width: 52px;
   padding: 3px 6px;
   font-size: 13px;
@@ -4600,29 +5926,81 @@ h1 {
 .tab-on:hover {
   color: #fff;
 }
-/* 自定义显示管理入口：齿轮图标，放在 Tab 行末尾 */
+/* 自定义显示管理入口：齿轮 + 文字，放在 Tab 行末尾。
+   文字用 --fg（不是 --fg-dim）：按钮只有 12px，深色下 --fg-dim(#9fb0d9) 压在 #303133 上
+   偏暗，实机反馈「深色主题下几乎看不见」；边框同理从虚线 --line 提亮到 --fg-faint */
 .display-manager-btn {
   flex: 0 0 auto;
-  width: 28px;
   height: 28px;
-  padding: 0;
-  font-size: 16px;
+  padding: 0 9px;
+  font-size: 12px;
   line-height: 1;
-  border: 0;
+  white-space: nowrap;
+  border: 1px dashed var(--fg-faint);
   border-radius: 6px;
   background: transparent;
-  color: var(--fg-dim);
+  color: var(--fg);
   cursor: pointer;
-  transition: background 0.15s, color 0.15s;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
 }
 .display-manager-btn:hover {
   background: var(--line);
   color: var(--fg);
+  border-color: var(--fg);
 }
+/* 当前分组的一句说明。原先在吸顶的 .tab-bar 里，随 Tab 切换一直挂在屏幕上；
+   挪进 .pin-scope（置顶排序的作用域）后随内容滚走 —— 它是「这一组干什么」的提示，
+   滚到第二屏时早已不需要，而吸顶区越矮、可视卡片越多。
+   上边距归零、下边距留 12px：吸顶条自带 16px 下边距，这里再加 8px 会让组首空出一大截 */
 .tab-desc {
-  margin: 8px 2px 0;
+  margin: 0 2px 12px;
   font-size: 12px;
   color: var(--fg-faint);
+}
+.tab-desc .desc-err { color: var(--err); }
+/* 配置保存失败条：常驻、可重试。刻意做成整块底色而不是一行红字 ——
+   一是它可能长期挂着（存储满不会自愈），一行细字容易被当成说明文字略过；
+   二来它带按钮，需要明确的点击区。配色与 .msg.err 同一套变量，不另起色板 */
+.save-fail {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 2px 12px;
+  padding: 8px 12px;
+  background: color-mix(in srgb, var(--err) 10%, transparent);
+  box-shadow: inset 2px 0 0 var(--err);
+  font-size: 12px;
+  color: var(--fg);
+}
+.save-fail-text { flex: 1 1 auto; min-width: 0; line-height: 1.5; }
+.save-fail-retry, .save-fail-close { flex: none; }
+/* 置顶竖条 .card-pinned 在 main.css 全局定义：置顶 class 由子视图挂在各自卡根上，
+   写在 scoped 里够不到子组件的卡根（详见 main.css 同名规则注释）。 */
+/* 置顶作用域：syncPinned 只在这里面查卡根、写 order，不搬 DOM。
+   必须是 flex 列容器 —— 置顶卡靠负 order 排到组首，未置顶卡保持 DOM（模板）顺序，
+   取消置顶时清掉 order 就回原位（不再需要另记一份模板序）。
+   这里不加 overflow —— .card 的 scroll-margin-top 定位闪烁与 Tab 切换淡入动画都依赖正常流，
+    加裁剪会把动画与阴影切掉。 */
+.pin-scope {
+  display: flex;
+  flex-direction: column;
+}
+/* 组首三段「行内说明」的 order 必须小于置顶卡的基数（脚本里的 PIN_ORDER_BASE = -1000），
+   否则置顶卡会跑到 Tab 描述 / 搜索命中 / 置顶标题上面去。
+   它们与普通卡的 DOM 顺序不变，这里只钉住「永远在置顶块之前」。 */
+.pin-scope > .tab-desc { order: -3001; }
+.pin-scope > .search-hits,
+.pin-scope > .search-empty { order: -3000; }
+.pin-scope > .pin-head { order: -2001; }
+/* 置顶区标题：告诉用户「下面这几张是置顶卡」；只出一行，太长省略避免撑高组首。
+   位置由上面的 order 钉到置顶卡块之前，不搬 DOM。 */
+.pin-head {
+  margin: 0 0 10px;
+  font-size: 12px;
+  color: var(--fg-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 /* 卡片搜索：与 Tab 条同处吸顶区。输入框沿用各卡表单的观感（--input-bg / --line），
    type=search 在各平台自带清空叉，这里不再自绘 */
@@ -6103,4 +7481,19 @@ h1 {
    只有 App.vue 模板里直接写的元素才带得上这个属性，子组件根节点以外的元素一律匹配不到。
    早先写在这一侧，规则在构建产物里存在但整段失效（模型行掉回纯文本堆叠）。
    现随组件放在 UsageChart.vue 自己的 scoped 块里。 */
+
+/* 专注与计时合并卡：两个子块在父卡内扁平化（子块已不带 .card，规则直接落在 .card-embedded） */
+.card-embedded {
+  border: 0;
+  box-shadow: none;
+  background: transparent;
+  padding: 0;
+  margin: 0;
+}
+/* 两段之间的分隔线 */
+.focus-timer-card .card-embedded + .card-embedded {
+  border-top: 1px solid var(--line);
+  margin-top: 12px;
+  padding-top: 12px;
+}
 </style>

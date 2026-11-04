@@ -11,10 +11,10 @@
  */
 const fs = require('fs')
 const path = require('path')
-const os = require('os')
 const { K } = require('./constants')
 const { logErr } = require('./log')
 const { errMsg } = require('./util')
+const { dataDir } = require('./data-dir')
 
 // Chromium 能直接渲染的位图格式（不要 SVG：外部 SVG 可带脚本，且挂件是本地页面，没必要开这个口子）
 // apng 的 MIME 与签名都是 image/png，Chromium 原生播放动画
@@ -27,15 +27,23 @@ const THUMB_MAX_BYTES = 256 * 1024
 const MAX_ITEMS = 20
 // v1.5.0 及更早只有一张，文件固定叫 skin.<ext>，迁移成画廊的第一项时沿用这个 id 与文件名
 const LEGACY_ID = 'skin'
+// id 字符集：会拼进文件名，所以只允许安全字符（存储归一化与子窗按需取图两处共用同一把尺子）
+const ID_RE = /^[A-Za-z0-9_-]{1,40}$/
+
+// 已装「官方可下载形象」的清单缓存：[{ id, ext, size }]，几百字节，随池子内容变化作废
+let manifestCache = null
 
 // base64 data URL 缓存（只缓存「当前形象」这一张）：导入/删除/切换/重载插件前有效
 let dataCache = null
 
+// 素材集合变化（新增/删除/清除）时两张缓存一起作废
+function invalidateCaches() {
+  dataCache = null
+  manifestCache = null
+}
+
 function skinsDir() {
-  let base = ''
-  try { base = utools.getPath('userData') } catch (err) {}
-  if (!base) base = os.tmpdir()
-  return path.join(base, 'whale-skins')
+  return dataDir('whale-skins')
 }
 
 // 图片体积（读取时派生，不落存储）：设置页「自定义素材」卡片要显示占多大；文件缺失回 0
@@ -235,7 +243,7 @@ function addItem(name, ext, write, thumb, opts) {
       if (o.builtin === true && exist.builtin !== true) { exist.builtin = true; dirty = true }
       if (o.displayName && exist.name !== o.displayName) { exist.name = String(o.displayName).slice(0, 120); dirty = true }
       if (dirty) writeRaw(raw)
-      dataCache = null
+      invalidateCaches()
       return { ok: true, id: o.id, name: exist.name, ext: ext, existed: true }
     }
   }
@@ -260,7 +268,7 @@ function addItem(name, ext, write, thumb, opts) {
   raw.items.unshift(item)
   if (o.keepCurrent !== true) raw.current = id
   writeRaw(raw)
-  dataCache = null
+  invalidateCaches()
   return { ok: true, id: id, name: safeName, ext: ext }
 }
 
@@ -409,7 +417,7 @@ function removeSkin(id) {
   raw.items.splice(idx, 1)
   if (raw.current === id) raw.current = raw.items[0] ? raw.items[0].id : ''
   writeRaw(raw)
-  dataCache = null
+  invalidateCaches()
   return { ok: true, current: raw.current, left: raw.items.length }
 }
 
@@ -439,7 +447,7 @@ function removeSkins(ids) {
   // 当前形象被删掉了才重算：只有当它已不在列表里，才把当前位交给剩下的第一张
   if (!raw.items.some((x) => x.id === raw.current)) raw.current = raw.items[0] ? raw.items[0].id : ''
   writeRaw(raw)
-  dataCache = null
+  invalidateCaches()
   return { ok: true, removed: removed, failed: failed, current: raw.current, left: raw.items.length }
 }
 
@@ -472,10 +480,14 @@ function setThumb(id, dataUrl) {
 }
 
 // 清除全部自定义形象（供设置页「清除选中数据」调用）
+// 必须用 rmSync 递归删：rmdirSync 对非空目录会抛 ENOTEMPTY，而旧写法用空 catch 吞掉，
+// 结果是「只清了元数据、图片全留在磁盘当孤儿」（与 bubbles.js 的 clearAll 对齐）
 function clearAll() {
-  try { fs.rmdirSync(skinsDir()) } catch (err) {}
+  try { fs.rmSync(skinsDir(), { recursive: true, force: true }) } catch (err) {
+    logErr('[whale][skins] 清除形象文件失败', err && err.message)
+  }
   try { utools.dbStorage.removeItem(K.skins) } catch (err) { logErr('[whale][skins] 清除形象信息失败', err && err.message) }
-  dataCache = null
+  invalidateCaches()
   return { ok: true }
 }
 
@@ -521,21 +533,44 @@ function importBuffer(name, ext, buf, thumbBuf, at, id, builtin) {
   return r
 }
 
-// 已装「官方可下载形象」（builtin===true，即内置包 + 共享角色）的本体 → base64 data URL 数组。
-// 用途：气泡台词 v2 的 randimg 段要从「共享角色图池」随机抽图（上游 gif 模块的能力），
-// 挂件侧读不到磁盘，只能由宿主一次性把已装的官方图推过去。
-// 为什么只推 builtin：用户自己导入的形象是「当前头像」语义，不该混进随机图池；
-// 只推已装官方图，池子天然就是「共享角色 + 内置形象」这一批。
-// 文件缺失的项跳过（不因一张坏图让整个池子推不出去）；一次搬几十 MB 的风险由调用方
-//（widget.pushInit）按需决定，这里只如实返回。
-function getBuiltinData() {
+// 已装「官方可下载形象」（builtin===true，即内置包 + 共享角色）的**清单** → [{ id, ext, size }]。
+// 用途：气泡台词 v2 的 randimg 段要从「共享角色图池」随机抽图（上游 gif 模块的能力）。
+// 这里刻意只给元信息、不给本体：整池本体实测 39MB 原图 / 52MB base64，一次读盘 + 编码 +
+// 跨进程克隆全压在「打开挂件」那一下（≈230ms），而且宿主与子窗各常驻一份。改推清单后首帧只搬
+// 几百字节，图片本体由挂件抽到哪张再按 id 单张来要（见 getSharedImage）。
+// 顺序 = 画廊顺序里的 builtin 子集：randimg 段的 imgs 是「池里第几张」的下标集（1 起算），
+// 挂件按这个顺序解析，所以顺序不能漂（改排序会改下标语义，与设置页面板的提示一致）。
+// size 一并给出：挂件要按字节预算决定预取几张、淘汰哪张（单张 0.9~2.7MB，数张数没意义）。
+// 文件缺失的项不进清单 —— 与旧版整池推送「读不到就跳过」的口径一致，下标只指向真拿得到的图。
+function getSharedManifest() {
+  if (manifestCache !== null) return manifestCache
   const out = []
   for (const it of readRaw().items) {
     if (it.builtin !== true) continue
-    const url = readFileUrl(it.id + '.' + it.ext, it.ext)
-    if (url) out.push(url)
+    const size = fileSize(it.id + '.' + it.ext)
+    if (!size) continue
+    out.push({ id: it.id, ext: it.ext, size: size })
   }
+  manifestCache = out
   return out
+}
+
+// 按 id 取单张本体 → base64 data URL（挂件 img.src 直接可用）。
+// 只服务「官方可下载形象」：用户自建形象是「当前头像」语义，既不在随机池里，也不允许被子窗
+// 按 id 要走（id 会拼进文件名，所以字符集不合法的一律拒）。取不到回空串，调用方按缺失处理。
+// **不进缓存**：一次一张、体积 1~3MB，宿主侧再存一份就是把「整池常驻」换个名字搬回来 ——
+// 去重与淘汰由挂件侧的 LRU 负责（那边才是真在用这些图的人）。
+function getSharedImage(id) {
+  if (typeof id !== 'string' || !ID_RE.test(id)) return ''
+  const one = readRaw().items.filter((x) => x.id === id && x.builtin === true)[0]
+  if (!one) return ''
+  const url = readFileUrl(one.id + '.' + one.ext, one.ext)
+  if (!url) {
+    // 要不到图 = 磁盘上的文件已经不在（用户在文件管理器里清了 userData/whale-skins）。
+    // 清单缓存里还留着它，挂件就会反复抽到一张取不到的图 —— 就地作废，下次推送自然把它剔掉。
+    manifestCache = null
+  }
+  return url
 }
 
 // 当前形象的本体 → base64 data URL（挂件 img.src 直接可用）。
@@ -551,7 +586,7 @@ function getSkinData() {
 
 module.exports = {
   importSkin, importSkinFromPath, pickImageFile, importSkinFromData,
-  removeSkin, removeSkins, setCurrent, moveSkin, moveSkins, setRandomBatch, clearAll, getSkinData, getBuiltinData, listSkins, readMeta,
+  removeSkin, removeSkins, setCurrent, moveSkin, moveSkins, setRandomBatch, clearAll, getSkinData, getSharedManifest, getSharedImage, listSkins, readMeta,
   // 内置可下载形象（lib/skin-packs.js）用
   builtinIds, installBuiltin,
   // 设置页把共享角色的打包缩略图补落盘用（老数据没有缩略图时懒补）

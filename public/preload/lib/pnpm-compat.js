@@ -8,7 +8,8 @@
  *   做透了（src/pnpm-compat.ts 的 classifyPnpmFailure）；但那边有相当一部分是它自己的
  *   workspace / hoist 场景，本项目**不整包照搬**。
  *
- * ⚠️ 本项目相对上游砍掉了 17 种码，只留 8 种 —— 理由逐条写在 RECOGNIZERS 的注释里。
+ * ⚠️ 本项目相对上游砍掉了大量码，只留与「装 / 卸本插件」真正相关的那些 —— 理由逐条写在
+ *    RECOGNIZERS 的注释里。
  *    核心原则：**归类只用于「说清原因 + 说清下一步」，绝不用于自动改用户的配置**。
  *    尤其 release-age：上游在 install.ts 里**明确拒绝**自动放行（`releaseAgeBypass === false`
  *    时直接放弃重试），本项目沿用同一立场 —— 看到「太新」只告诉用户等，绝不代写白名单、
@@ -39,6 +40,37 @@ function result(code, opts) {
   }
 }
 
+// 从 pnpm 的 stalled 输出里倒查「是哪个包」的安装脚本卡住了。
+//
+// pnpm 的原文形如：
+//   ...\node_modules\.pnpm\better-sqlite3@9.0.0\node_modules\better-sqlite3 install$ node-gyp rebuild
+//   Progress: resolved 1, reused 0, downloaded 0, added 0
+// 我们要的是 `node_modules/<包名> install$ ...` 里**最后一条**：一条安装流程可能先后跑好几个包的
+// 安装脚本，卡住的是最后那个还没跑完的（前面的都已经打印过后续输出了）。
+// 取 `.at(-1)` 是上游 #817 的结论，本项目沿用；Windows 上路径是反斜杠，统一折成正斜杠再截。
+// 认不出就返回空串 —— 调用方据此省略「卡住的是 X」半句，绝不编一个包名出来。
+function culpritOf(s) {
+  try {
+    const re = /node_modules[\\/]((?:@[^\\/\s]+[\\/])?[^\\/\s]+) (?:pre|post)?install[:$]/g
+    const all = []
+    let m
+    while ((m = re.exec(s)) !== null) all.push(m[1])
+    const last = all.length ? String(all[all.length - 1]).replace(/\\/g, '/') : ''
+    // 兜底形态：`node_modules/<包名>` 前面没有 `install:` 标记时不在这里猜，交给调用方省略
+    return last
+  } catch (err) {
+    return ''
+  }
+}
+
+// 抽出 `No matching version found for <pkg>@<version>` 里的包名与请求版本。
+// pkg 可能是 scoped（`@scope/name`），所以作用域段要单独匹配；认不出返 null。
+// 供 exact-version-missing 的「是不是精确版本」判据与文案共用，避免两处正则漂移。
+function noMatchingAsked(s) {
+  const m = /No matching version found for\s+((?:@[^/\s]+\/)?[^@\s]+)@([^\s]+)/.exec(String(s == null ? '' : s))
+  return m ? { pkg: m[1], version: m[2] } : null
+}
+
 // ── 识别器表 ──
 //
 // ⚠️ **顺序即设计**：多个规则可能同时命中同一段输出（pnpm 的报错常常层层套娃），
@@ -61,19 +93,49 @@ const RECOGNIZERS = [
     }),
   },
 
-  // ── 2. profile 文件锁被占用 ──
+  // ── 1.5 安装脚本长时间无输出被杀（pnpm 的 stalled 看门狗）──
+  // ⚠️ 必须紧跟 pnpm-missing 之后、排在锁类与网络类**之前**：pnpm 的 stalled 报错会把超时前
+  //    打印过的全部输出一起带出来，里面常混着 EBUSY / EPERM / network 之类的字样 ——
+  //    排在后面就会被那些规则抢走，把「某个包的安装脚本卡死」误报成「文件被占用」或「网络抖动」，
+  //    用户照着关杀软 / 换镜像折腾一圈，真正该处理的那个包却始终没被点名。
+  // ⚠️ retryable=false：安装脚本卡死是确定性的（同类脚本同一台机器会再次卡在同一处），
+  //    原样重试只会再等一轮（而 pnpm 的超时往往是分钟级）。
+  {
+    code: 'pnpm-stalled',
+    test: (s) => /printed nothing for (\d+)ms and was terminated/.test(s),
+    make: (s) => {
+      const hit = /printed nothing for (\d+)ms and was terminated/.exec(s)
+      const ms = hit ? Number(hit[1]) : 0
+      const sec = ms > 0 ? Math.round(ms / 1000) : 0
+      const culprit = culpritOf(s)
+      return result('pnpm-stalled', {
+        retryable: false,
+        reason: '有安装脚本长时间没有任何输出，被 pnpm 判定为卡死并终止了'
+          + (sec > 0 ? '（约 ' + sec + ' 秒无响应）。' : '。')
+          + (culprit ? '卡住的脚本来自 ' + culprit + '。' : ''),
+        hint: '多半是该插件的安装 / 构建脚本在等交互输入或访问被墙的网络。'
+          + (culprit ? '可先单独确认 ' + culprit + ' 能否正常装好（必要时换镜像源），再重试。' : '可检查该插件是否依赖联网脚本，必要时换镜像源后再试。'),
+      })
+    },
+  },
+
+  // ── 2. 依赖目录的写锁被占用 ──
   // ⚠️ 必须先于「包目录文件锁」判：两者的原文都属于「文件被占用」一类，但成因与出路不同 ——
-  //    这条说的是 dsh 自己的 profile 写锁（package.json.lock），正解是**关掉另一个 dsh / 等它跑完**；
-  //    下面那条说的是 Windows 上 node_modules 被别的进程（编辑器、杀软）占着。
-  //    顺序写反会把「dsh 正在跑」误报成「被杀软锁了」，用户照着一个改不好的方向折腾（上游同款序）。
+  //    这条说的是 pnpm / dsh 自己那套目录级写锁（.pnpm/lock.yaml.<pid> 这类内层锁文件），
+  //    正解是**等那条装 / 卸操作结束**；下面那条说的是 Windows 上 node_modules 被别的进程占着。
+  //    顺序写反会把「另一条装 / 卸还在跑」误报成「被杀软锁了」，用户照着一个改不好的方向折腾（上游同款序）。
+  // ⚠️ retryable=false（上游 #786 的结论）：锁没释放时原样重试必然再撞，界面不该给一个点了还是错的按钮。
   {
     code: 'profile-file-locked',
-    test: (s) => /ERR_PNPM_EPERM|package\.json\.lock|Cannot lock|profile .* is locked|EBUSY.*profiles|another dsh/i.test(s)
+    // 内层锁形态 `[\\/]\.pnpm[\\/]lock\.yaml\.\d+` 必须显式列出：这类报错常见的形式是
+    // `Cannot lock ... .pnpm/lock.yaml.12345`，单个文件名里既没有 package.json.lock 也没有 "profile"
+    // 字样，只靠原有几个关键词会漏判，回落成认不出的通用文案。
+    test: (s) => /ERR_PNPM_EPERM|package\.json\.lock|Cannot lock|profile .* is locked|EBUSY.*profiles|another dsh|[\\/]\.pnpm[\\/]lock\.yaml\.\d+/i.test(s)
       && /profile|package\.json\.lock|lock/i.test(s),
     make: () => result('profile-file-locked', {
-      retryable: true,
-      reason: 'profile 正被另一个进程占用（多半是另一个 dsh 实例或另一条装/卸操作还没结束）。',
-      hint: '等它结束后重试；若确认没有 dsh 在跑，可在「DeepSeek Harness」卡检查残留的 profile 写锁再重试。',
+      retryable: false,
+      reason: '插件依赖目录正被另一个进程占用（多半是另一条安装 / 卸载还没结束）。',
+      hint: '等那条操作结束后再点一次重试；若确实没有别的操作在跑，先关掉 dsh 本体再重试。',
     }),
   },
 
@@ -131,16 +193,33 @@ const RECOGNIZERS = [
     }),
   },
 
-  // ── 7. lockfile 与清单不一致 ──
+  // ── 7. lockfile 与清单对不上：分「过期」与「损坏」两档 ──
   // ⚠️ 只归因，**不做**「install --no-frozen-lockfile 再重试」的自动补救：
   //    那是一条全量 install，在 30 分钟硬超时下会把界面钉死（上游是命令行工具，代价小得多）。
+  // ⚠️ 为什么拆两码：两档的出路不同 ——
+  //    · outdated：清单改了、lockfile 没跟上，正解是重新解析依赖生成 lockfile；
+  //    · broken  ：lockfile 本身缺条目 / 解析不了（手工改坏、上次中断写了一半），
+  //                得先把它里面那一段记录清掉再重建。
+  //    挤在一句话里说不清，用户照着做的动作也就无从下手。
   {
-    code: 'lockfile',
-    test: (s) => /ERR_PNPM_OUTDATED_LOCKFILE|--frozen-lockfile|frozen-lockfile.*outdated|lockfile.*(?:mismatch|not up to date|different)/i.test(s),
-    make: () => result('lockfile', {
+    code: 'lockfile-outdated',
+    test: (s) => /ERR_PNPM_OUTDATED_LOCKFILE|frozen-lockfile.*outdated|lockfile.*(?:mismatch|not up to date|different)/i.test(s),
+    make: () => result('lockfile-outdated', {
       retryable: false,
-      reason: 'pnpm 的 lockfile 与 profile 的 package.json 对不上。',
-      hint: '这是 profile 目录被手工改过或上次安装中断留下的残局。请先到「DeepSeek Harness」卡做一次体检 / 修复，再重试。',
+      reason: '插件依赖目录里的清单与 lockfile 对不上，pnpm 拒绝按冻结模式安装。',
+      hint: '多半是这个目录被手工改过、或上次安装中断留下的残局。先到「DeepSeek Harness」卡做一次体检 / 修复，让 pnpm 重新生成 lockfile，再重试。',
+    }),
+  },
+  {
+    code: 'lockfile-broken',
+    // ⚠️ 必须排在 outdated 之后但**独立成一码**：`ERR_PNPM_OUTDATED_LOCKFILE` 与
+    //    `ERR_PNPM_LOCKFILE_MISSING_DEPENDENCY` 会同时出现在一段输出里（后者常是前者的子原因），
+    //    这一档认的是「lockfile 结构本身坏了」，出路比「过期」更重一步。
+    test: (s) => /ERR_PNPM_LOCKFILE_MISSING_DEPENDENCY|Broken lockfile|lockfile.*(?:missing|corrupt|invalid|parse)/i.test(s),
+    make: () => result('lockfile-broken', {
+      retryable: false,
+      reason: '插件依赖目录里的 lockfile 缺条目或已损坏，pnpm 无法据此安装。',
+      hint: '可在这个目录的 pnpm-lock.yaml 里只删掉对应 importer 的那段记录，再执行一次 pnpm install --no-frozen-lockfile --lockfile-only 重建；不要删整个 pnpm-lock.yaml，那会让所有已装插件的版本一起漂移。',
     }),
   },
 
@@ -152,7 +231,11 @@ const RECOGNIZERS = [
   //    这边只看**输出文本**，两者不重复计算（blockedByPolicy 在成功分支跑，本模块在失败分支跑）。
   {
     code: 'release-age-violation',
-    test: (s) => /ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION|ERR_PNPM_NO_MATURE_MATCHING_VERSION|minimum[\s-]?release[\s-]?age(?!Exclude)/i.test(s),
+    // ⚠️ `ERR_PNPM_RESOLUTION_POLICY_VIOLATIONS_UNHANDLED` 是同一道门的**第三张脸**
+    //    （上游 ca7fd10）：lockfile 校验通过后，解析器重新应用策略，仍落在窗口内的依赖
+    //    变成 policyViolation，而这条 CLI 路径没接 handler，只能抛这个码。成因与出路
+    //    和上面两码完全相同（等它满期），不归到这里就只剩一句用户看不懂的内部错误。
+    test: (s) => /ERR_PNPM_MINIMUM_RELEASE_AGE_VIOLATION|ERR_PNPM_NO_MATURE_MATCHING_VERSION|ERR_PNPM_RESOLUTION_POLICY_VIOLATIONS_UNHANDLED|minimum[\s-]?release[\s-]?age(?!Exclude)/i.test(s),
     make: () => result('release-age-violation', {
       retryable: false,
       reason: '目标版本发布得太新，还没过 pnpm 的发布观察期（release-age 供应链策略）。',
@@ -175,6 +258,35 @@ const RECOGNIZERS = [
       reason: '该插件把 DSH 宿主的包声明成了 peer 依赖，而它在 registry 上拉不到（404 / 无匹配版本）。',
       hint: '稍后会自动重试一次（这次不自动装 peer 依赖）。若仍失败，说明该插件要求的宿主版本与当前宿主不符，换个版本或等作者修正。',
     }),
+  },
+
+  // ── 9.5 精确版本在当前线路还没同步（**不等于版本不存在**）──
+  // ⚠️ 必须排在 host-peer 之后：宿主包（@deepseek-ai/*）的同类报错要归到上面那档，
+  //    那里的出路是「放行 peer」，而这里只是「等线路同步」—— 归错会让用户去改配置。
+  // ⚠️ 与 no-matching-version（认不出/未单列）的分工：只有请求是**精确版本**（name@x.y.z）
+  //    才成立；范围请求（`^1.2.3`）匹配不上时是真没有可满足版本，文案不同（上游 #927）。
+  // ⚠️ retryable=false：手动原样重试没有新信息；但宿主会自动**同 argv 重试一次**
+  //    重新拉 packument（见 shouldAutoRetryOnce），所以 hint 写「已自动重试一次」。
+  {
+    code: 'exact-version-missing',
+    test: (s) => {
+      if (!/ERR_PNPM_NO_MATCHING_VERSION/.test(s)) return false
+      const asked = noMatchingAsked(s)
+      if (!asked) return false
+      // 宿主包留给 host-peer（哪怕上一条因措辞差异没命中，也不能在这里认领）
+      if (/@deepseek-ai(?:%2f|\/)/i.test(asked.pkg)) return false
+      // 只有完整 x.y.z（可带 prerelease / build）才算「精确版本」；`1.2` 之类是范围，不放这档
+      return /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(asked.version)
+    },
+    make: (s) => {
+      const asked = noMatchingAsked(s)
+      const pin = asked ? asked.pkg + '@' + asked.version : '该版本'
+      return result('exact-version-missing', {
+        retryable: false,
+        reason: '当前下载线路暂时找不到精确版本 ' + pin + '；常见原因是线路还没同步到刚发布的版本，不等于这个版本不存在。',
+        hint: '已自动重试一次（重新拉取索引）。仍失败可稍后再试，或把 registry 切换为 npmjs.org 后再试。',
+      })
+    },
   },
 
   // ── 10. allowBuilds 未放行（构建脚本被拦）──
@@ -207,7 +319,7 @@ function classifyPnpmFailure(output, exitCode) {
   for (let i = 0; i < RECOGNIZERS.length; i++) {
     const r = RECOGNIZERS[i]
     try {
-      if (r.test(s, code)) return r.make()
+      if (r.test(s, code)) return r.make(s)
     } catch (err) {
       // 识别器必须永不抛出：这里是「失败路径上的失败路径」，
       // 抛出去会把原始报错顶掉、用户连「安装失败」都看不到（#662 的教训）
@@ -220,20 +332,24 @@ function classifyPnpmFailure(output, exitCode) {
 //
 // ⚠️ 白名单式，而不是「any retryable」：
 //    自动重试会**再跑一次 pnpm**（可能又是几分钟），花的是用户的时间。
-//    所以只放行那些「重试本身大概率改变结果、且不需要用户先做任何事」的两码：
+//    所以只放行那些「重试本身大概率改变结果、且不需要用户先做任何事」的几类：
 //      · transient-network：网络抖动，重试即可能成功；
 //      · fetch-timeout   ：超时，重试即可能赶上；
+//      · exact-version-missing：镜像的 packument 还没同步，同 argv 再拉一次有机会拿到（上游 #927）；
 //      · root-add        ：补 `-w` 后重试（**前提**：profile 下确实有 pnpm-workspace.yaml，
 //                          该判断由 settings.js 读盘后给出，本函数只做纯判定）。
 //    其余码即便 retryable=true 也不自动重试：
 //      · profile-file-locked / windows-file-locked：要等外部进程让出锁，立刻重试多半还锁着，
 //        频繁重试反而让界面长时间「正在安装」，体验更差（交给用户手动点）。
+//      · pnpm-stalled：安装脚本卡死是确定性的，重试只会再等一轮分钟级的超时。
 //      · host-peer：要重试的话得改 argv（加 auto-install-peers=false），属于「带参数重试」，
 //        由 settings.js 显式决定，不在这个纯函数的口径内。
 function shouldAutoRetryOnce(info, opts) {
   const i = info && typeof info === 'object' ? info : {}
   const o = opts && typeof opts === 'object' ? opts : {}
   if (i.code === 'transient-network' || i.code === 'fetch-timeout') return true
+  // 精确版本缺失：镜像 packument 还没同步，同 argv 再拉一次有机会命中（上游 #927 / install.ts 同款）
+  if (i.code === 'exact-version-missing') return true
   // root-add 仅在「目标目录确实是一个 workspace」时才自动补 -w 重试
   if (i.code === 'root-add' && o.hasWorkspaceFile === true) return true
   return false

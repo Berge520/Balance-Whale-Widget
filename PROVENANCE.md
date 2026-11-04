@@ -82,6 +82,21 @@
 - 共享素材包走 jsDelivr CDN / 用户自定义前缀 / `ghfast.top` / raw 直链的候选链单张下载，清单（含逐张 sha256）见 `constants.js` 的 `SHARED_SKIN_PACK_SKINS` 与 `SHARED_SOUND_LIB`。
 - 两者的权利状态分别同第 1、4 小节；均按 as-is 提供，适用第四节 Takedown。
 
+### 7. 视频壁纸（按需下载，不随包）
+
+「未至之境」背景可选一段鲸鱼娘循环视频（25.5 秒完整版，含线条构建 / 眨眼 / 雨滴）。该素材**不随插件包分发**，也不入库本仓库：用户在外观页主动点「下载视频壁纸」时，由 `public/preload/lib/bg-video.js` 从上游按需下载到 `userData/whale-bg/`。
+
+| 字段 | 值 |
+|---|---|
+| 作者 | **stushansusu**（原作） |
+| 许可 | **CC BY-NC-SA 4.0**（署名 — 非商业性使用 — 相同方式共享） |
+| 上游打包 | [jiangwangyang/dsh-skin-whale-fantasy](https://github.com/jiangwangyang/dsh-skin-whale-fantasy)（该项目内置的是裁出的 2.58s 眨眼片段） |
+| 原始来源 | [zhu1090093659/dsh-web](https://github.com/zhu1090093659/dsh-web) 的 `market/dist/assets/skins/whale-fantasy/assets/whale-fantasy-loop.mp4`（本项目使用其完整版，URL 钉在提交 `8b0f32f460caafb262a03f17fbac42c06f3debb1`） |
+| 文件 | `whale-fantasy-loop.mp4`，6,630,589 字节，SHA-256 `db8a022ac3bf877efb764ca4962e79c9b32cc07fa4be2cbc8ac98d4df0310e4d` |
+| 内容 | 25.5 秒完整循环；旧缓存 `whale-blink-loop.mp4`（1.3MB 眨眼片段）会在下次下载时自动清理 |
+
+本项目只做按需下载与本地缓存，**不主张该视频的版权，也不以本项目代码许可再授权**。设置页在下载入口旁标注作者与许可证，二次分发须保留署名与相同许可证、且不得用于商业用途。若权利人希望停止提供，按第四节 Takedown 处理。
+
 ## 三、元数据清理
 
 随包素材**不留内嵌元数据**，现状经解析核对：

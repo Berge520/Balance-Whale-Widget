@@ -55,8 +55,10 @@ const codexFlash: Flash = useFlash()
 
 // 图表档位：宿主一次给 31 天（days31，索引 0 是今天），切档只改前端切片、不重扫
 const codexRange = ref(7)
-// days31 是新→旧，最近 N 天在开头，故 slice(0, N)。原用 slice(-N) 取到的是最旧的 N 天。
-const codexDays = computed(() => ((codex.value && codex.value.days31) || []).slice(0, codexRange.value))
+// days31 是新→旧（最近 N 天在开头），故先 slice(0, N)；但 UsageChart 的契约是「索引越大越早」
+// （左旧右新，与用量卡一致），所以切片副本上再 reverse 一次。不改 days31 本身。
+// 历史坑：只 slice 不 reverse，Codex 图今天在最左、要从右往左读，与用量卡方向相反。
+const codexDays = computed(() => ((codex.value && codex.value.days31) || []).slice(0, codexRange.value).reverse())
 // 30 天档标签抽稀：每 5 天一个，避免糊成一片
 const codexLabelEvery = computed(() => (codexRange.value >= 30 ? 5 : 1))
 const codexModels = computed(() => {
@@ -82,13 +84,15 @@ function codexRefresh() {
   codexBusy.value = true
   codexFlash.msg = ''
   codexFlash.err = false
-  // 宿主侧是同步读文件（会话日志可能几十 MB），直接调会把「读取中…」和这次渲染一起卡住；
-  // 先让 Vue 渲染一帧，再在下一轮事件循环里执行
+  // 宿主侧扫描已改成「异步 + 切片让出事件循环」，但首次扫描仍可能要一段时间。
+  // 先让 Vue 渲染一帧再发起，保证「读取中…」先出现
   window.setTimeout(codexRefreshRun, 30)
 }
-function codexRefreshRun() {
+async function codexRefreshRun() {
   try {
-    const r = props.services.codexSummary?.()
+    // codexSummary 是 async（宿主内部 await 一次真实扫描）：这里必须 await，
+    // 否则拿到的是 Promise，r.ok 恒为 undefined，用户看到的是「读取失败」
+    const r = await props.services.codexSummary?.()
     if (!r) {
       codexFlash.err = true
       codexFlash.msg = '宿主 API 不可用'
@@ -101,7 +105,8 @@ function codexRefreshRun() {
       return
     }
     codexFlash.msg = r.sessions
-      ? `已扫描 ${r.sessions} 个会话文件（${r.changed} 个有更新）`
+      ? `已扫描 ${r.sessions} 个会话文件（${r.changed} 个有更新）` +
+        (r.deferred ? '，其余下轮补扫' : '')
       : '未找到会话文件：确认 Codex CLI 用过、且 ~/.codex/sessions 里有 rollout-*.jsonl'
     codexFlash.err = !r.sessions
   } catch (err: any) {
@@ -212,7 +217,7 @@ function codexClearCache() {
       />
 
       <div class="fold">
-        <button class="link-btn utils-btn utils-secondary" @click="helpFold.open = !helpFold.open">{{ helpFold.open ? '收起说明' : '说明' }}</button>
+        <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="helpFold.open" @click="helpFold.open = !helpFold.open">{{ helpFold.open ? '收起说明' : '说明' }}</button>
         <div v-if="helpFold.open" class="guide">
           <p class="guide-use"><strong>统计口径：</strong>优先用 <code>total_token_usage</code> 的累计差值（单调递增，一次轮次写多条 <code>token_count</code> 也不会重复计数）；累计缺失时退回 <code>last_token_usage</code>。</p>
           <p class="guide-use"><strong>模型归属：</strong>按 <code>turn_context</code> 事件里的 <code>model</code> 归类，未标注的记为 <code>codex</code>。</p>

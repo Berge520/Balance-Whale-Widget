@@ -3,12 +3,16 @@
  *
  * 悬浮窗（floating.html）与主窗宿主（services.js）之间的薄桥接层：
  *  - 接收宿主推送：whale:init / whale:balance / whale:config / whale:snapped / whale:sounds
- *              / whale:skin / whale:bubbles / whale:models / whale:todo / whale:focus-stats
+ *              / whale:skin / whale:bubbles / whale:shared-skins（共享角色池清单）
+ *              / whale:randimg-data（清单里某一张的本体，whale:randimg 的答复）
+ *              / whale:models / whale:todo / whale:focus-stats
  *              / whale:bubble-preview（设置页按压气泡试播）
  *              （另有本地推送 dark：preload 轮询 utools.isDarkColors() 检测 uTools 深浅色变化）
  *  - 向宿主上报：whale:ready / whale:show / whale:refresh / whale:config / whale:timer / whale:timer-done
  *              / whale:todo / whale:focus
  *              / whale:drag-begin / whale:drag-move / whale:drag-end / whale:ignore-mouse
+ *              / whale:probe-cursor（问一次光标位置，答复走本地推送 whale:cursor）
+ *              / whale:randimg（要共享角色池里某一张的本体，答复走 whale:randimg-data）
  *              / whale:open-settings（可带 { target } 直达某张设置卡，无载荷则只唤出主窗）
  *              / whale:models-refresh / whale:set-main-model / whale:hide-widget / whale:open-external
  *
@@ -27,7 +31,20 @@ log('[whale][floating] preload 已加载', {
   logFile: LOG_FILE || '(仅控制台)',
 })
 
-const handlers = { init: [], balance: [], config: [], snapped: [], dsh: [], sounds: [], skin: [], bubbles: [], sharedSkins: [], models: [], dark: [], bubblePreview: [], todo: [], focusStats: [] }
+// 关掉 Chromium 自带的缩放通道：挂件尺寸只由宿主 setBounds（scale）控制，
+// 整页视觉缩放会让窗口尺寸与 scale 读数都不变、画面却变大（触控板捏合后还会一直保持），
+// 用户观感就是「拖动之后变大了」。业务滚轮缩放在 floating-page.js 里接管，
+// 这里只锁视觉缩放与布局缩放级别；API 缺失时静默跳过（uTools 版本差异）。
+try {
+  if (electron.webFrame) {
+    electron.webFrame.setVisualZoomLevelLimits(1, 1)
+    if (typeof electron.webFrame.setLayoutZoomLevelLimits === 'function') {
+      electron.webFrame.setLayoutZoomLevelLimits(0, 0)
+    }
+  }
+} catch (err) { logErr('[whale] 禁止页面缩放失败', err && err.message) }
+
+const handlers = { init: [], balance: [], config: [], snapped: [], dsh: [], sounds: [], skin: [], bubbles: [], sharedSkins: [], randimgData: [], models: [], dark: [], bubblePreview: [], todo: [], todoDue: [], focusStats: [], cmd: [], cursor: [] }
 
 function on(name, cb) {
   if (handlers[name] && typeof cb === 'function') handlers[name].push(cb)
@@ -52,8 +69,11 @@ ipcRenderer.on('whale:sounds', (event, data) => emit('sounds', data))
 ipcRenderer.on('whale:skin', (event, data) => emit('skin', data))
 // 自定义气泡图片本体（base64 data URL 数组；导入/删除后宿主重推，空数组表示回退内置 rua.webp）
 ipcRenderer.on('whale:bubbles', (event, data) => emit('bubbles', data))
-// 已装「官方可下载形象」本体（base64 data URL 数组）：台词 v2 randimg 段的共享角色图池
+// 已装「官方可下载形象」的**清单**（[{ id, ext, size }]，不含本体）：台词 v2 randimg 段的共享角色图池。
+// 整池本体当年是一次性推过来的（52MB base64），把「打开挂件」卡住；现在本体按需在下面那条通道取。
 ipcRenderer.on('whale:shared-skins', (event, data) => emit('sharedSkins', data))
+// 单张共享角色本体（页面 whale:randimg 的答复）：{ id, url }，url 为空串 = 那张取不到
+ipcRenderer.on('whale:randimg-data', (event, data) => emit('randimgData', data))
 // 多厂商模型列表（含内置 DeepSeek 那条）+ 主显示模型
 ipcRenderer.on('whale:models', (event, data) => emit('models', data))
 // 设置页「按压气泡试播」：把设置页当前编辑的泡泡队列发来真弹一次（items 已在宿主侧归一化）
@@ -62,17 +82,35 @@ ipcRenderer.on('whale:bubble-preview', (event, data) => emit('bubblePreview', da
 ipcRenderer.on('whale:todo', (event, data) => emit('todo', data))
 // 专注统计与每日目标（宿主 whale:focus-stats 推送：{ summary, goal }）
 ipcRenderer.on('whale:focus-stats', (event, data) => emit('focusStats', data))
+// 快捷指令（宿主 feature 入口触发：计时器切换、专注统计显示等）
+// 待办到点提醒也走这条队列（宿主 sendWidgetCmd 会包成 whale:cmd），这里译成 todoDue 事件，
+// 页面只处理一种形态；队列机制顺带解决「页面还没 ready 时推送丢失」。
+ipcRenderer.on('whale:cmd', (event, data) => {
+  emit('cmd', data)
+  if (data && data.cmd === 'todo-due') emit('todoDue', data.payload)
+})
+// 光标探测回包（页面 whale:probe-cursor 的答复）：{ x, y } 相对挂件窗口左上角。
+// 用途见 api.probeCursor —— 指针静止时没有 pointermove，悬停判定建立不起来
+ipcRenderer.on('whale:cursor', (event, data) => emit('cursor', data))
 
 // —— 深浅色跟随 uTools ——
 // 菜单/计时条等 UI 的深浅形态挂在 <html> 的 dark 类上（floating.css 消费）。判定源是
 // utools.isDarkColors()，uTools 没有主题变更事件，只能在 preload 里轮询（同步布尔读，开销可忽略）。
 // 菜单面板等控件不跟配置里的 theme（那是气泡配色主题），两者是两回事。
+// 优化：5s 轮询（原 1s）+ 窗口获焦时立即检测。缓存上次值，仅变化时才推送，
+// 避免页面每秒做一次无意义的 DOM classList.toggle。
 function isDark() {
   try { return !!utools.isDarkColors() } catch (err) { return false }
 }
-function pushDark() { emit('dark', isDark()) }
+var lastDark = null
+function pushDark() {
+  var d = isDark()
+  if (d !== lastDark) { lastDark = d; emit('dark', d) }
+}
 pushDark() // 首次立即给一版，页面 onInit 前也能拿到正确形态
-setInterval(pushDark, 1000)
+setInterval(pushDark, 5000)
+// 窗口获焦时立即检测：用户切回挂件时主题可能已变，不等 5s 轮询
+try { window.addEventListener('focus', pushDark) } catch (_) {}
 
 // 悬浮窗 → 主窗。sendToParent 仅在 createBrowserWindow 创建的窗口中有效。
 function send(channel) {
@@ -95,13 +133,26 @@ const api = {
   onSkin(cb) { on('skin', cb) },
   onBubbles(cb) { on('bubbles', cb) },
   onSharedSkins(cb) { on('sharedSkins', cb) },
+  // 单张共享角色本体的回包（宿主 whale:randimg-data：{ id, url }，url 空串 = 取不到）
+  onRandimgData(cb) { on('randimgData', cb) },
   onModels(cb) { on('models', cb) },
   // 设置页「按压气泡试播」：真弹一次设置页正在编辑的泡泡队列（宿主 whale:bubble-preview 推送）
   onBubblePreview(cb) { on('bubblePreview', cb) },
   // 待办清单（宿主 whale:todo 推送：整份 { items, focusId }，页面不做增量合并）
   onTodo(cb) { on('todo', cb) },
+  // 待办到点提醒（宿主经 whale:cmd 队列送来的 todo-due：{ id, text, dueAt }）
+  onTodoDue(cb) { on('todoDue', cb) },
   // 专注统计与每日目标（宿主 whale:focus-stats 推送：{ summary, goal }）
   onFocusStats(cb) { on('focusStats', cb) },
+  // 快捷指令（宿主 feature 入口触发：{ cmd, payload }）
+  onCmd(cb) { on('cmd', cb) },
+  // 光标探测回包（宿主 whale:cursor 推送：{ x, y } 相对窗口左上角，拿不到时为 null）
+  onCursor(cb) { on('cursor', cb) },
+  // 复制文本到剪贴板：页面侧没有 utools 全局（它只在 preload 里），统一由这里代劳。
+  // 同步返回是否成功，页面据此给出「已复制 / 复制失败」回执
+  copyText(text) {
+    try { return !!utools.copyText(String(text == null ? '' : text)) } catch (err) { return false }
+  },
   // uTools 深浅色变化（preload 轮询检测后本地推送，不经主窗）
   onDark(cb) { on('dark', cb) },
   // 同步读取当前深浅态：preload 的首条 dark 推送早于页面注册回调，页面启动时用这里补齐初值
@@ -116,15 +167,43 @@ const api = {
   saveConfig(patch) { send('whale:config', patch || {}) },
   // 计时状态落库（state 传 null 表示清除）；宿主 pushInit 时回推给页面恢复
   saveTimer(state) { send('whale:timer', state || null) },
-  // 计时到点系统通知（页面已按「到点通知」开关判断是否调用）
-  notifyTimerDone(text) { send('whale:timer-done', { text: String(text || '') }) },
-  // 待办轻操作：op = toggle（勾选/取消完成）| focus（设为/取消当前专注），只带 id
+  // 计时到点通知（channels = 计时页的「系统通知 / 邮件」两个开关；宿主再叠渠道总开关）
+  notifyTimerDone(text, channels) {
+    const ch = channels && typeof channels === 'object' ? channels : null
+    const payload = { text: String(text || '') }
+    if (ch) payload.channels = { system: ch.system === true, mail: ch.mail === true }
+    send('whale:timer-done', payload)
+  },
+  // 待办轻操作：op = toggle（勾选/取消完成）| focus（设为当前专注）| unfocus（取消专注），带 id
   todoSend(payload) {
     const p = payload && typeof payload === 'object' ? payload : {}
-    send('whale:todo', { op: String(p.op || ''), id: String(p.id || '') })
+    send('whale:todo', { op: String(p.op || ''), id: String(p.id || ''), text: String(p.text || '') })
   },
-  // 专注轮次上报（页面在倒计时到点、专注记录开着且不是休息轮时调用）
-  focusRound(minutes) { send('whale:focus', { minutes: Number(minutes) || 0 }) },
+  // 到点气泡回执：shown=true 表示气泡真的挂出来了，宿主据此才写幂等位（remindedFor）。
+  // 计时气泡占位 / 免打扰被拦时回 shown=false，提醒保留待投递状态，下一个 tick 还会再试。
+  // debug=true：设置页调试入口触发的演练，宿主不记账（否则会把真实幂等位改脏）
+  todoDueAck(payload) {
+    const p = payload && typeof payload === 'object' ? payload : {}
+    send('whale:todo-due-ack', {
+      id: String(p.id || ''),
+      dueAt: Number(p.dueAt) || 0,
+      shown: p.shown === true,
+      debug: p.debug === true,
+    })
+  },
+  // 专注会话上报：payload = { mode, startAt, endAt, minutes, isBreak, abandoned }
+  // 页面只报「这段投入多长、怎么计的、走完还是放弃」；什么算一轮、归哪天由宿主派生
+  focusSession(payload) {
+    const p = payload && typeof payload === 'object' ? payload : {}
+    send('whale:focus', {
+      mode: String(p.mode || 'down'),
+      startAt: Number(p.startAt) || 0,
+      endAt: Number(p.endAt) || 0,
+      minutes: Number(p.minutes) || 0,
+      isBreak: p.isBreak === true,
+      abandoned: p.abandoned === true,
+    })
+  },
   // dsh（DeepSeek Harness）控制：action = status | start | stop | restart | update | open
   dsh(payload) {
     send('whale:dsh', typeof payload === 'string' ? { action: payload } : (payload || {}))
@@ -134,6 +213,13 @@ const api = {
   dragMove(x, y) { send('whale:drag-move', { x: Number(x), y: Number(y) }) },
   dragEnd() { send('whale:drag-end', {}) },
   setIgnoreMouse(ignore) { send('whale:ignore-mouse', { ignore: !!ignore }) },
+  // 问宿主「光标此刻在哪」（相对窗口左上角）：挂件窗口平时是 ignoreMouse，指针若本来就停在
+  // 鲸鱼上（页面刚重建 / 挂件刚被拖到光标下），没有 pointermove 就建立不了悬停判定，
+  // 用户直接点会被穿透到下层应用。页面拿到坐标后自己补一次命中测试（见 hoverAt）
+  probeCursor() { send('whale:probe-cursor', {}) },
+  // 要共享角色池里的某一张本体（答复走本地推送 whale:randimg-data）。宿主推来的清单只有
+  // id/ext/size，图片是抽到才来要的 —— 一次一张，避免整池搬进挂件
+  requestRandimg(id) { send('whale:randimg', { id: String(id || '') }) },
   // 菜单里的输入框要打字：窗口是 focusable:false 建的，键盘事件进不到页面，
   // 打开菜单时让宿主把焦点给挂件，关闭时交还（详见 preload/lib/ipc.js 的 whale:input-focus）
   setInputFocus(focus) { send('whale:input-focus', { focus: !!focus }) },

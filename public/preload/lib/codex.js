@@ -18,18 +18,50 @@ const { log, logErr } = require('./log')
 const { dayKeyFromTs, dayAdd, homeDir, walkDir } = require('./util')
 
 // ── 扫描上限 ──
-// 解析是同步的（readFileSync + split + 逐行 JSON.parse），整个插件主线程会被占住，
-// 所以要给「单个文件」和「单轮总量」都设上限：
+// 解析是「readFile + split + 逐行 JSON.parse」，即便改成异步读，**解析本身仍占主线程**，
+// 所以要三管齐下给单文件、单轮总量、单轮时长都设上限：
 //   · 单文件超限：直接跳过，但**结果必须落缓存**。否则该文件的 size/mtime 每轮都在变、
 //     每轮都被判定为"变更"重读，而超大文件又必然在读入/解析时抛错（V8 字符串上限），
 //     错误发生在写缓存之前 → 永久复发，整个插件每轮都卡一次。
-//   · 单轮超预算：先返回已聚合的部分并标 deferred，剩下的留到下一轮（5 秒 memo + 调用方缓存承接）。
+//   · 单轮超预算（文件数 / 字节数 / 耗时）：先返回已聚合的部分并标 deferred，剩下的留到下一轮。
+//   · 逐文件 await yieldLoop()：把控制权还给事件循环，挂件动画 / IPC 不会被一次长扫描冻住。
 const CODEX_MAX_FILE_BYTES = 32 * 1024 * 1024
 const CODEX_MAX_ROUND_FILES = 400
 const CODEX_MAX_ROUND_BYTES = 96 * 1024 * 1024
+// 单轮「连续同步解析」的时长上限。文件数 / 字节数只能挡住大文件，挡不住
+// 「400 个小文件逐个 JSON.parse」——量不大，但解析一段就是几十毫秒的连续阻塞，
+// 挂件动画照样掉帧。到点就让出事件循环再接着扫（不中断本轮，只切片）
+const CODEX_YIELD_MS = 12
+// 快照层：同步入口只读快照（过期就顺手发起后台刷新，绝不阻塞），
+// 需要「这次一定要新数据」的调用方（写模型状态的那一路）走 codexSummaryEnsured 有界等待
+const CODEX_SNAP_TTL_MS = 60 * 1000
+const CODEX_ENSURE_MAX_MS = 2500
+// 本轮有 deferred 时，隔这么久再补扫一次（不用 5s memo，那只是防抖，不是补扫）
+const CODEX_RESUME_DELAY_MS = 5000
+// 单次 scan 内部 memo（防抖）：同一轮里多次取快照不必重扫
+const CODEX_MEMO_MS = 5000
 
 // ── 工具 ──
 // dayKeyFromTs / dayAdd 已提到 util.js（与 dsh-usage.js 原本逐字重复，D18）
+
+// 让出事件循环：setImmediate 在本轮 IO/定时器回调之后、下一个 tick 之前执行，
+// 比 setTimeout(0) 少一次 4ms 下限，也不像 process.nextTick 那样插队（插队等于没让）。
+// 刻意**不用** setImmediate().unref 之类：扫描是有意义的未完成工作，不该被当成空闲句柄。
+function yieldLoop() {
+  return new Promise((resolve) => setImmediate(resolve))
+}
+
+// 可在单测里替换的「延迟执行」接缝：scheduleResume 的 5 秒补扫、codexSummaryEnsured 的超时
+// 都走它，测试才能在不真等的前提下验证补扫（与 util.js 的 atomicTmpPath 同款理由）。
+// ⚠️ 调用点必须走 `module.exports.later(...)` 这个间接层（本文件末尾是 module.exports 整体替换，
+//    写 exports.x 会拿到 undefined）。返回句柄供 clearTimeout
+function later(fn, waitMs) {
+  return setTimeout(fn, waitMs)
+}
+// 取用函数：调用点统一经它在**调用时**取一次当前实现，测试替换 module.exports.later 才真的生效
+function laterOf() {
+  return typeof module.exports.later === 'function' ? module.exports.later : later
+}
 
 // ── Codex 目录定位 ──
 // 口径与改动前完全一致（D22）：**不支持** `~` 展开、**不**把相对路径按 cwd 解析
@@ -69,13 +101,13 @@ function listCodexSessionFiles(root) {
 
 // ── 解析单个会话文件 → { day: { model: {in,cached,cwrite,out,reason,total,turns} } } ──
 // rl/rlTs 是该文件里时间最新的订阅窗口快照（没订阅 / API-key 计费时为 null）
-function parseCodexFile(file) {
+// 纯文本解析（不做 IO），读取在 async 的 codexScan 里 —— 分开是为了让单测能直接喂文本，
+// 也避免「读失败」与「解析失败」两条错误的归因混在一起
+function parseCodexFileText(text) {
   const days = {}
   let model = 'codex'
   let prevTotal = null
   let lastRl = null, rlTs = -1
-  let text = ''
-  try { text = fs.readFileSync(file, 'utf8') } catch (_) { return { days, rl: null, rlTs: 0 } }
   const bump = (day, mk, v) => {
     days[day] = days[day] || {}
     const cur = days[day][mk] || { in: 0, cached: 0, cwrite: 0, out: 0, reason: 0, total: 0, turns: 0 }
@@ -83,7 +115,7 @@ function parseCodexFile(file) {
     cur.out += v.out; cur.reason += v.reason; cur.total += v.total; cur.turns += v.turns
     days[day][mk] = cur
   }
-  for (const line of text.split('\n')) {
+  for (const line of String(text == null ? '' : text).split('\n')) {
     if (!line || line.charCodeAt(0) !== 123) continue // 只处理 '{' 开头的行
     let o = null
     try { o = JSON.parse(line) } catch (_) { continue }
@@ -182,10 +214,24 @@ function normalizeCodexRateLimits(rl, baseTs) {
 }
 
 // ── 汇总（带增量缓存：只有变化的文件才重新解析）──
+// 全程 async：读文件走 fs.promises，解析之间 await yieldLoop()，挂件动画不会被冻住
 let memo = null, memoAt = 0
-function codexSummary() {
+
+// 读一个会话文件并解析；读失败按「空结果 + 留痕」处理（与旧实现同口径，但不再静默）
+async function parseCodexFile(file) {
+  let text = ''
+  try {
+    text = await fs.promises.readFile(file, 'utf8')
+  } catch (err) {
+    logErr('[whale][codex] 读会话文件失败', file, err && err.message)
+    return { days: {}, rl: null, rlTs: 0 }
+  }
+  return parseCodexFileText(text)
+}
+
+async function codexScan() {
   const now = Date.now()
-  if (memo && now - memoAt < 5000) return memo
+  if (memo && now - memoAt < CODEX_MEMO_MS) return memo
   const home = codexHome()
   if (!home) {
     memo = { ok: false, error: '未找到 Codex 目录（$CODEX_HOME 或 ~/.codex）' }
@@ -193,6 +239,8 @@ function codexSummary() {
     return memo
   }
   const cache = readCodexCache()
+  // walkDir 是同步递归（util.js 的既有实现）。会话目录只有 YYYY/MM/DD 三层、
+  // readdir 通常在毫秒级，这里不为它单独造一套异步遍历 —— 真正的大头是文件解析，已经切片了
   const files = listCodexSessionFiles(home)
   const keep = {}
   let changed = 0
@@ -206,7 +254,7 @@ function codexSummary() {
   let pendingCount = 0
   for (const f of files) {
     let st = null
-    try { st = fs.statSync(f) } catch (_) { continue }
+    try { st = await fs.promises.stat(f) } catch (_) { continue }
     const prev = cache.files[f]
     if (prev && prev.size === st.size && prev.mtimeMs === st.mtimeMs && prev.days) { reused.push([f, st, prev]); continue }
     // 超大文件：不解析，但把 size/mtime 记进缓存，下一轮指纹未变就不会再进来
@@ -218,10 +266,11 @@ function codexSummary() {
     fresh.push([f, st])
   }
 
-  // 单轮预算：本轮只解析 fresh 里的前 N 个 / 前 X 字节，其余留到下一轮。
+  // 单轮预算：本轮只解析 fresh 里的前 N 个 / 前 X 字节 / 前十几毫秒，其余留到下一轮。
   // 注意「留到下一轮」必须能在下一轮被优先处理，所以本轮未解析的一律不写缓存指纹，
   // 下轮它们仍在 fresh 里、且排在已被 reuse 的那些之前。
   let roundFiles = 0, roundBytes = 0, deferred = false
+  let yieldAt = Date.now()
   for (const [f, st] of fresh) {
     if (roundFiles >= CODEX_MAX_ROUND_FILES || roundBytes + st.size > CODEX_MAX_ROUND_BYTES) {
       deferred = true
@@ -230,7 +279,12 @@ function codexSummary() {
       if (prev) keep[f] = prev // 有旧结果就先用旧的，至少不丢历史数据
       continue
     }
-    const parsed = parseCodexFile(f)
+    // 连续解析超过 CODEX_YIELD_MS 就让出一次事件循环，回来再接着扫（不中断本轮）
+    if (Date.now() - yieldAt >= CODEX_YIELD_MS) {
+      await yieldLoop()
+      yieldAt = Date.now()
+    }
+    const parsed = await parseCodexFile(f)
     keep[f] = { size: st.size, mtimeMs: st.mtimeMs, days: parsed.days, rl: parsed.rl || null, rlTs: parsed.rlTs || 0 }
     roundFiles++
     roundBytes += st.size
@@ -303,11 +357,129 @@ function codexSummary() {
   return memo
 }
 
-// 清缓存（设置页「刷新」按钮调用）
+// ── 快照层 ──
+// 为什么还要一层快照：所有 IPC handler 与 sendToWidget 都是**同步**的 —— 把 scan 做成 async 之后，
+// 一旦在同步函数里调它，拿到的只会是个 Promise，`r.ok` 恒为 undefined，用户看到的是「统计失败」。
+// 所以对外拆成三种入口：
+//   · codexSummaryCached()     同步、永不阻塞：有快照就返回快照，过期就顺手发一个后台刷新
+//   · codexSummaryEnsured(ms)  有界等待：最多等 ms 毫秒，等不到就给旧快照（可能 null），绝不挂死
+//   · codexSummary()           直接 await 一次真实扫描（设置页「刷新」按钮要的语义）
+let snap = null          // 最近一次完成的扫描结果（可能已过期）
+let snapAt = 0           // 快照完成时刻
+let inflight = null      // 进行中的扫描 Promise（并发调用共享同一次扫描，不叠跑）
+let resumeTimer = null   // deferred 补扫的定时器句柄
+let snapListeners = []
+
+// 唯一的扫描发起口：已有进行中的扫描就复用。失败也要落成快照（ok:false），
+// 否则「目录不存在」这类稳定失败会变成每次调用都重扫一遍目录树
+function kickScan(why) {
+  if (inflight) return inflight
+  inflight = Promise.resolve()
+    .then(() => codexScan())
+    .then((r) => {
+      snap = r
+      snapAt = Date.now()
+      if (r && r.ok && r.deferred) scheduleResume()
+      notifySnapshot()
+      return r
+    })
+    .catch((err) => {
+      logErr('[whale][codex] 扫描失败', why, err && err.message)
+      const r = { ok: false, error: '读取 Codex 会话统计失败：' + String((err && err.message) || err) }
+      snap = r
+      snapAt = Date.now()
+      return r
+    })
+    .then((r) => { inflight = null; return r })
+  return inflight
+}
+
+// 补扫：本轮预算用尽 → 隔 CODEX_RESUME_DELAY_MS 再扫一次，把 deferred 的部分补上。
+// 不用 5s memo 顶替：memo 只是防抖，过期后再调才扫，而这条路径需要「没人调也自己补」
+function scheduleResume() {
+  if (resumeTimer) return
+  resumeTimer = laterOf()(() => {
+    resumeTimer = null
+    // 清掉 scan 内部的 memo：补扫必须真的再扫一轮，不能被 5s 防抖挡回去
+    memo = null
+    memoAt = 0
+    kickScan('resume')
+  }, CODEX_RESUME_DELAY_MS)
+}
+
+function notifySnapshot() {
+  const list = snapListeners.slice()
+  for (const cb of list) {
+    try { cb(snap) } catch (err) { logErr('[whale][codex] 快照订阅回调异常', err && err.message) }
+  }
+}
+
+// 订阅「快照更新」（后台补扫 / 刷新完成后触发）。返回退订函数。
+// settings.js 用它把新的今日 token 推给挂件：用户没开设置页时，也只有这里能感知到补扫完成
+function onCodexSnapshot(cb) {
+  if (typeof cb !== 'function') return () => {}
+  snapListeners.push(cb)
+  return function off() {
+    const i = snapListeners.indexOf(cb)
+    if (i >= 0) snapListeners.splice(i, 1)
+  }
+}
+
+function snapshotFresh() {
+  return !!snap && Date.now() - snapAt < CODEX_SNAP_TTL_MS
+}
+
+// 同步入口：立刻返回（可能是旧快照 / null），过期就在后台补一次，绝不阻塞调用方
+function codexSummaryCached() {
+  if (!snapshotFresh()) kickScan('cached')
+  return snap
+}
+
+// 有界等待入口：最多等 maxWaitMs；等不到就返回旧快照（调用方要能接受 null）
+async function codexSummaryEnsured(maxWaitMs) {
+  if (snapshotFresh()) return snap
+  const ms = Number.isFinite(maxWaitMs) && maxWaitMs > 0 ? maxWaitMs : CODEX_ENSURE_MAX_MS
+  const run = kickScan('ensured')
+  let timer = null
+  const timeout = new Promise((resolve) => { timer = laterOf()(() => resolve(null), ms) })
+  const r = await Promise.race([run, timeout])
+  if (timer) clearTimeout(timer)
+  return r || snap
+}
+
+// 直接扫一轮（await 真实结果）。设置页「刷新」按钮走这里，语义是「我现在就要最新数字」。
+// 仍复用进行中的扫描，避免连点叠跑
+function codexSummary() {
+  memo = null
+  memoAt = 0
+  return kickScan('direct')
+}
+
+// 插件进程真正结束时的清理（services.js 的 onPluginOut(isKill) 调）。
+// 与 clearCodexCache 的区别：这里**不删缓存数据**（用户下次进来还要用），只停掉本模块持有的
+// 定时器并清空订阅者 —— resumeTimer 是 5s 后才触发的补扫，进程结束前它还会再拉一次全量扫描，
+// 对一个正在退出的进程纯属浪费（且扫描本身是 async，可能在退出过程中把半截结果写库）。
+// 进行中的扫描不强行中断（没有取消通道，硬造只会让 fileCache 停在半更新态），让它自然收尾即可。
+function dispose() {
+  if (resumeTimer) { clearTimeout(resumeTimer); resumeTimer = null }
+  snapListeners = []
+}
+
+// 清缓存（设置页「刷新」按钮 / 清除数据时调用）
 function clearCodexCache() {
   memo = null
   memoAt = 0
+  snap = null
+  snapAt = 0
+  if (resumeTimer) { clearTimeout(resumeTimer); resumeTimer = null }
   try { utools.dbStorage.removeItem(K.codex) } catch (_) {}
 }
 
-module.exports = { codexSummary, clearCodexCache, codexHome }
+module.exports = {
+  codexSummary, codexSummaryCached, codexSummaryEnsured, clearCodexCache, codexHome,
+  onCodexSnapshot,
+  // 插件退出清理（停补扫定时器 + 退订，不删缓存），services.js 的 onPluginOut 调
+  dispose,
+  // 单测接缝：替换 later 以便不真等 5 秒就能验证补扫
+  later,
+}

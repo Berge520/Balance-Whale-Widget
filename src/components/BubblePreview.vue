@@ -49,6 +49,8 @@ function applyThemeVars() {
   rootEl.style.setProperty('--dshwv-hint', t.hint)
   rootEl.style.setProperty('--dshwv-fill', t.fill)
   rootEl.style.setProperty('--dshwv-stroke', t.stroke)
+  // 与悬浮窗 applyTheme 同一口径：HUD 外圈/文字角标只在 fantasy 主题显示
+  rootEl.classList.toggle('dshwv-theme-fantasy', (props.theme || 'default') === 'fantasy')
 }
 
 onMounted(() => {

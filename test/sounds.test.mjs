@@ -13,7 +13,7 @@
  * 落盘走真实文件系统：getPath('userData') 桩指向本次测试的临时目录，dbStorage 用内存 Map，
  * 全程不碰真实用户数据，也不打真实网络（本模块没有网络）。
  */
-import test from 'node:test'
+import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
 import os from 'node:os'
 import path from 'node:path'
@@ -23,6 +23,8 @@ import { createRequire } from 'node:module'
 // ── utools 桩：内存 dbStorage + userData 指向本次测试的临时目录 ──
 const store = new Map()
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'whale-sounds-test-'))
+// 本次的素材目录跑完即废。不删的话每轮 npm test 在 %TEMP% 里攒一个 whale-sounds-test-*
+after(() => { fs.rmSync(TMP, { recursive: true, force: true }) })
 globalThis.utools = {
   getPath: () => TMP,
   dbStorage: {
