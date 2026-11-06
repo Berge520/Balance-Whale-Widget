@@ -29,7 +29,7 @@ const {
   winAlive, getWindow, queueLiveScale, widgetOrigin,
   widgetSide, spaceAround, usableArea, snapRect, flippedOf, setWidgetPos,
   syncTaskbarWatch, destroyWidget, ensureWindowStyles, applyIgnoreMouse, show,
-  beginDragSession, endDragSession, dragMoveTo,
+  beginDragSession, endDragSession, dragMoveTo, setPageHidden,
 } = require('./widget')
 // 共享角色图池的**单张**本体（randimg 段抽到才要，见 whale:randimg）。
 // 顶层 require 不额外付代价：widget.js 已经在启动路径上把 skins.js 加载好了。
@@ -294,6 +294,13 @@ function registerIpc() {
         logErr('[whale][drag] 补做拖拽期缩放失败', err && err.message)
       }
     }
+  })
+
+  // 页面可见态：子窗 preload 在 visibilitychange / pageshow / pagehide 时上报 document.hidden。
+  // 宿主的任务栏轮询据此在挂件不可见（最小化 / 显示桌面 / 切虚拟桌面 / 被连带 hide）时跳过光标采样。
+  // 原生 isVisible() / isMinimized() 只覆盖窗口自身显隐，页面级不可见由这条补齐。
+  ipcRenderer.on('whale:widget-visibility', (event, data) => {
+    setPageHidden(!!(data && data.hidden))
   })
 
   // 光标探测：页面启动 / 挂件重建后问一次「指针现在在哪」。

@@ -66,3 +66,13 @@ test('页面：挂件隐藏时不发光标探测', () => {
   assert.match(block, /if \(document\.hidden\) return;/)
   assert.match(page, /visibilitychange/)
 })
+
+test('页面：启动 350ms 的一次性探测也必须跳过隐藏态', () => {
+  const at = page.indexOf('}, 350);')
+  assert.ok(at >= 0, '找不到启动 350ms 的一次性光标探测')
+  const block = page.slice(Math.max(0, at - 500), at)
+  // 与 probeCursorSoon 同一守卫：隐藏态不探测，否则可能在不可见时接管上 ignore=false，
+  // 重新显示后先吞一次点击；可见时的首次探测与 visibilitychange 补问都不能被破坏
+  assert.match(block, /if \(document\.hidden\) return/)
+  assert.match(block, /whaleApi\.probeCursor\(\)/)
+})

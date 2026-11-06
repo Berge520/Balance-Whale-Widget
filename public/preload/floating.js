@@ -15,6 +15,7 @@
  *              / whale:randimg（要共享角色池里某一张的本体，答复走 whale:randimg-data）
  *              / whale:open-settings（可带 { target } 直达某张设置卡，无载荷则只唤出主窗）
  *              / whale:models-refresh / whale:set-main-model / whale:hide-widget / whale:open-external
+ *              / whale:widget-visibility（页面可见态上报，宿主据此跳过隐藏态的光标采样）
  *
  * 页面侧统一通过 window.whale 调用，不直接碰 electron / utools。
  */
@@ -121,6 +122,22 @@ function send(channel) {
     }
   } catch (err) { logErr('[whale] sendToParent 失败', channel, err && err.message) }
 }
+
+// 页面可见态上报：宿主的任务栏轮询（widget.js watchTick）要靠它跳过隐藏态的光标采样。
+// 为什么不用原生 isVisible() / isMinimized() 就够：那两个只反映窗口自身的显隐，
+// 「切虚拟桌面 / 显示桌面」这类页面级不可见在 Windows 上不一定让 isVisible() 翻 false；
+// document.hidden 由 Chromium 直接按页面是否真正可见维护，二者叠加才不漏判。
+// 初始推一次，之后由 visibilitychange（最小化 / 显示桌面 / 虚拟桌面切换）维护；
+// pageshow / pagehide 兜住页面被冻结、恢复的极端时序，避免宿主停在旧状态。
+function pushVisibility() {
+  try { send('whale:widget-visibility', { hidden: !!window.document.hidden }) } catch (err) {}
+}
+try {
+  window.document.addEventListener('visibilitychange', pushVisibility)
+  window.addEventListener('pageshow', pushVisibility)
+  window.addEventListener('pagehide', pushVisibility)
+} catch (err) {}
+pushVisibility()
 
 const api = {
   // —— 接收宿主推送（floating.html 注册回调） ——

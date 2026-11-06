@@ -340,6 +340,10 @@ function setWidgetPos(p) {
 }
 function watchTick() {
   if (!winAlive()) return
+  // 窗口存在但不可见时不取光标：任务栏轮询的唯一光标来源是 taskbarBase → getCursorScreenPoint，
+  // 隐藏态（最小化 / 显示桌面 / 切虚拟桌面 / 被连带 hide）继续问只会拿到过期值并可能误触发重摆。
+  // 可见后下一 tick 照常采样；watchSig 保留，隐藏期间任务栏/显示器变化在恢复后仍能被识别。
+  if (!nativeSamplingVisible()) return
   try {
     const sz = win.getSize()
     const pos = win.getPosition()
@@ -514,6 +518,31 @@ function flippedOf(anchor) {
 
 function winAlive() {
   try { return !!win && !win.isDestroyed() } catch (err) { return false }
+}
+// 页面可见态（子窗 visibilitychange 经 preload 上报）。document.hidden 能覆盖
+// 「最小化 / 显示桌面 / 切虚拟桌面」这类原生 isVisible() 不一定翻的不可见态。
+let pageHidden = false
+function setPageHidden(hidden) { pageHidden = hidden === true }
+// 光标采样可见性（纯函数）：任一信号判不可见就跳过，避免隐藏态取光标后把 ignore=false 接管上。
+// visible=false 覆盖 win.hide / 被 uTools 连带隐藏；minimized=true 单独判，
+// 因为 Windows 最小化时 isVisible() 不保证为 false；pageHidden 覆盖虚拟桌面等页面级隐藏。
+function canSampleCursor(state) {
+  const s = state || {}
+  if (s.visible === false) return false
+  if (s.minimized === true) return false
+  if (s.pageHidden === true) return false
+  return true
+}
+// 原生窗口信号取不到时按「可见」处理：宁可保持原有探测频率，也不因 API 缺失漏探测。
+// 虚拟桌面这类 isVisible() 不一定反映的状态由 pageHidden 兜住。
+function nativeSamplingVisible() {
+  let visible = true
+  let minimized = false
+  try {
+    if (win && typeof win.isVisible === 'function') visible = win.isVisible() !== false
+    if (win && typeof win.isMinimized === 'function') minimized = win.isMinimized() === true
+  } catch (err) {}
+  return canSampleCursor({ visible, minimized, pageHidden })
 }
 // 暴露当前窗口实例（供 IPC 层做几何读写；调用前先用 winAlive() 判断）
 function getWindow() { return win }
@@ -690,6 +719,8 @@ function ensureWidgetInner(opts) {
 //            「主窗失焦自动隐藏」把设置窗收起）；false = 挂件只显示不夺焦（设置窗需同时可见）
 function createWidget(focusable) {
   const wantFocus = !!focusable
+  // 新窗口从「未上报」开始；页面 preload 会立刻推一次 document.hidden，之后由 visibilitychange 维护
+  pageHidden = false
   const cfg = readConfig()
   const wa = usableArea(undefined, undefined, cfg) // 复用上面这次读，别再读一遍存储
   const size = winSize(wa, cfg.scale)
@@ -797,6 +828,7 @@ function destroyWidget() {
     try { win.hide() } catch (err) {}
   }
   win = null
+  pageHidden = false
   // 兜底显示定时器属于「上一个窗口」：重建后的窗口会自己排新的，旧的必须撤销
   clearAutoShow()
   clearInitFallback() // 同上：旧窗口的兜底不能让它在销毁后又推一次 init（新页面有自己的 ready）
@@ -1245,6 +1277,9 @@ module.exports = {
   flippedOf,
   setWidgetPos,
   winAlive,
+  canSampleCursor,
+  nativeSamplingVisible,
+  setPageHidden,
   getWindow,
   applyOnTop,
   ensureOnTop,

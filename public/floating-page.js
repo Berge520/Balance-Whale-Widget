@@ -6072,8 +6072,13 @@
   if (typeof whaleApi.show === 'function') whaleApi.show();
   whaleApi.ready();
   // 页面重建时指针可能正停在鲸鱼上：没有 pointermove 就建立不了悬停，第一下点击会被穿透丢掉。
-  // 稍等一下（窗口显示 + 首次布局完成）再问宿主光标位置，补一次命中测试
-  setTimeout(function () { try { whaleApi.probeCursor(); } catch (err) {} }, 350);
+  // 稍等一下（窗口显示 + 首次布局完成）再问宿主光标位置，补一次命中测试。
+  // 与看门狗同一守卫：隐藏态（最小化/显示桌面/切虚拟桌面/被连带 hide）不探测，
+  // 否则可能在不可见时把 ignore=false 接管上，重新显示后先吞一次点击；恢复可见后的补问由 visibilitychange 负责
+  setTimeout(function () {
+    if (document.hidden) return
+    try { whaleApi.probeCursor(); } catch (err) {}
+  }, 350);
 
   // —— 穿透死锁看门狗 ——
   // 真机实证：窗口可能被留在 WS_EX_TRANSPARENT(0x20) 上，而 Electron 的 forward 转发钩子已经失效，
