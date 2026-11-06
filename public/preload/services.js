@@ -225,7 +225,7 @@ try {
   })
 } catch (err) { logErr('[whale][lifecycle] 注册 onPluginOut 失败', err && err.message) }
 
-// 用户把插件从搜索框分离为独立窗口（Ctrl+D）时触发，仅用于日志
+// 插件被分离为独立窗口时触发，仅用于日志（真机实测：Ctrl+D 注入不会触发本事件；实际分离走顶部 ⋮ 菜单的「分离为独立窗口」）
 try {
   utools.onPluginDetach(() => {
     log('[whale][lifecycle] onPluginDetach 已分离为独立窗口', { windowType: winType() })
