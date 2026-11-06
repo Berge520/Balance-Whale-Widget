@@ -191,14 +191,16 @@ try {
 } catch (err) { logErr('[whale][lifecycle] 注册 onPluginEnter 失败', err && err.message) }
 
 // 插件退出：挂件是常驻桌面的独立窗口，任何时候都不在这里 destroyWidget()。
-// 否则「关闭（已分离的）设置窗口」触发 onPluginOut 时会把挂件一起关掉 —— 这正是此前的 bug。
-// 进程真正结束（isKill=true）时 uTools 会自行关闭本插件 createBrowserWindow 创建的窗口，
-// 无需我们销毁；若窗口已被 uTools 关闭/隐藏，winAlive() 会判为失效或不可见，
-// 下一次 ensureWidget() 会自动重建，不依赖这里的销毁来「清理失效引用」。
+// 真机实测：关闭已分离的设置窗口会触发 onPluginOut(isKill=true) —— 分离窗承载主界面，
+// 关掉即插件结束，uTools 会自行关闭本插件 createBrowserWindow 创建的窗口，无需我们销毁。
+// 否则「关窗顺手销毁挂件」会把挂件一起关掉 —— 这正是此前的 bug。
+// isKill=false 只对应隐藏 / 退出到后台，那时挂件仍在桌面，更不能动它。
+// 窗口若被关闭/隐藏，winAlive() 会判为失效或不可见，下一次 ensureWidget() 自动重建。
 try {
   utools.onPluginOut((isKill) => {
     log('[whale][lifecycle] onPluginOut', { isKill, windowType: winType() })
-    // 到点扫描只在本插件进程真正退出时停表：关 / 隐藏设置窗（isKill=false）时挂件仍在桌面，
+    // 到点扫描只在本插件进程真正退出（isKill=true）时停表：此时挂件会被 uTools 一起关掉，
+    // 停表不会有副作用。isKill=false 只对应隐藏 / 后台驻留，那时挂件仍在桌面，
     // 停掉扫描会让到点提醒再也不响（此前「关一次设置窗提醒就没了」就是这个原因）。
     // 真正退出后下次 onPluginEnter 会重起并补扫一次。若发现表已停（旧版本遗留状态），补起即可。
     if (isKill) {
@@ -206,8 +208,8 @@ try {
     } else if (!remindTimer) {
       try { startReminders() } catch (err) { logErr('[whale][remind] 恢复扫描失败', err && err.message) }
     }
-    // 插件进程真正结束（isKill=true）时按「保留 dsh」开关决定是否结束 dsh，避免留下孤进程占着 3080。
-    // 关闭已分离的设置窗口也会触发 onPluginOut，但那种情况 isKill=false，不能动 dsh。
+    // 插件进程真正结束（isKill=true，含关闭已分离的设置窗口）时按「保留 dsh」开关决定是否结束 dsh，
+    // 避免留下孤进程占着 3080。isKill=false 只对应隐藏 / 后台驻留，插件还活着，不能动 dsh。
     if (isKill) {
       // 只 require 一次再取两项：dsh 一族 300KB+，两次 dshModule() 虽命中 Node 缓存但读起来像两条路径
       let dsh = null

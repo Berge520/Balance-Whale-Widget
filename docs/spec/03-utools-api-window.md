@@ -1,5 +1,5 @@
 12. **空 `catch` 分两类**：预期分支（Electron 可选 API 不存在、窗口已销毁、读存储失败回默认值）保留空 catch 静默降级；业务失败（网络、写存储、IPC、窗口创建、音效与命中测试初始化）一律 `logErr(...)` 留痕。唯一例外：页面检测不到宿主桥接的 `console.warn` 常显，保证生产环境也有线索。
-13. **`onPluginOut(isKill)` 语义**：挂件是常驻桌面的独立窗口，**任何时候都不在 `onPluginOut` 里 `destroyWidget()`**。曾按「`isKill===true` 才销毁」实现，结果**关闭已分离的设置窗口**（同样触发 `onPluginOut`）会把挂件一起关掉。进程真正结束时 uTools 会自行关闭本插件创建的窗口，无需我们销毁；窗口若被关闭/隐藏，`winAlive()` 判为失效或不可见，下一次 `ensureWidget()` 自动重建。`onPluginOut` 只保留一条 dev 日志（打印 `isKill`）。
+13. **`onPluginOut(isKill)` 语义**：挂件是常驻桌面的独立窗口，**任何时候都不在 `onPluginOut` 里 `destroyWidget()`**。真机实测的两种触发：① **关闭已分离的设置窗口 = `isKill=true`** —— 分离窗承载主界面 BrowserView，关掉即插件结束，uTools 会自行关闭本插件 `createBrowserWindow` 创建的挂件窗，无需我们销毁；② **主窗隐藏 / 退出到后台 = `isKill=false`**（隐藏后约 3 分钟才后台退出，期间挂件仍在桌面），此时销毁挂件或停掉到点扫描都会出问题。曾按「`isKill===true` 才销毁」实现，结果关闭已分离的设置窗口时把挂件一起关掉。窗口若被关闭/隐藏，`winAlive()` 判为失效或不可见，下一次 `ensureWidget()` 自动重建。`onPluginOut` 只保留一条 dev 日志（打印 `isKill`）。
 14. **`enterMode`（进入插件时显示哪些窗口）**：`both`（默认，设置窗 + 挂件）/ `widget`（显示挂件，设置窗自动收起）/ `settings`（只显示设置窗口）。显隐分两层，由 `onPluginEnter` 的 whale 分支按需编排：
     - **主窗自不自动弹出**：`whale` feature 在 `plugin.json` 设 `mainHide:true`；它只阻止 uTools「自动弹出主搜索框」，对已显示 / 已分离的主窗无效。
     - **挂件是否夺焦**：`createWidget(focusable)` 按模式决定（`focusable` 只能在创建时指定）；`ensureWidget({ focus })` 检测到与现有窗口不一致时销毁重建。

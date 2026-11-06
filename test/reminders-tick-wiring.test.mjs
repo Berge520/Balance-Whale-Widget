@@ -28,8 +28,8 @@ test('第二路驱动接在挂件窗与 ipc 上，且与主窗表共用同一份
   assert.match(remindTick, /REMIND_TICK_DEBOUNCE_MS\s*=\s*20000/)
 })
 
-test('到点扫描只在 isKill=true 真退出时停表（关分离设置窗不停）', () => {
-  // 非 kill 的 onPluginOut（关设置窗 / 失焦）不能再无条件停表，否则挂件还在、提醒先哑了
+test('到点扫描只在 isKill=true 真退出时停表（isKill=false 的隐藏 / 后台驻留不停）', () => {
+  // 非 kill 的 onPluginOut（隐藏 / 失焦 / 退到后台）不能再无条件停表，否则挂件还在、提醒先哑了
   const at = services.indexOf("log('[whale][lifecycle] onPluginOut'")
   assert.ok(at >= 0, '找不到 onPluginOut 处理块')
   const head = services.slice(at, services.indexOf('if (isKill) {', at))

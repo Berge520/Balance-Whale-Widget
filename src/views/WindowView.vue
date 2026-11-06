@@ -103,6 +103,7 @@ function onOpacityCommit() {
         <option value="settings">只显示设置窗口</option>
       </select>
     </label>
+    <p class="hint">关闭分离出来的设置窗口等于退出插件，挂件也会一起关；只想收起设置窗请按 Esc 或点窗口外。</p>
     <div class="btn-row">
       <button class="utils-btn utils-primary" @click="emit('show-widget')">显示挂件</button>
       <button class="secondary utils-btn utils-secondary" @click="emit('hide-widget')">隐藏挂件</button>
