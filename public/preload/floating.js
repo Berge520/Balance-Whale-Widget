@@ -16,6 +16,7 @@
  *              / whale:open-settings（可带 { target } 直达某张设置卡，无载荷则只唤出主窗）
  *              / whale:models-refresh / whale:set-main-model / whale:hide-widget / whale:open-external
  *              / whale:widget-visibility（页面可见态上报，宿主据此跳过隐藏态的光标采样）
+ *              / whale:remind-tick（可见时每 30s 向宿主补一拍到点扫描，兜住主窗被节流后的 60s）
  *
  * 页面侧统一通过 window.whale 调用，不直接碰 electron / utools。
  */
@@ -138,6 +139,26 @@ try {
   window.addEventListener('pagehide', pushVisibility)
 } catch (err) {}
 pushVisibility()
+
+// —— 待办到点扫描的第二路驱动 ——
+// 主窗（设置窗）一关就隐藏，它的 30s 表会被 Chromium 后台节流拉成 60s（真机日志实测：
+// onPluginOut(isKill:false) 后约 2 分钟，节奏从 30.000s 变成 60.000s）。
+// 挂件窗常驻桌面且可见，渲染进程不被节流，这里按同一节拍向宿主补一拍；宿主 lib/remind-tick.js
+// 有 20s 去抖（与主窗表共用同一实例），两路不会在同一秒重复跑。
+// 挂件不可见（最小化 / 显示桌面 / 切虚拟桌面）时主动停发：隐藏态下本窗同样会被节流，
+// 再发只是把 60s 的拍子叠上去，交给主窗兜底表即可。
+function remindTick() {
+  try {
+    if (window.document.hidden) return
+    send('whale:remind-tick')
+  } catch (err) { logErr('[whale][remind] 挂件驱动上报失败', err && err.message) }
+}
+try {
+  remindTick() // 建窗 / 重载后先补一拍（与主窗启动补扫重叠时由宿主去抖挡掉）
+  setInterval(remindTick, 30000)
+  // 从隐藏恢复可见时立刻补一拍，隐藏期间漏掉的到点不用再等下个 30s
+  window.document.addEventListener('visibilitychange', function () { if (!window.document.hidden) remindTick() })
+} catch (err) { logErr('[whale][remind] 启动挂件驱动失败', err && err.message) }
 
 const api = {
   // —— 接收宿主推送（floating.html 注册回调） ——

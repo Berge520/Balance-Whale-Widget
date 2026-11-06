@@ -12,12 +12,12 @@
  *  settings.js   对外 window.services（设置页 API）
  */
 const { log, logErr, LOG_FILE } = require('./lib/log')
-const { readConfig, patchConfig, alertFor, alertOneLine, readTodo, writeTodo } = require('./lib/store')
-const { runDueTick } = require('./lib/reminders')
+const { readConfig, patchConfig, alertFor, alertOneLine } = require('./lib/store')
 const { notify } = require('./lib/notify')
-const { checkUpdate, inQuietHours } = require('./lib/api')
+const { checkUpdate } = require('./lib/api')
 const { ensureWidget, toggleWidget, pushConfig, dispose: disposeWidget } = require('./lib/widget')
 const { registerIpc, sendWidgetCmd } = require('./lib/ipc')
+const { runRemindTick } = require('./lib/remind-tick')
 
 // dsh 一族（dsh / dsh-market / dsh-export / dsh-backup / dsh-usage / ...）合计 300KB+，
 // 而启动路径上只在「插件进程真正退出」时才用得到 stopOnQuit()。顶层 require 会把这整片
@@ -62,24 +62,17 @@ if (isSettingsWindow()) {
 function settingsApiOrNull() { return isSettingsWindow() ? getSettings() : null }
 
 // ──────────────────────────────────────────────
-// 待办到点提醒：30s 轮询
+// 待办到点提醒：30s 轮询（主窗兜底表）
 // ──────────────────────────────────────────────
-// 判定全部在 lib/reminders.js（纯函数），这里只负责「什么时候扫一次」：
-// 进插件时启动 + 立刻补扫一次（插件不在期间错过的到点也补一次），退出时停表。
+// 判定全部在 lib/reminders.js（纯函数），装配与双驱动去抖在 lib/remind-tick.js。
+// 这里只负责「主窗的兜底表」：进插件时启动 + 立刻补扫一次（插件不在期间错过的也补一次），
+// 真退出时停表。为什么还要这层：挂件窗没建 / 已销毁 / 被隐藏时挂件驱动就没有了，只能靠它。
+// 主窗被隐藏后这张表会被 Chromium 后台节流成 60s（真机日志实测），这正是挂件驱动要补的洞。
 // 到点只提醒（通知 + 挂件气泡），不自动开始计时。
 let remindTimer = null
 function startReminders() {
   stopReminders()
-  const tick = () => {
-    try {
-      const cfg = readConfig()
-      // 免打扰时段只弹挂件气泡，不弹系统通知 —— 与设置页「免打扰」的文案一致
-      // （计时到点是用户主动设定的一次性提醒，不走这条，照常通知）
-      const fired = runDueTick({ now: Date.now(), readTodo, writeTodo, notify, sendToWidget: sendWidgetCmd, cfg, silent: inQuietHours(cfg) })
-      // 留痕：到点提醒是静默副作用，真机排查时只能靠日志确认扫到了、发了几条
-      if (fired && fired.length) log('[whale][remind] 到点提醒', { count: fired.length, ids: fired.map((x) => x.id) })
-    } catch (err) { logErr('[whale][remind] 到点扫描失败', err && err.message) }
-  }
+  const tick = () => runRemindTick(sendWidgetCmd, 'main')
   tick() // 启动补扫：插件不在期间错过的也补一次
   remindTimer = setInterval(tick, 30000)
 }

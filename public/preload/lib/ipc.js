@@ -12,6 +12,9 @@ const {
 const { appendSession, pruneFocus } = require('./focus')
 const { FOCUS_KEEP_DAYS, TODO_MAX, TODO_TEXT_MAX } = require('./constants')
 const { notifyTimer } = require('./notify')
+// 到点扫描的共用装配（与 services.js 的主窗表共用同一个去抖实例）。
+// 本模块只被它引用，绝不反向 require ipc.js，无环。
+const { runRemindTick } = require('./remind-tick')
 // dsh 一族（dsh / dsh-market / dsh-export / dsh-backup / dsh-usage / ...）合计 300KB+。
 // 顶层 require 会把它压进每次 preload 加载的求值阶段（本模块在启动路径上必加载），
 // 而这里对 dsh 的引用全在运行时（菜单操作、状态广播），没有一处是模块求值期。
@@ -301,6 +304,21 @@ function registerIpc() {
   // 原生 isVisible() / isMinimized() 只覆盖窗口自身显隐，页面级不可见由这条补齐。
   ipcRenderer.on('whale:widget-visibility', (event, data) => {
     setPageHidden(!!(data && data.hidden))
+  })
+
+  // 到点扫描的第二路驱动：挂件窗可见、不被 Chromium 后台节流，每 30s 补一拍。
+  // 主窗（设置窗）被隐藏后它自己的 30s 表会被节流成 60s（真机日志实测），这条路用来补洞；
+  // 挂件没建 / 已销毁 / 被隐藏时页面不发这条，自动回落到主窗兜底表。
+  // 只认当前挂件窗口：重载 / 重建期间旧页面可能还在，它的上报不能叠加成双倍节奏。
+  // 老 Electron 没有 event.senderId 时不拦，交给 remind-tick 的 20s 去抖兜底。
+  ipcRenderer.on('whale:remind-tick', (event) => {
+    if (!winAlive()) return
+    try {
+      const cur = getWindow()
+      const sid = event && event.senderId
+      if (cur && cur.webContents && sid && cur.webContents.id !== sid) return
+    } catch (err) {}
+    runRemindTick(sendWidgetCmd, 'widget')
   })
 
   // 光标探测：页面启动 / 挂件重建后问一次「指针现在在哪」。

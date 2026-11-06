@@ -7,11 +7,25 @@ const read = (rel) => fs.readFileSync(new URL(`../${rel}`, import.meta.url), 'ut
 const services = read('public/preload/services.js')
 const ipc = read('public/preload/lib/ipc.js')
 const api = read('public/preload/lib/api.js')
+const remindTick = read('public/preload/lib/remind-tick.js')
+const floating = read('public/preload/floating.js')
 
 test('services 起 30s 到点扫描并在退出时清理', () => {
-  assert.match(services, /runDueTick/)
-  assert.match(services, /setInterval\([^)]*,\s*30000\s*\)/)
+  // 扫描本体已抽到 lib/remind-tick.js，services 只保留主窗兜底表的启停
+  assert.match(services, /runRemindTick/)
+  assert.match(remindTick, /runDueTick/)
+  assert.match(services, /setInterval\(tick,\s*30000\)/)
   assert.match(services, /clearInterval/)
+})
+
+test('第二路驱动接在挂件窗与 ipc 上，且与主窗表共用同一份去抖', () => {
+  assert.match(floating, /whale:remind-tick/)
+  assert.match(floating, /setInterval\(remindTick,\s*30000\)/)
+  assert.match(ipc, /whale:remind-tick/)
+  assert.match(ipc, /runRemindTick\(sendWidgetCmd,\s*'widget'\)/)
+  // 去抖实例在 remind-tick 模块内（services 与 ipc 同进程共享），阈值 20s = 2/3 周期：
+  // 两路同时健康也最多 20s 一拍，单路正常的 30s 拍不会被吞
+  assert.match(remindTick, /REMIND_TICK_DEBOUNCE_MS\s*=\s*20000/)
 })
 
 test('到点扫描只在 isKill=true 真退出时停表（关分离设置窗不停）', () => {
@@ -43,5 +57,5 @@ test('两套幂等位分开记账：回执写 remindedFor，并把通知位一�
 
 test('到点扫描把免打扰算进 silent（时段内只弹气泡，不弹系统通知）', () => {
   assert.match(api, /^\s*inQuietHours,\s*$/m, 'api.js 需导出 inQuietHours 供宿主扫描使用')
-  assert.match(services, /silent:\s*inQuietHours\(cfg\)/)
+  assert.match(remindTick, /silent:\s*d\.inQuietHours\(cfg\)/)
 })
