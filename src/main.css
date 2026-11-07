@@ -252,6 +252,26 @@ html:not(.dark).bg-warm body::before {
   html.bg-warm body::before { animation: none; }
 }
 
+/* 系统「减少动态效果」：全局收敛过渡与纯装饰动画 —— 悬停变色、折叠展开、Tab 卡片淡入、
+   搜索高亮等一律瞬时完成，不做位移 / 缩放 / 淡入。
+   用 1ms 而不是 0s：不少组件靠 transitionend 收尾，0s 在部分 Chromium 版本里不派发该事件。
+   承载「正在进行」状态的功能动效（.btn-busy、引导高亮、倒计时脉冲）已在各自样式里
+   只放慢不关闭，这里刻意不碰 —— 关掉后用户分不清是卡住还是在跑。 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    transition-duration: 1ms !important;
+    transition-delay: 0s !important;
+    scroll-behavior: auto !important;
+  }
+  .card,
+  .card.search-flash,
+  .guide {
+    animation: none !important;
+  }
+}
+
 /* 媒体背景（内置视频 / 用户图片视频）：跟随界面深浅色。
    层放在内容之下、根背景之上；body 透明让画面透出，--card-bg 的半透明卡面
    保证长表单可读。遮罩分两层：均匀压暗/提亮（--bg-scrim）+ 上下渐晕；

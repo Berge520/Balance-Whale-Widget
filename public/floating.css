@@ -941,3 +941,17 @@
   html.fantasy .dshwv-timer-chip.dshwv-timer-chip-on { background: #3A7BFF; border-color: #3A7BFF; color: #fff; }
   html.fantasy .dshwv-menu-btn { background: rgba(58, 123, 255, 0.85); }
   html.fantasy .dshwv-menu-btn:hover { background: #2f6ae0; }
+
+  /* 系统「减少动态效果」：菜单展开、按钮悬停 / 按压、面板位移、尺寸切换等过渡
+     一律瞬时完成，不做缓动；鲸鱼呼吸（刷新中）与专注进度脉冲承载「正在运行」的
+     状态信息，保持原样不在此覆盖。用 1ms 而非 0s：部分逻辑靠 transitionend 收尾，
+     0s 在部分 Chromium 版本里不派发该事件。 */
+  @media (prefers-reduced-motion: reduce) {
+    .dshwv-root,
+    .dshwv-root *,
+    .dshwv-root *::before,
+    .dshwv-root *::after {
+      transition-duration: 1ms !important;
+      transition-delay: 0s !important;
+    }
+  }
