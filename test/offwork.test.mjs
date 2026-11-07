@@ -172,3 +172,74 @@ test('关闭开关不渲染：页面侧有 offworkOn 守卫，默认配置为关
   assert.match(page, /function bubbleTtlSweep\(\) \{[\s\S]*?if \(offworkOn\) offworkStep\(\)/)
   assert.match(page, /function offworkStep\(\) \{[\s\S]*?if \(!offworkOn \|\| !bubbleShown\) return;/)
 })
+
+// 「今天已过百分比」：分母 = 当日「上班 → 下班」区间；上班前 0%、下班后 100%，
+// 休息日与跨日班一律返回 null（页面侧据此隐藏进度条，不硬凑数字）
+test('dayProgress：上班前 / 工作中 / 下班后的边界', () => {
+  const before = O.dayProgress(at(11, 4, 8, 0), cfg())
+  assert.deepEqual(before, { pct: 0, phase: 'before' })
+  // 09:00–18:00，13:30 正好过半
+  const mid = O.dayProgress(at(11, 4, 13, 30), cfg())
+  assert.equal(mid.phase, 'work')
+  assert.equal(Math.round(mid.pct), 50)
+  const atEnd = O.dayProgress(at(11, 4, 18, 0), cfg())
+  assert.deepEqual(atEnd, { pct: 100, phase: 'after' })
+  const after = O.dayProgress(at(11, 4, 19, 0), cfg())
+  assert.deepEqual(after, { pct: 100, phase: 'after' })
+})
+
+test('dayProgress：休息日 / 跨日班 / 非法时间返回 null', () => {
+  // 11-07 是周六，不在默认工作日
+  assert.equal(O.dayProgress(at(11, 7, 13, 30), cfg()), null)
+  // 跨日班（22:00–06:00）当日区间不成立：凌晨、白天都不显示
+  const night = cfg({ start: '22:00', end: '06:00', days: [0, 1, 2, 3, 4, 5, 6] })
+  assert.equal(O.dayProgress(at(11, 4, 23, 0), night), null)
+  assert.equal(O.dayProgress(at(11, 5, 2, 0), night), null)
+  // 非法时间戳
+  assert.equal(O.dayProgress(new Date('x'), cfg()), null)
+})
+
+// 「今日已赚」= 时薪 × 今日已工作小时数；时间段判定必须与 dayProgress 同口径。
+// 09:00–18:00 共 9 小时：08:00 上班前 0、12:00 已工作 3 小时、13:30 已工作 4.5 小时、18:00 起封顶 9 小时。
+test('todayEarned：金额算式与上班前 / 工作中 / 下班后边界', () => {
+  assert.equal(O.todayEarned(at(11, 4, 8, 0), cfg(), 50), 0)
+  assert.equal(O.todayEarned(at(11, 4, 12, 0), cfg(), 50), 150) // 3 小时 × 50 = 150.00
+  assert.equal(O.todayEarned(at(11, 4, 13, 30), cfg(), 50), 225) // 4.5 小时 × 50 = 225.00
+  assert.equal(O.todayEarned(at(11, 4, 18, 0), cfg(), 50), 450) // 满档 9 小时 × 50 = 450.00
+  assert.equal(O.todayEarned(at(11, 4, 19, 0), cfg(), 50), 450) // 下班后不继续累加
+  // 两位小数：33.33 × 4.5 = 149.985 → 149.99
+  assert.equal(O.todayEarned(at(11, 4, 13, 30), cfg(), 33.33), 149.99)
+})
+
+test('todayEarned：时薪空 / 0 / 负数 / 非数字 / 超上限一律不显示（null）', () => {
+  const t = at(11, 4, 13, 30)
+  assert.equal(O.todayEarned(t, cfg(), 0), null)
+  assert.equal(O.todayEarned(t, cfg(), ''), null)
+  assert.equal(O.todayEarned(t, cfg(), null), null)
+  assert.equal(O.todayEarned(t, cfg(), -1), null)
+  assert.equal(O.todayEarned(t, cfg(), 'abc'), null)
+  assert.equal(O.todayEarned(t, cfg(), O.WAGE_MAX + 1), null)
+  assert.equal(O.todayEarned(t, cfg(), 50.123), null)
+})
+
+test('todayEarned：dayProgress 为 null（休息日 / 跨日班 / 非法时间）时同样不显示', () => {
+  assert.equal(O.todayEarned(at(11, 7, 13, 30), cfg(), 50), null)
+  const night = cfg({ start: '22:00', end: '06:00', days: [0, 1, 2, 3, 4, 5, 6] })
+  assert.equal(O.todayEarned(at(11, 4, 23, 0), night, 50), null)
+  assert.equal(O.todayEarned(at(11, 5, 2, 0), night, 50), null)
+  assert.equal(O.todayEarned(new Date('x'), cfg(), 50), null)
+})
+
+test('normWage：0 / 空视为未配置，非法返回 null，合法值最多两位小数', () => {
+  assert.equal(O.normWage(0), 0)
+  assert.equal(O.normWage(''), 0)
+  assert.equal(O.normWage(null), 0)
+  assert.equal(O.normWage(-5), null)
+  assert.equal(O.normWage('abc'), null)
+  assert.equal(O.normWage(100001), null)
+  assert.equal(O.normWage(50.123), null)
+  assert.equal(O.normWage(50), 50)
+  assert.equal(O.normWage('50.5'), 50.5)
+  assert.equal(O.normWage(100000), 100000)
+})
+

@@ -124,6 +124,72 @@
     line-height: 1.15;
   }
   .dshwv-amount.dshwv-low { color: #e0433f; }
+  /* 金额可点（切遮蔽）时单独放开命中：其余场景维持父级的 pointer-events: none，
+     让点击穿透到气泡的「推进 / 收起」逻辑，不抢语义 */
+  .dshwv-amount.dshwv-maskable { pointer-events: auto; cursor: pointer; }
+  /* 「今日已过」细进度条：绝对定位在文字块下方，不占三行的高度 */
+  .dshwv-offwork-progress {
+    position: absolute;
+    left: 50%;
+    top: calc(100% + var(--dshw-u) * 12);
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: calc(var(--dshw-u) * 12);
+    width: calc(var(--dshw-u) * 430);
+    max-width: 72%;
+    pointer-events: none;
+  }
+  .dshwv-offwork-progress > i {
+    position: relative;
+    flex: 1 1 auto;
+    height: calc(var(--dshw-u) * 8);
+    border-radius: calc(var(--dshw-u) * 99);
+    overflow: hidden;
+  }
+  /* 底槽与进度用同一主题色，靠透明度分辨：不用 color-mix，老版 Electron 不支持 */
+  .dshwv-offwork-progress > i::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background: var(--dshwv-text, #536ba9);
+    opacity: .22;
+  }
+  .dshwv-offwork-progress > i > b {
+    position: relative;
+    z-index: 1;
+    display: block;
+    height: 100%;
+    width: 0;
+    border-radius: inherit;
+    background: var(--dshwv-text, #536ba9);
+    transition: width .3s linear;
+  }
+  .dshwv-offwork-pct {
+    flex: 0 0 auto;
+    font-size: calc(var(--dshw-u) * 36);
+    line-height: 1;
+    color: var(--dshwv-hint, #9fb0d9);
+    font-variant-numeric: tabular-nums;
+    min-width: calc(var(--dshw-u) * 64);
+    text-align: right;
+  }
+  /* 「今日已赚」：排在进度条下一行（top 54u ≈ 进度条 12u 偏移 + 36u 行高 + 6u 间距）。
+     绝对定位，不参与三行测高，窗口窄时也不会把倒计时挤成换行。
+     仅配置了时薪且倒计时可见时由 JS 显示；未配置 / 休息日 / 跨日班整项 display:none。 */
+  .dshwv-offwork-earned {
+    position: absolute;
+    left: 50%;
+    top: calc(100% + var(--dshw-u) * 54);
+    transform: translateX(-50%);
+    font-size: calc(var(--dshw-u) * 32);
+    line-height: 1;
+    color: var(--dshwv-hint, #9fb0d9);
+    white-space: nowrap;
+    pointer-events: none;
+    font-variant-numeric: tabular-nums;
+  }
   .dshwv-hint.dshwv-low { color: #e0433f; }
   /* 余额变动动效：下降闪红+微抖，上升闪绿+微弹。动画结束后由 JS 移除类名。
      与 .dshwv-low 共存时低余额的红色优先（变动动画 1.2s 后自动退场，低余额常驻）。 */

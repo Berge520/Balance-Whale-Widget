@@ -28,7 +28,7 @@ export const SEARCH_INDEX: Record<string, { label: string; tab: TabKey; keys: st
   notify: { label: '提醒与通知', tab: 'usage', keys: '提醒 通知 系统通知 邮件 smtp 预算 低余额 波动 免打扰 预警 阈值 端口 ssl tls 直连 账号 授权码 发件人 收件人 主题 前缀 停留 峰谷 切换' },
   focus: { label: '专注与待办', tab: 'usage', keys: '专注 专注与计时 专注与待办 番茄 计时 倒计时 统计 连续 待办 清单 任务 勾选 完成 轮次 分钟 目标 专注中 改名 删除' },
   timer: { label: '计时设置', tab: 'usage', keys: '计时 计时器 番茄 番茄钟 番茄循环 倒计时 正计时 定时 默认时长 快捷时长 档位 休息 短休 长休 每几轮进长休 自动衔接 到点 到点提醒 留言 气泡 常驻 只显计时 记住 邮件 系统通知 计时设置' },
-  offwork: { label: '下班倒计时', tab: 'usage', keys: '下班 倒计时 上班 工时 打卡 工作日 周末 发薪日 发薪 工资 秒 显示 距离下班 距离上班 已下班 休息日' },
+  offwork: { label: '下班倒计时', tab: 'usage', keys: '下班 倒计时 上班 工时 打卡 工作日 周末 发薪日 发薪 工资 时薪 今日已赚 估算 秒 显示 距离下班 距离上班 已下班 休息日' },
   window: { label: '挂件窗口', tab: 'window', keys: '窗口 显隐 位置 复位 透明度 穿透 吸附 翻转 避让 任务栏 间距 插件 滚动条 置顶 锁定 贴边 宽度' },
   help: { label: '使用帮助', tab: 'help', keys: '帮助 快捷键 使用说明 故障排查 日志 新手引导 异常 详情' },
   backup: { label: '备份与恢复', tab: 'data', keys: '备份 恢复 导出 导入 json 迁移 密码 加密 凭据 气泡 泡泡 素材 待办 专注 记录' },

@@ -352,6 +352,10 @@ const WINDOW_VIEW = 'src/views/WindowView.vue'
 const USE_DSH = 'src/composables/useDsh.ts'
 // 专注统计窗口 / 保留上限的设置页副本在 FocusView（柱图 STAT_DAYS / 热力图 HEAT_DAYS）
 const FOCUS_VIEW = 'src/views/FocusView.vue'
+// 「今日已赚」的时薪上限在宿主纯函数、设置页回填、设置页输入校验三处各有一份副本：
+// 宿主 offwork.js（判定 / 文案都靠它）、App.vue（applyConfig 回填归一）、OffworkView.vue（输入校验）
+const OFFWORK_JS = 'public/preload/lib/offwork.js'
+const OFFWORK_VIEW = 'src/views/OffworkView.vue'
 
 const CHECKS = process.env.CS_CHECKS
   ? JSON.parse(process.env.CS_CHECKS).map((c) => ({
@@ -381,6 +385,16 @@ const CHECKS = process.env.CS_CHECKS
     parts: [
       { file: CONSTANTS, pick: jsLiteral('const LOW_ALERT_BY_CURRENCY =') },
       { file: APP_VUE, pick: jsLiteral('LOW_ALERT_DEFAULT') },
+    ],
+  },
+  // 时薪上限：填入超过这个值一律视为非法（防误填，不参与任何折算）。
+  // 三处任何一处漏改，都会出现「设置页能存、宿主却按非法丢弃」或反过来的静默不一致。
+  {
+    name: '时薪上限 WAGE_MAX',
+    parts: [
+      { file: OFFWORK_JS, pick: jsNumber('const WAGE_MAX') },
+      { file: APP_VUE, pick: jsNumber('const OFFWORK_WAGE_MAX') },
+      { file: OFFWORK_VIEW, pick: jsNumber('const WAGE_MAX') },
     ],
   },
   // 下班倒计时默认值（见 offworkDefaults 注释）。三处都改才算改：设置页归一、页面兜底、

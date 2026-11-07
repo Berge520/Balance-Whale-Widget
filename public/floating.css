@@ -479,6 +479,16 @@
   .dshwv-menu-toprow .dshwv-model-val {
     margin-left: auto; color: #1b2a5e; font-size: 12px; font-weight: 700;
   }
+  /* 金额遮蔽小眼睛：紧挨余额数值，点击即切「***」。不做开关样式，省得和右侧的
+     「刷新 / 复制」链接按钮抢视觉；aria-pressed 承担状态语义 */
+  .dshwv-mask-btn {
+    flex: 0 0 auto; margin-left: 6px; width: 20px; height: 20px; padding: 0;
+    display: inline-flex; align-items: center; justify-content: center;
+    border: 0; border-radius: 5px; background: transparent; color: #5b6ba1; cursor: pointer;
+  }
+  .dshwv-mask-btn:hover { background: rgba(47, 87, 214, .12); color: #1b2a5e; }
+  .dshwv-mask-btn svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.6; }
+  .dshwv-mask-btn svg circle { fill: currentColor; stroke: none; opacity: .85; }
   /* 主显示换成别的模型时，这行的标签会变成「模型名 + 名分」（如「Kimi 剩余额度」），
      比默认的「余额」长得多：放宽上限并加省略号，否则会顶到右边的数值上
      （.dshwv-menu-label 的 72px 上限只够两个字的标签） */
@@ -808,6 +818,8 @@
   html.dark .dshwv-group-sum { color: #7f8db3; }
   html.dark .dshwv-menu-toprow { border-bottom-color: rgba(255,255,255,.1); }
   html.dark .dshwv-menu-toprow .dshwv-model-val { color: #dbe2f5; }
+  html.dark .dshwv-mask-btn { color: #9fb0d9; }
+  html.dark .dshwv-mask-btn:hover { background: rgba(138, 164, 230, .18); color: #dbe2f5; }
   /* 吸顶头的不透明底也跟深色走（与 .dshwv-menu 同源的暗底），否则深色下吸顶会出现一条亮白横带 */
   html.dark .dshwv-group-open > .dshwv-group-head { background: rgba(28,32,48,.97); }
   html.dark .dshwv-menu-foot { border-top-color: rgba(255,255,255,.1); }
@@ -916,6 +928,8 @@
   html.fantasy .dshwv-model-row:hover { background: rgba(58, 123, 255, 0.14); }
   html.fantasy .dshwv-model-row.dshwv-model-on { background: rgba(58, 123, 255, 0.2); color: #77A4FF; }
   html.fantasy .dshwv-model-val { color: #8FA8CC; }
+  html.fantasy .dshwv-mask-btn { color: #8FA8CC; }
+  html.fantasy .dshwv-mask-btn:hover { background: rgba(58, 123, 255, .18); color: #A9C6FF; }
   html.fantasy .dshwv-menu-link { border-color: rgba(58, 123, 255, 0.35); background: rgba(58, 123, 255, 0.14); color: #A9C6FF; }
   html.fantasy .dshwv-menu-link:hover { background: rgba(58, 123, 255, 0.24); border-color: rgba(58, 123, 255, 0.55); }
   html.fantasy .dshwv-todo-row { color: #E8F1FF; }

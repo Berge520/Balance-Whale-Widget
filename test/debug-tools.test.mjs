@@ -15,7 +15,7 @@ const app = read('src/App.vue')
 const display = read('src/constants/display.ts')
 
 test('配置四处同步：default / read / write / patch 都有 debugTools，默认 false', () => {
-  // focusGoal 与 debugTools 之间现在隔着下班倒计时八键，不再相邻
+  // focusGoal 与 debugTools 之间现在隔着下班倒计时九键，不再相邻
   assert.match(store, /focusGoal: 0,[\s\S]{0,400}debugTools: false/)
   assert.match(store, /debugTools: p\.debugTools === true/)
   assert.match(store, /debugTools: cfg\.debugTools === true/)

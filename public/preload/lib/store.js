@@ -806,8 +806,14 @@ function normFoldDefaults(v) {
   }
   return out
 }
+// 时薪落盘值归一：非法（null）一律按「未配置」存 0，避免手改配置 / 老备份里的脏值算出离谱的今日已赚。
+// 时薪只做「元/小时」这一种口径，不存月薪、不做任何折算（见 lib/offwork.js#todayEarned）。
+function readWage(v) {
+  const w = offwork.normWage(v)
+  return w === null ? 0 : w
+}
 function defaultConfig() {
-  return { scale: 1.3, vol: 0.9, soundOn: true, soundSet: 'duck', usageMode: 'ledger', peakMode: 'default', peakRemindOn: true, bubbleOn: true, menuBtn: true, onTop: true, lowAlertOn: true, lowAlertAmount: LOW_ALERT_BY_CURRENCY.CNY, budgetOn: false, budgetAmount: 0, dropAlertOn: false, dropAlertAmount: 5, remindSec: 8, quietOn: false, quietFrom: '23:00', quietTo: '07:00', timeBubbleOn: true, updateCheckOn: false, dragLock: false, bubbleDwell: 5, dragLines: null, tapAdvance: false, enterMode: 'both', timerNotifyOn: true, timerMailOn: true, timerPersistOn: true, timerMode: 'off', timerSec: 1500, timerAt: '07:30', timerNote: '', timerBreakMin: 5, timerRemindSec: 8, timerBubblePin: true, timerBubbleOnly: true, timerPomoOn: false, timerLongBreakMin: TIMER_LONG_BREAK_DEFAULT, timerLongEvery: TIMER_LONG_EVERY_DEFAULT, timerAutoNext: false, timerPresets: TIMER_PRESETS_DEFAULT.slice(), focusOn: false, todoOn: false, focusGoal: 0, offworkOn: false, offworkStart: offwork.DEFAULTS.start, offworkEnd: offwork.DEFAULTS.end, offworkDays: offwork.DEFAULTS.days.slice(), offworkShowSec: true, offworkWeekendOn: false, offworkPaydayOn: false, offworkPaydayDay: offwork.DEFAULTS.paydayDay, debugTools: false, guideDone: false, dshNodeDir: '', dshKeepAlive: false, dshElevated: false, dshPort: DSH_PORT_DEFAULT, dshRegistry: '', dshVersion: '', dshReinstall: false, dshNoOpen: true, dshMarketUrl: '', dshMarketMirror: true, dshMarketRegistry: '', dshMarketOfficial: false, dshExportCred: false, dshExportNoMod: true, avoidTaskbar: true, edgeTop: 0, edgeRight: 0, edgeBottom: 0, edgeLeft: 0, scrollGapOn: false, scrollGapPx: SCROLL_GAP_DEFAULT, snapMode: 'ratio', snapRatio: SNAP_RATIO_DEFAULT, opacity: 100, passThrough: false, skin: 'DSniang1', theme: 'default', uiMode: 'auto', bgMode: 'off', bgMediaId: '', bgScrim: 45, bgBlur: 0, bgBrightness: 100, bgVignette: 100, bgFit: 'cover', bgFocusX: 50, bgFocusY: 50, bgZoom: 100, bootIntroOn: false, bootIntroClean: false, bootIntroSource: 'auto', bootIntroMediaId: '', bubble: normBubble(null, null, null), alerts: normAlerts(null), alertVols: normAlertVols(null), quotaTotal: 0, quotaReset: 'monthly', tokenPrice: normTokenPrice(null), historyKeepDays: HISTORY_KEEP_DEFAULT, models: [], mainModelId: DEFAULT_MAIN_MODEL, dshBackupKeep: DSB_KEEP_DEFAULT, ghAccelOn: false, ghAccelIps: normIps(null), ghAccelRefreshedAt: 0, ghAccelSrc: normGhAccelSrc(null), skinPackSrc: '', randomIncludeBuiltin: true, notifySystemOn: true, notifyMailOn: false, mailFrom: '', mailTo: '', mailFromName: '小鲸鱼余额挂件', mailSubjectPrefix: '[小鲸鱼余额挂件]', hiddenTabs: [], hiddenCards: [], tabOrder: [], pinnedCards: [], cardOrder: {}, foldDefaults: {}, foldRemember: true }
+  return { scale: 1.3, vol: 0.9, soundOn: true, soundSet: 'duck', usageMode: 'ledger', peakMode: 'default', peakRemindOn: true, bubbleOn: true, menuBtn: true, onTop: true, hideAmounts: false, lowAlertOn: true, lowAlertAmount: LOW_ALERT_BY_CURRENCY.CNY, budgetOn: false, budgetAmount: 0, dropAlertOn: false, dropAlertAmount: 5, remindSec: 8, quietOn: false, quietFrom: '23:00', quietTo: '07:00', timeBubbleOn: true, updateCheckOn: false, dragLock: false, bubbleDwell: 5, dragLines: null, tapAdvance: false, enterMode: 'both', timerNotifyOn: true, timerMailOn: true, timerPersistOn: true, timerMode: 'off', timerSec: 1500, timerAt: '07:30', timerNote: '', timerBreakMin: 5, timerRemindSec: 8, timerBubblePin: true, timerBubbleOnly: true, timerPomoOn: false, timerLongBreakMin: TIMER_LONG_BREAK_DEFAULT, timerLongEvery: TIMER_LONG_EVERY_DEFAULT, timerAutoNext: false, timerPresets: TIMER_PRESETS_DEFAULT.slice(), focusOn: false, todoOn: false, focusGoal: 0, offworkOn: false, offworkStart: offwork.DEFAULTS.start, offworkEnd: offwork.DEFAULTS.end, offworkDays: offwork.DEFAULTS.days.slice(), offworkShowSec: true, offworkWeekendOn: false, offworkPaydayOn: false, offworkPaydayDay: offwork.DEFAULTS.paydayDay, offworkHourlyWage: 0, debugTools: false, guideDone: false, dshNodeDir: '', dshKeepAlive: false, dshElevated: false, dshPort: DSH_PORT_DEFAULT, dshRegistry: '', dshVersion: '', dshReinstall: false, dshNoOpen: true, dshMarketUrl: '', dshMarketMirror: true, dshMarketRegistry: '', dshMarketOfficial: false, dshExportCred: false, dshExportNoMod: true, avoidTaskbar: true, edgeTop: 0, edgeRight: 0, edgeBottom: 0, edgeLeft: 0, scrollGapOn: false, scrollGapPx: SCROLL_GAP_DEFAULT, snapMode: 'ratio', snapRatio: SNAP_RATIO_DEFAULT, opacity: 100, passThrough: false, skin: 'DSniang1', theme: 'default', uiMode: 'auto', bgMode: 'off', bgMediaId: '', bgScrim: 45, bgBlur: 0, bgBrightness: 100, bgVignette: 100, bgFit: 'cover', bgFocusX: 50, bgFocusY: 50, bgZoom: 100, bootIntroOn: false, bootIntroClean: false, bootIntroSource: 'auto', bootIntroMediaId: '', bubble: normBubble(null, null, null), alerts: normAlerts(null), alertVols: normAlertVols(null), quotaTotal: 0, quotaReset: 'monthly', tokenPrice: normTokenPrice(null), historyKeepDays: HISTORY_KEEP_DEFAULT, models: [], mainModelId: DEFAULT_MAIN_MODEL, dshBackupKeep: DSB_KEEP_DEFAULT, ghAccelOn: false, ghAccelIps: normIps(null), ghAccelRefreshedAt: 0, ghAccelSrc: normGhAccelSrc(null), skinPackSrc: '', randomIncludeBuiltin: true, notifySystemOn: true, notifyMailOn: false, mailFrom: '', mailTo: '', mailFromName: '小鲸鱼余额挂件', mailSubjectPrefix: '[小鲸鱼余额挂件]', hiddenTabs: [], hiddenCards: [], tabOrder: [], pinnedCards: [], cardOrder: {}, foldDefaults: {}, foldRemember: true }
 }
 // dsh Web UI 监听端口（默认 3080）。
 // ⚠️ 为什么必须能配：3080 属于 Windows/Hyper-V 的「动态端口保留段」，被系统预留时
@@ -1103,6 +1109,8 @@ function readConfig() {
     bubbleOn: p.bubbleOn !== false,
     menuBtn: p.menuBtn !== false,
     onTop: p.onTop !== false,
+    // 金额遮蔽：只有显式 true 才遮蔽，老配置（无此键）按「显示」处理
+    hideAmounts: p.hideAmounts === true,
     lowAlertOn: p.lowAlertOn !== false,
     // 低余额阈值：0 / 非法值一律回落默认阈值。api 侧的低余额提醒要求阈值 > 0，若把「清空输入框」
     // 得到的 0 原样存下，开关开着也永远不会提醒（用户完全无感）；想关提醒请关上面的开关
@@ -1165,6 +1173,8 @@ function readConfig() {
     offworkWeekendOn: p.offworkWeekendOn === true,
     offworkPaydayOn: p.offworkPaydayOn === true,
     offworkPaydayDay: offwork.normPayday(p.offworkPaydayDay),
+    // 时薪（元/小时，0 = 未配置）：只用于估算挂件上的「今日已赚」，不是真实工资
+    offworkHourlyWage: readWage(p.offworkHourlyWage),
     // 首次运行引导是否已结束（点「开始使用」或「跳过」）——默认 false 表示还没走过引导。
     // 只认 true：老配置里没有这个键，若不这样归一，升级上来的老用户会被当成新装用户弹一次设置页的凭据引导
     guideDone: p.guideDone === true,
@@ -1285,6 +1295,7 @@ function writeConfig(cfg) {
       bubbleOn: !!cfg.bubbleOn,
       menuBtn: cfg.menuBtn !== false,
       onTop: cfg.onTop !== false,
+      hideAmounts: cfg.hideAmounts === true,
       lowAlertOn: cfg.lowAlertOn !== false,
       lowAlertAmount: cfg.lowAlertAmount,
       budgetOn: cfg.budgetOn === true,
@@ -1332,6 +1343,7 @@ function writeConfig(cfg) {
       offworkWeekendOn: cfg.offworkWeekendOn === true,
       offworkPaydayOn: cfg.offworkPaydayOn === true,
       offworkPaydayDay: offwork.normPayday(cfg.offworkPaydayDay),
+      offworkHourlyWage: readWage(cfg.offworkHourlyWage),
       guideDone: cfg.guideDone === true,
       dshNodeDir: typeof cfg.dshNodeDir === 'string' ? cfg.dshNodeDir.slice(0, 260) : '',
       dshKeepAlive: cfg.dshKeepAlive === true,
@@ -1429,6 +1441,7 @@ function patchConfig(patch) {
   if (p.bubbleOn !== undefined) cfg.bubbleOn = !!p.bubbleOn
   if (p.menuBtn !== undefined) cfg.menuBtn = !!p.menuBtn
   if (p.onTop !== undefined) cfg.onTop = !!p.onTop
+  if (p.hideAmounts !== undefined) cfg.hideAmounts = !!p.hideAmounts
   if (p.lowAlertOn !== undefined) cfg.lowAlertOn = !!p.lowAlertOn
   // 低余额阈值：清空输入框会送来 0，此时保留原值（与 readConfig 的「0 回落默认」同口径），
   // 免得用户清一下数字，提醒就静默失效了
@@ -1494,6 +1507,12 @@ function patchConfig(patch) {
   if (p.offworkWeekendOn !== undefined) cfg.offworkWeekendOn = p.offworkWeekendOn === true
   if (p.offworkPaydayOn !== undefined) cfg.offworkPaydayOn = p.offworkPaydayOn === true
   if (p.offworkPaydayDay !== undefined) cfg.offworkPaydayDay = offwork.normPayday(p.offworkPaydayDay)
+  // 时薪：非法值**保持现值**（不清空），只有明确的空 / 0 才表示「取消配置」。
+  // 与 readWage 的差异是刻意的：读盘时脏值按未配置处理，写入时用户误填不能悄悄抹掉已配好的值
+  if (p.offworkHourlyWage !== undefined) {
+    const w = offwork.normWage(p.offworkHourlyWage)
+    if (w !== null) cfg.offworkHourlyWage = w
+  }
   // 首次运行引导只允许单向置为「已完成」：写回 undefined 之外的任何值都按 bool 处理，
   // 但不提供「重新弹出引导」的入口，免得误触让老用户再走一遍
   if (p.guideDone !== undefined) cfg.guideDone = p.guideDone === true

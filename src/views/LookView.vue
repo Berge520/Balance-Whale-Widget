@@ -6,13 +6,6 @@ import BubblePreview from '../components/BubblePreview.vue'
 import DownloadBox from '../components/DownloadBox.vue'
 import type { DownloadProgress, HolidayStatus, MediaItem, SkinGallery, SkinMeta, SoundMeta, SoundRole, WhaleServices } from '../types/services'
 
-// 气泡主题预览样本：与挂件同一套渲染器，切主题前先看效果（含未至之境 HUD）
-const themePreviewLines = [
-  { t: 'DeepSeek 余额', s: 'A' },
-  { t: '¥ 88.88', s: 'B' },
-  { t: '今日已用 ¥ 1.23', s: 'C' },
-] as Array<{ t: string; s: 'A' | 'B' | 'P' | 'C' }>
-
 // 「挂件外观」整卡：大小 / 形象 / 深浅色 / 气泡与文案 / 音效，从设置页 App.vue 抽出。
 // 仍有多处留在父级，按 props 下传或 emit 触发，不能跟着搬：
 //   - 素材状态（skinMeta / skinUnused / skinFlash / assetSize / soundsMeta / soundLabel /
@@ -100,6 +93,13 @@ const emit = defineEmits<{
   // 切到资源页「背景与片头」卡
   (e: 'go-assets'): void
 }>()
+// 气泡主题预览样本：与挂件同一套渲染器，切主题前先看效果（含未至之境 HUD）。
+// 金额遮蔽开启时预览也显示 ***，与挂件本体保持一致（遮蔽只影响显示，不改配置里的真实值）
+const themePreviewLines = computed<Array<{ t: string; s: 'A' | 'B' | 'P' | 'C' }>>(() => [
+  { t: 'DeepSeek 余额', s: 'A' },
+  { t: props.cfg.hideAmounts === true ? '***' : '¥ 88.88', s: 'B' },
+  { t: props.cfg.hideAmounts === true ? '今日已用 ***' : '今日已用 ¥ 1.23', s: 'C' },
+])
 // 「随机」抽签池规模：内置那张（开关打开时）+ 画廊里未取消参与随机的项。
 // 口径与父级 allSkinChoices 一致 —— 这里只用来显示，真正的抽签仍在父级 doRandomSkin。
 const randomPoolCount = computed(() => {

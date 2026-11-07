@@ -30,6 +30,8 @@ export interface WhaleConfig {
   // 峰/谷时段切换时，用气泡提醒当前价格时段
   peakRemindOn: boolean
   bubbleOn: boolean
+  // 金额遮蔽：开启后挂件上的金额显示为 ***（只影响显示，不改真实余额）
+  hideAmounts: boolean
   menuBtn: boolean
   onTop: boolean
   lowAlertOn: boolean
@@ -209,6 +211,8 @@ export interface WhaleConfig {
   offworkWeekendOn: boolean
   offworkPaydayOn: boolean
   offworkPaydayDay: number
+  // 时薪（元/小时）：0 = 未配置（挂件不显示「今日已赚」）；正数才参与估算，最多两位小数
+  offworkHourlyWage: number
 }
 
 // 按压气泡模型（上游「自定义泡泡」）：v 固定 1（结构版本）。items 是点击序列（首次 + 再次…），

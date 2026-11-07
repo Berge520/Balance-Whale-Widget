@@ -1,10 +1,12 @@
 <script setup lang="ts">
+import { onUnmounted } from 'vue'
 import { useFold } from '../composables/useFold'
+import { msgCls, useFlashShow } from '../composables/useFlash'
 
 // 「下班倒计时」整卡：显示形态由宿主 / 浮动页决定，本卡只写配置（不直接改挂件）。
 // 所有取值都走现有 patch 链路（defaultConfig / readConfig / writeConfig / patchConfig 四处同步）。
 const props = defineProps<{
-  // 挂件配置整体传入：本卡只读写 offwork* 八键，落盘统一走 emit('patch')
+  // 挂件配置整体传入：本卡只读写 offwork* 键，落盘统一走 emit('patch')
   cfg: any
 }>()
 const emit = defineEmits<{
@@ -25,6 +27,35 @@ const WEEK_ITEMS = [
   { v: 0, label: '周日' },
 ]
 const PAY_DAYS = Array.from({ length: 31 }, (_, i) => i + 1)
+
+// 时薪校验的回执：沿用设置页统一的 Flash 机制（class="msg" + msgCls），不新造 toast。
+// 4 秒自动消失：这一行只在「输入被拒」时出现，正常保存不打扰。
+const WAGE_MAX = 100000
+const { flash: wageFlash, show: wageFlashShow, stop: wageFlashStop } = useFlashShow(4000)
+onUnmounted(() => wageFlashStop())
+
+// 时薪（元/小时）：只接受正数、最多两位小数、≤ WAGE_MAX；非法输入**不落盘**，
+// 输入框回退到已保存的值并给出明确提示。空 = 清除配置（挂件不再显示「今日已赚」）。
+// 口径与宿主 lib/offwork.js#normWage / store.js#patchConfig 一致。
+function onWage(e: Event) {
+  const el = e.target as HTMLInputElement
+  const raw = el.value.trim()
+  if (!raw) {
+    wageFlash.msg = ''
+    emit('patch', { offworkHourlyWage: 0 })
+    return
+  }
+  const n = Number(raw)
+  const valid = /^\d+(\.\d{1,2})?$/.test(raw) && n > 0 && n <= WAGE_MAX
+  if (!valid) {
+    wageFlashShow(`时薪需为大于 0、不超过 ${WAGE_MAX} 的数字，最多两位小数；本次未保存`, true)
+    // 回退到已保存的值：否则输入框里会留着一个没生效的数，用户以为已经改了
+    el.value = props.cfg.offworkHourlyWage > 0 ? String(props.cfg.offworkHourlyWage) : ''
+    return
+  }
+  wageFlash.msg = ''
+  emit('patch', { offworkHourlyWage: Math.round(n * 100) / 100 })
+}
 
 function onCheck(key: string, e: Event) {
   emit('patch', { [key]: (e.target as HTMLInputElement).checked })
@@ -96,6 +127,24 @@ function toggleDay(d: number) {
       </div>
       <p class="hint">默认周一至周五；至少保留一天（取消最后一天不会生效）。</p>
 
+      <div class="field row">
+        <span class="label">时薪 <em>（元/小时，用于估算「今日已赚」）</em></span>
+        <input
+          class="time wage"
+          type="number"
+          min="0.01"
+          :max="WAGE_MAX"
+          step="0.01"
+          :value="cfg.offworkHourlyWage > 0 ? String(cfg.offworkHourlyWage) : ''"
+          placeholder="留空不显示"
+          @change="onWage"
+        />
+      </div>
+      <p class="hint">
+        按「时薪 × 今日已工作小时数」简单估算挂件上的「今日已赚」，只在工作日的上班时段递增、下班后按整段封顶；这不是真实工资，不做月薪折算、个税、社保等扣除。留空则不显示这一项。
+      </p>
+      <p v-if="wageFlash.msg" class="msg" :class="msgCls(wageFlash)">{{ wageFlash.msg }}</p>
+
       <label class="field row check">
         <span class="label">显示秒 <em>（关闭后只显示 hh:mm）</em></span>
         <input type="checkbox" :checked="cfg.offworkShowSec" @change="onCheck('offworkShowSec', $event)" />
@@ -133,6 +182,10 @@ function toggleDay(d: number) {
   border-radius: 8px;
   background: transparent;
   color: inherit;
+}
+/* 时薪要容纳 100000.00 这类上限值，比时间输入宽一点 */
+.wage {
+  width: 118px;
 }
 .day-row {
   display: flex;

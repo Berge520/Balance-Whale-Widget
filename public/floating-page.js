@@ -71,7 +71,7 @@
   var whaleApi = window.whale || {
     onInit: function () {}, onBalance: function () {}, onConfig: function () {}, onSnapped: function () {},
     onSounds: function () {}, onSkin: function () {}, onBubbles: function () {}, onSharedSkins: function () {}, onRandimgData: function () {}, onModels: function () {}, onDark: function () {},
-    onBubblePreview: function () {}, onTodo: function () {}, onTodoDue: function () {}, onFocusStats: function () {}, onCmd: function () {}, onCursor: function () {},
+    onBubblePreview: function () {}, onTodo: function () {}, onTodoDue: function () {}, onFocusStats: function () {}, onCmd: function () {}, onCursor: function () {}, onForcePass: function () {},
     isDark: function () { return false; }, copyText: function () { return false; },
     ready: function () {}, refresh: function () {}, saveConfig: function () {},
     saveTimer: function () {}, notifyTimerDone: function () {},
@@ -101,7 +101,6 @@
   if (window.whale && window.whale.__bridge) log('[whale][page] 已连接宿主桥接 window.whale');
   // 桥接缺失是严重异常，保留常显警告：生产环境也要留下用户侧线索
   else console.warn('[whale][page] 未检测到宿主桥接（preload 未加载？），余额/拖拽将不可用');
-
   // —— DOM ——
   var root = document.createElement('div');
   root.className = 'dshwv-root';
@@ -480,6 +479,21 @@
   menuBalanceEl.className = 'dshwv-model-val';
   menuBalanceEl.textContent = '--';
   rowBalanceTop.appendChild(menuBalanceEl);
+  // 金额遮蔽的一键入口：余额条右侧的小眼睛（点挂件主体上的数字也能切，见 amountEl 的 click）。
+  // 放在这条常显行里而不是某个折叠组：有人凑过来看屏幕时，用户要能在 0.5 秒内点掉金额
+  var maskBtn = document.createElement('button');
+  maskBtn.type = 'button';
+  maskBtn.className = 'dshwv-mask-btn';
+  maskBtn.setAttribute('aria-label', '遮蔽金额');
+  maskBtn.setAttribute('aria-pressed', 'false');
+  rowBalanceTop.appendChild(maskBtn);
+  var EYE_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M1.8 12s3.7-6.3 10.2-6.3S22.2 12 22.2 12s-3.7 6.3-10.2 6.3S1.8 12 1.8 12z"/><circle cx="12" cy="12" r="3.1"/></svg>';
+  var EYE_OFF_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M1.8 12s3.7-6.3 10.2-6.3S22.2 12 22.2 12s-3.7 6.3-10.2 6.3S1.8 12 1.8 12z"/><circle cx="12" cy="12" r="3.1"/><path d="M3 3l18 18"/></svg>';
+  maskBtn.addEventListener('click', function (e) {
+    e.stopPropagation();
+    toggleHideAmounts();
+  });
+  updateMaskBtnUi();
   // 穿透中的逃生行：鼠标穿透开着时，挂件本体点不动，只能靠「在鲸鱼上停约 1 秒」临时接管才点得开菜单；
   // 菜单一关又得重来一遍。所以在菜单里给一条「关闭穿透」的直达入口 —— 不用去设置页翻「窗口」Tab
   var rowPass = menuRow();
@@ -565,7 +579,7 @@
   var copyBtnBusy = false;
   copyBalanceBtn.addEventListener('click', function (e) {
     e.stopPropagation();
-    var text = mainAmountText();
+    var text = withRealAmounts(mainAmountText);
     // 页面没有 utools 全局，复制统一走 preload 暴露的 whaleApi.copyText（同步返回是否成功）
     var ok = false;
     try { ok = whaleApi.copyText ? !!whaleApi.copyText(text) : false } catch (err) { ok = false }
@@ -1499,12 +1513,41 @@
     modPick: bubbleModPick,
   });
   var textBox = renderer.els.textBox;
+  // 「今日已过百分比」细进度条：只在倒计时接管主体时出现，挂在文字块下方，
+  // 绝对定位（top:100%）不参与 fitBubbleText 的三行测高，避免多一条元素把主数字挤小。
+  // 占比算不出来（休息日 / 跨日班）时整条隐藏，不硬凑数字
+  var offworkBarEl = document.createElement('div');
+  offworkBarEl.className = 'dshwv-offwork-progress';
+  offworkBarEl.style.display = 'none';
+  var offworkTrackEl = document.createElement('i');
+  var offworkFillEl = document.createElement('b');
+  offworkTrackEl.appendChild(offworkFillEl);
+  var offworkPctEl = document.createElement('span');
+  offworkPctEl.className = 'dshwv-offwork-pct';
+  offworkPctEl.textContent = '0%';
+  offworkBarEl.appendChild(offworkTrackEl);
+  offworkBarEl.appendChild(offworkPctEl);
+  textBox.appendChild(offworkBarEl);
+  // 「今日已赚」估算：排在进度条下方一行，同样绝对定位，不占三行高度、不挤主数字。
+  // 只在配置了时薪且 dayProgress 有效时显示；金额遮蔽与余额共用同一个 hideAmounts 开关。
+  var offworkEarnedEl = document.createElement('span');
+  offworkEarnedEl.className = 'dshwv-offwork-earned';
+  offworkEarnedEl.style.display = 'none';
+  offworkEarnedEl.title = '按简单时薪估算，不代表实际工资';
+  textBox.appendChild(offworkEarnedEl);
   var labelEl = renderer.els.labelEl;
   var amountEl = renderer.els.amountEl;
   var hintEl = renderer.els.hintEl;
   var rowsBox = renderer.els.rowsBox;
   var modsBox = renderer.els.modsBox;
   var bubbleBox = renderer.els.bubbleBox;
+  // 点「大数字」也可切换金额遮蔽（与菜单里的小眼睛等价）。只拦常规三行这一路：
+  // 计时 / 提醒 / 自定义气泡 / 倒计时里的数字不是金额，点击仍交回气泡自己的推进逻辑
+  amountEl.addEventListener('click', function (e) {
+    if (!canToggleMaskByAmount()) return;
+    e.stopPropagation();
+    toggleHideAmounts();
+  });
   var gifEl = renderer.els.gifEl;
   bubbleBox.addEventListener('click', function (e) {
     e.stopPropagation();
@@ -1585,6 +1628,9 @@
   //   bubbleIdx    —— 常规点按推进到第几项（首次点击 0）
   //   bubbleActive —— 当前气泡内容来自本模型（决定点击推进走 bubbleNext）
   var bubbleOn = false;
+  // 金额遮蔽：为「旁边有人看屏幕」准备的一键隐私态。true 时所有金额类文本统一显示 ***，
+  // 只影响显示层，state / 账本 / 复制按钮取到的仍是真实值（见 withRealAmounts）
+  var hideAmounts = false;
   var bubbleItems = [];
   // 自定义泡泡模型是否启用（bubble.on === true）。与顶层 bubbleOn 分开记：
   // bubbleOn 是「点挂件弹不弹气泡」的总闸（顶层思考气泡也用它），bubbleModelOn 才是
@@ -1621,6 +1667,8 @@
   var offworkWeekendOn = OFFWORK_DEFAULTS.weekendOn;
   var offworkPaydayOn = OFFWORK_DEFAULTS.paydayOn;
   var offworkPaydayDay = OFFWORK_DEFAULTS.paydayDay;
+  // 时薪（元/小时，0 = 未配置）：只用于「今日已赚」估算；0 时整项不显示，不占位、不显示 0
+  var offworkHourlyWage = 0;
   // 最近一次已写入 DOM 的倒计时文本：每秒巡检只在「秒数 / 阶段 / 临近档位」变化时才写 DOM
   var offworkLastKey = '';
 
@@ -2310,6 +2358,8 @@
   }
   function singleCenter(style, text, color, wrap) { return [null, { t: text, s: style, c: color || '', w: !!wrap }, null]; }
   function fmt(balance, currency) {
+    // 遮蔽态统一占位：调用方拿到的仍是「已格式化好的金额字符串」，不关心具体数值
+    if (hideAmounts) return '***';
     var num = Number(balance);
     var fixed = isFinite(num) ? num.toFixed(2) : '--';
     return currency === 'CNY' ? '¥ ' + fixed : fixed + ' ' + currency;
@@ -2336,10 +2386,33 @@
   }
   // 原币种金额（不折汇率：各模型余额彼此独立，不参与 DeepSeek 的账本记账）
   function fmtModelMoney(v, currency) {
+    if (hideAmounts) return '***';
     var num = Number(v);
     var fixed = isFinite(num) ? num.toFixed(2) : '--';
     var pre = MODEL_MONEY_PREFIX[currency];
     return pre ? pre + fixed : fixed + ' ' + String(currency || '');
+  }
+  // 少数场景（复制到剪贴板）要的是真实数字，不能把 *** 复制进去。
+  // 这里只临时关掉显示开关，不改存储、不重绘，做完立即还原
+  function withRealAmounts(fn) {
+    var prev = hideAmounts;
+    hideAmounts = false;
+    try { return fn(); } finally { hideAmounts = prev; }
+  }
+  // 金额遮蔽按钮：同一枚按钮同时承担「切换」和「状态指示」（aria-pressed + 图标一划）
+  function updateMaskBtnUi() {
+    if (!maskBtn) return;
+    maskBtn.innerHTML = hideAmounts ? EYE_OFF_SVG : EYE_SVG;
+    maskBtn.title = hideAmounts ? '显示金额（当前已遮蔽）' : '遮蔽金额（旁边有人时用）';
+    maskBtn.setAttribute('aria-label', maskBtn.title);
+    maskBtn.setAttribute('aria-pressed', hideAmounts ? 'true' : 'false');
+  }
+  // 即时生效：先本地翻转 + 重绘，再把状态交给宿主持久化（没有动画、没有 toast）
+  function toggleHideAmounts() {
+    hideAmounts = !hideAmounts;
+    updateMaskBtnUi();
+    render();
+    try { whaleApi.saveConfig({ hideAmounts: hideAmounts }); } catch (err) { logErr('[whale][page] 保存金额遮蔽失败', err); }
   }
   function resetTail(ms) {
     var t = Number(ms) || 0;
@@ -3839,7 +3912,15 @@
   // 保住页面全部调用点（render / show* / hide / updateTimerClock…），行为与抽取前一致
   function resetBubbleFont() { renderer.resetFont(); }
   function fitBubbleText() { renderer.fitText(); }
-  function applyBubbleLines(lines) { return renderer.applyLines(lines); }
+  function applyBubbleLines(lines) {
+    // 切到计时 / 提醒 / 自定义等非倒计时布局时，「今日已过」条与「今日已赚」都不属于这些内容
+    offworkBarEl.style.display = 'none';
+    offworkEarnedEl.style.display = 'none';
+    // 这些布局的大数字不是金额：撤掉可点态，别让「关气泡」的点击看起来像切遮蔽
+    amountEl.classList.remove('dshwv-maskable');
+    amountEl.title = '';
+    return renderer.applyLines(lines);
+  }
   function setHint(text) {
     if (text === lastHintText) return;
     var first = lastHintText === null;
@@ -4202,8 +4283,48 @@
     return !!offworkOn && !bubbleModelOn && !bubbleTimerActive && !bubbleRemindActive &&
       !bubblePreviewActive && !bubbleRandomActive;
   }
+  // 大数字此刻是不是「金额」：倒计时接管 / 自定义气泡 / 计时 / 提醒 / 试播 / 随机台词下都不是，
+  // 这些场景点数字不切遮蔽，避免把「关气泡」误触成「切隐私态」
+  function canToggleMaskByAmount() {
+    return !bubbleModelOn && !bubbleTimerActive && !bubbleRemindActive &&
+      !bubblePreviewActive && !bubbleRandomActive && !offworkCanRender();
+  }
+  // 刷新「今日已过」细进度：只在倒计时接管主体时显示。
+  // 口径由 offwork.dayProgress 统一（上班前 0% / 区间内按比例 / 下班后 100% / 休息日与跨日班返回 null）
+  function updateOffworkProgress() {
+    if (!offworkCanRender() || !OFFWORK_CORE || typeof OFFWORK_CORE.dayProgress !== 'function') {
+      offworkBarEl.style.display = 'none';
+      offworkEarnedEl.style.display = 'none';
+      return;
+    }
+    var now = Date.now();
+    var p = OFFWORK_CORE.dayProgress(now, offworkCfgObj());
+    if (!p) {
+      offworkBarEl.style.display = 'none';
+      offworkEarnedEl.style.display = 'none';
+      return;
+    }
+    offworkBarEl.style.display = '';
+    offworkFillEl.style.width = p.pct.toFixed(1) + '%';
+    offworkPctEl.textContent = Math.round(p.pct) + '%';
+    // 「今日已赚」与进度条同口径：todayEarned 内部复用 dayProgress，null = 休息日 / 跨日班 / 非法时间。
+    // 未配置时薪（0）时同样返回 null —— 整项隐藏，不出现 0 或占位符。
+    var earned = typeof OFFWORK_CORE.todayEarned === 'function'
+      ? OFFWORK_CORE.todayEarned(now, offworkCfgObj(), offworkHourlyWage)
+      : null;
+    if (earned === null) {
+      offworkEarnedEl.style.display = 'none';
+      return;
+    }
+    offworkEarnedEl.style.display = '';
+    // 遮蔽与余额共用同一个 hideAmounts（没有第二个独立开关）；文案带「≈」与「估算」提示，
+    // 避免被当成真实工资。判重后再写 DOM：每秒最多一次，避免无谓重绘
+    var text = hideAmounts ? '今日已赚 ***' : '今日已赚 ≈ ' + fmt(earned, 'CNY');
+    if (offworkEarnedEl.textContent !== text) offworkEarnedEl.textContent = text;
+  }
   // 把倒计时写进主体。每秒巡检只在「阶段 / 秒数 / 临近档位」变化时才碰 DOM
   function applyOffworkView(force) {
+    updateOffworkProgress(); // 进度条独立于文本判重：showSec 关掉时主数字一分钟才变，进度条仍按秒刷新
     if (!offworkCanRender()) { applyOffworkNear(null); return; }
     var ov = offworkState();
     if (!ov) return;
@@ -4213,6 +4334,9 @@
     resetBubbleFont(); // 秒数变短 / 阶段切换后让自适应从基准字号重新算，别沿用上一次的缩小系数
     labelEl.textContent = ov.label;
     amountEl.textContent = ov.main;
+    // 倒计时不是金额：撤掉「点数字切遮蔽」的可点态
+    amountEl.classList.remove('dshwv-maskable');
+    amountEl.title = '';
     // 倒计时不继承「低余额」红色，也不让余额变动的 flash 类残留
     amountEl.classList.remove('dshwv-low', 'dshwv-flash-down', 'dshwv-flash-up');
     hintEl.classList.remove('dshwv-low');
@@ -4240,6 +4364,7 @@
     }
     root.classList.remove('dshwv-offwork');
     applyOffworkNear(null);
+    updateOffworkProgress(); // 关掉倒计时后同步隐藏进度条
     amountEl.classList.remove('dshwv-low');
     hintEl.classList.remove('dshwv-low');
     if (!bubbleModelOn && !bubbleTimerActive && !bubbleRemindActive &&
@@ -4248,7 +4373,7 @@
     }
     render();
   }
-  // 配置八键：宿主已归一过，这里再走一次共享模块的同一套归一（防手改 / 老配置）
+  // 下班倒计时配置项：宿主已归一过，这里再走一次共享模块的同一套归一（防手改 / 老配置）
   function applyOffworkConfig(cfg) {
     if (!OFFWORK_CORE) { offworkOn = false; return; }
     var wasOn = offworkOn;
@@ -4285,6 +4410,11 @@
       var day = oc.normPayday(cfg.offworkPaydayDay);
       if (day !== offworkPaydayDay) { offworkPaydayDay = day; changed = true; }
     }
+    if (cfg.offworkHourlyWage !== undefined) {
+      // 与宿主 patchConfig 同口径：非法值保持现值，0 / 空表示「取消配置」
+      var wg = typeof oc.normWage === 'function' ? oc.normWage(cfg.offworkHourlyWage) : 0;
+      if (wg !== null && wg !== offworkHourlyWage) { offworkHourlyWage = wg; changed = true; }
+    }
     if (!changed) return;
     // 关着的时候改时间 / 工作日不会影响任何展示，不必触发一次完整 render
     if (wasOn || offworkOn) syncOffworkMode();
@@ -4316,6 +4446,10 @@
       hint = note ? note.text : usedTodayText(usedText) + (overAmt !== null ? ' · 超预算 ' + fmt(overAmt, state.currency) : '');
     }
     amountEl.textContent = amount;
+    // 可点击态只在这一刻是金额时打开；其余场景保持 pointer-events: none，点击交回气泡
+    var maskable = canToggleMaskByAmount();
+    amountEl.classList.toggle('dshwv-maskable', maskable);
+    amountEl.title = maskable ? (hideAmounts ? '点击显示金额' : '点击遮蔽金额') : '';
     // 菜单「余额」置顶条与各组折叠摘要都跟着同一份状态走（倒计时接管主体时，菜单仍报真实余额）
     menuBalanceEl.textContent = realAmount;
     refreshMenuSummaries();
@@ -4347,6 +4481,8 @@
       // 报时/余额文案过长时同样等比缩小，避免超出气泡（与计时/随机台词走同一套适配）
       fitBubbleText();
     }
+    // render 也负责进度条的显隐：气泡刚打开 / 手动刷新时不必等下一次每秒巡检
+    updateOffworkProgress();
   }
 
   // —— 余额 ——
@@ -4723,6 +4859,12 @@
       soundOn = cfg.soundOn;
       soundToggle.checked = soundOn;
     }
+    // 金额遮蔽：从设置/备份恢复/另一窗口改过来时同步本地并立刻重绘（只重绘一次，值没变就跳过）
+    if (typeof cfg.hideAmounts === 'boolean' && cfg.hideAmounts !== hideAmounts) {
+      hideAmounts = cfg.hideAmounts;
+      updateMaskBtnUi();
+      render();
+    }
     if (typeof cfg.soundSet === 'string') {
       var nextSet = (cfg.soundSet === 'fx1' || cfg.soundSet === 'custom') ? cfg.soundSet : 'duck';
       if (nextSet !== soundSet) { soundSet = nextSet; applySoundSet(); }
@@ -4992,7 +5134,7 @@
       var newGoal = Math.max(0, Math.min(99, Math.round(cfg.focusGoal)));
       if (newGoal !== focusGoal) { focusGoal = newGoal; todoPrefsChanged = true; }
     }
-    // 下班倒计时八键：开关 / 运行态与主体展示都在这里收口（关掉后 render 走原路径）
+    // 下班倒计时配置：开关 / 运行态与主体展示都在这里收口（关掉后 render 走原路径）
     applyOffworkConfig(cfg);
     if (todoPrefsChanged) {
       renderTodoMenu();

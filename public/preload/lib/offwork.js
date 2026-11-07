@@ -153,6 +153,78 @@ function fmtSpan(ms) {
   return hh ? d + '天' + hh + '小时' : d + '天'
 }
 
+/*
+ * 「今天已过百分比」：分母固定为「今天上班时刻 → 今天下班时刻」这段当日区间。
+ *   · 上班前 = 0%，下班后（含刚好到点）= 100%，区间内 = 已过时长 / 区间总长。
+ *   · 只在工作日且**非跨日班**时返回；休息日、跨日班、非法时间一律返回 null（调用方隐藏进度条），
+ *     不拿「昨天的班」或「次日下班」硬算出一个看着像真的百分比。
+ *   · 早于上班时刻的时间算 0 而非负数；阶段判定与 display 的 phase 同口径（见上方 display）。
+ * 返回 { pct: 0–100, phase: 'before' | 'work' | 'after' }。
+ */
+function dayProgress(nowMs, raw) {
+  const cfg = normCfg(raw)
+  const now = nowMs instanceof Date ? new Date(nowMs.getTime()) : new Date(nowMs)
+  if (!Number.isFinite(now.getTime())) return null
+  // 跨日班（下班 <= 上班）：当日区间不成立，隐藏进度
+  const s = parseHm(cfg.start)
+  const e = parseHm(cfg.end)
+  if (e.h * 60 + e.m <= s.h * 60 + s.m) return null
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+  if (!isWorkday(today, cfg.days)) return null
+  const tr = shiftOf(today, cfg)
+  const t = now.getTime()
+  if (t < tr.start.getTime()) return { pct: 0, phase: 'before' }
+  if (t >= tr.end.getTime()) return { pct: 100, phase: 'after' }
+  const total = tr.end.getTime() - tr.start.getTime()
+  const pct = ((t - tr.start.getTime()) / total) * 100
+  return { pct: Math.min(100, Math.max(0, pct)), phase: 'work' }
+}
+
+// 时薪上限（元/小时）：纯防误填，不参与任何折算。设置页与宿主共用同一个数。
+const WAGE_MAX = 100000
+/*
+ * 时薪归一（元/小时）。返回值语义：
+ *   · 0     = 未配置（空 / 0），挂件不显示「今日已赚」；
+ *   · > 0   = 合法时薪（最多两位小数）；
+ *   · null  = 非法（负数、非数字、超过 WAGE_MAX、超过两位小数）。
+ * 分开「0」与「null」是因为写配置时前者表示清空、后者必须保持原值不动；
+ * 合成一个 0 会让用户误填一个字母就把已配好的时薪悄悄清掉。
+ * 刻意不做月薪 / 年薪折算：口径越复杂越容易被当成真实工资。
+ */
+function normWage(v) {
+  if (v === null || v === undefined) return 0
+  const s = String(v).trim()
+  if (!s) return 0
+  const n = Number(s)
+  if (!Number.isFinite(n)) return null
+  if (n === 0) return 0
+  if (n < 0 || n > WAGE_MAX) return null
+  // 最多两位小数：浮点误差容差 1e-6，避免 50.1 * 100 = 5010.0000000001 被判非法
+  if (Math.abs(n * 100 - Math.round(n * 100)) > 1e-6) return null
+  return Math.round(n * 100) / 100
+}
+/*
+ * 「今日已赚」= 时薪 × 今日已工作小时数（估算，不是真实工资）。
+ * 时间段判定**完全复用 dayProgress**：它返回 null（休息日 / 跨日班 / 非法时间）时这里同样返回 null，
+ * 调用方隐藏这一项；上班前 pct=0 → 0 元，下班后 pct=100 → 按整段班时长封顶。
+ * 只做「时薪 × 小时」，不做月薪折算、个税、社保、补贴等任何扣除。
+ * 返回两位小数；未配置时薪返回 null（与「赚了 0 元」区分开）。
+ */
+function todayEarned(nowMs, raw, wage) {
+  const w = normWage(wage)
+  if (!w) return null
+  const p = dayProgress(nowMs, raw)
+  if (!p) return null
+  const cfg = normCfg(raw)
+  const s = parseHm(cfg.start)
+  const e = parseHm(cfg.end)
+  // dayProgress 已保证非跨日班，这里的区间一定是当日且 end > start
+  const shiftHours = (e.h * 60 + e.m - (s.h * 60 + s.m)) / 60
+  // 在「分」上四舍五入并加 1e-6 抵消浮点误差（33.33 × 4.5 = 149.985，JS 实际算成 149.98499999998，
+  // 直接 Math.round 会错成 149.98）。1e-6 分远小于真实金额精度，不会把该舍的进位上去
+  return Math.round(shiftHours * (p.pct / 100) * w * 100 + 1e-6) / 100
+}
+
 // 「今天 09:00」/「明天 09:00」/「周一 09:00」/「11 月 10 日 09:00」
 function dayDesc(target, now) {
   const clock = pad2(target.getHours()) + ':' + pad2(target.getMinutes())
@@ -267,6 +339,10 @@ module.exports = {
   normCfg: normCfg,
   fmtDuration: fmtDuration,
   display: display,
+  dayProgress: dayProgress,
+  normWage: normWage,
+  todayEarned: todayEarned,
+  WAGE_MAX: WAGE_MAX,
   _weekendInfo: weekendInfo,
   _paydayInfo: paydayInfo,
 }

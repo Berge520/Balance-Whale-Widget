@@ -69,6 +69,7 @@ const PATCH_FIXTURES = {
   scale: { scale: 2 }, vol: { vol: 0.1 }, soundOn: { soundOn: false }, soundSet: { soundSet: 'custom' },
   usageMode: { usageMode: 'token' }, peakMode: { peakMode: 'liangwen' }, peakRemindOn: { peakRemindOn: false },
   bubbleOn: { bubbleOn: false }, menuBtn: { menuBtn: false }, onTop: { onTop: false },
+  hideAmounts: { hideAmounts: true },
   lowAlertOn: { lowAlertOn: false }, lowAlertAmount: { lowAlertAmount: 123 }, budgetOn: { budgetOn: true },
   budgetAmount: { budgetAmount: 55 }, dropAlertOn: { dropAlertOn: true }, dropAlertAmount: { dropAlertAmount: 66 },
   remindSec: { remindSec: 5 }, quietOn: { quietOn: true },
@@ -87,11 +88,12 @@ const PATCH_FIXTURES = {
   focusOn: { focusOn: true }, todoOn: { todoOn: true },
   // 每日专注目标：默认 0（关闭），夹具给一个合法值
   focusGoal: { focusGoal: 8 },
-  // 下班倒计时八键：默认关闭 / 09:00–18:00 / 周一至周五 / 显示秒 / 发薪日 10 号
+  // 下班倒计时九键：默认关闭 / 09:00–18:00 / 周一至周五 / 显示秒 / 发薪日 10 号 / 时薪未配置
   offworkOn: { offworkOn: true }, offworkStart: { offworkStart: '08:30' },
   offworkEnd: { offworkEnd: '19:00' }, offworkDays: { offworkDays: [0, 6] },
   offworkShowSec: { offworkShowSec: false }, offworkWeekendOn: { offworkWeekendOn: true },
   offworkPaydayOn: { offworkPaydayOn: true }, offworkPaydayDay: { offworkPaydayDay: 25 },
+  offworkHourlyWage: { offworkHourlyWage: 50 },
   guideDone: { guideDone: true },
   dshNodeDir: { dshNodeDir: 'C:\\node' }, dshKeepAlive: { dshKeepAlive: true },
   // 以管理员身份启动（默认 false，夹具取 true 才算「改过」）

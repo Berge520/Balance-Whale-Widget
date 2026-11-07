@@ -129,9 +129,18 @@ function normOffworkDays(v: any, dft: number[]) {
 function normOffworkPayday(v: any) {
   return Number.isInteger(v) && v >= 1 && v <= 31 ? v : 10
 }
+// 时薪（元/小时）：与宿主 offwork.js 的 normWage 同口径 —— 正数、最多两位小数、≤ 100000；
+// 其余（含 0 / 空）一律按「未配置」0 回填，挂件据此隐藏「今日已赚」
+const OFFWORK_WAGE_MAX = 100000
+function normOffworkWage(v: any) {
+  const n = Number(v)
+  if (!Number.isFinite(n) || n <= 0 || n > OFFWORK_WAGE_MAX) return 0
+  if (Math.abs(n * 100 - Math.round(n * 100)) > 1e-6) return 0
+  return Math.round(n * 100) / 100
+}
 const OFFWORK_DEFAULTS = {
   start: '09:00', end: '18:00', days: [1, 2, 3, 4, 5],
-  showSec: true, weekendOn: false, paydayOn: false, paydayDay: 10,
+  showSec: true, weekendOn: false, paydayOn: false, paydayDay: 10, hourlyWage: 0,
 }
 
 // 随包内置形象 id（= public/whale/ 下的图片文件名），数组顺序即「形象」下拉的顺序。
@@ -1216,6 +1225,8 @@ const cfg = reactive({
   peakMode: 'default',
   peakRemindOn: true,
   bubbleOn: true,
+  // 金额遮蔽（挂件上点数字或菜单眼睛切换）：只影响显示，不改任何真实金额
+  hideAmounts: false,
   menuBtn: true,
   onTop: true,
   lowAlertOn: true,
@@ -1363,7 +1374,7 @@ const cfg = reactive({
   focusOn: false,
   todoOn: false,
   focusGoal: 0,
-  // 下班倒计时（v1.14.0）：默认关闭；八键与宿主 offwork.DEFAULTS / store.js 保持一致
+  // 下班倒计时（v1.14.0）：默认关闭；与宿主 offwork.DEFAULTS / store.js 保持一致
   offworkOn: false,
   offworkStart: '09:00',
   offworkEnd: '18:00',
@@ -1372,6 +1383,8 @@ const cfg = reactive({
   offworkWeekendOn: false,
   offworkPaydayOn: false,
   offworkPaydayDay: 10,
+  // 时薪（元/小时）：0 = 未配置（输入框显示空、挂件不显示「今日已赚」），只有正数才参与估算
+  offworkHourlyWage: 0,
   // 自定义显示：用户隐藏的 Tab 与卡片（空数组 = 全部显示）+ Tab 顺序（空数组 = 默认顺序）
   // + 置顶卡片（空数组 = 无置顶；顺序即组内置顶顺序）
   hiddenTabs: [] as string[],
@@ -3247,6 +3260,7 @@ function applyConfig(c: any) {
   cfg.peakMode = c.peakMode
   cfg.peakRemindOn = c.peakRemindOn !== false
   cfg.bubbleOn = c.bubbleOn
+  cfg.hideAmounts = c.hideAmounts === true
   // 按压气泡整份回填（**不能漏**：BubbleView 的整卡数据都来自 cfg.bubble，漏了这步
   // 队列编辑器读到的 items 恒为 []，「加一步 / 删 / 上移」全是点不动的手感 —— 宿主其实已存成功）。
   // 宿主 normBubble 保证出口是稳定形态；这里只做类型兜底，不重新归一化（避免两套口径打架）
@@ -3339,7 +3353,7 @@ function applyConfig(c: any) {
   cfg.focusGoal = typeof c.focusGoal === 'number' && isFinite(c.focusGoal)
     ? Math.min(99, Math.max(0, Math.round(c.focusGoal)))
     : 0
-  // 下班倒计时（v1.14.0）：八键同样必须回填，否则 OffworkView 的开关 / 时间 / 工作日在重开设置页后看着像没保存
+  // 下班倒计时（v1.14.0）：九键同样必须回填，否则 OffworkView 的开关 / 时间 / 工作日 / 时薪在重开设置页后看着像没保存
   cfg.offworkOn = c.offworkOn === true
   cfg.offworkStart = normOffworkHm(c.offworkStart, OFFWORK_DEFAULTS.start)
   cfg.offworkEnd = normOffworkHm(c.offworkEnd, OFFWORK_DEFAULTS.end)
@@ -3348,6 +3362,7 @@ function applyConfig(c: any) {
   cfg.offworkWeekendOn = c.offworkWeekendOn === true
   cfg.offworkPaydayOn = c.offworkPaydayOn === true
   cfg.offworkPaydayDay = normOffworkPayday(c.offworkPaydayDay)
+  cfg.offworkHourlyWage = normOffworkWage(c.offworkHourlyWage)
   // 自定义显示：隐藏列表原样回填（空数组 = 全部显示）。漏了这里，DisplayManager 勾选后
   // 本地 cfg 永远不变，界面看着像「点不动」。
   // 含核心卡片的 Tab 与核心卡片本身一律剔掉：老备份 / 手改配置可能带着它们，
