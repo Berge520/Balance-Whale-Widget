@@ -35,6 +35,8 @@ test('prebuild 同时挂上 sync-version 与 check-shared', () => {
   assert.match(prebuild, /scripts\/check-z-layers\.mjs\s+--fail/, 'prebuild 少了 check-z-layers.mjs --fail：悬浮窗 z-index 裸数字不再拦截')
   // public/ 会被原样拷进 dist/，未入库（未跟踪 / 被 .gitignore 忽略）的文件等于直接进发行包
   assert.match(prebuild, /scripts\/check-public-tracked\.mjs/, 'prebuild 少了 check-public-tracked.mjs：public/ 下的 .bak / 副本会静默进包')
+  // 体积棘轮：不在链路上时文件只能继续变大，白名单失效也无人发现
+  assert.match(prebuild, /scripts\/check-file-size\.mjs/, 'prebuild 少了 check-file-size.mjs：单文件体积不再受棘轮闸门约束')
 })
 
 test('prebuild 仍由 build 触发', () => {

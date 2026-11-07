@@ -304,7 +304,7 @@ src/                     # 设置页（Vue 3 单文件组件）
 ├─ components/           # 可复用控件（裁剪器 / 试听 / 下载框 / 首启引导 / 气泡编辑等，以目录实际内容为准）
 └─ types/services.d.ts   # 宿主注入 API 的类型声明
 test/                    # 单元测试（node --test，npm test）
-scripts/                 # 构建与发布脚本（prebuild 八道闸门：sync-version / check-shared / check-dead-settings / check-doc-refs / check-z-layers / gen-search-index / check-orphan-css / check-public-tracked；另有 release / verify-release-zip / check-zip-size / build-skin-pack.py / export-shared-assets，以目录实际内容为准）
+scripts/                 # 构建与发布脚本（prebuild 九道闸门：sync-version / check-shared / check-dead-settings / check-doc-refs / check-z-layers / gen-search-index / check-orphan-css / check-public-tracked / check-file-size；另有 check / release / verify-release-zip / check-zip-size / build-skin-pack.py / export-shared-assets，以目录实际内容为准）
 eslint.config.js         # ESLint 扁平配置（npm run lint）
 .github/workflows/ci.yml # 持续集成（push / PR 依次跑 lint + typecheck + test + build）
 .github/workflows/release.yml # 发版（打 v* tag 时校验版本 → 跑同一套检查 → 构建打包 zip → 校验体积 → 建 Release）
