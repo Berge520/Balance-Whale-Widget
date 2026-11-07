@@ -46,7 +46,7 @@ try {
   }
 } catch (err) { logErr('[whale] 禁止页面缩放失败', err && err.message) }
 
-const handlers = { init: [], balance: [], config: [], snapped: [], dsh: [], sounds: [], skin: [], bubbles: [], sharedSkins: [], randimgData: [], models: [], dark: [], bubblePreview: [], todo: [], todoDue: [], focusStats: [], cmd: [], cursor: [] }
+const handlers = { init: [], balance: [], config: [], snapped: [], dsh: [], sounds: [], skin: [], bubbles: [], sharedSkins: [], randimgData: [], models: [], dark: [], bubblePreview: [], todo: [], todoDue: [], focusStats: [], cmd: [], cursor: [], forcePass: [] }
 
 function on(name, cb) {
   if (handlers[name] && typeof cb === 'function') handlers[name].push(cb)
@@ -94,6 +94,9 @@ ipcRenderer.on('whale:cmd', (event, data) => {
 // 光标探测回包（页面 whale:probe-cursor 的答复）：{ x, y } 相对挂件窗口左上角。
 // 用途见 api.probeCursor —— 指针静止时没有 pointermove，悬停判定建立不起来
 ipcRenderer.on('whale:cursor', (event, data) => emit('cursor', data))
+// 宿主强制穿透的告知（widget.js 的 250ms 兜底确认「指针已在窗口外」且已把窗口改成穿透态）：
+// 页面可能因收不到 pointerleave 停在「可交互」，收到后按一次真正离开收尾并把去重缓存对齐
+ipcRenderer.on('whale:force-pass', () => emit('forcePass'))
 
 // —— 深浅色跟随 uTools ——
 // 菜单/计时条等 UI 的深浅形态挂在 <html> 的 dark 类上（floating.css 消费）。判定源是
@@ -186,6 +189,8 @@ const api = {
   onCmd(cb) { on('cmd', cb) },
   // 光标探测回包（宿主 whale:cursor 推送：{ x, y } 相对窗口左上角，拿不到时为 null）
   onCursor(cb) { on('cursor', cb) },
+  // 宿主强制穿透的告知（宿主 whale:force-pass：指针已在窗口矩形外，宿主已把窗口改成穿透态）
+  onForcePass(cb) { on('force-pass', cb) },
   // 复制文本到剪贴板：页面侧没有 utools 全局（它只在 preload 里），统一由这里代劳。
   // 同步返回是否成功，页面据此给出「已复制 / 复制失败」回执
   copyText(text) {

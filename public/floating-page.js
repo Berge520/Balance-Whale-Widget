@@ -6033,6 +6033,22 @@
     if (!pt || !isFinite(pt.x) || !isFinite(pt.y)) return;
     hoverAt({ clientX: Number(pt.x), clientY: Number(pt.y) });
   });
+  // 宿主强制穿透的告知（宿主 250ms 兜底确认「指针已在窗口矩形外」且已把窗口改成穿透态后才发）：
+  // 此时页面很可能因收不到 pointerleave 停在了「可交互」状态。这里按一次真正的离开收尾，
+  // 并把去重缓存对齐到宿主已落地的 true —— 否则指针回来悬停时，页面发的 false 会被自己的
+  // lastIgnoreSent 吞掉，窗口就一直点不着（宿主只补「在窗口外强制穿透」这一侧，
+  // 窗口内的命中最优仍由页面的精确判定负责）。
+  whaleApi.onForcePass(function () {
+    passDwellCancel();
+    passReleaseCancel();
+    if (menuOpen) closeMenu();
+    lastHoverPt = null;
+    try { menuBtn.classList.remove('dshwv-menu-btn-visible'); } catch (err) {}
+    lastIgnoreSent = true;
+    passHoverActive = false;
+    try { passApplyIndicator(); } catch (err) {}
+    try { setWidgetCursor(''); } catch (err) {}
+  });
   // 深浅色跟 uTools 走（preload 轮询 isDarkColors 后本地推送）：挂 <html> 的 dark 类，
   // 菜单/计时条等面板的深色形态全在 floating.css 的 html.dark 系列规则里。
   // 首条推送在 preload 阶段就发过（早于本回调注册），此处先把类补齐一次——类已对时 toggle 是空操作。
@@ -6084,11 +6100,17 @@
   // 真机实证：窗口可能被留在 WS_EX_TRANSPARENT(0x20) 上，而 Electron 的 forward 转发钩子已经失效，
   // 页面收不到任何 pointermove；可悬停接管（含上面那次补命中测试）全靠 pointermove 驱动，
   // 350ms 那次探测只在启动时问一次 → 之后再没机会，挂件「看得见、点不着」。
-  // 处理：穿透待命期低频主动问一次光标（等价于补一次 pointermove）；窗口获焦/失焦/页面重新可见时
-  // 立刻补问。指针若压在鲸鱼上，驻留 PASS_DWELL_MS 后会自动接管并下发 ignore=false，把窗口捞回来。
+  // 处理：窗口「该穿透」时低频主动问一次光标（等价于补一次 pointermove）；窗口获焦/失焦/页面重新可见时
+  // 立刻补问。指针若压在鲸鱼上，悬停逻辑会接管并下发 ignore=false，把窗口捞回来
+  // （开穿透时先驻留 PASS_DWELL_MS，关穿透时立即接管）。
+  // 为什么门槛看 lastIgnoreSent 而不是 passThroughOn：**两种模式下窗口的闲置态都是穿透**
+  //（启动即 sendIgnoreMouse(true)，见下方「初始全穿透」；关掉穿透只是「悬停立即接管」，
+  //  不改变闲置态），而 passThrough 的默认值恰是 false —— 按它设门槛，等于把默认配置下
+  //  卡死的窗口排除在救援之外（真机症状：设置页「鼠标穿透」没勾、窗口带着 0x20、点鲸鱼没反应）。
+  // 窗口此刻已可交互（lastIgnoreSent=false）时没有这个死锁风险，不必探测。
   // 宿主侧另有一条重申路径（lib/widget.js reassertIgnoreMouse）负责把 forward 钩子重新装回去。
   function probeCursorSoon() {
-    if (!passThroughOn || passHoverActive) return;
+    if (passHoverActive || lastIgnoreSent !== true) return;
     if (menuOpen || (drag && drag.active)) return;
     // 页面隐藏（挂件被收起 / 全屏自动隐藏）时不问：隐藏态既没有可点的鲸鱼，
     // 问了反而可能在不可见时把 ignore=false 接管上，重新显示后先吞一次点击。

@@ -39,6 +39,40 @@ function dayAdd(base, delta) {
   return dayKeyFromTs(d.getTime())
 }
 
+// ── 窗口几何 / 节流 ──
+// 以下三个是「宿主侧穿透兜底」的判据（调用方 widget.js 的 cursorGuardTick）：
+// 取光标（utools.getCursorScreenPoint）与取窗口矩形（win.getBounds）都是 IO，由调用方做完再传进来。
+// 这里只回答两件事：指针在不在窗口矩形内、同一个值重申是否已到限频间隔。
+
+// 严格的「是有限数」判断。刻意不复用上面的 num()：num() 会把 'abc' 收敛成 0，
+// 传进来一个字符串坐标反而会被当成合法值（0,0）→ 误判「在窗口内」→ 该强制穿透时没强制。
+function isFiniteNum(v) {
+  return typeof v === 'number' && isFinite(v)
+}
+
+// 指针是否在窗口矩形内（左闭右开，与 getBounds 的 x/y/width/height 口径一致）。
+// 坐标缺失或非法一律按「不在内」——拿不到证据时不能凭空宣布接管，维持穿透永远更安全。
+function insideRect(p, b) {
+  if (!p || !b) return false
+  if (!isFiniteNum(p.x) || !isFiniteNum(p.y)) return false
+  if (!isFiniteNum(b.x) || !isFiniteNum(b.y) || !isFiniteNum(b.width) || !isFiniteNum(b.height)) return false
+  return p.x >= b.x && p.x < b.x + b.width && p.y >= b.y && p.y < b.y + b.height
+}
+
+// 宿主该不该强制穿透：唯一判据是「指针不在窗口矩形内」。
+// 刻意不用「鲸鱼外接方块」判可交互区 —— 气泡与菜单本来就会伸到留白外，那部分归页面精确判定。
+function shouldForcePass(p, b) {
+  return !insideRect(p, b)
+}
+
+// 限频：距上次重申已满 gapMs 才允许。
+// lastAt <= 0 表示「从没重申过」（调用方初始值 0）—— 第一拍必须放行，否则窗口卡住时要白等一个间隔。
+function reassertDue(now, lastAt, gapMs) {
+  if (!isFiniteNum(now) || !isFiniteNum(lastAt) || !isFiniteNum(gapMs)) return false
+  if (lastAt <= 0) return true
+  return now - lastAt >= gapMs
+}
+
 // ── 目录定位 ──
 // 环境变量优先 + 回退，取第一个**实际存在**的候选目录；都不存在返回 ''
 //
@@ -362,4 +396,7 @@ module.exports = {
   normalizePath,
   isIpv4,
   readBodyWithProgress,
+  insideRect,
+  shouldForcePass,
+  reassertDue,
 }

@@ -4,7 +4,7 @@
 const { MIN_SCALE, MAX_SCALE, BASE_MIN, BASE_CAP, BASE_MAX, WIN_PAD, WIDGET_AUTOSHOW_MS, TODO_MAX, FOCUS_STATS_DAYS, K } = require('./constants')
 const { execFileSync } = require('child_process')
 const { log, logErr } = require('./log')
-const { errMsg } = require('./util')
+const { errMsg, shouldForcePass, reassertDue } = require('./util')
 const { clampNum, readConfig, readAnchor, writeAnchor, defaultAnchor, readTimer, readTodo, readFocus, todayKey } = require('./store')
 const { summarize: summarizeFocus } = require('./focus')
 const { getCachedBalance, getModelsPayload } = require('./api')
@@ -338,6 +338,41 @@ function setWidgetPos(p) {
   win.setPosition(Math.round(p.x), Math.round(p.y))
   snappedPos = Math.round(p.x) + ',' + Math.round(p.y)
 }
+// —— 宿主侧穿透兜底：光标在窗口外 → 强制穿透 ——
+// 双权威分工：窗口矩形**内**的命中（鲸鱼轮廓 / 气泡 / 菜单伸进留白的部分）一律由页面精确判定，
+// 宿主只在「指针已不在矩形内」这一个方向上做权威，且只强制 true，绝不替页面判 false。
+// 为什么必须有这一条：页面的接管/交还全靠 pointermove / pointerleave 驱动。一旦窗口卡在「可交互」态
+// 而指针已经离开（forward 钩子被摘掉、或指针贴着屏幕边移走不再派发事件），页面既收不到 move 也收不到
+// leave，就再也不会下发 ignore=true —— 实测约 1/5 概率残留，窗口一直挡住下层应用。页面那条看门狗
+// 只救反方向（自认穿透、实际卡死点不着），补不了这一侧。
+// 限频：值缓存已是 true 时 applyIgnoreMouse 会去重，但「缓存 true、窗口实际仍可交互」正是要救的场景，
+// 故对同一值做限频重申（≤CURSOR_REASSERT_MS 一次），不能每 tick 都重登记窗口样式（WATCH_MS=250ms）。
+const CURSOR_REASSERT_MS = 2500
+let cursorAssertAt = 0
+function cursorGuardTick() {
+  // 拖拽中指针必然短暂越出窗口：此刻强推穿透会掐断后续 pointerup，拖拽收不了尾（抱出屏外时尤其明显）
+  if (dragFrozen) return
+  let p = null
+  let b = null
+  try { p = utools.getCursorScreenPoint() } catch (err) {}
+  try { b = win.getBounds() } catch (err) {}
+  if (!shouldForcePass(p, b)) return
+  if (ignoreMouseVal === true) {
+    const now = Date.now()
+    if (!reassertDue(now, cursorAssertAt, CURSOR_REASSERT_MS)) return
+    cursorAssertAt = now
+    // 重申走 ensureWindowStyles 而不是只调 setIgnoreMouseEvents：后者会重新登记窗口样式，
+    // 可能把置顶/跳任务栏一起打掉，重申时必须连带补回（理由见 ensureWindowStyles 头部注释）
+    ensureWindowStyles()
+    return
+  }
+  applyIgnoreMouse(true)
+  // 刚改过值也记一笔：下一拍不必再重申一次（否则每次强推后 250ms 都要多登记一遍样式）
+  cursorAssertAt = Date.now()
+  // 页面此刻可能还认为窗口「可交互」（它根本没收到 leave）：不通知的话，回来悬停时页面发的 false
+  // 会被它自己的 lastIgnoreSent 去重吞掉，窗口就一直点不着。故回告页面把本地缓存对齐到已落地的 true
+  sendToWidget('whale:force-pass')
+}
 function watchTick() {
   if (!winAlive()) return
   // 窗口存在但不可见时不取光标：任务栏轮询的唯一光标来源是 taskbarBase → getCursorScreenPoint，
@@ -345,6 +380,9 @@ function watchTick() {
   // 可见后下一 tick 照常采样；watchSig 保留，隐藏期间任务栏/显示器变化在恢复后仍能被识别。
   if (!nativeSamplingVisible()) return
   try {
+    // 穿透兜底与「自动避让任务栏」无关：这一拍无论避让开关如何都要先跑（见 cursorGuardTick）
+    cursorGuardTick()
+    if (!watchTaskbarOn) return
     const sz = win.getSize()
     const pos = win.getPosition()
     const s = isFinite(sz[0]) ? sz[0] : WIN_PAD * 2 + BASE_MIN
@@ -372,14 +410,21 @@ function watchTick() {
     logErr('[whale][taskbar] 任务栏轮询失败', err && err.message)
   }
 }
+let watchTaskbarOn = true // 当前配置是否开着「自动避让任务栏」（只决定这一拍跑不跑避让部分）
 function syncTaskbarWatch() {
-  const need = winAlive() && readConfig().avoidTaskbar !== false
-  if (need && !watchTimer) {
+  const alive = winAlive()
+  const on = readConfig().avoidTaskbar !== false
+  // 避让重新打开时清掉旧签名：签名里混着任务栏状态，关掉期间没采过样，拿旧值比会误判成「刚变化」而重摆一次
+  if (on && !watchTaskbarOn) watchSig = ''
+  watchTaskbarOn = on
+  // 定时器的启动条件只认「窗口活着」：250ms 这一拍同时承载宿主侧穿透兜底（cursorGuardTick），
+  // 那条兜底与避让开关无关 —— 关掉避让也必须继续跑，否则残留穿透就回来了
+  if (alive && !watchTimer) {
     watchSig = ''
     snappedPos = ''
     watchTimer = setInterval(watchTick, WATCH_MS)
     watchTick() // 立刻建立基线
-  } else if (!need && watchTimer) {
+  } else if (!alive && watchTimer) {
     clearInterval(watchTimer)
     watchTimer = null
   }

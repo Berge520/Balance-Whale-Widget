@@ -129,9 +129,12 @@ function onOpacityCommit() {
     <p class="hint">透明度作用于整个挂件（含气泡与菜单）；拖动实时预览。</p>
 
     <label class="field row check">
-      <span class="label">鼠标穿透 <em>（挂件完全不接收鼠标——点击/拖拽/菜单全部穿透；在鲸鱼上停留约 1 秒可临时接管）</em></span>
+      <span class="label">鼠标穿透 <em>（开启后连鲸鱼本体也点不动，需在鲸鱼上停留约 1 秒临时接管）</em></span>
       <input type="checkbox" :checked="cfg.passThrough" @change="onCheckChange('passThrough', $event)" />
     </label>
+    <p class="hint">
+      关闭时（默认）：鼠标移到鲸鱼、气泡或菜单上就能直接操作，移开即恢复穿透——挂件四周的透明留白始终不挡下层应用。开启后：连鲸鱼本体也要先停留约 1 秒才接管。
+    </p>
     <p class="hint">
       穿透开启后挂件自身菜单也点不到，建议先绑定全局快捷键作为「逃生通道」：uTools 设置 → 全局功能 → 新增 → 指令填「切换鼠标穿透」→ 按下组合键。也可在鲸鱼上停留约 1 秒临时接管后再关。
     </p>

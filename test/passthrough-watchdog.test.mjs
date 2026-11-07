@@ -19,13 +19,23 @@ test('页面：光标探测不是一次性 —— 有低频看门狗', () => {
   assert.match(page, /setInterval\(probeCursorSoon,\s*\d+\)/, '缺少周期探测：卡死后再没人补 pointermove')
 })
 
-test('页面：看门狗只在穿透待命时探头，不干扰接管/菜单/拖拽', () => {
+test('页面：看门狗在「窗口该穿透」时都探头，不按穿透开关门槛', () => {
   const at = page.indexOf('function probeCursorSoon()')
   assert.ok(at >= 0, '找不到 probeCursorSoon')
-  const block = page.slice(at, at + 400)
-  assert.match(block, /if \(!passThroughOn \|\| passHoverActive\) return;/)
+  const block = page.slice(at, at + 600)
+  // 两种模式下窗口的闲置态都是穿透（启动即 sendIgnoreMouse(true)），而 passThrough 默认 false；
+  // 旧写法 `!passThroughOn || …` 把默认配置下卡在 0x20 的窗口排除在救援之外
+  // （真机症状：『鼠标穿透』没勾、点鲸鱼没反应）
+  assert.match(block, /if \(passHoverActive \|\| lastIgnoreSent !== true\) return;/)
+  assert.doesNotMatch(block, /!passThroughOn/)
   assert.match(block, /menuOpen/)
   assert.match(block, /drag\.active/)
+})
+
+test('页面：闲置态在两种穿透模式下都是穿透（看门狗门槛的依据）', () => {
+  // 关掉「鼠标穿透」只影响悬停接管的时机（关 = 立即接管，开 = 驻留 1.2s），
+  // 不改变闲置态；故窗口样式位在两种模式下都可能带 WS_EX_TRANSPARENT
+  assert.match(page, /sendIgnoreMouse\(true\); \/\/ 初始全穿透/)
 })
 
 test('页面：失焦 / 获焦 / 重新可见时立刻补问一次', () => {
