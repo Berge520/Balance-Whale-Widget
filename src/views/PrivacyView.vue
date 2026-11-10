@@ -132,7 +132,7 @@ function clearSelectedData() {
       <input type="checkbox" v-model="clearItems.assets" @change="clearConfirm = false" />
     </label>
     <label class="field row check">
-      <span class="label">待办与专注记录 <em>（待办清单 + 专注轮次与分钟数统计，清后不可恢复）</em></span>
+      <span class="label">待办与专注记录 <em>（待办清单 + 历史专注数据，清后不可恢复）</em></span>
       <input type="checkbox" v-model="clearItems.todo" @change="clearConfirm = false" />
     </label>
     <div class="btn-row">
