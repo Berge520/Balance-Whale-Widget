@@ -311,6 +311,46 @@ function uDivisorFromJsComment(marker) {
   }
 }
 
+// uTools 功能指令名（全局快捷键绑的就是这个字符串）：
+//   设置页侧 → src/constants/commands.ts 里的 `export const CMD_XXX = '中文指令名'`
+//   宿主侧   → public/plugin.json 的 cmds 数组
+// 这不是「两边同值」的比对，而是「commands.ts 的每个值都必须出现在 plugin.json 的 cmds 里」：
+// 指令名在 plugin.json 里改名 / 删除，界面上「复制指令名」「新增快捷键」仍用旧词，
+// 用户绑到一个不存在的指令上 —— 不报错、点了也没反应，是最难排查的一类故障。
+// 这里用 JSON.parse 解析 plugin.json（它是严格 JSON；解析失败要给出可读报错，不要把
+// 语法错误误报成「指令名不一致」）。
+function cmdNamesFromTs(src, file) {
+  const names = [...src.matchAll(/export\s+const\s+CMD_[A-Z0-9_]+\s*=\s*['"]([^'"]+)['"]/g)].map((m) => m[1])
+  if (!names.length) throw new Error(`${file} 里没解析出任何 export const CMD_XXX = '...'`)
+  return names.sort()
+}
+function cmdNamesFromPluginJson(src, file) {
+  let json
+  try {
+    json = JSON.parse(src)
+  } catch (err) {
+    throw new Error(`${file} 不是合法 JSON：${err.message}`, { cause: err })
+  }
+  const feats = Array.isArray(json.features) ? json.features : []
+  if (!feats.length) throw new Error(`${file} 里没有 features 数组`)
+  const names = feats.flatMap((f) => (Array.isArray(f.cmds) ? f.cmds : []))
+  if (!names.length) throw new Error(`${file} 里没有 feature 的任何 cmds`)
+  return names
+}
+// 「commands.ts 的每个值都在 plugin.json 的 cmds 里」—— 子集判定，不是全集相等：
+// plugin.json 允许有多条指令（同一功能的多个搜索词），设置页只引用其中一部分。
+function cmdsSubset(tsSrc, tsFile, jsonSrc, jsonFile) {
+  const wanted = cmdNamesFromTs(tsSrc, tsFile)
+  const have = cmdNamesFromPluginJson(jsonSrc, jsonFile)
+  const missing = [...new Set(wanted)].filter((n) => !have.includes(n))
+  if (missing.length) {
+    throw new Error(
+      `设置页引用的指令名在 plugin.json 的 cmds 里不存在：${missing.map((m) => `「${m}」`).join('、')}`,
+    )
+  }
+  return 'ok'
+}
+
 // 从 openAt 处的括号起取配平整段（字符串 / 行注释跳过），压掉空白便于比对
 function balanced(src, openAt, file, marker) {
   const open = src[openAt]
@@ -350,12 +390,13 @@ const WINDOW_VIEW = 'src/views/WindowView.vue'
 // dsh 一族的设置页常量随整套逻辑抽到了 useDsh composable（见 src/composables/useDsh.ts），
 // MAX_BATCH / NEWEST_VERSION 两项的抠取路径指向这里；DEFAULT_DSH_PORT 仍留 App.vue（cfg 初始化消费）
 const USE_DSH = 'src/composables/useDsh.ts'
-// 专注统计窗口 / 保留上限的设置页副本在 FocusView（柱图 STAT_DAYS / 热力图 HEAT_DAYS）
-const FOCUS_VIEW = 'src/views/FocusView.vue'
 // 「今日已赚」的时薪上限在宿主纯函数、设置页回填、设置页输入校验三处各有一份副本：
 // 宿主 offwork.js（判定 / 文案都靠它）、App.vue（applyConfig 回填归一）、OffworkView.vue（输入校验）
 const OFFWORK_JS = 'public/preload/lib/offwork.js'
 const OFFWORK_VIEW = 'src/views/OffworkView.vue'
+// 计时到点留言的上限副本随「到点提醒」控件一起从 App.vue 搬进了 NotifyView
+// （设置页输入框 maxLength 在那边，父级不再下传）
+const NOTIFY_VIEW = 'src/views/NotifyView.vue'
 
 const CHECKS = process.env.CS_CHECKS
   ? JSON.parse(process.env.CS_CHECKS).map((c) => ({
@@ -657,33 +698,18 @@ const CHECKS = process.env.CS_CHECKS
     ],
   },
   // 到点留言长度上限三处副本：宿主 constants（清洗用）、挂件页（菜单输入框取用）、
-  // 设置页（输入框 maxLength）。改一处忘另一处会出现「界面能敲进去、宿主悄悄截掉」。
+  // 设置页（输入框 maxLength，控件在 NotifyView）。改一处忘另一处会出现「界面能敲进去、宿主悄悄截掉」。
   {
     name: '到点留言长度上限 TIMER_NOTE_MAX',
     parts: [
       { file: CONSTANTS, pick: jsNumber('const TIMER_NOTE_MAX') },
       { file: FLOATING_PAGE, pick: jsNumber('var TIMER_NOTE_MAX') },
-      { file: APP_VUE, pick: jsNumber('const TIMER_NOTE_MAX') },
+      { file: NOTIFY_VIEW, pick: jsNumber('const TIMER_NOTE_MAX') },
     ],
   },
-  // 专注统计窗口：宿主 constants 是真源（widget.js / settings.js 都 require 它），
-  // 设置页拿不到 preload 常量，FocusView 留 STAT_DAYS 一份副本（柱图与明细共用）。
-  // 两边不一致会出现「柱图 7 根、明细却列 14 天」——多出来的天没有分组头数字。
-  {
-    name: '专注统计窗口 FOCUS_STATS_DAYS',
-    parts: [
-      { file: CONSTANTS, pick: jsNumber('const FOCUS_STATS_DAYS') },
-      { file: FOCUS_VIEW, pick: jsNumber('const STAT_DAYS') },
-    ],
-  },
-  // 专注保留上限：热力图窗口取宿主保留上限（再长也没有数据），设置页副本 HEAT_DAYS 同值
-  {
-    name: '专注保留上限 FOCUS_KEEP_DAYS',
-    parts: [
-      { file: CONSTANTS, pick: jsNumber('const FOCUS_KEEP_DAYS') },
-      { file: FOCUS_VIEW, pick: jsNumber('const HEAT_DAYS') },
-    ],
-  },
+  // FOCUS_STATS_DAYS / FOCUS_KEEP_DAYS 的校验已于 v1.16 移除：专注统计层（柱图、明细、
+  // 保留天数说明）整层下线，设置页已无 STAT_DAYS / KEEP_DAYS 副本，宿主 constants 里的
+  // 两个常量仍留给 focus.js 裁剪用，不再有跨文件一致性可言
   // 共享角色清单（36 张）：宿主 constants.js 的 SHARED_SKIN_PACK_SKINS（对象数组，含 sha256）
   // 与设置页字面量副本（`{ id, name }` 数组）同值。两边不一致会出现「设置页列了这张、宿主下不下来」
   // 或「下载成功但设置页认不出是哪个已装」。
@@ -714,6 +740,18 @@ const CHECKS = process.env.CS_CHECKS
       } },
     ],
   },
+  // uTools 功能指令名：设置页的「复制指令名 / 新增快捷键」用 constants/commands.ts 的值，
+  // 而全局快捷键真正绑定的是 plugin.json 的 cmds。两者漂移 = 用户绑到一个不存在的指令，
+  // 无报错、无反应。子集判定（commands.ts ⊆ cmds）由 compare 自己实现；此处两侧的 pick
+  // 都需要读原始全文（TS 用正则抽常量、JSON 用 JSON.parse），故 pick 直通、不用 all。
+  {
+    name: '功能指令名 commands.ts ⊆ plugin.json 的 cmds',
+    parts: [
+      { file: 'src/constants/commands.ts', pick: (src) => src },
+      { file: 'public/plugin.json', pick: (src) => src },
+    ],
+    compare: cmdsSubset,
+  },
 ]
 
 let bad = 0
@@ -733,6 +771,18 @@ for (const c of CHECKS) {
     bad++
     console.error(`[check-shared] ${c.name} 读取失败：`)
     for (const x of failed) console.error(`  ${x.file}\n    读取失败：${x.err}`)
+    continue
+  }
+  // 自定义比较器（如子集判定）：pick 返回原始文本，由 compare 自行解析并判定
+  if (c.compare) {
+    try {
+      c.compare(vals[0].v, vals[0].file, vals[1].v, vals[1].file)
+      console.log(`[check-shared] ${c.name} 一致`)
+    } catch (err) {
+      bad++
+      console.error(`[check-shared] ${c.name} 不一致：`)
+      console.error(`  ${err.message}`)
+    }
     continue
   }
   if (new Set(vals.map((x) => x.v)).size === 1) {

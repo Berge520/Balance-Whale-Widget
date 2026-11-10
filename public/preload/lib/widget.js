@@ -6,6 +6,7 @@ const { execFileSync } = require('child_process')
 const { log, logErr } = require('./log')
 const { errMsg, shouldForcePass, reassertDue } = require('./util')
 const { clampNum, readConfig, readAnchor, writeAnchor, defaultAnchor, readTimer, readTodo, readFocus, todayKey } = require('./store')
+const configForWidget = require('./widget-config')
 const { summarize: summarizeFocus } = require('./focus')
 const { getCachedBalance, getModelsPayload } = require('./api')
 const { getSoundData } = require('./sounds')
@@ -942,24 +943,22 @@ function sendToWidget(channel) {
   }
 }
 
-
 function pushInit() {
   // 页面已经就绪（这条就是它发来的 ready 触发的）→ 撤销「ready 丢了」的兜底，
   // 免得同一个窗口把整份 init（含几十 MB 素材）再搬一遍；同时记下「这个窗口推过了」，
   // 让晚到的创建回调不再排兜底（真机时序：ready 比回调早 400ms）
   clearInitFallback()
   initPushed = true
-  const cfg = readConfig()
+  const cfg = configForWidget()
   const anchor = readAnchor()
   const space = widgetSpace()
   const balance = getCachedBalance()
   const timer = cfg.timerPersistOn ? readTimer() : null
-  const sounds = getSoundData()
-  const skin = getSkinData()
+  const sounds = getSoundData(), skin = getSkinData()
   const bubbles = getBubbleData()
   const models = getModelsPayload()
+  // 「专注与待办」一个开关，这里只在开启时给待办快照（v1.16 起不再随 init 下发专注统计）
   const todo = cfg.todoOn ? readTodo() : null
-  const focusStats = cfg.focusOn ? focusStatsPayload() : null
   const payload = {
     config: cfg,
     anchor: { hAnchor: anchor.hAnchor, vAnchor: anchor.vAnchor, flipped: flippedOf(anchor) },
@@ -981,8 +980,8 @@ function pushInit() {
     // 待办条数上限：页面在提交前先判一次（满额时宿主会静默丢弃 add），
     // 单一来源仍是 constants.js 的 TODO_MAX，页面不再抄一份副本
     todoMax: TODO_MAX,
-    // 专注统计与每日目标：只在「专注记录」开启时推（与 FocusView 的显示条件一致）
-    focusStats: focusStats,
+    // 专注统计与每日目标：v1.16 起挂件页已不读（统计层下线），这里停止下发；
+    // 推送函数本身保留（宿主侧仍有别人调用），恢复统计时把这一行加回即可
   }
   sendToWidget('whale:init', payload)
   // 共享角色图池（台词 randimg 段的图）不并进 init，而且只推**清单**不推本体：
@@ -1001,7 +1000,7 @@ function queueSharedSkinsPush() {
 }
 
 function pushConfig() {
-  sendToWidget('whale:config', readConfig())
+  sendToWidget('whale:config', configForWidget())
 }
 
 // 待办变更回推（设置页增删改、挂件页勾选/设专注都走这里）。

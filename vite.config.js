@@ -6,19 +6,27 @@ import vue from '@vitejs/plugin-vue'
 //   - manifest.json 是做核对用的中间产物，运行时用不到。
 // 但 thumbs/（v1.8.0 起 1 张缩略图，约 4KB）必须进包：设置页「内置资源」折叠区用相对路径
 // './whale-pack/thumbs/<id>.webp' 显示缩略图，让用户下载前就能看见长什么样。
-const SKIP_PUBLIC_FILES = new Set(['whale-pack/skins-pack.whaleassets', 'whale-pack/manifest.json'])
+// 下面四张清单同时被 scripts/check-public-tracked.mjs 复用（判断「哪些文件进不了 dist、不必入库」），
+// 所以导出 —— 单一来源，避免闸门里再抄一份而漂移。
+export const SKIP_PUBLIC_FILES = new Set(['whale-pack/skins-pack.whaleassets', 'whale-pack/manifest.json'])
 
 // public/shared/ 是「共享素材」的单张下载源（scripts/export-shared-assets.mjs 导出，
 // 角色 36 张约 40.6MB + 音效 45 段约 2.7MB），**整个目录都不进插件包**：
 // 它入库的唯一目的是让用户从 raw / jsDelivr 按 URL 单张取；
 // 若随插件包分发，插件体积白涨 43MB，等于把「按需下载」这件事作废。
-const SKIP_PUBLIC_DIRS = new Set(['shared'])
+// 目录项按**相对 public/ 的完整路径前缀**匹配（与 check-public-tracked.mjs 同构），
+// 加嵌套路径如 'whale-pack/shared' 时两边自动一致；别再写回「只看顶层名字」的特例。
+export const SKIP_PUBLIC_DIRS = new Set(['shared'])
 
 // resources/ 是仓库里的素材源目录，**大部分不该进插件包**：
 //   - manifest.json 是打包核对用的中间产物；
 //   - thumbs/（36 张缩略图，约 404KB）**必须进包** —— 设置页「共享角色」网格用相对路径
 //     './resources/thumbs/<id>.webp' 显示缩略图，让用户下载前就能看见长什么样。
-const SKIP_RESOURCES_FILES = new Set(['manifest.json'])
+//   - skins-src/ 是发布者本机保留的素材源（build-skin-pack.py 的输入，.gitignore 有意排除），
+//     只用来生成内置形象包，运行时用不到。曾因这里没排除而被原样拷进 dist/ 打进发行包
+//     （与上游 lib/index.js.bak-devpaths 同一个翻车路径）。
+export const SKIP_RESOURCES_FILES = new Set(['manifest.json'])
+export const SKIP_RESOURCES_DIRS = new Set(['skins-src'])
 
 // 把仓库根的 resources/ 拷进 dist/resources/，按上面清单排除大件
 function copyResourcesExceptSkip(outDir) {
@@ -34,6 +42,7 @@ function copyResourcesExceptSkip(outDir) {
         for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
           const childRel = rel ? rel + '/' + ent.name : ent.name
           if (SKIP_RESOURCES_FILES.has(childRel)) continue
+          if (SKIP_RESOURCES_DIRS.has(childRel)) continue
           const from = path.join(dir, ent.name)
           const to = path.join(outDir, 'resources', childRel)
           if (ent.isDirectory()) {
@@ -63,7 +72,7 @@ function copyPublicExceptSkip(outDir) {
         for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
           const childRel = rel ? rel + '/' + ent.name : ent.name
           if (SKIP_PUBLIC_FILES.has(childRel)) continue
-          if (ent.isDirectory() && rel === '' && SKIP_PUBLIC_DIRS.has(ent.name)) continue
+          if (SKIP_PUBLIC_DIRS.has(childRel)) continue
           const from = path.join(dir, ent.name)
           const to = path.join(outDir, childRel)
           if (ent.isDirectory()) {

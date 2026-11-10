@@ -42,6 +42,6 @@ test('气泡：余额变动抖动 / 弹跳不播，倒计时脉冲的既有降�
   )
   // 功能动效仍在（保留状态提示），且既有降级块没有被重复写第二份
   assert.match(css, /animation: dshwv-offwork-pulse 1\.8s ease-in-out infinite;/)
-  const pulse = css.match(/\.dshwv-root\.dshwv-offwork-imminent \.dshwv-amount \{ animation: none; \}/g) || []
+  const pulse = css.match(/\.dshwv-root\.dshwv-offwork-imminent \.dshwv-label \{ animation: none; \}/g) || []
   assert.equal(pulse.length, 1, '倒计时脉冲的降级块出现多份或已消失')
 })

@@ -136,12 +136,8 @@ try {
       sendWidgetCmd('timer-toggle')
       return
     }
-    // 「专注统计」指令：在挂件气泡区显示今日专注摘要
-    if (code === 'whale-focus') {
-      ensureWidget({ focus: true })
-      sendWidgetCmd('show-focus')
-      return
-    }
+    // 「专注统计」指令（whale-focus）已随专注统计层一起下线（v1.16）：
+    // 指令本身从 plugin.json 移除，这里不再处理
     // 「打开设置」兜底入口：挂件菜单在「显示挂件」模式下用 utools.redirect('余额挂件') 重定向进入。
     // 本插件所有 feature 都设了 mainHide:true（防挂件抢焦前主窗闪烁），
     // uTools 不会自动弹主窗，所以这里在重定向入口显式 showMainWindow

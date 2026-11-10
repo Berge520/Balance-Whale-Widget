@@ -72,23 +72,19 @@ const MIRROR_REGISTRIES = [
 const MIRROR_REGISTRY = MIRROR_REGISTRIES[0].url
 // 抓取超时。官方源单次实测要 52–99s，竞速时**不能**让慢源把整次加载拖住 ——
 // 竞速下这个值只用于「兜底取消」，最慢源等满就放弃（快源早返回了）。
-// ⚠️ 镜像源的 tarball **不吃**这个总时限（见下面 BODY_* 的停滞看门狗）：目录包 1–3MB，
-//    国内镜像抖动到几十 KB/s 时 15s 一刀切会把仍在传字节的下载杀掉（上游 b766e2a 实测）。
+// ⚠️ 镜像源的 tarball **不吃**这个总时限（见 BODY_TOTAL_CEILING_MS）：国内镜像抖动到几十 KB/s 时，
+//    15s 一刀切会把仍在传字节的下载杀掉（上游 b766e2a 实测）。
 const FETCH_TIMEOUT_MS = 15000
-// 镜像 tarball 的「停滞看门狗」：只有**多久没有新字节**才判死，链路慢但一直在走就允许。
-// 头部（响应开始）仍用 15s —— 头是一次性到达的，固定预算合适；体则可能持续很久。
+// 镜像 tarball 的「停滞看门狗」：只有**多久没有新字节**才判死，慢但一直走就允许；头部仍用 15s。
 const BODY_STALL_TIMEOUT_MS = 15000
 // 整体上限：看门狗只看「暂停」，一个每 15s 吐一个字节的镜像能永远拖住读取，故留兜底。
-// 10 分钟约是最慢实测全量下载的 7 倍；超过它还没完就是坏了，不是慢。
 const BODY_TOTAL_CEILING_MS = 10 * 60 * 1000
-// tarball 体积上限。目录包实测约 1–4MB；256MB 是几十年余量，同时硬性封住内存
-// （整包先缓冲再解析，异常镜像以线速灌垃圾时不能让它把进程撑死）。
+// tarball 体积上限。整包先缓冲再解析，异常镜像以线速灌垃圾时不能让它把进程撑死（实测包 1–4MB）。
 const MAX_TAR_BYTES = 256 * 1024 * 1024
 // 内存缓存 TTL：目录每天才刷新一次，60s 足够挡住「反复点刷新」
 const CACHE_TTL_MS = 60 * 1000
 // 目录体积上限：防止被异常响应（或被劫持的镜像）撑爆内存。实测最大约 4.4MB，给 16MB 余量
 const MAX_BYTES = 16 * 1024 * 1024
-
 // ── 内存状态（重载插件即丢；持久化的那份由 settings.js 落 dbStorage）──
 let mem = { at: 0, key: '', data: null, validators: {} }
 
@@ -97,7 +93,6 @@ let mem = { at: 0, key: '', data: null, validators: {} }
 // 目录的 install 字段是 `dsh plugin --profile <p> add <spec>` 形式的完整命令。
 // 本函数只负责把末尾的 <spec> 剥出来、去掉 shell 引号 —— **不做安全性判断**
 // （白名单在 dsh.js 的 validPkgSpec，那边才是进命令行的关口）。
-//
 // 为什么不直接用 npm 字段拼：npm 为 null 的条目（近半数）根本没有 npm 名可拼。
 // install 是目录作者写的原话，且实测与 npm 字段零冲突，用它更忠实。
 function parseInstallSpec(install) {
@@ -139,6 +134,9 @@ function specKindOf(spec) {
 function specNeedsBuild(kind) {
   return kind === 'github' || kind === 'tarball'
 }
+
+// 外链判定与「源码」入口的推导在 market-link.js（纯函数叶子，单独成文件是为了不撑大本模块的棘轮基线）
+const { sourceWebUrl } = require('./market-link')
 
 // ── 纯函数：归一 ──
 
@@ -183,6 +181,8 @@ function normPlugin(raw) {
     spec: spec,
     specKind: specKind,
     needsBuild: specNeedsBuild(specKind),
+    // 「源码」入口：目录没写 page/url 的条目靠它给一个可读仓库的地址（空串 = 不渲染）
+    sourceWeb: sourceWebUrl(spec),
   }
 }
 

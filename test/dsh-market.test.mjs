@@ -18,6 +18,8 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import zlib from 'node:zlib'
 import dshMarket from '../public/preload/lib/dsh-market.js'
+// 外链判定与「源码」入口推导已抽到零依赖叶子模块（dsh-market.js 有体积棘轮）
+import { sourceWebUrl, safeWebUrl } from '../public/preload/lib/market-link.js'
 
 const {
   normPlugin, normCatalog, filterPlugins, matchKeyword, SORTS_DESC,
@@ -747,6 +749,65 @@ test('normCatalog：坏条目被丢掉，但剩下能用的条目照样出结果
   assert.equal(r.ok, true)
   assert.equal(r.count, 1)
   assert.equal(r.plugins[0].name, 'dsh-demo')
+})
+
+// ── safeWebUrl / sourceWebUrl（外链白名单与源码入口）──
+
+test('safeWebUrl：只放行 http(s)，file / javascript / data 与相对串一律空串', () => {
+  assert.equal(safeWebUrl('https://awesome-dsh-plugin.com/p/dsh-demo'), 'https://awesome-dsh-plugin.com/p/dsh-demo')
+  assert.equal(safeWebUrl('  http://example.com/a?b=1#c  '), 'http://example.com/a?b=1#c')
+  // 这几个一旦交给 shellOpenExternal 就是本机路径执行，必须在宿主出口挡掉
+  assert.equal(safeWebUrl('file:///C:/Windows/System32/calc.exe'), '')
+  assert.equal(safeWebUrl('javascript:alert(1)'), '')
+  assert.equal(safeWebUrl('data:text/html,<h1>x'), '')
+  assert.equal(safeWebUrl('vbscript:x'), '')
+  assert.equal(safeWebUrl(''), '')
+  assert.equal(safeWebUrl('   '), '')
+  assert.equal(safeWebUrl(null), '')
+  assert.equal(safeWebUrl(undefined), '')
+  // 没有 base 可解析的相对串也不放行
+  assert.equal(safeWebUrl('/p/dsh-demo'), '')
+  assert.equal(safeWebUrl('awesome-dsh-plugin.com'), '')
+})
+
+test('normPlugin：sourceWeb 由 spec 派生，目录自带的主页字段原样保留', () => {
+  assert.equal(normPlugin(raw({ install: 'dsh plugin --profile p add github:o/r' })).sourceWeb, 'https://github.com/o/r')
+  assert.equal(normPlugin(raw({ install: 'dsh plugin --profile p add dsh-demo' })).sourceWeb, '')
+})
+
+test('sourceWebUrl：github: 简写取仓库页，保留大小写、去掉子包与 .git', () => {
+  assert.equal(sourceWebUrl('github:owner/repo'), 'https://github.com/owner/repo')
+  assert.equal(sourceWebUrl('github:Omdsh-dev/DSH-better-sidebar'), 'https://github.com/Omdsh-dev/DSH-better-sidebar')
+  // 条目名带 `#子包`（实测 443 条），网页地址只到仓库
+  assert.equal(sourceWebUrl('github:owner/repo#dsh-plugin'), 'https://github.com/owner/repo')
+  assert.equal(sourceWebUrl('github:owner/repo.git'), 'https://github.com/owner/repo')
+  // 缺 owner 段 / 空 → 不是仓库地址
+  assert.equal(sourceWebUrl('github:repo'), '')
+  assert.equal(sourceWebUrl('github:'), '')
+})
+
+test('sourceWebUrl：https / git+ / scp / ssh 四种 git 写法统一成 https 网页地址', () => {
+  assert.equal(sourceWebUrl('https://github.com/o/r'), 'https://github.com/o/r')
+  assert.equal(sourceWebUrl('git+https://github.com/o/r.git'), 'https://github.com/o/r')
+  assert.equal(sourceWebUrl('git+https://github.com/o/r.git#main'), 'https://github.com/o/r')
+  assert.equal(sourceWebUrl('git@github.com:o/r.git'), 'https://github.com/o/r')
+  // ssh URL 里的 scp 冒号（URL 会当成非法端口）也要能转
+  assert.equal(sourceWebUrl('ssh://git@gitlab.com:o/r.git'), 'https://gitlab.com/o/r')
+  // 真端口是传输层的，不能带进网页地址
+  assert.equal(sourceWebUrl('ssh://git@example.com:2222/o/r'), 'https://example.com/o/r')
+})
+
+test('sourceWebUrl：非仓库 spec 与越界路径一律空串', () => {
+  // 裸包名 / 本地路径 / 认不出的形态都没有「仓库网页」可给
+  assert.equal(sourceWebUrl('@scope/dsh-demo'), '')
+  assert.equal(sourceWebUrl('dsh-demo'), '')
+  assert.equal(sourceWebUrl('file:///C:/repo'), '')
+  assert.equal(sourceWebUrl(''), '')
+  assert.equal(sourceWebUrl(null), '')
+  // ⚠️ `..` 必须在 new URL() 之前拦住：解析器会把 `/o/../etc` 归一成 `/etc`，
+  // 事后再查路径段永远查不到（实测过这条，白名单曾形同虚设）
+  assert.equal(sourceWebUrl('https://github.com/o/../etc'), '')
+  assert.equal(sourceWebUrl('git@github.com:o/../etc'), '')
 })
 
 // ── matchKeyword / filterPlugins ──

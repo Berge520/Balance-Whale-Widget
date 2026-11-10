@@ -83,15 +83,18 @@ const PATCH_FIXTURES = {
   timerPresets: { timerPresets: [10, 20, 30, 40] },
   // 番茄循环：默认 timerPomoOn=false，夹具取反；数值键给合法范围内的非默认值
   timerPomoOn: { timerPomoOn: true }, timerLongBreakMin: { timerLongBreakMin: 20 },
-  timerLongEvery: { timerLongEvery: 6 }, timerAutoNext: { timerAutoNext: true },
-  // 专注记录 / 待办：默认 focusOn=false、todoOn=false，夹具各自取反
-  focusOn: { focusOn: true }, todoOn: { todoOn: true },
+  timerLongEvery: { timerLongEvery: 6 },
+  // 到点自动衔接下一条待办：默认 false，夹具取反
+  todoAutoNext: { todoAutoNext: true },
+  // 专注与待办：唯一总开关，默认 todoOn=false，夹具取反
+  todoOn: { todoOn: true },
   // 每日专注目标：默认 0（关闭），夹具给一个合法值
   focusGoal: { focusGoal: 8 },
-  // 下班倒计时九键：默认关闭 / 09:00–18:00 / 周一至周五 / 显示秒 / 发薪日 10 号 / 时薪未配置
+  // 下班倒计时十键：默认关闭 / 09:00–18:00 / 周一至周五 / 显示秒 / 外圈进度圈 / 发薪日 10 号 / 时薪未配置
   offworkOn: { offworkOn: true }, offworkStart: { offworkStart: '08:30' },
   offworkEnd: { offworkEnd: '19:00' }, offworkDays: { offworkDays: [0, 6] },
-  offworkShowSec: { offworkShowSec: false }, offworkWeekendOn: { offworkWeekendOn: true },
+  offworkShowSec: { offworkShowSec: false }, offworkRing: { offworkRing: false },
+  offworkWeekendOn: { offworkWeekendOn: true },
   offworkPaydayOn: { offworkPaydayOn: true }, offworkPaydayDay: { offworkPaydayDay: 25 },
   offworkHourlyWage: { offworkHourlyWage: 50 },
   guideDone: { guideDone: true },
@@ -147,6 +150,8 @@ const PATCH_FIXTURES = {
   cardOrder: { cardOrder: { usage: ['models', 'notify'] } },
   foldDefaults: { foldDefaults: { look: false } },
   foldRemember: { foldRemember: false },
+  // 外圈画法：默认 standard / 跟随主题开，夹具取另一档才能验证分支真的改动
+  ringWidth: { ringWidth: 'thick' }, ringFollowTheme: { ringFollowTheme: false },
 }
 
 test('patchConfig 的逐键分支表覆盖全部配置键（加键必须同时加夹具）', () => {

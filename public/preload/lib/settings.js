@@ -26,6 +26,13 @@ const {
 } = require('./widget')
 // dsh 一族合计 300KB+，且本模块在设置窗加载时会被求值。下面所有 dsh.xxx 的调用都在函数体内
 // （无模块求值期引用），故改成惰性：首次访问 dsh.* 时才 require，之后复用同一份。
+// ipc 同款（见下方 getWidgetCmd）：它反过来只在 emitConfigChange / emitTodoChange 等函数体内
+// require 本模块，两边互在函数体内 require，无环；顶层引用会变成模块求值期的环
+let ipcMod = null
+function getWidgetCmd() {
+  if (!ipcMod) ipcMod = require('./ipc')
+  return ipcMod.sendWidgetCmd
+}
 let dshMod = null
 function dshOf() {
   if (!dshMod) dshMod = require('./dsh')
@@ -46,7 +53,7 @@ function hostsOf() {
 const hosts = new Proxy({}, {
   get(_t, key) { return hostsOf()[key] },
 })
-const { notify, sendMail, mailSubject, notifySystem, sendMailAsync } = require('./notify')
+const { sendMail, mailSubject, notifySystem, sendMailAsync } = require('./notify')
 const backup = require('./backup')
 const assets = require('./assets')
 const sounds = require('./sounds')
@@ -57,6 +64,7 @@ const bgVideo = require('./bg-video')
 const media = require('./media')
 const dlp = require('./download-progress')
 const bubbles = require('./bubbles')
+const debugTools = require('./debug-tools')
 const codex = require('./codex')
 
 // dsh 一族（dsh-usage / dsh-dump / dsh-backup / dsh-export / dsh-patch / dsh-isolate /
@@ -2364,15 +2372,47 @@ module.exports = {
       if (st.focusId && !st.items.some((x) => x.id === st.focusId)) st.focusId = ''
     })
   },
-  // 设为 / 取消当前专注目标（id 传空串 = 直接取消）
-  todoFocus(id) {
+  // 设为 / 取消当前专注目标（id 传空串 = 直接取消）。
+  // start=true（设置页待办行点「开始」）：把这条设为专注后，再让挂件按它自己的计时方式
+  // （tm / mins）启动计时 —— 计时状态机只在挂件页（floating-page.js），这里不复制一套，
+  // 只把 todo-start 指令投进 sendWidgetCmd 的「就绪前排队」通道（窗口没建 / 页面还没 ready
+  // 也能补发），由页面的 startTodoTimer 走与挂件菜单「开始」完全相同的一条路径。
+  // 已经就是当前专注的那条：不再翻转（否则会取消专注），只在 start 时补投计时指令。
+  todoFocus(id, start) {
     const key = String(id || '')
-    return todoMutate((st) => {
+    const res = todoMutate((st) => {
       if (!key) { st.focusId = ''; return }
       const it = st.items.find((x) => x.id === key)
       if (!it) return { error: '条目不存在' }
       if (it.done) return { error: '已完成的条目不能设为专注目标' }
-      st.focusId = st.focusId === key ? '' : key
+      st.focusId = key
+    })
+    if (start && res && res.ok && key) {
+      try {
+        ensureWidget()
+        getWidgetCmd()('todo-start', { id: key })
+      } catch (err) {
+        logErr('[whale][settings] 通知挂件开始计时失败', err && err.message)
+      }
+    }
+    return res
+  },
+  // 移动待办顺序（挂件里拖拽排序）：把 id 挪到 beforeId 之前；beforeId 为空 = 挪到末尾。
+  // 只调数组顺序，不动任何条目字段 —— 「已完成」的条目也保持它在原数组里的位置，
+  // 挂件渲染只筛未完成的，所以拖拽对已完成的相对顺序没有可感知影响。
+  todoMove(id, beforeId) {
+    const key = String(id || '')
+    const before = String(beforeId || '')
+    if (!key) return { ok: false, error: '条目不存在', todo: readTodo() }
+    if (key === before) return { ok: true, todo: readTodo() }
+    return todoMutate((st) => {
+      const from = st.items.findIndex((x) => x.id === key)
+      if (from < 0) return { error: '条目不存在' }
+      const [moved] = st.items.splice(from, 1)
+      // 摘出后再找目标位置：beforeId 原本在 moved 之后时，下标已经左移一位，
+      // 先找再摘会让条目停错一格
+      const to = before ? st.items.findIndex((x) => x.id === before) : -1
+      st.items.splice(to < 0 ? st.items.length : to, 0, moved)
     })
   },
   // 设置待办条目的预估番茄轮数（est）：0 = 未设置，1–99 有效
@@ -2421,63 +2461,18 @@ module.exports = {
   // 调试工具（config.debugTools 默认关，只在「开发者」Tab 里渲染入口）
   // ──────────────────────────────────────────────
   // 真机回归专用：这些操作以前只能靠拖拽 / 改 leveldb 完成，没法让用户配合验证。
-  // 双保险：UI 默认不渲染，服务入口自己也再查一次开关，避免被误调。
-  // 两个入口都**不写幂等位**、不启动/停止扫描，只做一次投递或数据注入，正常 tick 逻辑不受影响。
-  //
-  // 「立即触发指定提醒」：走与正常 tick 相同的两条通道（系统通知/邮件 + 挂件气泡），
-  // dueAt 取当前时刻，回执带 debug:true（宿主 ipc 据此跳过记账）。
-  debugTodoDue(id) {
-    if (readConfig().debugTools !== true) return { ok: false, error: '调试工具未开启' }
-    const st = readTodo()
-    const it = st.items.find((x) => x.id === String(id || ''))
-    if (!it) return { ok: false, error: '条目不存在' }
-    const cfg = readConfig()
-    const dueAt = Date.now()
-    try { notify('待办到点：' + it.text, cfg) } catch (err) {
-      logErr('[whale][debug] 演练通知失败', err && err.message)
-    }
-    try {
-      require('./ipc').sendWidgetCmd('todo-due', { id: it.id, text: it.text, dueAt: dueAt, debug: true })
-    } catch (err) {
-      logErr('[whale][debug] 演练气泡下发失败', err && err.message)
-      return { ok: false, error: '挂件未就绪，气泡没发出去' }
-    }
-    return { ok: true, todo: st, id: it.id, dueAt: dueAt }
-  },
-  // 「注入旧数据」：一次性造出三类历史故障现场，供后续回归：
-  //  1) remindedFor / notifiedFor 都是 0 的重复提醒（daily，时刻 = 当前时间前 1 分钟）——
-  //     下个 tick 会把它当新到点走完整投递路径（免打扰 / 气泡被拦的补弹都能验）；
-  //  2) pinnedCards 同时含 focus 与 timer（合并卡根重复的旧形态）—— 验去重/排序/取消置顶；
-  //  3) 幽灵媒体项（元数据在、文件不在）—— 验媒体列表与导入配额的自愈。
-  debugInjectLegacy() {
-    if (readConfig().debugTools !== true) return { ok: false, error: '调试工具未开启' }
-    const st = readTodo()
-    const now = new Date()
-    // 当前本地时刻往前 1 分钟（跨零点回绕）。到点时刻已经过去，下个 tick 立刻命中
-    let mins = now.getHours() * 60 + now.getMinutes() - 1
-    if (mins < 0) mins += 24 * 60
-    const id = newTodoId(st.items)
-    st.items.unshift({
-      id: id,
-      text: '调试：旧数据提醒 ' + String(Math.floor(mins / 60)).padStart(2, '0') + ':' + String(mins % 60).padStart(2, '0'),
-      done: false, at: Date.now(), doneAt: 0, est: 0, rounds: 0, tm: 'down', mins: 25,
-      remindOn: true, remindKind: 'daily', remindAt: mins, remindDow: 0,
-      remindedFor: 0, notifiedFor: 0,
-    })
-    if (!writeTodo(st)) return { ok: false, error: '写入失败', todo: readTodo() }
-    try { patchConfig({ pinnedCards: ['focus', 'timer'] }) } catch (err) {
-      logErr('[whale][debug] 注入旧置顶配置失败', err && err.message)
-    }
-    let ghostId = ''
-    try { ghostId = media.injectGhost() } catch (err) {
-      logErr('[whale][debug] 注入幽灵媒体失败', err && err.message)
-    }
+  // 双保险：UI 默认不渲染，服务入口（debug-tools 内）自己也再查一次开关，避免被误调。
+  // 实现整体在 ./debug-tools（演练投递 / 旧数据注入 / 专注与计时只读自检），这里只做转交 ——
+  // 旧数据注入要推挂件与设置页，那两个 emit* 闭在本模块内部，故以回调传入。
+  debugTodoDue: (...a) => debugTools.debugTodoDue(...a),
+  debugInjectLegacy: () => debugTools.debugInjectLegacy(() => {
     try { pushConfig() } catch (err) {}
     try { pushTodo() } catch (err) {}
     emitConfigChange()
     emitTodoChange()
-    return { ok: true, todo: st, todoId: id, ghostId: ghostId, pinnedCards: ['focus', 'timer'] }
-  },
+  }),
+  debugFocusCheck: (...a) => debugTools.debugFocusCheck(...a),
+  debugTimerCheck: (...a) => debugTools.debugTimerCheck(...a),
   // 专注统计汇总：series 只覆盖最近 days 天（默认 7），total 与图上柱对得上。
   // todayByTodo 是「今天每条待办各几轮」，待办列表按它显示今日徽标（历史 rounds 是终身累计）
   focusStats(days) {
@@ -2537,9 +2532,9 @@ module.exports = {
   getTaskbarState() {
     try { return taskbarState() } catch (err) { return { state: 'none', edge: '', thickness: 0 } }
   },
-  getVersion() {
-    return PLUGIN_VERSION
-  },
+  // isDev：是否 uTools 开发模式（设置页据此决定「调试工具」卡是否渲染）。与 log.js 恒 true 的 DEV 是两个口径
+  getVersion() { return PLUGIN_VERSION },
+  isDev() { try { return !!utools.isDev() } catch (err) { return false } },
   // force=false 命中缓存；force=true 立即联网检查
   checkUpdate(force) {
     return checkUpdate(!!force)
@@ -2575,20 +2570,25 @@ module.exports = {
     }
     return { ok: false, error: '无法打开系统设置' }
   },
-  // 系统默认浏览器打开外链（用于跳转下载页）
+  // 系统默认浏览器打开外链（下载页跳转）。⚠️ 宿主打开外链唯一出口，白名单必须在这一层：
+  // shellOpenExternal 对 `file:` 是「交给系统壳执行」而非「打不开」，而市场链接来自第三方目录。
   openExternal(url) {
+    const u = require('./market-link').safeWebUrl(url)
+    if (!u) {
+      logErr('[whale][shell] 拒绝打开非 http(s) 外链', String(url).slice(0, 120))
+      return false
+    }
     try {
-      utools.shellOpenExternal(String(url || ''))
+      utools.shellOpenExternal(u)
       return true
     } catch (err) {
-      logErr('[whale][shell] 打开外链失败', url, err && err.message)
+      logErr('[whale][shell] 打开外链失败', u, err && err.message)
       return false
     }
   },
-  // 让 uTools 底座跳到「插件应用市场」并搜索指定关键词：
+  // 让 uTools 底座跳到「插件应用市场」并搜索指定关键词（失败返回 false，由设置页兜底走浏览器）：
   // redirect(label) 传入非本插件指令的名称时，底座查不到已装插件会降级为「跳市场并搜索该名称」。
-  // 之所以不直接用「小鲸鱼余额挂件」：用户很可能已装本插件，为避免命中自己的指令而直接打开自身，
-  // 用「不可作为指令命中」的词去触发市场搜索分支。失败返回 false，由设置页兜底走浏览器详情页。
+  // 不用「小鲸鱼余额挂件」：用户很可能已装本插件，会命中自身指令直接打开自己，改用不可命中指令的词
   redirectToMarket(keyword) {
     try {
       return !!utools.redirect(String(keyword || ''), '')
@@ -3183,12 +3183,12 @@ module.exports = {
     if (cfg.onTop !== prev.onTop) applyOnTop(cfg.onTop)
     if (cfg.usageMode !== prev.usageMode) resetBalanceCache()
     pushConfig()
-    // 「显示待办」刚打开时挂件手里还没有清单快照（pushInit 只在窗口创建时带一次），
-    // 补推一份，否则要等用户下次勾选/改清单才会出现内容
-    if (cfg.todoOn !== prev.todoOn) pushTodo()
-    // 打开「专注记录」或改了每日目标时补推统计：挂件菜单的专注组只在 focusOn 开启后建，
-    // 不推的话它一直显示「还没有专注记录」（pushInit 只在建窗时带一次）
-    if (cfg.focusOn !== prev.focusOn || cfg.focusGoal !== prev.focusGoal) pushFocusStats()
+    // 「专注与待办」总开关（v1.15 由 focusOn + todoOn 合并）：刚打开时挂件手里两个快照都还是空的
+    // （pushInit 只在建窗时带一次），清单与统计一起补推，否则要等用户下次改清单才出内容
+    if (cfg.todoOn !== prev.todoOn) {
+      pushTodo()
+      pushFocusStats()
+    } else if (cfg.focusGoal !== prev.focusGoal) pushFocusStats()
     // 反向回推给设置页：saveConfig 是设置页自己调的，但设置页的 cfg 不一定等于落库结果 ——
     // 宿主 patchConfig 会做归一化（补齐 / 钳范围 / 清洗），不回推的话设置页手里的还是它自己拼的
     // 那份「未归一化」的值。取消订阅后再回推会打断「配置 → 订阅 → 回推」的闭环

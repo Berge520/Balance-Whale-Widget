@@ -22,14 +22,27 @@ test('页面：光标探测不是一次性 —— 有低频看门狗', () => {
 test('页面：看门狗在「窗口该穿透」时都探头，不按穿透开关门槛', () => {
   const at = page.indexOf('function probeCursorSoon()')
   assert.ok(at >= 0, '找不到 probeCursorSoon')
-  const block = page.slice(at, at + 600)
+  const block = page.slice(at, at + 700)
   // 两种模式下窗口的闲置态都是穿透（启动即 sendIgnoreMouse(true)），而 passThrough 默认 false；
   // 旧写法 `!passThroughOn || …` 把默认配置下卡在 0x20 的窗口排除在救援之外
   // （真机症状：『鼠标穿透』没勾、点鲸鱼没反应）
-  assert.match(block, /if \(passHoverActive \|\| lastIgnoreSent !== true\) return;/)
+  assert.match(block, /if \(lastIgnoreSent !== true && !btnVisible\) return;/)
   assert.doesNotMatch(block, /!passThroughOn/)
   assert.match(block, /menuOpen/)
   assert.match(block, /drag\.active/)
+})
+
+test('页面：按钮亮着但窗口可交互时也要放行探测（菜单关闭后无 pointermove 自愈）', () => {
+  const at = page.indexOf('function probeCursorSoon()')
+  assert.ok(at >= 0, '找不到 probeCursorSoon')
+  const block = page.slice(at, at + 700)
+  // 菜单动作 / Esc 关菜单后没有 pointermove 送达时，按钮停在显示态；
+  // 窗口此刻 lastIgnoreSent === false，只判这一项会把最需要自愈的处境排除掉
+  assert.match(block, /menuBtn\.classList\.contains\('dshwv-menu-btn-visible'\)/,
+    '看门狗没看按钮是否还亮着：可交互态的按钮残留无人清理')
+  assert.match(block, /lastIgnoreSent === false/)
+  // 仍然是既有 2.5s 周期，不许为这条另起定时器
+  assert.match(page, /setInterval\(probeCursorSoon,\s*2500\)/)
 })
 
 test('页面：闲置态在两种穿透模式下都是穿透（看门狗门槛的依据）', () => {
@@ -70,7 +83,7 @@ test('宿主：重申跳过旧窗口的缓存值（新窗口必须由页面重�
 test('页面：挂件隐藏时不发光标探测', () => {
   const at = page.indexOf('function probeCursorSoon()')
   assert.ok(at >= 0, '找不到 probeCursorSoon')
-  const block = page.slice(at, at + 500)
+  const block = page.slice(at, at + 1200)
   // 隐藏态没有可点的鲸鱼；问了反而可能在不可见时把 ignore=false 接管上，
   // 重新显示后先吞一次点击。重新可见的补问由 visibilitychange 负责
   assert.match(block, /if \(document\.hidden\) return;/)

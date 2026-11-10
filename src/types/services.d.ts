@@ -3,15 +3,14 @@
 
 // 挂件形象 id：随包内置形象的 id 即 public/whale/ 下的图片文件名（宿主 store.js 的 normSkin
 // 与设置页 App.vue 的 BUILTIN_SKINS 各有一份同值清单）；'custom' = 用户导入的图片。
-// 其余历史内置形象 id（LEGACY_BUILTIN_SKINS）已移出插件包、改为按需下载，但老配置里可能仍是
-// 这些值（下载回来之前挂件回退默认形象），故 normalize 时原样保留、不打回默认。
+// 历史内置形象 id（LEGACY_BUILTIN_SKINS）已移出插件包改为按需下载，老配置里可能仍是这些值
+// （下载回来之前挂件回退默认形象），故 normalize 时原样保留、不打回默认。
 export type SkinId =
   | 'DSniang1'
   | 'liuy' | 'black' | 'ciya'
   | 'DSniang02' | 'DSniang3' | 'DSniang4' | 'DSniang5' | 'DSniang6' | 'DSniang7'
   | 'glby' | 'Jian' | 'wjztg'
   | 'custom'
-
 // 提醒音独立音量条目：vol 0-1；volSet = 用户是否动过滑块（false = 跟随全局音量）
 export interface AlertVol {
   vol: number
@@ -39,12 +38,12 @@ export interface WhaleConfig {
   // 今日预算：当日用量超过 budgetAmount 时提醒（气泡 + 每天一次系统通知）；budgetAmount 为 0 表示未设置
   budgetOn: boolean
   budgetAmount: number
-  // 余额大幅波动通知：单次采样余额下降 ≥ dropAlertAmount 时弹系统通知（不做每天一次去重）；0 表示未设置
+  // 余额大幅波动通知：单次采样余额下降 ≥ dropAlertAmount 时弹系统通知（不做去重）；0 表示未设置
   dropAlertOn: boolean
   dropAlertAmount: number
   // 提醒气泡（峰谷/预算/低余额/穿透说明）停留秒数；0 = 常驻，等用户点掉
   remindSec: 0 | 5 | 8 | 15
-  // 免打扰时段：时段内只弹挂件气泡、不弹系统通知（支持跨午夜，如 23:00–07:00）
+  // 免打扰时段内只弹挂件气泡、不弹系统通知（支持跨午夜，如 23:00–07:00）
   quietOn: boolean
   quietFrom: string
   quietTo: string
@@ -104,8 +103,7 @@ export interface WhaleConfig {
   quotaReset: 'never' | 'daily' | 'monthly'
   // 自定义单价（仅「实时·令牌」模式生效）：谷价（元或美元 / 百万 token）+ 币种 + 汇率（元/USD）
   tokenPrice: WhaleTokenPrice
-  // 账本历史保留天数（35–730，默认 365）：账本与明细日志的裁剪窗口，
-  // 也是趋势图 / 明细 / CSV 导出能回溯的最长区间
+  // 账本历史保留天数（35–730，默认 365）：也是趋势图 / 明细 / CSV 导出能回溯的最长区间
   historyKeepDays: number
   // 计时到点时弹系统通知
   timerNotifyOn: boolean
@@ -113,7 +111,7 @@ export interface WhaleConfig {
   timerMailOn: boolean
   // 记住计时状态：重载插件/重建挂件后继续计时
   timerPersistOn: boolean
-  // 计时偏好（重载后不用重新选）：模式 / 倒计时秒数（1–86399）/ 定时时刻 / 到点气泡停留秒数（0=常驻）
+  // 计时偏好（重载后不用重新选）：模式 / 秒数（1–86399）/ 时刻 / 到点气泡停留秒数（0=常驻）
   timerMode: 'off' | 'up' | 'down' | 'at'
   timerSec: number
   timerAt: string
@@ -126,14 +124,14 @@ export interface WhaleConfig {
   timerBubblePin: boolean
   // 气泡是否只显示计时（false = 计时中气泡照常显示余额/用量等全部内容）
   timerBubbleOnly: boolean
-  // 番茄循环：是否开启（短休/长休/每 N 轮/自动衔接）
+  // 番茄循环：是否开启（短休/长休/每 N 轮）
   timerPomoOn: boolean
   // 长休时长（分钟，1–60，默认 15）
   timerLongBreakMin: number
   // 每几轮专注后进入长休（2–12，默认 4）
   timerLongEvery: number
-  // 计时结束后是否自动开始下一轮（专注→休息→专注…）
-  timerAutoNext: boolean
+  // 到点自动衔接下一条待办（默认 false）：一条待办计时结束时自动开始下一条，气泡里可取消
+  todoAutoNext: boolean
   // 挂件计时组快捷时长四档（分钟，每档 1–600，固定 4 个）：设置页可改，挂件 chips 直接读
   timerPresets: number[]
   // 进入插件时显示哪些窗口：both=设置窗+挂件；widget=只显示挂件；settings=只显示设置窗
@@ -195,12 +193,10 @@ export interface WhaleConfig {
   mailTo: string
   mailFromName: string
   mailSubjectPrefix: string
-  // 专注记录：开关（挂件页按它决定倒计时走完是否上报 whale:focus）
-  focusOn: boolean
-  // 待办清单：是否在挂件菜单里显示待办分组（编辑面始终在设置页）
+  // 待办与计时：唯一开关（v1.15 起 focusOn 与 todoOn 合并）。关着时挂件不显示待办分组，
+  // 也不把计时上报成 whale:focus；编辑面始终在设置页。旧配置里的 focusOn 由宿主 readConfig
+  // 兜底读进来，保存后不再写出。
   todoOn: boolean
-  // 每日专注目标（轮数，0 = 未设置/关闭，1–99 有效）。达成时弹一次提醒
-  focusGoal: number
   // 下班倒计时（v1.14.0）：独立可开关的挂件展示形态。offworkDays 用 Date.getDay() 编号
   // （0 = 周日 … 6 = 周六），默认 [1,2,3,4,5]；跨日班由「下班时间 <= 上班时间」判定
   offworkOn: boolean
@@ -208,6 +204,7 @@ export interface WhaleConfig {
   offworkEnd: string
   offworkDays: number[]
   offworkShowSec: boolean
+  /** 外圈工时进度环；关掉后圈只给计时用，工时进度改看倒计时页的细进度条 */ offworkRing: boolean
   offworkWeekendOn: boolean
   offworkPaydayOn: boolean
   offworkPaydayDay: number
@@ -933,9 +930,8 @@ export interface DshMarketPlugin {
   category: string
   descZh: string
   descEn: string
-  // ⚠️ 目录里这一项**可以是空串**（原始 JSON 里为 null，实测 4183 条里 2033 条即 48.6%）。
-  // 这些条目**并非装不了** —— 只是 install spec 换了形态，见下面的 spec。
-  // 仅用于展示与「去 scope 短名」的兜底比对，**不再作为安装能力的判据**
+  // ⚠️ 目录里这一项**可以是空串**（原始 JSON 里为 null，实测 4183 条里 2033 条即 48.6%）：
+  // 这些条目**并非装不了**，只是 install spec 换了形态（见下面的 spec），仅用于展示与短名兜底比对
   npm: string
   version: string
   stars: number
@@ -950,6 +946,8 @@ export interface DshMarketPlugin {
   specKind: string
   // github / tarball 靠 prepare 脚本在安装时构建，pnpm 默认拦一次；界面据此标「需构建」
   needsBuild: boolean
+  // 宿主 normPlugin 由 spec 反推的仓库网页地址（「源码」按钮用；空串 = 无入口）
+  sourceWeb: string
 }
 
 export interface DshMarketCatalogResult {
@@ -2186,7 +2184,7 @@ export interface WhaleServices {
   onNavigate(cb: (target: string) => void): () => void
   // 任务栏当前状态：visible = 正在占位（常显/自动隐藏已弹出）/ hidden = 已自动收起 / none = 未识别到
   getTaskbarState(): TaskbarState
-  getVersion(): string
+  getVersion(): string; isDev(): boolean // isDev = uTools 开发模式（决定「调试工具」卡是否渲染）
   checkUpdate(force?: boolean): Promise<UpdateCheckResult>
   openExternal(url: string): boolean
   // 打开系统「动画效果 / 减少动态效果」设置页（Windows 10 轻松使用→显示 / Win11 辅助功能→视觉效果）
@@ -2476,18 +2474,20 @@ export interface WhaleServices {
   todoUndoRemove(id: string): TodoMutateResult
   // 清掉全部已完成条目（专注目标若指向已完成条目会一并清空）
   todoClearDone(): TodoMutateResult
-  // 设为 / 取消当前专注目标（id 传空串 = 直接取消；同 id 再点也等于取消）
-  todoFocus(id: string): TodoMutateResult
-  // 设置待办条目的预估番茄轮数（est）：0 = 未设置，1–99 有效
+  // 设为 / 取消当前专注目标（id 传空串 = 直接取消）；start=true 时顺带让挂件按该条的 tm / mins 起计时
+  todoFocus(id: string, start?: boolean): TodoMutateResult
+  // 设置待办条目的预估番茄轮数（est）：0 = 未设置，1–99 有效。
+  // 设置页入口 v1.15 已移除（保留接口与字段，旧脚本 / 备份仍可读写），UI 不再调用
   todoSetEst(id: string, est: number): TodoMutateResult
   // 设置待办条目自己的计时方式与倒计时分钟数（挂件点「开始」按它启动）
   todoSetTimer(id: string, tm: 'down' | 'up' | '', mins: number): TodoMutateResult
   todoSetDue(id: string, remind: { remindOn: boolean; remindKind: 'once' | 'daily' | 'weekdays' | 'weekly'; remindAt: number; remindDow: number }): TodoMutateResult
-  // 调试工具（config.debugTools 打开后才生效；UI 只在该开关下渲染入口）：
-  // 立即对指定条目走一次「到点投递」（通知 + 气泡，不写幂等位）
-  debugTodoDue(id: string): { ok: boolean; error?: string; todo?: TodoState; id?: string; dueAt?: number }
-  // 注入旧数据：remindedFor/notifiedFor=0 的重复提醒 + pinnedCards 含 focus 与 timer + 幽灵媒体项
-  debugInjectLegacy(): { ok: boolean; error?: string; todo?: TodoState; todoId?: string; ghostId?: string }
+  // —— 调试工具（config.debugTools 默认关；各入口在宿主侧还会再校验一次开关）——
+  // 后两条会写：演练一次到点提醒（通知 + 气泡，不写幂等位）、注入旧数据（三类历史现场）
+  debugFocusCheck(): { ok: boolean; error?: string; sessions: number; rounds: number; todayMs: number; total: number; streak: number; gate: boolean }
+  debugTimerCheck(): { ok: boolean; error?: string; mode: string; running: boolean; paused: boolean; isBreak: boolean; remainMs: number; cycle: number }
+  debugTodoDue(id: string): { ok: boolean; error?: string; id?: string; dueAt?: number }
+  debugInjectLegacy(): { ok: boolean; error?: string; todoId?: string; ghostId?: string }
   // 专注统计：series 只覆盖最近 days 天（默认 7），total 与图上柱对得上
   focusStats(days?: number): FocusStatsResult
   // 最近 days 天（默认 7）的专注会话明细，按时间倒序

@@ -14,7 +14,7 @@ test('只有一个专注组，没有独立待办组', () => {
   assert.doesNotMatch(page, /groupTimer/, 'groupTimer 引用应全部清掉')
 })
 
-test('组标题与底部入口按 focusOn || todoOn 切换', () => {
+test('组标题与底部入口按总开关切换', () => {
   assert.match(page, /function syncFocusGroupChrome/)
   assert.match(page, /groupFocus\.setTitle\(hub \? '专注' : '计时'\)/)
   assert.match(page, /timerSettingsBtn\.textContent = hub \? '专注与待办设置' : '计时设置'/)
@@ -23,5 +23,5 @@ test('组标题与底部入口按 focusOn || todoOn 切换', () => {
 test('合并组只保留一个底部设置入口', () => {
   assert.doesNotMatch(page, /todoManageBtn/, '管理待办按钮应删除')
   assert.doesNotMatch(page, /管理待办/, '管理待办文案应删除')
-  assert.match(page, /openSettings\(\(focusOn \|\| todoOn\) \? 'focus' : 'timer'\)/)
+  assert.match(page, /openSettings\(todoOn \? 'focus' : 'timer'\)/)
 })

@@ -54,6 +54,41 @@ test('closeMenu 必须交还输入焦点（setInputFocus(false)）', () => {
     'closeMenu 没交还焦点：挂件一直占着焦点，设置窗会失焦自动隐藏')
 })
 
+test('closeMenu 收尾必须统一重算菜单按钮显隐（点链接 / Esc / 再点按钮都不必各自补）', () => {
+  // 菜单开着时 applyMenuBtn 恒为「显」，关菜单的各条路径漏补任何一条，
+  // 按钮就会停在强显态；而窗口此刻仍可交互，没有 pointermove 就永不复位
+  assert.match(closeMenuSource(), /applyMenuBtnAtLast\(\)/,
+    'closeMenu 没重算按钮显隐：点菜单链接 / Esc 关菜单后按钮会残留')
+})
+
+test('applyMenuBtnAtLast 无坐标时必须隐藏，不能空操作', () => {
+  const start = page.indexOf('function applyMenuBtnAtLast()')
+  assert.ok(start >= 0, '找不到 applyMenuBtnAtLast')
+  const end = page.indexOf('function forceShowMenuBtn()', start)
+  assert.ok(end > start, '找不到 applyMenuBtnAtLast 收尾，解析规则可能已失效')
+  const body = page.slice(start, end)
+  // 旧实现 else applyMenuBtn(null) 是空操作：关菜单 / 配置变更后按钮停在最后一次的显示态
+  assert.ok(!/else applyMenuBtn\(null\)/.test(body), '无坐标分支仍走空操作的 applyMenuBtn(null)')
+  assert.match(body, /remove\('dshwv-menu-btn-visible'\)/,
+    '无坐标（lastHoverPt === null）时没移除 -visible：按钮不会自动收起')
+})
+
+test('窗口级退出与宿主 force-pass 路径仍然移除按钮（回归）', () => {
+  const leaveAt = page.indexOf('function onWindowPointerLeave(e)')
+  assert.ok(leaveAt >= 0, '找不到 onWindowPointerLeave')
+  const leaveEnd = page.indexOf('}', page.indexOf('sendIgnoreMouse(true)', leaveAt))
+  const leave = page.slice(leaveAt, leaveEnd)
+  assert.match(leave, /remove\('dshwv-menu-btn-visible'\)/,
+    'pointerleave 兜底不再移除按钮：指针离开窗口后按钮会常亮')
+
+  const forceAt = page.indexOf('whaleApi.onForcePass(')
+  assert.ok(forceAt >= 0, '找不到 onForcePass 收尾')
+  const forceEnd = page.indexOf('});', forceAt)
+  const force = page.slice(forceAt, forceEnd)
+  assert.match(force, /remove\('dshwv-menu-btn-visible'\)/,
+    'whale:force-pass 收尾不再移除按钮：强制穿透后按钮会残留')
+})
+
 test('宿主 input-focus 交还分支必须重申窗口样式（置顶 + 任务栏）', () => {
   const start = ipc.indexOf("ipcRenderer.on('whale:input-focus'")
   assert.ok(start >= 0, '找不到 whale:input-focus 监听器')

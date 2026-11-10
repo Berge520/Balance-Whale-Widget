@@ -14,12 +14,13 @@ const block = (src, start, end) => {
   return src.slice(from, to)
 }
 
-test('合并组顺序固定', () => {
-  const body = block(page, 'groupFocus.body.appendChild(focusStatsEl)', 'menuBox.appendChild(groupFocus.el)')
+test('合并组顺序固定：开始置顶，待办往下排（v1.16 起统计块已删）', () => {
+  const body = block(page, 'groupFocus.body.appendChild(rowTimerQuick)', 'menuBox.appendChild(groupFocus.el)')
   const order = [...body.matchAll(/groupFocus\.body\.appendChild\(([^)]+)\)/g)].map((m) => m[1].trim())
+  // v1.18：「最近计时」紧贴当前行之下（刚结束的一段挨着正在跑的一轮）
   assert.deepEqual(order, [
-    'focusStatsEl', 'rowTimerStatus', 'rowTimerConfirm', 'todoBlock',
-    'rowTimer', 'rowTimerQuick', 'rowTimerDown', 'rowTimerAt', 'rowTimerPeekHint', 'rowTimerFoot',
+    'rowTimerQuick', 'rowTimer', 'rowTimerStatus', 'rowTimerHistory', 'rowTimerConfirm',
+    'todoBlock', 'rowTimerDown', 'rowTimerAt', 'rowTimerPeekHint', 'rowTimerFoot',
   ])
 })
 
@@ -34,18 +35,18 @@ test('待办块包在 todoBlock 里，清除按钮按已完成数量显隐', () 
 })
 
 test('折叠摘要：进行中带任务名、空闲有清单、纯计时保留默认时长', () => {
-  const body = block(page, 'function refreshMenuSummaries', 'function renderFocusStats')
+  // v1.16：统计块删除后，摘要函数的下一个邻居不再是 renderFocusStats
+  const body = block(page, 'function refreshMenuSummaries', 'function renderTodoMenu')
   assert.match(body, /timerSum \+= ' · ' \+ focusText/)
   assert.match(body, /todoLeft \+ ' 项'/)
   assert.match(body, /'默认 '/)
   assert.match(body, /syncFocusGroupChrome\(\)/)
 })
 
-test('今日统计压成今日行 + 一行元信息', () => {
-  const body = block(page, 'function renderFocusStats', 'function renderTodoMenu')
-  assert.match(body, /dshwv-focus-meta/)
-  assert.match(body, /近 ' \+ \(Number\(focusSummary\.days\) \|\| 7\) \+ ' 天/)
-  assert.doesNotMatch(body, /groupFocus\.setTitle/, '标题改由 syncFocusGroupChrome 负责')
+test('专注统计块已下线：不再画今日行与元信息', () => {
+  // v1.16：今日轮数 / 目标进度 / 连续天数 / 近 N 天整体删除，挂件只留待办本身
+  assert.equal(page.indexOf('function renderFocusStats'), -1, 'renderFocusStats 应已删除')
+  assert.equal(page.indexOf('dshwv-focus-meta'), -1, '专注统计的元信息行应已删除')
 })
 
 test('当前行：进行中显示任务 + 暂停/重置，空闲有专注项显示开始', () => {
@@ -59,14 +60,22 @@ test('当前行：进行中显示任务 + 暂停/重置，空闲有专注项显�
 })
 
 test('放弃确认行紧跟当前行，出现时滚动到可见', () => {
-  assert.match(page, /groupFocus\.body\.appendChild\(rowTimerStatus\);\s*\n\s*groupFocus\.body\.appendChild\(rowTimerConfirm\)/)
+  // v1.18：当前行与放弃确认之间插了「最近计时」那一行，故顺序断言改为「当前行 → 最近计时 → 放弃确认」，
+  // 仍然要求放弃确认在最后（它问的是「要不要放弃这一轮」，被别的行隔开就看不出是在问谁）
+  assert.match(
+    page,
+    /groupFocus\.body\.appendChild\(rowTimerStatus\);\s*(?:\n\s*\/\/[^\n]*)*\s*\n\s*groupFocus\.body\.appendChild\(rowTimerHistory\);\s*\n\s*groupFocus\.body\.appendChild\(rowTimerConfirm\)/,
+  )
   const fn = block(page, 'function syncTimerConfirm', 'function cancelTimerConfirm')
   assert.match(fn, /scrollIntoView\(\{ block: 'nearest' \}\)/)
   assert.match(fn, /var wasShown = rowTimerConfirm\.style\.display !== 'none'/)
 })
 
-test('CSS：专注元信息行有浅/深/幻想三套配色', () => {
-  assert.match(css, /\.dshwv-focus-meta\s*\{/)
-  assert.match(css, /html\.dark \.dshwv-focus-meta/)
-  assert.match(css, /html\.fantasy \.dshwv-focus-meta/)
+test('CSS：专注相关样式里不残留统计层选择器', () => {
+  // v1.16：.dshwv-focus-meta / -stats / -row / -value / -bar / -fill 三套配色随之删除，
+  // 只留 .dshwv-focus-todo 的分隔虚线
+  assert.match(css, /\.dshwv-focus-todo\s*\{/)
+  for (const dead of ['focus-meta', 'focus-stats', 'focus-row', 'focus-value', 'focus-bar', 'focus-fill']) {
+    assert.equal(css.indexOf('.dshwv-' + dead), -1, `floating.css 还留着 .dshwv-${dead}`)
+  }
 })

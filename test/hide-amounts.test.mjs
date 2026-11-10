@@ -25,9 +25,9 @@ test('遮蔽状态：默认关闭，只有显式 true 才开启', () => {
 test('遮蔽出口：两种金额格式化都统一返回 ***，覆盖挂件所有金额显示', () => {
   assert.match(page, /function fmt\(balance, currency\) \{\s*\/\/[^\n]*\n\s*if \(hideAmounts\) return '\*\*\*';/)
   assert.match(page, /function fmtModelMoney\(v, currency\) \{\s*if \(hideAmounts\) return '\*\*\*';/)
-  // 大数字点击只拦常规三行；倒计时 / 计时 / 提醒等场景不抢气泡本身的点击语义
-  assert.match(page, /if \(!canToggleMaskByAmount\(\)\) return;/)
-  assert.match(page, /function canToggleMaskByAmount\(\)/)
+  // 大数字不再有独立点击入口：它正落在气泡中心，双语义会把「点气泡推进」误触成切遮蔽
+  assert.doesNotMatch(page, /amountEl\.addEventListener\('click'/)
+  assert.doesNotMatch(page, /canToggleMaskByAmount|dshwv-maskable/)
 })
 
 test('遮蔽交互：本地即时翻转后立即重绘，并复用既有 saveConfig 持久化', () => {
@@ -47,11 +47,12 @@ test('设置页预览与挂件一致：预览样本读同一个 hideAmounts', ()
 })
 
 test('今日已赚：未配置时薪时整项不显示，配置后才显示', () => {
-  // 默认 0 = 未配置；todayEarned 对 0 / 非法时薪返回 null，页面据此 display:none（不占位、不显示 0）
+  // 默认 0 = 未配置；todayEarned 对 0 / 非法时薪返回 null，第三行附加项据此跳过该段（不占位、不显示 0）
   assert.match(storeSrc, /offworkHourlyWage: 0/)
   assert.match(page, /var offworkHourlyWage = 0;/)
   assert.match(page, /var earned = typeof OFFWORK_CORE\.todayEarned === 'function'[\s\S]*?offworkHourlyWage/)
-  assert.match(page, /if \(earned === null\) \{[\s\S]*?offworkEarnedEl\.style\.display = 'none';/)
+  // 有值且周末 / 发薪都没开时才顶上（说明行最多一项）
+  assert.match(page, /if \(earned !== null && !list\.length\) list\.push\(/)
   // 有配置才写文案，并带「≈」提示不是精确工资
   assert.match(page, /'今日已赚 ≈ ' \+ fmt\(earned, 'CNY'\)/)
   // 宿主写入时非法值保持现值，只有空 / 0（normWage 返回 0）才取消配置
@@ -59,7 +60,7 @@ test('今日已赚：未配置时薪时整项不显示，配置后才显示', ()
 })
 
 test('今日已赚与余额共用同一个遮蔽开关：不开第二个独立开关', () => {
-  assert.match(page, /var text = hideAmounts \? '今日已赚 \*\*\*' : '今日已赚 ≈ ' \+ fmt\(earned, 'CNY'\)/)
+  assert.match(page, /list\.push\(hideAmounts \? '今日已赚 \*\*\*' : '今日已赚 ≈ ' \+ fmt\(earned, 'CNY'\)\)/)
   assert.doesNotMatch(page, /wageHide|hideEarned|earnedMask|showEarned/)
 })
 

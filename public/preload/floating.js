@@ -5,7 +5,7 @@
  *  - 接收宿主推送：whale:init / whale:balance / whale:config / whale:snapped / whale:sounds
  *              / whale:skin / whale:bubbles / whale:shared-skins（共享角色池清单）
  *              / whale:randimg-data（清单里某一张的本体，whale:randimg 的答复）
- *              / whale:models / whale:todo / whale:focus-stats
+ *              / whale:models / whale:todo / whale:focus-stats / whale:focus-session
  *              / whale:bubble-preview（设置页按压气泡试播）
  *              （另有本地推送 dark：preload 轮询 utools.isDarkColors() 检测 uTools 深浅色变化）
  *  - 向宿主上报：whale:ready / whale:show / whale:refresh / whale:config / whale:timer / whale:timer-done
@@ -46,7 +46,7 @@ try {
   }
 } catch (err) { logErr('[whale] 禁止页面缩放失败', err && err.message) }
 
-const handlers = { init: [], balance: [], config: [], snapped: [], dsh: [], sounds: [], skin: [], bubbles: [], sharedSkins: [], randimgData: [], models: [], dark: [], bubblePreview: [], todo: [], todoDue: [], focusStats: [], cmd: [], cursor: [], forcePass: [] }
+const handlers = { init: [], balance: [], config: [], snapped: [], dsh: [], sounds: [], skin: [], bubbles: [], sharedSkins: [], randimgData: [], models: [], dark: [], bubblePreview: [], todo: [], todoDue: [], focusStats: [], focusSession: [], cmd: [], cursor: [], forcePass: [] }
 
 function on(name, cb) {
   if (handlers[name] && typeof cb === 'function') handlers[name].push(cb)
@@ -84,6 +84,9 @@ ipcRenderer.on('whale:bubble-preview', (event, data) => emit('bubblePreview', da
 ipcRenderer.on('whale:todo', (event, data) => emit('todo', data))
 // 专注统计与每日目标（宿主 whale:focus-stats 推送：{ summary, goal }）
 ipcRenderer.on('whale:focus-stats', (event, data) => emit('focusStats', data))
+// 刚落库的那一条计时记录（宿主 whale:focus 处理完记账后回推单条会话）：
+// 挂件菜单的「最近计时」用它插到列表头，不必为了一段刚结束的计时去拉整份历史
+ipcRenderer.on('whale:focus-session', (event, data) => emit('focusSession', data))
 // 快捷指令（宿主 feature 入口触发：计时器切换、专注统计显示等）
 // 待办到点提醒也走这条队列（宿主 sendWidgetCmd 会包成 whale:cmd），这里译成 todoDue 事件，
 // 页面只处理一种形态；队列机制顺带解决「页面还没 ready 时推送丢失」。
@@ -185,6 +188,8 @@ const api = {
   onTodoDue(cb) { on('todoDue', cb) },
   // 专注统计与每日目标（宿主 whale:focus-stats 推送：{ summary, goal }）
   onFocusStats(cb) { on('focusStats', cb) },
+  // 刚结束的一段计时（单条会话，形状见 focus.normSession）
+  onFocusSession(cb) { on('focusSession', cb) },
   // 快捷指令（宿主 feature 入口触发：{ cmd, payload }）
   onCmd(cb) { on('cmd', cb) },
   // 光标探测回包（宿主 whale:cursor 推送：{ x, y } 相对窗口左上角，拿不到时为 null）

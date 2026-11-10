@@ -1,7 +1,9 @@
 <script lang="ts" setup>
 import { computed, reactive, ref, watch } from 'vue'
 
-// 「计时」整卡：计时功能的**全部配置**（默认时长 / 快捷档位 / 到点提醒 / 休息与番茄 / 气泡与状态）。
+// 「计时」整卡：只管「一轮怎么设」（默认时长 / 快捷档位 / 休息与番茄 / 气泡与状态）。
+// 「到点怎么提示」（留言 / 系统通知 / 气泡停留 / 邮件）归「提醒与通知」卡 —— 那是一类提醒，
+// 不是计时参数，本卡只留一句指向。
 // 从「提醒与通知」卡里拆出来：那边四类自动提醒与通知渠道已经够长，计时 9 个控件夹在中间，
 // 用户搜到「倒计时」滚过去也只看到一张默认收起的卡。拆成独立卡后搜索直达、入口随挂件菜单的
 // 「计时设置」深链（target='timer'）直接落在这里。
@@ -12,8 +14,6 @@ import { computed, reactive, ref, watch } from 'vue'
 const props = defineProps<{
   // 挂件配置整体传入：本卡只读写计时相关字段，落盘统一走 emit('patch')
   cfg: any
-  // 到点留言长度上限（父级 TIMER_NOTE_MAX）
-  timerNoteMax: number
   // 快捷档位默认值（父级 TIMER_PRESETS_DEFAULT）：配置缺键时兜底渲染
   timerPresetsDefault: number[]
   // 搜索命中态：低频分区在搜索时强制展开，否则「搜到了番茄却看不到控件」
@@ -23,13 +23,13 @@ const emit = defineEmits<{
   (e: 'patch', p: Record<string, any>): void
 }>()
 
-// 指向性文案：专注卡被显示管理隐藏时，「上面的专注统计」并不存在，不能给一个死锚点
+// 指向性文案：v1.16 起专注卡不再有统计 / 记录层，这里只说计时怎么记
 const focusRulesHint = computed(() => {
   const hidden = (props.cfg.hiddenCards || []).includes('focus')
     || (props.cfg.hiddenTabs || []).includes('usage')
   return hidden
-    ? '记录与统计规则在「专注与待办」卡（已在显示管理中隐藏）'
-    : '记录与统计规则见上面的「专注统计」'
+    ? '挂件菜单里开不开「专注」组，在「待办与计时」卡（已在显示管理中隐藏）'
+    : '挂件菜单里开不开「专注」组，见上面的「待办与计时」卡'
 })
 
 // —— 低频分区折叠：休息与番茄 / 计时气泡与状态默认收起 ——
@@ -53,7 +53,9 @@ const restBrief = computed(() => {
   const pomo = c.timerPomoOn
     ? `番茄循环 · 长休 ${c.timerLongBreakMin} 分 / 每 ${c.timerLongEvery} 轮`
     : '番茄循环关'
-  return `${rest} · ${pomo}`
+  // 自动衔接独立于番茄循环，收起标题里也要能看出它开着，别让人以为折叠区里没有这项
+  const next = c.todoAutoNext ? '待办自动衔接' : ''
+  return [rest, pomo, next].filter(Boolean).join(' · ')
 })
 const bubbleBrief = computed(() => {
   const c = props.cfg
@@ -159,32 +161,9 @@ function onCheck(key: string, e: Event) {
     </div>
     <p class="hint">只对那一轮生效，不改默认时长。</p>
 
-    <h3 class="card-sub">到点提醒</h3>
-    <label class="field row">
-      <span class="label">到点提醒我 <em>（到点显示在气泡与通知里）</em></span>
-      <input type="text" :value="cfg.timerNote" :maxlength="timerNoteMax" placeholder="例如：起来喝水、活动一下"
-             @change="emit('patch', { timerNote: ($event.target as HTMLInputElement).value })" />
-    </label>
-
-    <label class="field row check">
-      <span class="label">计时到点系统通知 <em>（关掉后只留气泡）</em></span>
-      <input type="checkbox" :checked="cfg.timerNotifyOn" @change="onCheck('timerNotifyOn', $event)" />
-    </label>
-
-    <label class="field row">
-      <span class="label">到点气泡停留 <em>（常驻 = 手动点掉）</em></span>
-      <select :value="cfg.timerRemindSec" @change="emit('patch', { timerRemindSec: Number(($event.target as HTMLSelectElement).value) })">
-        <option :value="5">5 秒</option>
-        <option :value="8">8 秒</option>
-        <option :value="15">15 秒</option>
-        <option :value="0">常驻</option>
-      </select>
-    </label>
-
-    <label class="field row check">
-      <span class="label">计时到点也发邮件 <em>（需先在「提醒与通知」开启邮件）</em></span>
-      <input type="checkbox" :checked="cfg.timerMailOn" @change="onCheck('timerMailOn', $event)" />
-    </label>
+    <!-- 「到点提醒」（留言 / 系统通知 / 气泡停留 / 邮件）已迁到「提醒与通知」卡：
+         本卡只回答「一轮多长、怎么循环、气泡怎么写」，到点怎么提示归提醒 -->
+    <p class="hint">到点怎么提示（留言 / 系统通知 / 邮件 / 气泡停留）在「提醒与通知」卡里设。</p>
 
     <h3 class="card-sub card-sub-toggle" role="button" tabindex="0"
         :aria-expanded="foldOpen('rest')"
@@ -222,11 +201,17 @@ function onCheck(key: string, e: Event) {
                @change="commitNum('timerLongEvery', 2, 12, $event)" />
         <span class="num-text">轮</span>
       </label>
-      <label class="field row check">
-        <span class="label">自动衔接下一轮 <em>（休息结束后自动开始下一轮）</em></span>
-        <input type="checkbox" :checked="cfg.timerAutoNext" @change="onCheck('timerAutoNext', $event)" />
-      </label>
+      <!-- 「自动衔接下一轮」v1.15 移除：到点一律停下等用户点。自动衔接要维护等待期、
+           倒计时与取消路径，是最容易「没点却自己跑了」的一处；手动点一下成本更低 -->
     </template>
+
+    <!-- 到点自动衔接下一条待办（v1.17 恢复为可选，默认关）：
+         只管「待办这条做完了要不要接着下一条」，与上面的番茄循环（轮间怎么休息）正交。
+         v1.15 硬移除是因为它当时无条件生效；现在做成显式开关 + 到点气泡仍可取消 -->
+    <label class="field row check">
+      <span class="label">到点自动开始下一条待办 <em>（待办计时结束时，自动接下一条未完成项）</em></span>
+      <input type="checkbox" :checked="cfg.todoAutoNext" @change="onCheck('todoAutoNext', $event)" />
+    </label>
     </template>
 
     <h3 class="card-sub card-sub-toggle" role="button" tabindex="0"
@@ -253,7 +238,7 @@ function onCheck(key: string, e: Event) {
     </template>
 
     <p class="hint">
-      实际计时在挂件菜单的「{{ cfg.focusOn || cfg.todoOn ? '专注' : '计时' }}」组；{{ focusRulesHint }}。
+      实际计时在挂件菜单的「{{ cfg.todoOn ? '专注' : '计时' }}」组；{{ focusRulesHint }}。
     </p>
   </section>
 </template>

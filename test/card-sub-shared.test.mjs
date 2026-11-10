@@ -9,7 +9,7 @@
  *
  * 这里断言的是「同一个角色只允许一个 class」，比断言像素更稳：
  * ① 分区标题的规则只写在 main.css 的 .card-sub，各卡不许留 scoped 副本；
- * ② 专注卡要有分区标题，且顺序是「设置 → 统计 → 明细 → 待办」；
+ * ② 专注卡要有分区标题，且顺序是「今日 → 待办 → 已完成」（v1.16 统计层下线后只剩这三段）；
  * ③ 标题与它下面那行开关不许重名（同名会出现「待办清单 / [✓] 待办清单」的重复）；
  * ④ 挂件里标签行 / 说明行的 class 与设置页同理：menuLabel() 与 .dshwv-menu-hint 是唯一来源。
  */
@@ -58,46 +58,52 @@ test('计时卡与专注卡的标题用同一个 class', () => {
   }
 })
 
-test('专注卡按「今日 → 待办 → 统计 → 明细」分区，顺序固定', () => {
+test('专注卡按「今日 → 待办 → 已完成」分区，顺序固定', () => {
   const tpl = templateOf(view)
-  // 统计 / 明细是折叠分区，class 上多挂了 card-sub-toggle，故允许修饰类
+  // 已完成是折叠分区，class 上多挂了 card-sub-toggle，故允许修饰类。
+  // v1.16：7 天柱图、今日摘要里的轮数 / 连续天数、每日目标、专注明细整块都随「统计 / 记录」层下线，
+  // 本卡只留「开关 + 待办清单（未完成 / 已完成）」
   const heads = [...tpl.matchAll(/<h3 class="card-sub(?=[\s"])[^>]*>([^<]*)/g)].map((m) => m[1].trim())
-  assert.deepEqual(heads, ['今日', '待办清单', '专注统计', '专注明细'], `专注卡分区标题不对：${heads.join(' / ')}`)
-  // 明细标题自带范围（最近 N 天 · M 条），不再在列表里另起一个私有表头；
-  // 折叠分区的三角紧跟在标题文字后，故 em 前允许一个 .fold-caret
-  assert.match(tpl, /class="card-sub[^"]*"[^>]*>\s*专注明细<span class="fold-caret">[^<]*<\/span>\s*<em/, '专注明细的标题没并上范围行')
-  assert.doesNotMatch(tpl, /focus-log-title|focus-log-head/, '明细区还留着自己的表头，和分区标题重复')
+  assert.deepEqual(heads, ['今日', '待办清单', '已完成'], `专注卡分区标题不对：${heads.join(' / ')}`)
+  // 下线的东西不许以任何形式回魂（注释里允许说明为什么移除，故只查运行代码与样式）
+  const code = view.replace(/\/\*[\s\S]*?\*\//g, '').replace(/<!--[\s\S]*?-->/g, '').replace(/\/\/[^\n]*/g, '')
+  assert.doesNotMatch(tpl, /focus-log-title|focus-log-head/, '明细区还留着自己的表头')
+  assert.doesNotMatch(code, /focusGoal|focus-goal|statsSummary|sessionGroups|todayRoundsOf|onFocusChange/, '统计 / 明细 / 每日目标的代码应已全部移除')
 })
 
-test('专注统计只留一行摘要（趋势并入），不再有独立回顾段', () => {
-  const tpl = templateOf(view)
-  assert.doesNotMatch(tpl, /reviewText|focus-review/, '独立回顾段应已删除')
-  assert.doesNotMatch(view, /const reviewText = computed/, 'reviewText computed 应已删除')
+test('专注统计层已下线：不再有摘要、趋势、日均与明细', () => {
+  // v1.16：这一层要求「设目标 → 对齐 → 看进度」的额外习惯，而「一轮」判定又严格
+  // （只有倒计时走完、非休息、非放弃才算），做了正计时却显示 0 轮反而像没记上。
+  // 计时与番茄循环不依赖它，故整层下线；宿主侧 focus.js / whale:focus 暂留（可逆）
+  const code = view.replace(/\/\*[\s\S]*?\*\//g, '').replace(/<!--[\s\S]*?-->/g, '').replace(/\/\/[^\n]*/g, '')
+  assert.doesNotMatch(code, /reviewText|focus-review|trendText|日均/, '回顾 / 趋势 / 日均应已移除')
+  assert.doesNotMatch(code, /focus-bars|barMax|barH\(/, '柱图应已移除')
+  assert.doesNotMatch(code, /heatHasData|heatStats|heatLevel|heatCells/, '热力图应已移除')
   assert.doesNotMatch(styleOf(view), /\.focus-review\s*\{/, '孤儿样式 .focus-review 应已删除')
-  assert.match(view, /trendText/, '摘要需要并入近 7 天趋势')
 })
 
 test('分区标题不和它下面的开关重名', () => {
-  // 「待办清单」是标题，开关行说的是「挂件里显不显示」，两行同名读者会以为是两个开关
+  // 「待办与计时」这个总开关放在「今日」标题下，不能写成「待办清单」——
+  // 与下面那个分区标题同名，读者会以为是两个开关
   assert.doesNotMatch(templateOf(view), /class="label">待办清单</, '开关标签与分区标题同名')
-  assert.match(templateOf(view), /class="label">挂件里显示待办/, '待办开关没有改名成动作描述')
+  assert.match(templateOf(view), /class="label">待办与计时/, '总开关没有用动作描述命名')
 })
 
 // floating-page.js 有 20 多万字符：断言失败时把整文件打出来会淹没输出，这里用 includes 判
 const absent = (src, needle, msg) => assert.ok(!src.includes(needle), msg)
 
-test('挂件：专注组的标签用共享的 menuLabel，不再另起一套列宽', () => {
-  const start = page.indexOf('function renderFocusStats')
-  const stats = page.slice(start, page.indexOf('function renderTodoMenu', start))
-  assert.ok(start > 0 && stats.includes('menuLabel('), '专注统计没走共享的 menuLabel()：标签列宽/字色会和其它组跑偏')
-  absent(stats, "className = 'dshwv-focus-label'", '专注组还在自己造标签元素')
-  absent(pageCss, '.dshwv-focus-label {', 'floating.css 还留着 .dshwv-focus-label 副本')
-  // 行的左右留白交给行自己（与 .dshwv-menu-row 同 inset），容器不再加一层缩进
-  const rowRule = /\.dshwv-focus-row\s*\{[^}]*\}/.exec(pageCss)
-  assert.ok(rowRule, '找不到 .dshwv-focus-row 规则')
-  assert.match(rowRule[0], /padding:\s*4px 6px/, '专注行的左右留白和菜单行不同，标签会缩进一截')
-  const wrapRule = /\.dshwv-focus-stats\s*\{[^}]*\}/.exec(pageCss)
-  assert.ok(!wrapRule || !/padding:\s*[1-9]/.test(wrapRule[0]), '专注统计容器还在加缩进，和菜单行叠成两层')
+test('挂件：专注统计层已下线，标签仍走共享的 menuLabel', () => {
+  // v1.16：renderFocusStats 整块（今日轮数 / 目标进度条 / 连续天数）随统计层删除，
+  // 挂件专注组只剩「计时 + 待办」。这里防的是回魂：页面与样式都不许再有这些名字
+  absent(page, 'renderFocusStats', 'floating-page.js 还留着专注统计渲染')
+  absent(page, 'focusSummary', 'floating-page.js 还在读专注统计摘要')
+  absent(page, 'dshwv-focus-stats', 'floating-page.js 还在挂统计容器')
+  for (const dead of ['.dshwv-focus-stats', '.dshwv-focus-row', '.dshwv-focus-value', '.dshwv-focus-bar', '.dshwv-focus-fill', '.dshwv-focus-meta', '.dshwv-todo-today', '.dshwv-focus-label']) {
+    absent(pageCss, dead + ' {', `floating.css 还留着 ${dead} 副本`)
+  }
+  // 标签 / 说明仍只走共享 helper：专注组还没另起一套列宽
+  assert.ok(page.includes('function menuLabel'), '缺共享的 menuLabel()')
+  absent(page, "className = 'dshwv-focus-label'", '专注组还在自己造标签元素')
 })
 
 test('挂件：空态说明行只有一套 class（灰底说明 + 蓝色引导）', () => {
@@ -111,6 +117,6 @@ test('挂件：空态说明行只有一套 class（灰底说明 + 蓝色引导�
   assert.equal([...page.matchAll(/'dshwv-menu-hint-act'/g)].length, 1, '蓝色引导行的 class 不该散在各处手写')
   const gray = [...page.matchAll(/(?<!function )menuHint\(/g)].length
   const act = [...page.matchAll(/(?<!function )menuHintAct\(/g)].length
-  assert.ok(gray >= 5, `灰底说明行至少 5 处（计时提示 + 专注空态 + 待办空态三行），实际 ${gray}`)
-  assert.equal(act, 2, `蓝色引导行该 2 处（专注空态 + 待办空态），实际 ${act}`)
+  assert.ok(gray >= 4, `灰底说明行至少 4 处（计时提示 + 待办空态三行），实际 ${gray}`)
+  assert.equal(act, 1, `蓝色引导行该 1 处（待办空态），实际 ${act}`)
 })

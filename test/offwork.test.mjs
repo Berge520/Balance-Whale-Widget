@@ -59,7 +59,7 @@ test('normPayday：1–31 的整数，其余回默认 10 号', () => {
 test('上班前：倒到上班时刻', () => {
   const r = O.display(at(11, 4, 8, 30), cfg())
   assert.equal(r.phase, 'before')
-  assert.equal(r.label, '距离上班')
+  assert.equal(r.label, '上班')
   assert.equal(r.main, '00:30:00')
   assert.equal(r.hint, '09:00 上班')
   assert.equal(r.near, null)
@@ -68,7 +68,7 @@ test('上班前：倒到上班时刻', () => {
 test('工作中：倒到下班时刻，最后 30 / 10 分钟给 near 档位', () => {
   const plain = O.display(at(11, 4, 10, 0), cfg())
   assert.equal(plain.phase, 'work')
-  assert.equal(plain.label, '距离下班')
+  assert.equal(plain.label, '下班')
   assert.equal(plain.main, '08:00:00')
   assert.equal(plain.hint, '18:00 下班')
   assert.equal(plain.near, null)
@@ -126,7 +126,7 @@ test('跨日班（22:00–06:00）：凌晨仍算昨天那一班，下班不写�
   assert.equal(early.main, '04:00:00')
   assert.equal(early.hint, '06:00 下班')
 
-  // 周四 06:00 整点：交班后进入「距离上班」
+  // 周四 06:00 整点：交班后进入「上班前」
   const handover = O.display(at(11, 5, 6, 0), night)
   assert.equal(handover.phase, 'before')
   assert.equal(handover.main, '16:00:00')
@@ -143,34 +143,37 @@ test('显示秒关闭：主体只到分钟', () => {
   assert.equal(r.main, '08:00')
 })
 
-test('附加倒计时：距周末 / 距发薪日（含短月按月末截断）', () => {
+test('说明行附加项：周末 / 发薪（含短月按月末截断）', () => {
   const weekend = O.display(at(11, 6, 10, 0), cfg({ weekendOn: true }))
-  assert.equal(weekend.hint, '18:00 下班 · 距周末 14小时')
+  assert.equal(weekend.hint, '18:00 下班 · 周末 14小时')
   // 周六属于非工作日：主体倒到周一上班，附加信息是「周末进行中」
   assert.equal(O.display(at(11, 7, 10, 0), cfg({ weekendOn: true })).hint, '距上班 周一 09:00 · 周末进行中')
 
   const payday = O.display(at(11, 4, 10, 0), cfg({ paydayOn: true, paydayDay: 10 }))
-  assert.equal(payday.hint, '18:00 下班 · 距发薪 5天14小时')
-  assert.equal(O.display(at(11, 10, 10, 0), cfg({ paydayOn: true, paydayDay: 10 })).hint, '18:00 下班 · 今天发薪')
+  assert.equal(payday.hint, '18:00 下班 · 发薪 5天14小时')
+  assert.equal(O.display(at(11, 10, 10, 0), cfg({ paydayOn: true, paydayDay: 10 })).hint, '18:00 下班 · 发薪 就是今天')
 
   // 11 月没有 31 日：发薪日 31 按 11-30 截断
   const shortMonth = O.display(at(11, 4, 10, 0), cfg({ paydayOn: true, paydayDay: 31 }))
-  assert.match(shortMonth.hint, /距发薪 /)
-  assert.match(O.display(at(11, 30, 10, 0), cfg({ paydayOn: true, paydayDay: 31 })).hint, /今天发薪/)
+  assert.match(shortMonth.hint, /· 发薪 /)
+  assert.match(O.display(at(11, 30, 10, 0), cfg({ paydayOn: true, paydayDay: 31 })).hint, /· 发薪 就是今天/)
 })
 
 test('关闭开关不渲染：页面侧有 offworkOn 守卫，默认配置为关闭', () => {
   const page = readFileSync(new URL('../public/floating-page.js', import.meta.url), 'utf8')
   const storeSrc = readFileSync(new URL('../public/preload/lib/store.js', import.meta.url), 'utf8')
 
-  // 默认关闭：空配置不会把主体交给倒计时
+  // 默认关闭：空配置不会占标题行、也不追加说明行附加项
   assert.match(storeSrc, /offworkOn: false/)
   // 所有展示路径都先过 offworkCanRender()（offworkOn 为 false 时恒假）
   assert.match(page, /function offworkCanRender\(\)/)
-  assert.match(page, /return !!offworkOn && !bubbleModelOn/)
-  // tick 复用既有每秒巡检，且气泡没开 / 开关关着时立刻返回
-  assert.match(page, /function bubbleTtlSweep\(\) \{[\s\S]*?if \(offworkOn\) offworkStep\(\)/)
-  assert.match(page, /function offworkStep\(\) \{[\s\S]*?if \(!offworkOn \|\| !bubbleShown\) return;/)
+  // 自定义泡泡不再整体压掉倒计时：只有临时接管 / 翻到自定义页才隐藏（同队列共存，见 floating-bubble-queue.test.mjs）
+  assert.match(page, /return !!offworkOn && !bubbleTimerActive && !bubbleRemindActive && !bubblePreviewActive && !bubbleRandomActive &&/)
+  assert.match(page, /\(!bubbleActive \|\| bubbleQueue\(\)\[bubbleIdx\] === OFFWORK_PAGE\)/)
+  // tick 复用既有每秒巡检；计时在跑时它同时是计时圈的每秒刷新入口，不能只按 offworkOn 跳
+  assert.match(page, /function bubbleTtlSweep\(\) \{[\s\S]*?if \(offworkOn \|\| timerRunning\) offworkStep\(\)/)
+  // 气泡没开时 offworkStep 直接返回、不碰文案（圈在此之前已由 updateTimerRing 刷过）
+  assert.match(page, /function offworkStep\(\) \{[\s\S]*?if \(!bubbleShown && !timerRunning\) return;[\s\S]*?if \(!bubbleActive\) updateTimerRing\(\);/)
 })
 
 // 「今天已过百分比」：分母 = 当日「上班 → 下班」区间；上班前 0%、下班后 100%，

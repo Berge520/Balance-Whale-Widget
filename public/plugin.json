@@ -6,7 +6,7 @@
   "features": [
     {
       "code": "whale",
-      "explain": "小鲸鱼余额挂件：桌面透明置顶小窗显示 DeepSeek 余额，也可管理 DeepSeek Harness（dsh）开发者环境，并可打开设置窗口",
+      "explain": "小鲸鱼余额挂件：桌面置顶小窗显示 DeepSeek 余额，也能管理 dsh 开发者环境",
       "mainHide": true,
       "cmds": [
         "余额挂件",
@@ -18,7 +18,7 @@
     },
     {
       "code": "whale-toggle",
-      "explain": "显示/隐藏小鲸鱼余额挂件（可绑定全局快捷键）",
+      "explain": "显示 / 隐藏桌面的余额挂件（建议绑全局快捷键）",
       "mainHide": true,
       "cmds": [
         "显示/隐藏挂件",
@@ -27,7 +27,7 @@
     },
     {
       "code": "whale-passthrough",
-      "explain": "开启/关闭挂件的鼠标穿透（可绑定全局快捷键，穿透后唯一的快捷关闭方式）",
+      "explain": "切换挂件鼠标穿透（穿透后只能靠快捷键关掉）",
       "mainHide": true,
       "cmds": [
         "切换鼠标穿透",
@@ -36,7 +36,7 @@
     },
     {
       "code": "whale-refresh",
-      "explain": "立即刷新 DeepSeek 余额（可绑定全局快捷键）",
+      "explain": "立即刷新 DeepSeek 余额（挂件没开会自动唤出）",
       "mainHide": true,
       "cmds": [
         "刷新余额",
@@ -45,22 +45,13 @@
     },
     {
       "code": "whale-timer",
-      "explain": "开始/暂停计时器（可绑定全局快捷键）",
+      "explain": "开始 / 暂停番茄钟计时（挂件没开会自动唤出）",
       "mainHide": true,
       "cmds": [
         "计时器",
         "番茄钟",
         "开始计时",
         "暂停计时"
-      ]
-    },
-    {
-      "code": "whale-focus",
-      "explain": "显示今日专注统计摘要（可绑定全局快捷键）",
-      "mainHide": true,
-      "cmds": [
-        "专注统计",
-        "今日专注"
       ]
     }
   ]

@@ -10,9 +10,12 @@ import UsageChart from './components/UsageChart.vue'
 import DisplayManager from './components/DisplayManager.vue'
 import { msgCls, useFlash, useFlashShow, type Flash } from './composables/useFlash'
 import { useFold, setFoldPrefs } from './composables/useFold'
+import { useDebugSelfCheck } from './composables/useDebugSelfCheck'
 import { assetSize, fetchAsDataUrl, pad2, sharedSkinThumb } from './utils/format'
 // 自定义显示：Tab/卡片/依赖关系常量（供 DisplayManager.vue 等组件共享）
 import { TABS, SEARCH_INDEX, CORE_TABS, CORE_CARDS, sortByOrder, isCardHidden as cardHiddenByCfg, pinnedInTab as pinnedInTabOf, CARD_FOLDS, cardRootKey, type TabKey } from './constants/display'
+// uTools 功能指令名的唯一副本（构建期与 plugin.json 的 cmds 交叉校验）
+import { CMD_TOGGLE } from './constants/commands'
 // 卡片「全文」索引：scripts/gen-search-index.mjs 在构建期从模板提取每张卡的可见文本
 // （h2 卡头 + label 字段名），搜索第三档兜底用。模板改了没重新生成会被 prebuild 拦下
 import { CARD_TEXT } from './search-index.gen'
@@ -55,25 +58,28 @@ import UsageView from './views/UsageView.vue'
 // 「提醒与通知」整卡。提醒开关与阈值 / 通知渠道 / SMTP 配置 / 提醒音音量 / 提醒文案
 // 都内聚在组件内（计时配置已迁到 TimerView）；applyConfig 回填后要落「未保存」基线、备份恢复后
 // 要刷新展示，这两处父级驱动，故组件用 defineExpose 暴露 syncAlertsBaseline，父级用模板 ref 调用。
-// SMTP 凭据改由组件自己 onMounted 读回（父级 onMounted 时它的 ref 还没建立，会空转），
-// 故 loadMailSecrets 仍保留在 defineExpose 里备用，但父级不再调。保存 / 恢复默认提醒文案需父级整份
+// SMTP 凭据由 NotifyView 内的子块 components/MailSettings.vue 自己 onMounted 读回
+// （父级 onMounted 时它的 ref 还没建立，会空转），父级不再调。保存 / 恢复默认提醒文案需父级整份
 // applyConfig，故 emit('save-alerts')。
 import NotifyView from './views/NotifyView.vue'
 // 「计时」整卡：计时功能的全部配置（默认时长 / 快捷档位 / 到点提醒 / 休息与番茄 / 气泡与状态）。
 // 原先寄居在「提醒与通知」卡的折叠分区里，搜索到也不容易看见；拆成独立卡后挂件菜单的
 // 「计时设置」深链（target='timer'）可直达。落盘走 emit('patch')，跨卡跳转走 emit('go-card')。
 import TimerView from './views/TimerView.vue'
+// 「调试工具」卡：默认关、仅回归用。不注册成卡片（不进「管理显示内容」与搜索结果），
+// 只在本 Tab 非搜索态渲染；三条只读自检各带一个按钮、结论写在行内。
+import DevView from './views/DevView.vue'
 // 「模型与余额」整卡。行内表单 / 展开态 / 删除确认 / 测试 / 刷新 / 增删改都内聚在组件内；
 // 跨卡共享的运行时快照（models）、配置清单（modelConfigs）、主显示 id（modelsMainId）、
 // 模板与上限、以及 fmtTokens / codexWinText 仍留父级，故按 props 下传；保存 / 删除 / 刷新后
 // 需要父级 reloadModels 重新取快照，故 emit('reload')；主显示切换经 update:mainId 上抛。
 // 按需异步加载：expose 的 closeModelForm 仅组件内部使用，父级无 ref 调用点，异步安全。
 const ModelsView = defineAsyncComponent(() => import('./views/ModelsView.vue'))
-// 「专注与待办」整卡：今日概览 + 待办清单 + 专注统计/明细；计时默认值沉底。
-// 待办与统计都归宿主（preload 的 settings.js），本卡只读写快照、订阅宿主推送；
+// 「待办与计时」整卡：待办清单 + 计时默认值；v1.16 起去掉了专注统计 / 记录 / 每日目标。
+// 待办归宿主（preload 的 settings.js），本卡只读写快照、订阅宿主推送；
 // 输入法组字守卫与其它卡共用父级的 isImeComposing，故按 props 下传。
 import FocusView from './views/FocusView.vue'
-// 「下班倒计时」整卡：上下班时间 / 工作日 / 显示秒 / 可选附加倒计时（周末、发薪日）。
+// 「下班倒计时」整卡：上下班时间 / 工作日 / 显示秒 / 可选附加信息（周末、发薪日、今日已赚）。
 // 开关关闭时挂件完全走原路径（余额 / 专注 / 计时不受影响），本卡只负责写 cfg 并交给宿主归一。
 import OffworkView from './views/OffworkView.vue'
 // 「使用帮助」整卡：使用说明 / 快捷键绑定 / 挂件故障排查 / 挂件创建错误详情。
@@ -104,8 +110,6 @@ const PRICE_MODEL_MAX = 20
 // （下限 35 是为了「本月汇总」在 31 号能回溯到 1 号）
 const HISTORY_KEEP = { DEFAULT: 365, MIN: 35, MAX: 730 }
 
-// 计时到点留言长度上限，是宿主 constants.js TIMER_NOTE_MAX 的同值副本（下传给 NotifyView）
-const TIMER_NOTE_MAX = 60
 // 番茄循环：长休时长（分钟），是宿主 constants.js TIMER_LONG_BREAK_DEFAULT 的同值副本
 const TIMER_LONG_BREAK_DEFAULT = 15
 // 番茄循环：每 N 轮进入长休，是宿主 constants.js TIMER_LONG_EVERY_DEFAULT 的同值副本
@@ -241,7 +245,7 @@ const guides = reactive({ apiKey: false, token: false })
 // 长卡片内部的折叠态：凭据（填一次就不动，默认收起）
 // 走 useFold：卡片级折叠要能被「管理显示内容」的默认展开/收起与记忆开关管到
 const credentialsFold = useFold('credentials', false)
-// 合并卡「专注与待办」的整卡折叠：主卡默认展开，收起态摘要提示三段内容
+// 合并卡「待办与计时」的整卡折叠：主卡默认展开，收起态摘要提示两段内容
 const focusTimerFold = useFold('focusTimer', true)
 // —— 设置页顶部 Tab ——
 // 原先 12 张卡片竖排一屏到底（模板近千行），找一项要滚很久；按主题分 7 组，一次只看一组。
@@ -1301,12 +1305,14 @@ const cfg = reactive({
   timerSec: 1500,
   timerNote: '',
   timerBreakMin: 5,
-  // 番茄循环（v1.13.0）：倒计时结束后自动进入休息，休息结束按开关衔接下一轮。
+  // 番茄循环（v1.13.0）：倒计时结束后自动进入休息；休息结束停在「继续专注」等用户点
+  // （「自动衔接」v1.15 移除，默认配置里也不再保留该键）。
   // 默认值与宿主 constants.js 同值（check-shared 钉住），故直接引用上方常量而不是写死数字。
   timerPomoOn: false,
   timerLongBreakMin: TIMER_LONG_BREAK_DEFAULT,
   timerLongEvery: TIMER_LONG_EVERY_DEFAULT,
-  timerAutoNext: false,
+  // 到点自动衔接下一条待办（v1.17 恢复为可选）：默认关 —— 没人点的自动开始计时是惊吓不是帮助
+  todoAutoNext: false,
   // 挂件计时组快捷时长四档（分钟）：设置页可改，挂件 chips 读它
   timerPresets: TIMER_PRESETS_DEFAULT.slice(),
   enterMode: 'both',
@@ -1370,16 +1376,17 @@ const cfg = reactive({
   // BubbleView 读 cfg.bubble.items，回填缺失 → 恒读 undefined → items 恒为 []，
   // 于是「加一步」按下去宿主其实存成功了，设置页却永远显示 0 步，看着就是按钮点不动。
   bubble: { v: 1, on: false, items: [] as any[], lib: [] as any[], tapAdvance: false, dwell: 5, dragLines: [] as string[], system: {} as Record<string, string[]> },
-  // 专注记录 / 待办 / 每日专注目标（v1.13.0）：默认全关，不勾时挂件行为与 1.12.0 一致
-  focusOn: false,
+  // 待办与计时总开关（v1.13.0 引入，v1.15 里 focusOn 与 todoOn 并成一个总开关）：
+  // 默认关，不勾时挂件行为与 1.12.0 一致。v1.16 起 focusGoal（每日目标）已从设置页下线，
+  // 宿主侧仍保留该键（数据不丢、可逆），这里不再回填也不再写默认值
   todoOn: false,
-  focusGoal: 0,
   // 下班倒计时（v1.14.0）：默认关闭；与宿主 offwork.DEFAULTS / store.js 保持一致
   offworkOn: false,
   offworkStart: '09:00',
   offworkEnd: '18:00',
   offworkDays: [1, 2, 3, 4, 5],
   offworkShowSec: true,
+  offworkRing: true,
   offworkWeekendOn: false,
   offworkPaydayOn: false,
   offworkPaydayDay: 10,
@@ -1492,10 +1499,10 @@ watch(visibleTabs, (list, prev) => {
 })
 const darkPollTimer = window.setInterval(applyUtoolsDark, 1000)
 onUnmounted(() => { window.clearInterval(darkPollTimer) })
-// 「提醒与通知」卡片的模板 ref：applyConfig 回填后要落「未保存」基线、挂载时要读回 SMTP 凭据、
-// 备份恢复 / 宿主配置推送后要刷新计时三段展示 —— 这两处都由父级生命周期驱动，故用 ref 调组件暴露的方法。
+// 「提醒与通知」卡片的模板 ref：applyConfig 回填后要落「未保存」基线、备份恢复 / 宿主配置推送后
+// 要刷新展示 —— 这些都由父级生命周期驱动，故用 ref 调组件暴露的方法。
 // 保存 / 恢复默认提醒文案要先写配置再整份 applyConfig 回读，涉及父级 onConfigChange 通路，故仍留父级。
-const notifyViewRef = ref<{ syncAlertsBaseline: () => void; loadMailSecrets: () => void } | null>(null)
+const notifyViewRef = ref<{ syncAlertsBaseline: () => void } | null>(null)
 // 提醒文案保存 / 恢复默认：子组件整理好整份内容（或 null = 恢复默认）上抛，这里落盘并回读。
 // 失败回执由 patchCfg 统一处理（失败条常驻，见 saveFail），这里不必再判返回值
 function onSaveAlerts(alerts: Record<string, string> | null) {
@@ -2008,34 +2015,15 @@ function onScaleCommit() {
 // 实际存储还是旧值），用户看着像是生效了。
 //
 // —— 调试工具（config.debugTools 默认关，只在「开发者」Tab 且开关打开时渲染）——
-// 「立即触发提醒」只演练一次投递（通知 + 气泡），不写幂等位；
-// 「注入旧数据」会真写入并回推，用来替代「拖拽 / 改 leveldb」这类没法让用户做的验证操作。
-const debugTodoId = ref('')
-const debugMsg = ref('')
-const debugTodos = computed(() => {
-  if (!cfg.debugTools) return []
-  try {
-    return (services.todoGet?.().items || []).filter((x) => !x.done)
-  } catch (err) {
-    return []
-  }
+// 卡片本体在 views/DevView.vue；「专注 / 待办 / 计时」三条只读自检的判定在
+// composables/useDebugSelfCheck（结果由本层持有，切 Tab 回来还在），父级只转交调用。
+const dbg = useDebugSelfCheck(services)
+// 整张卡只在 uTools 开发模式下存在（v1.18）：打包版用户看到「注入旧数据」这类会真写库的按钮，
+// 除了困惑没有任何用处，误点还会污染专注 / 待办数据。故开发模式下才渲染，打包版连 DOM 都没有。
+// services.isDev 在宿主里现取 utools.isDev()，不要缓存成一次性常量 —— 设置页窗口可能跨模式复用。
+const devMode = computed(() => {
+  try { return !!services.isDev?.() } catch (err) { return false }
 })
-function doDebugTodoDue() {
-  const id = debugTodoId.value
-  if (!id) return
-  const r = services.debugTodoDue?.(id)
-  debugMsg.value = r && r.ok
-    ? '已投递一条到点提醒（不写幂等位，可在挂件里看气泡）'
-    : ((r && r.error) || '宿主未提供该调试入口')
-}
-function doDebugInjectLegacy() {
-  const r = services.debugInjectLegacy?.()
-  if (r && r.ok) {
-    debugMsg.value = '已注入旧数据：待办 ' + (r.todoId || '') + '、置顶 [focus, timer]、幽灵媒体 ' + (r.ghostId || '')
-  } else {
-    debugMsg.value = (r && r.error) || '宿主未提供该调试入口'
-  }
-}
 function patchCfg(p: Record<string, any>): boolean {
   let lastErr: any = null
   for (let i = 0; i < 2; i++) {
@@ -3193,7 +3181,8 @@ function onBackupApplied(applied: string[]) {
   }
 }
 // 复制指令名，便于粘贴到 uTools「全局功能」新增全局快捷键
-function copyHotkeyCmd(label = '显示/隐藏挂件') {
+// label 默认取 constants/commands 的唯一副本（与 plugin.json 的 cmds 构建期校验一致）
+function copyHotkeyCmd(label: string = CMD_TOGGLE) {
   const ok = services.copyText?.(label)
   widgetFlash.err = !ok
   widgetFlash.msg = ok
@@ -3202,7 +3191,7 @@ function copyHotkeyCmd(label = '显示/隐藏挂件') {
 }
 // 跳转 uTools「全局功能」并直接新增一条待绑定项（快捷键被删除后可用它重新添加）
 // 注意：每次点击都会新增一条，uTools 无「只跳转不新增」的接口
-function addHotkey(label = '显示/隐藏挂件') {
+function addHotkey(label: string = CMD_TOGGLE) {
   const ok = services.redirectHotKeySetting?.(label)
   widgetFlash.err = !ok
   widgetFlash.msg = ok
@@ -3227,8 +3216,11 @@ function doCheckUpdate(force: boolean) {
     })
     .finally(() => { updateChecking.value = false })
 }
-// 教程里的链接用系统浏览器打开，避免在插件窗口内导航
+// 教程里的链接用系统浏览器打开，避免在插件窗口内导航。
+// 协议白名单统一在宿主 openExternal 里做（那里是所有外链的唯一出口，覆盖面最大），
+// 前端这里只做「有没有地址」的判断
 function openDoc(url: string) {
+  if (!url) return
   services.openExternal?.(url)
 }
 
@@ -3336,7 +3328,8 @@ function applyConfig(c: any) {
   cfg.timerLongEvery = typeof c.timerLongEvery === 'number' && isFinite(c.timerLongEvery)
     ? Math.min(12, Math.max(2, Math.round(c.timerLongEvery)))
     : TIMER_LONG_EVERY_DEFAULT
-  cfg.timerAutoNext = c.timerAutoNext === true
+  // 到点衔接下一条待办：同理必须回填，否则保存后开关自己弹回去
+  cfg.todoAutoNext = c.todoAutoNext === true
   // 快捷时长四档：与宿主 normTimerPresets 同口径（固定 4 档、1–600 分钟、缺项补默认）。
   // 必须回填：TimerView 的四个输入框读的是这里，漏了会「改完重开又变回去」
   cfg.timerPresets = Array.isArray(c.timerPresets)
@@ -3347,18 +3340,17 @@ function applyConfig(c: any) {
         : Math.round(Math.min(600, Math.max(1, n)))
     })
     : TIMER_PRESETS_DEFAULT.slice()
-  // 专注记录 / 待办 / 每日目标（v1.13.0）：同样必须回填，否则 FocusView 的开关与目标输入框读不到已存值
-  cfg.focusOn = c.focusOn === true
+  // 待办与计时总开关（v1.13.0）：同样必须回填，否则 FocusView 的开关读不到已存值。
+  // 旧配置只有 focusOn 时宿主已在 readConfig 里兜底成 todoOn，这里只管取最终值。
+  // v1.16 起不再回填 focusGoal —— 设置页已无每日目标入口，回填一个无消费方的字段只会误导
   cfg.todoOn = c.todoOn === true
-  cfg.focusGoal = typeof c.focusGoal === 'number' && isFinite(c.focusGoal)
-    ? Math.min(99, Math.max(0, Math.round(c.focusGoal)))
-    : 0
   // 下班倒计时（v1.14.0）：九键同样必须回填，否则 OffworkView 的开关 / 时间 / 工作日 / 时薪在重开设置页后看着像没保存
   cfg.offworkOn = c.offworkOn === true
   cfg.offworkStart = normOffworkHm(c.offworkStart, OFFWORK_DEFAULTS.start)
   cfg.offworkEnd = normOffworkHm(c.offworkEnd, OFFWORK_DEFAULTS.end)
   cfg.offworkDays = normOffworkDays(c.offworkDays, OFFWORK_DEFAULTS.days)
   cfg.offworkShowSec = c.offworkShowSec !== false
+  cfg.offworkRing = c.offworkRing !== false
   cfg.offworkWeekendOn = c.offworkWeekendOn === true
   cfg.offworkPaydayOn = c.offworkPaydayOn === true
   cfg.offworkPaydayDay = normOffworkPayday(c.offworkPaydayDay)
@@ -3596,8 +3588,7 @@ onMounted(() => {
       secrets.apiKey = s.apiKey || ''
       secrets.platformToken = s.platformToken || ''
     }
-    // SMTP 凭据不在这里读：NotifyView 归「用量」Tab、默认 Tab 是「外观」，此刻它的 ref 还是 null，
-    // 父级调 loadMailSecrets() 是空转。改由 NotifyView 自己 onMounted 读（见该组件注释）
+    // SMTP 凭据不在这里读：它已下沉到 NotifyView 内的 MailSettings.vue 自己 onMounted 读
     widgetVisibleSync() // 见 widgetVisibleSync 注释：此刻挂件窗口可能还没被宿主创建，靠轮询校正
     checkWidgetError(true)
     appVersion.value = services.getVersion?.() || ''
@@ -3969,39 +3960,40 @@ onUnmounted(() => {
 
     <!-- [用量] 提醒与通知：四类自动提醒（峰谷切换 / 低余额 / 今日预算 / 余额大幅波动）+ 通知渠道 + 提醒文案。
          原先开关挤在「挂件行为」那张 106 行的卡里、文案挂在「外观 → 文案」卡里，调一类提醒要跳两个 Tab，
-         现在按「提醒」这个主题收成一张卡，文案作为卡内折叠。计时类配置已迁到下面的「计时」卡 -->
+         现在按「提醒」这个主题收成一张卡，文案作为卡内折叠。计时类配置已迁到下面的「计时」卡，
+         「到点怎么提示」（留言 / 系统通知 / 气泡停留 / 邮件）归本卡 —— 那是一类提醒，不是计时参数 -->
     <NotifyView v-if="cardOn('usage', 'notify')" ref="notifyViewRef"
                 :class="cardCls('notify')"
                 :cfg="cfg" :services="services" :usage-currency="usageCurrency"
                 :alert-sound-roles="ALERT_SOUND_ROLES" :sound-role-label="SOUND_ROLE_LABEL"
                 @patch="patchCfg" @save-alerts="onSaveAlerts" />
 
-    <!-- [用量] 专注与待办：今日/待办/统计/明细在前，计时默认值沉底。
+    <!-- [用量] 待办与计时：待办清单在前，计时默认值沉底。
          子块仍各自带 data-search，显示管理 / 搜索 / 置顶键不变 -->
     <section v-if="cardOn('usage', 'timer') || cardOn('usage', 'focus')"
              class="card focus-timer-card"
              :class="{ 'card-pinned': isPinned('timer') || isPinned('focus') }">
       <div class="card-head">
         <h2 class="card-toggle" @click="focusTimerFold.open = !focusTimerFold.open">
-          <span class="caret">{{ focusTimerFold.open ? '▾' : '▸' }}</span>{{ cardOn('usage', 'focus') ? '专注与待办' : '计时' }}
-          <span v-if="!focusTimerFold.open" class="card-sum">{{ cardOn('usage', 'focus') ? (cardOn('usage', 'timer') ? '今日专注 · 待办 · 计时设置' : '专注记录 · 待办 · 统计') : '默认时长 · 快捷 · 到点提醒' }}</span>
+          <span class="caret">{{ focusTimerFold.open ? '▾' : '▸' }}</span>{{ cardOn('usage', 'focus') ? '待办与计时' : '计时' }}
+          <span v-if="!focusTimerFold.open" class="card-sum">{{ cardOn('usage', 'focus') ? (cardOn('usage', 'timer') ? '待办清单 · 计时设置' : '待办清单') : '默认时长 · 快捷 · 休息与番茄' }}</span>
         </h2>
       </div>
       <template v-if="focusTimerFold.open">
-      <p v-if="cardOn('usage', 'focus')" class="hint">开启专注记录后，一轮计时会记成专注；待办可挂提醒或直接开始计时。</p>
+      <p v-if="cardOn('usage', 'focus')" class="hint">待办可直接开始计时，也可挂提醒；计时默认值在下方「计时设置」里调。</p>
       <FocusView v-if="cardOn('usage', 'focus')" class="card-embedded"
                  :cfg="cfg" :services="services" :is-ime-composing="isImeComposing"
                  :search-active="searchActive"
                  @patch="patchCfg" />
       <TimerView v-if="cardOn('usage', 'timer')" class="card-embedded"
-                 :cfg="cfg" :timer-note-max="TIMER_NOTE_MAX"
+                 :cfg="cfg"
                  :timer-presets-default="TIMER_PRESETS_DEFAULT"
                  :search-active="searchActive"
                  @patch="patchCfg" />
       </template>
     </section>
 
-    <!-- [用量] 下班倒计时：可开关的独立展示形态；关闭时挂件完全走原路径（余额 / 专注 / 计时不受影响） -->
+    <!-- [用量] 下班倒计时：占气泡首行（标题行），余额 / 今日已用照常；关闭时首行回到报时 / 余额（余额 / 专注 / 计时不受影响） -->
     <OffworkView
       v-if="cardOn('usage', 'offwork')"
       :class="cardCls('offwork')"
@@ -4070,7 +4062,7 @@ onUnmounted(() => {
         </h2>
       </div>
       <template v-if="dshMainFold.open">
-      <p class="hint">在挂件菜单「dsh」分组或本卡片里 启动 / 重启 / 结束 / 更新 dsh 并打开它的 Web UI（默认 <code>http://127.0.0.1:{{ DEFAULT_DSH_PORT }}</code>，可在下方「高级选项」里改端口）。<strong>优先用你已全局安装的那份</strong>（零重复占用、终端与插件同一版本），没有才装到插件数据目录。</p>
+      <p class="hint">在挂件菜单「dsh」分组或本卡里启动 / 重启 / 结束 / 更新 dsh 并打开 Web UI（默认 <code>http://127.0.0.1:{{ DEFAULT_DSH_PORT }}</code>，端口可在「高级选项」改）。优先用已全局安装的那份，没有才装到插件数据目录。</p>
 
       <label class="field row">
         <span class="label">状态</span>
@@ -4293,7 +4285,7 @@ onUnmounted(() => {
               @change="dshSetPort"
             />
           </label>
-          <p class="hint">3080 <template v-if="IS_WIN">落在 Windows/Hyper-V 的<strong>动态端口保留段</strong>里，被系统预留时</template><template v-else>若被其它程序占用</template> dsh 会直接 bind 失败（报 <code>EADDRINUSE</code>）。这里换成别的端口（如 4080）即可绕开；填非法值（0 / 超出 1–65535）会退回 3080。</p>
+          <p class="hint">3080 <template v-if="IS_WIN">落在 Windows/Hyper-V 的动态端口保留段，被预留时</template><template v-else>若被其它程序占用</template> dsh 会 bind 失败（<code>EADDRINUSE</code>）。换别的端口（如 4080）即可绕开；填非法值（0 / 超出 1–65535）退回 3080。</p>
           <label class="field row">
             <span class="label">npm 注册源</span>
             <select v-model="cfg.dshRegistry" @change="patchCfg({ dshRegistry: cfg.dshRegistry })">
@@ -5514,6 +5506,14 @@ onUnmounted(() => {
                   @click="dshMarketPreviewInstall(p)"
                 >{{ dshMarketPending === p.spec ? '处理中…' : (p.needsBuild ? '安装（需构建）' : '安装') }}</button>
                 <a v-if="p.page || p.url" class="link-btn utils-btn utils-secondary" href="#" @click.prevent="openDoc(p.page || p.url)">主页</a>
+                <!-- 目录没给主页时，用安装 spec 反推出的仓库地址兜底；主页指向的又恰好是同一个仓库时不再重复 -->
+                <a
+                  v-else-if="p.sourceWeb"
+                  class="link-btn utils-btn utils-secondary"
+                  href="#"
+                  :title="p.sourceWeb"
+                  @click.prevent="openDoc(p.sourceWeb)"
+                >源码</a>
               </div>
             </div>
           </div>
@@ -5771,30 +5771,20 @@ onUnmounted(() => {
       @patch="patchCfg"
     />
     <!-- 调试工具：不注册成卡片（否则会出现在「管理显示内容」与搜索结果里，违背「生产 UI 不出现」）。
-         只在「开发者」Tab、非搜索态渲染；入口本身还要 config.debugTools 打开才显示。
-         「立即触发提醒」是纯投递演练（不写幂等位）；「注入旧数据」会真写入并回推，用于回归。 -->
-    <section v-if="!searchActive && activeTab === 'dev'" class="card">
-      <h2 class="card-title">调试工具 <em>（默认关闭 · 仅回归测试用）</em></h2>
-      <label class="field row check">
-        <span class="label">启用调试工具 <em>（正常使用请保持关闭）</em></span>
-        <input type="checkbox" :checked="cfg.debugTools" @change="patchCfg({ debugTools: ($event.target as HTMLInputElement).checked })" />
-      </label>
-      <template v-if="cfg.debugTools">
-        <label class="field row">
-          <span class="label">立即触发指定提醒</span>
-          <select :value="debugTodoId" @change="debugTodoId = ($event.target as HTMLSelectElement).value">
-            <option value="">选择一条待办…</option>
-            <option v-for="it in debugTodos" :key="it.id" :value="it.id">{{ it.text }}</option>
-          </select>
-          <button class="btn" :disabled="!debugTodoId" @click="doDebugTodoDue">立即触发</button>
-        </label>
-        <label class="field row">
-          <span class="label">注入旧数据 <em>（remindedFor=0 的重复提醒 + focus/timer 双置顶 + 幽灵媒体项）</em></span>
-          <button class="btn" @click="doDebugInjectLegacy">注入</button>
-        </label>
-        <p class="hint">调试结果：{{ debugMsg || '（未执行）' }}。提醒演练不写幂等位；旧数据注入会真写入，可在「专注与待办」「管理显示内容」「背景与片头」里核对。</p>
-      </template>
-    </section>
+         只在「开发者」Tab、非搜索态、**且运行在 uTools 开发模式**下渲染；入口本身还要 config.debugTools 打开才显示。
+         三条只读自检各自一行、结论就地写在行内；「演练提醒」只投递不写幂等位，「注入旧数据」会真写入。 -->
+    <DevView
+      v-if="devMode && !searchActive && activeTab === 'dev'"
+      :services="services"
+      :debug-on="cfg.debugTools"
+      :row="dbg.row"
+      @toggled="patchCfg({ debugTools: $event })"
+      @focus-check="dbg.focusCheck()"
+      @todo-check="dbg.todoCheck()"
+      @timer-check="dbg.timerCheck()"
+      @todo-due="dbg.todoDue($event)"
+      @inject="dbg.injectLegacy()"
+    />
     </div>
 
     <!-- 导入裁剪弹层：宿主选完文件（还没落盘）才显示，确认后才写盘 -->

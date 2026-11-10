@@ -23,6 +23,7 @@ const DEFAULTS = Object.freeze({
   end: '18:00',
   days: Object.freeze([1, 2, 3, 4, 5]),
   showSec: true,
+  ring: true,
   weekendOn: false,
   paydayOn: false,
   paydayDay: 10,
@@ -76,6 +77,7 @@ function normCfg(raw) {
     end: normHm(pick('end', 'offworkEnd'), DEFAULTS.end),
     days: normDays(pick('days', 'offworkDays')),
     showSec: pick('showSec', 'offworkShowSec') !== false,
+    ring: pick('ring', 'offworkRing') !== false, // 外圈工时进度环：默认开，关掉后圈只归计时
     weekendOn: pick('weekendOn', 'offworkWeekendOn') === true,
     paydayOn: pick('paydayOn', 'offworkPaydayOn') === true,
     paydayDay: normPayday(pick('paydayDay', 'offworkPaydayDay')),
@@ -241,13 +243,19 @@ function weekendInfo(now) {
   if (dow === 6 || dow === 0) return '周末进行中'
   const delta = (6 - dow + 7) % 7 || 7
   const sat = new Date(now.getFullYear(), now.getMonth(), now.getDate() + delta, 0, 0, 0, 0)
-  return '距周末 ' + fmtSpan(sat.getTime() - now.getTime())
+  return spanInfo('周末', sat.getTime() - now.getTime())
+}
+
+// 「距周末」与「距发薪」共用：数值里已经带「距」了就不再重复（「周末 2天3小时」比「距周末 2天3小时」
+// 少两字，说明行本来就只有两行宽）；当天用「就是今天」，说「发薪 就是今天」也成立（用户 2026-11-09 要求简洁明了）
+function spanInfo(what, ms, today) {
+  return what + ' ' + (today ? '就是今天' : fmtSpan(ms))
 }
 
 function paydayInfo(now, day) {
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
   const thisTarget = new Date(now.getFullYear(), now.getMonth(), Math.min(day, new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate()))
-  if (sameDay(today, thisTarget)) return '今天发薪'
+  if (sameDay(today, thisTarget)) return '发薪 就是今天'
   let target = thisTarget
   if (thisTarget.getTime() < today.getTime()) {
     const ny = now.getMonth() === 11 ? now.getFullYear() + 1 : now.getFullYear()
@@ -255,7 +263,7 @@ function paydayInfo(now, day) {
     const last = new Date(ny, nm + 1, 0).getDate()
     target = new Date(ny, nm, Math.min(day, last))
   }
-  return '距发薪 ' + fmtSpan(target.getTime() - now.getTime())
+  return spanInfo('发薪', target.getTime() - now.getTime())
 }
 
 /*
@@ -292,11 +300,13 @@ function display(nowMs, raw) {
   const remain = Math.max(0, target.getTime() - now.getTime())
   let label = ''
   let hint = ''
+  // 标签只写「上班 / 下班」两个字：标题行是「下班 02:15:30 · 18:00」，
+  // 前面的数字本身就是倒计时，「距离」二字只是每个字都在挤标题行的宽度（用户 2026-11-09 要求简洁明了）
   if (phase === 'before') {
-    label = '距离上班'
+    label = '上班'
     hint = cfg.start + ' 上班'
   } else if (phase === 'work') {
-    label = '距离下班'
+    label = '下班'
     // 「次日」按实际下班日期判（凌晨仍在昨天的跨日班上时，下班其实是今天，不是次日）
     hint = (sameDay(target, now) ? '' : '次日 ') + cfg.end + ' 下班'
   } else if (phase === 'after') {

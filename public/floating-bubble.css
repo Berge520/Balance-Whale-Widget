@@ -122,28 +122,51 @@
        不预留的话文本变化时三行会整体上下跳 */
     min-height: calc(var(--dshw-u) * 74);
     line-height: 1.15;
+    /* 说明行比同块其它行窄时（见下面的 offwork 收窄）必须自己居中：
+       文本块宽度由最长的那行（标题行 660u）撑开，块级子项默认贴左，
+       会整体左移出椭圆的中轴（实测偏 70u，两行时左端越界） */
+    margin-left: auto;
+    margin-right: auto;
   }
   .dshwv-amount.dshwv-low { color: #e0433f; }
-  /* 金额可点（切遮蔽）时单独放开命中：其余场景维持父级的 pointer-events: none，
-     让点击穿透到气泡的「推进 / 收起」逻辑，不抢语义 */
-  .dshwv-amount.dshwv-maskable { pointer-events: auto; cursor: pointer; }
-  /* 「今日已过」细进度条：绝对定位在文字块下方，不占三行的高度 */
+  /* 两行说明行：椭圆在两行文字底边处的可用总宽只有约 520u（比 FIT_W 的 660u 窄得多），
+     fitText 只认 660×430 的矩形、不认椭圆收窄，所以这里用类把宽度收住（行内 max-width 会被
+     fitBlock 复位，必须走 CSS）。配合 fitOffworkHint 的整项丢弃，保证全部文字落在内壁内。
+     颜色：hint 色在浅底气泡上对比度过低（用户 2026-11-10 反馈看不清），倒计时页改用正文色 + .82
+     透明度 —— 仍弱于标题行，但可读 */
+  .dshwv-hint.dshwv-hint-offwork { max-width: calc(var(--dshw-u) * 520); color: var(--dshwv-text, #536ba9); opacity: .82; }
+  /* 说明行硬兜底：正常由 fitOffworkHint 按高度整项丢弃附加项（见 floating-page.js），
+     这里只在数值进位等边界把行数钳死两行 —— 三行会把文字顶出椭圆内壁 */
+  .dshwv-hint.dshwv-hint-clamp {
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    overflow: hidden;
+  }
+  /* 「今日已过」细进度条：绝对定位在文字块下方，不占三行的高度。
+     top 用 100%（贴文字块下沿，不再 +12u）、宽度从 430u 收到 260u：
+     说明行两行时文字块整体变高，椭圆在条子两端的高度处只剩约 440 SVG 的收口，
+     条子连同右侧百分比会越过内壁（实测 +25u）。收到 260u 后两端落在内壁内 10u */
   .dshwv-offwork-progress {
     position: absolute;
     left: 50%;
-    top: calc(100% + var(--dshw-u) * 12);
+    top: 100%;
     transform: translateX(-50%);
     display: flex;
     align-items: center;
-    gap: calc(var(--dshw-u) * 12);
-    width: calc(var(--dshw-u) * 430);
+    gap: calc(var(--dshw-u) * 16);
+    /* 整组宽度 236u = 条子 150u + 间距 16u + 百分比约 62u（6%）~70u（18%）。
+       上一版整组只有 200u，条子被压到约 122u，配上 8u 细高和 .22 透明度只剩一根几乎看不见的灰线
+       （用户 2026-11-10 反馈「看不清」）：条子收短 50u，把宽度让给粗细与对比度 */
+    width: calc(var(--dshw-u) * 236);
     max-width: 72%;
     pointer-events: none;
   }
   .dshwv-offwork-progress > i {
     position: relative;
     flex: 1 1 auto;
-    height: calc(var(--dshw-u) * 8);
+    /* 条子加粗到 12u（原 8u）：挂件缩到小尺寸时低于 1px 就糊成一条线 */
+    height: calc(var(--dshw-u) * 12);
     border-radius: calc(var(--dshw-u) * 99);
     overflow: hidden;
   }
@@ -154,7 +177,8 @@
     inset: 0;
     border-radius: inherit;
     background: var(--dshwv-text, #536ba9);
-    opacity: .22;
+    /* 底槽 .3（原 .22）：浅底主题（蓝白 / 樱粉）上 .22 几乎与气泡底色同色，看不出条子在哪 */
+    opacity: .3;
   }
   .dshwv-offwork-progress > i > b {
     position: relative;
@@ -168,27 +192,15 @@
   }
   .dshwv-offwork-pct {
     flex: 0 0 auto;
-    font-size: calc(var(--dshw-u) * 36);
+    /* 42u（原 36u）：原来比说明行（72u）小一半，挂到小尺寸只剩 4~5px，读不出来 */
+    font-size: calc(var(--dshw-u) * 42);
+    font-weight: 600;
     line-height: 1;
-    color: var(--dshwv-hint, #9fb0d9);
+    /* 正文色（原 hint 色）：hint 色在浅底上对比度太低，百分比是数据不是附注 */
+    color: var(--dshwv-text, #536ba9);
     font-variant-numeric: tabular-nums;
-    min-width: calc(var(--dshw-u) * 64);
-    text-align: right;
-  }
-  /* 「今日已赚」：排在进度条下一行（top 54u ≈ 进度条 12u 偏移 + 36u 行高 + 6u 间距）。
-     绝对定位，不参与三行测高，窗口窄时也不会把倒计时挤成换行。
-     仅配置了时薪且倒计时可见时由 JS 显示；未配置 / 休息日 / 跨日班整项 display:none。 */
-  .dshwv-offwork-earned {
-    position: absolute;
-    left: 50%;
-    top: calc(100% + var(--dshw-u) * 54);
-    transform: translateX(-50%);
-    font-size: calc(var(--dshw-u) * 32);
-    line-height: 1;
-    color: var(--dshwv-hint, #9fb0d9);
-    white-space: nowrap;
-    pointer-events: none;
-    font-variant-numeric: tabular-nums;
+    /* 进度 + 百分比整组居中（条子已收在 150u，整组 236u） */
+    margin: 0 auto;
   }
   .dshwv-hint.dshwv-low { color: #e0433f; }
   /* 余额变动动效：下降闪红+微抖，上升闪绿+微弹。动画结束后由 JS 移除类名。
@@ -276,18 +288,17 @@
   .dshwv-rgb-blaze,     .dshwv-bgrgb-blaze     { background-image: linear-gradient(90deg,#ff512f,#dd2476,#ff512f); }
   .dshwv-rgb-amber,     .dshwv-bgrgb-amber     { background-image: linear-gradient(90deg,#f7971e,#ffd200,#f7971e); }
 
-  /* 下班倒计时：沿用主体字号，只给数字加一点字距；最后 30 / 10 分钟轻微变色 / 呼吸，
-     不弹窗、不响铃。root 上的 dshwv-offwork 类由浮动页的 offwork 开关控制，
-     near 两个类只会在倒计时接管「常规三行」时存在（切到计时/提醒/自定义泡泡会摘掉） */
-  .dshwv-root.dshwv-offwork .dshwv-amount { letter-spacing: .02em; }
-  .dshwv-root.dshwv-offwork-soon .dshwv-amount { color: #d9821a; }
-  .dshwv-root.dshwv-offwork-imminent .dshwv-amount {
+  /* 下班倒计时：最后 30 / 10 分钟只给它自己那一页的标题行轻微变色 / 呼吸，不弹窗、不响铃。
+     near 两个类只会在倒计时页可渲染时存在（切到计时 / 提醒 / 自定义泡泡会摘掉，
+     否则颜色会带到那些内容的标题行上）。倒计时只在自己的页出现，第一页是步骤页、不渲染三行 */
+  .dshwv-root.dshwv-offwork-soon .dshwv-label { color: #d9821a; }
+  .dshwv-root.dshwv-offwork-imminent .dshwv-label {
     color: #d9821a;
     animation: dshwv-offwork-pulse 1.8s ease-in-out infinite;
   }
-  @keyframes dshwv-offwork-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .62; } }
+  @keyframes dshwv-offwork-pulse { 0%, 100% { opacity: 1; } 50% { opacity: .8; } }
   @media (prefers-reduced-motion: reduce) {
-    .dshwv-root.dshwv-offwork-imminent .dshwv-amount { animation: none; }
+    .dshwv-root.dshwv-offwork-imminent .dshwv-label { animation: none; }
   }
 
   /* 系统「减少动态效果」：气泡展开 / 收起的淡入缩放与余额变动的抖 / 弹都属于装饰，
@@ -305,3 +316,4 @@
     .dshwv-amount.dshwv-flash-down,
     .dshwv-amount.dshwv-flash-up { animation: none; }
   }
+

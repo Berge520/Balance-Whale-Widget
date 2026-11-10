@@ -96,7 +96,7 @@ function toggleDay(d: number) {
         <input type="checkbox" :checked="cfg.offworkOn" @change="onCheck('offworkOn', $event)" />
       </label>
       <p class="hint">
-        开启后挂件主体改为「距离下班 hh:mm:ss」，余额、专注与计时不受影响；点小鲸鱼仍可查看余额。关闭后与现在完全一致。
+        开启后气泡队列末尾多一张「倒计时页」，首行显示「距离下班 08:12:34 · 09:00–18:00」（下班后 / 未上班换成「距上班」等措辞），其余内容照常。第一张永远是步骤页，不与「小鲸鱼报时」冲突；关闭后与未开启完全一致。
       </p>
 
       <div class="field row">
@@ -141,13 +141,18 @@ function toggleDay(d: number) {
         />
       </div>
       <p class="hint">
-        按「时薪 × 今日已工作小时数」简单估算挂件上的「今日已赚」，只在工作日的上班时段递增、下班后按整段封顶；这不是真实工资，不做月薪折算、个税、社保等扣除。留空则不显示这一项。
+        按「时薪 × 今日已工作小时」估算挂件上的「今日已赚」（需开启下班倒计时），只在工作日上班时段递增、下班后封顶。不是真实工资，不含月薪折算与个税社保；留空则不显示。
       </p>
       <p v-if="wageFlash.msg" class="msg" :class="msgCls(wageFlash)">{{ wageFlash.msg }}</p>
 
       <label class="field row check">
         <span class="label">显示秒 <em>（关闭后只显示 hh:mm）</em></span>
         <input type="checkbox" :checked="cfg.offworkShowSec" @change="onCheck('offworkShowSec', $event)" />
+      </label>
+
+      <label class="field row check">
+        <span class="label">挂件外圈进度圈 <em>（关掉后外圈只给计时用，工时进度改看倒计时页里的细进度条）</em></span>
+        <input type="checkbox" :checked="cfg.offworkRing" @change="onCheck('offworkRing', $event)" />
       </label>
 
       <label class="field row check">
@@ -166,7 +171,7 @@ function toggleDay(d: number) {
       </label>
 
       <p class="hint">
-        附加倒计时接在倒计时下方的说明行，用「·」分隔；最后 30 分钟与 10 分钟会轻微变色提醒，不弹窗、不响铃。
+        附加项接在倒计时页「今日已用 ¥x」之后，用「·」分隔；只占两行，放不下按「距周末 → 距发薪 → 今日已赚」丢整项。临近下班（最后 30 / 10 分钟）标题行会轻变颜色，不弹窗、不响铃。
       </p>
     </template>
   </section>

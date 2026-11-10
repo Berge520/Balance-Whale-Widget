@@ -3,6 +3,8 @@ import { ref, watch } from 'vue'
 import { msgCls, type Flash } from '../composables/useFlash'
 import { useFold } from '../composables/useFold'
 import { useHotkey } from '../composables/useHotkey'
+// 指令名唯一副本：全局快捷键绑的是 plugin.json 的 cmds 文本，构建期交叉校验
+import { CMD_PASSTHROUGH } from '../constants/commands'
 import type { WhaleServices } from '../types/services'
 
 // 整卡折叠：窗口行为高频但内容多，默认展开；收起态摘要提示包含哪些项
@@ -42,7 +44,7 @@ const emit = defineEmits<{
 // 统一的消息态（Flash）：定义收口在 composables/useFlash.ts，各卡不再各持一份。
 
 // 「切换鼠标穿透」当前绑定的全局快捷键（uTools 8.0 的 getCmdHotKey；旧版本回空串）
-const { hotkey: passHotkey } = useHotkey(props.services, '切换鼠标穿透')
+const { hotkey: passHotkey } = useHotkey(props.services, CMD_PASSTHROUGH)
 
 // 吸附区宽度（可用区宽/高的百分比）上下限，同宿主 store.js 的 SNAP_RATIO_*
 const SNAP_RATIO_MIN = 1
@@ -103,7 +105,7 @@ function onOpacityCommit() {
         <option value="settings">只显示设置窗口</option>
       </select>
     </label>
-    <p class="hint">分离后的设置窗想收起就点最小化（插件和挂件都不受影响）；按 Esc、点窗口外收不起（点窗外只是失焦，窗口仍在）；点右上角 X、Alt+F4 或从任务栏关闭会结束插件，挂件也会一起关。</p>
+    <p class="hint">分离后点最小化即收起设置窗（插件与挂件照常运行）；Esc 和点窗口外收不起。点右上角 X、Alt+F4 或从任务栏关闭会退出插件，挂件一起关。</p>
     <div class="btn-row">
       <button class="utils-btn utils-primary" @click="emit('show-widget')">显示挂件</button>
       <button class="secondary utils-btn utils-secondary" @click="emit('hide-widget')">隐藏挂件</button>
@@ -133,14 +135,14 @@ function onOpacityCommit() {
       <input type="checkbox" :checked="cfg.passThrough" @change="onCheckChange('passThrough', $event)" />
     </label>
     <p class="hint">
-      关闭时（默认）：鼠标移到鲸鱼、气泡或菜单上就能直接操作，移开即恢复穿透——挂件四周的透明留白始终不挡下层应用。开启后：连鲸鱼本体也要先停留约 1 秒才接管。
+      关闭时（默认）：鼠标移到鲸鱼、气泡或菜单上就能操作，移开即恢复穿透，四周透明留白也不挡下层应用。开启后：连鲸鱼本体也要停留约 1 秒才接管。
     </p>
     <p class="hint">
-      穿透开启后挂件自身菜单也点不到，建议先绑定全局快捷键作为「逃生通道」：uTools 设置 → 全局功能 → 新增 → 指令填「切换鼠标穿透」→ 按下组合键。也可在鲸鱼上停留约 1 秒临时接管后再关。
+      开启后连菜单都点不到，建议先绑个全局快捷键当「逃生通道」：uTools 设置 → 全局功能 → 新增 → 指令填「{{ CMD_PASSTHROUGH }}」→ 按组合键。也可在鲸鱼上停留约 1 秒临时接管。
     </p>
     <div class="btn-row">
-      <button class="secondary utils-btn utils-secondary" @click="emit('copy-cmd', '切换鼠标穿透')">复制「穿透」指令名</button>
-      <button class="secondary utils-btn utils-secondary" @click="emit('add-hotkey', '切换鼠标穿透')">新增「穿透」快捷键</button>
+      <button class="secondary utils-btn utils-secondary" @click="emit('copy-cmd', CMD_PASSTHROUGH)">复制「穿透」指令名</button>
+      <button class="secondary utils-btn utils-secondary" @click="emit('add-hotkey', CMD_PASSTHROUGH)">新增「穿透」快捷键</button>
     </div>
     <p class="hint">
       当前绑定：<strong>{{ passHotkey || '未检测到' }}</strong>
@@ -170,7 +172,7 @@ function onOpacityCommit() {
         <em>左</em><input class="num" type="number" min="0" max="400" step="4" :value="cfg.edgeLeft" @change="onNumChange('edgeLeft', $event)" />
       </span>
     </label>
-    <p class="hint">贴边间距：挂件贴到该边时留出的像素数（0＝紧贴）。开了「自动避让任务栏」时，任务栏占位的那条边会自动让位；任务栏收起后又回到这里设定的贴边位置。</p>
+    <p class="hint">贴边间距：挂件贴到该边时留出的像素数（0＝紧贴）。开了「自动避让任务栏」时，任务栏占位的那条边会自动让位，收起后再贴回这里设定的距离。</p>
 
     <label class="field row">
       <span class="label">吸附与翻转</span>
@@ -185,8 +187,7 @@ function onOpacityCommit() {
       <span class="num-text">%</span>
     </label>
     <p class="hint">
-      吸附：拖拽松手时，挂件中心落进某条边的吸附区就贴到那条边（吸附区宽度按可用区宽/高算，默认 25%＝左右各 1/4、上下各 1/4）。
-      关掉吸附后松手停在哪就是哪，不再自动贴边。
+      吸附：拖拽松手时，挂件中心落进某条边的吸附区就贴到那条边（吸附区宽度按可用区宽 / 高算，默认 25%＝左右各 1/4、上下各 1/4）；关掉后松手停在哪就是哪。
     </p>
     <p class="hint">
       朝向不用配：锚在屏幕左半边就朝右、右半边就朝左，鲸鱼始终面向屏幕内侧（关掉吸附也一样）。

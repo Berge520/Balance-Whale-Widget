@@ -465,17 +465,41 @@ function registerIpc() {
     notifyTimer(text, readConfig(), data && data.channels)
   })
 
-  // 待办轻操作：挂件页只有「勾选完成 / 设为当前专注 / 取消专注」三种（编辑一律在设置页做）。
+  // 待办轻操作：挂件页能做的操作分两档 ——
+  // 轻操作（勾选 / 设为专注 / 取消专注 / 新增 / 清已完成）在这里就地改；
+  // 编辑类（改名 / 删除 / 到点提醒）转交 services 的同名方法，与设置页走同一条实现：
+  // 删除要留 undo 快照、改提醒要重置两套幂等位，这些语义只该有一份，路由层不复制。
   // 与 whale:todo 的下行推送同名不同向：这里是子→父，父处理完再 pushTodo 回推权威状态。
   // 操作被拒（条目已不存在 / 清单已满 / 写失败）时也要回推一次：挂件已经按乐观状态重画，
   // 静默 return 会让它停在错误状态上，直到下一次无关操作把它顶掉。
+  const TODO_OPS = ['add', 'clearDone', 'toggle', 'focus', 'unfocus', 'rename', 'remove', 'due', 'est', 'move']
+  // 走 services 的编辑类操作：返回值由 services 自己写库并 pushTodo / emitTodoChange，
+  // 这里只把成败回给页面（页面用它决定是否弹回编辑态）
+  const TODO_VIA_SERVICES = { rename: 'todoRename', remove: 'todoRemove', due: 'todoSetDue', est: 'todoSetEst', move: 'todoMove' }
+  // 编辑类操作在函数体内惰性 require（与 emitConfigChange 同款理由）：
+  // 只有用户真的在挂件里改名 / 删除 / 设提醒时才把 services 拉进来
+  function todoService() { return require('./settings') }
   ipcRenderer.on('whale:todo', (event, data) => {
     const op = String((data && data.op) || '')
     const id = String((data && data.id) || '')
     const resync = () => { pushTodo(); emitTodoChange() }
-    if (op !== 'add' && op !== 'clearDone' && op !== 'toggle' && op !== 'focus' && op !== 'unfocus') return
+    if (TODO_OPS.indexOf(op) < 0) return
     // add / clearDone 不需要 id，其余操作必须有
     if (op !== 'add' && op !== 'clearDone' && !id) { resync(); return }
+    if (TODO_VIA_SERVICES[op]) {
+      let res = { ok: false }
+      try {
+        if (op === 'rename') res = todoService().todoRename(id, data && data.text)
+        else if (op === 'remove') res = todoService().todoRemove(id)
+        else if (op === 'est') res = todoService().todoSetEst(id, data && data.est)
+        else if (op === 'move') res = todoService().todoMove(id, data && data.beforeId)
+        else res = todoService().todoSetDue(id, data && data.remind)
+      } catch (err) {
+        logErr('[whale][todo] 挂件编辑待办失败', op, err && err.message)
+      }
+      if (!res || !res.ok) resync()
+      return
+    }
     const st = readTodo()
     if (op === 'add') {
       const text = String((data && data.text) || '').replace(/\s+/g, ' ').trim().slice(0, TODO_TEXT_MAX)
@@ -583,6 +607,16 @@ function registerIpc() {
     }
     emitFocusChange()
     pushFocusStats()
+    // 回推「刚落的那一条」：挂件菜单里的「最近计时」直接把它插到列表头，
+    // 不必为了看刚结束的一段去拉整份历史。只发一条归一后的会话（形状见 focus.normSession），
+    // 发送失败不影响记账 —— 统计与明细已经是落库的事实。
+    // 取裁剪后的末条：normSessions 已按结束时刻升序排过，末条就是最新的一条
+    const kept = next.sessions
+    if (kept.length) {
+      try { sendToWidget('whale:focus-session', kept[kept.length - 1]) } catch (err) {
+        logErr('[whale][ipc] 推送最近计时失败', err && err.message)
+      }
+    }
   })
 
   // 悬浮页把自身错误转交宿主落盘：页面侧的 logErr 只能打 console，

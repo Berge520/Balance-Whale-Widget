@@ -51,6 +51,22 @@
 | ~~D3~~ | [floating-page.js](file:///e:/Github/AI/Balance-Whale-Widget/public/floating-page.js) `hoverAt` / [ipc.js](file:///e:/Github/AI/Balance-Whale-Widget/public/preload/lib/ipc.js) `whale:probe-cursor` | ~~指针本来就停在鲸鱼上时（页面刚重建 / 挂件刚被拖到光标下），第一下点击会被穿透到下层应用~~ **已修**：窗口平时 `ignoreMouse`，悬停全靠 `pointermove` 建立，指针静止就没有 move 事件。页面启动 350ms 后发 `whale:probe-cursor`，宿主用 `utools.getCursorScreenPoint() − getBounds()` 回 `whale:cursor`，页面调 `hoverAt()` 补一次命中测试 |
 | ~~D1~~ | [bubble-edit.js](file:///e:/Github/Balance-Whale-Widget/src/bubble/bubble-edit.js) `newLibId` | ~~随机后缀只有 4 位 base36（约 1.7M 组合），`bubble-editor.test.mjs` 连生成 200 个 id 时生日碰撞约 1.1%，偶发失败会被误读成「本次改动弄坏了」~~ **已修**：后缀改 10 位（`slice(2, 12)`），同毫秒碰撞概率约 1e-9；`store.js#normBubbleLib` 的补号后缀同步 10 位，两处同长 |
 
+### 12.3.1 v1.17 / v1.18 待办与计时的防回退结论
+
+| 位置 | 结论（不要回退） |
+|---|---|
+| [ipc.js](file:///e:/Github/AI/Balance-Whale-Widget/public/preload/lib/ipc.js) `whale:todo` | 编辑类 op（`rename` / `remove` / `due` / `est` / `move`）**必须经 `TODO_VIA_SERVICES` 委托 `services`**，不在路由层重写业务语义 —— 删除要留 undo 快照、改提醒要重置两套幂等位，复制一份就一定会漂移。`test/todo-ops.test.mjs` 钉住「允许列表 = `TODO_OPS` 常量」与这条委托 |
+| [floating-todo-edit.js](file:///e:/Github/AI/Balance-Whale-Widget/public/floating-todo-edit.js) `REMIND_KINDS` | kind 合法值必须与 `reminders.normKind` 同名：`once / daily / **weekdays** / weekly`。写成 `workday` 会被宿主静默归一成 `once` —— 用户选「工作日」，实际变成一次性提醒，且没有任何报错 |
+| [floating-todo-edit.js](file:///e:/Github/AI/Balance-Whale-Widget/public/floating-todo-edit.js) `convertRemindAt` | `once` 的 `remindAt` 是**绝对 ms**，其余形态是**当天分钟数**。切换形态时必须就地换算，否则「每天 09:00」会变成 1970-01-01 的某个分钟数 |
+| [floating-page.js](file:///e:/Github/AI/Balance-Whale-Widget/public/floating-page.js) 自动衔接 | 「到点自动接下一条」**必须受 `todoAutoNext` 门控（默认 false）**，且有 5 秒等待期 + 可见的「取消衔接」。v1.15 删掉的 `timerAutoNext` 根因就是无条件生效；`AUTO_NEXT_DELAY_MS` 从 1500ms 提到 5000ms 是因为 1.5 秒既读不完那句提示、也来不及点取消 |
+| [floating-todo-edit.js](file:///e:/Github/AI/Balance-Whale-Widget/public/floating-todo-edit.js) `row` 进度点 | `est` clamp 到 99，**点数必须压到 8 个以内**（`Math.min(it.est, 8)`，第 8 个点代表「8 轮及以后」；精确数字放 `title`「已完成 x / 预估 y 轮」）。按 `est` 原样画 99 个点会把整行撑爆、待办文字被挤到看不见。v1.17 起渲染实体已从 `floating-page.js` 迁到 `floating-todo-edit.js` |
+| [floating-todo-edit.js](file:///e:/Github/AI/Balance-Whale-Widget/public/floating-todo-edit.js) `dragHandle` | **只有 `⠿` 手柄带 `draggable`，行本身不能设** —— 整行可拖会让「按下即进入拖拽」，勾选框 / 「开始」按钮的 click 被吞；且 pointer 方案在置顶浮层移出屏幕后收不到 `pointerup`，行会永久卡在拖拽态（`dragend` 由 Chromium 保证触发）。`test/todo-ops.test.mjs` 钉住「`el.draggable = true` 不得出现」 |
+| [settings.js](file:///e:/Github/AI/Balance-Whale-Widget/public/preload/lib/settings.js) `todoMove` | **先 `splice` 摘出、再找 `beforeId` 下标**。先找再摘会让「往后挪」（目标原本在被摘条之后）停错一格 —— 下标已左移一位。只调数组顺序、不动任何条目字段（已完成的条目也保持原位，挂件渲染只筛未完成的）。`test/todo-undo.test.mjs` 覆盖往前 / 往后 / 挪到末尾三种 |
+| [floating-todo-edit.js](file:///e:/Github/AI/Balance-Whale-Widget/public/floating-todo-edit.js) `dragover` 委托 | 指针在**自身行 / 已完成灰行 / 清单空白**上时必须先 `clearDropMarks()` 再 return —— 只 return 会让上一次划过的行留着高亮，松手按旧落点排序（用户明明已经移开了）。同一行同半边不重设 class（`dragover` 每几十毫秒一次，反复 remove/add 会让高亮闪）。`dragend` 里**先读落点、再清标记**，顺序反了永远读不到 target |
+| [floating-page.js](file:///e:/Github/AI/Balance-Whale-Widget/public/floating-page.js) `renderTodoMenu` | 容器级 `dragover` 监听只在清单容器上挂**一次**（`WhaleTodoEdit.bindDrag()`）—— 行是每次重画出来的，挂到行上会随重画重复叠加 |
+| [floating-page.js](file:///e:/Github/AI/Balance-Whale-Widget/public/floating-page.js) `rowTimerHistory` | 「最近计时」**必须在 `rowTimerConfirm` 之前 append**：放弃确认问的是「要不要放弃这一轮」，被别的行隔开就看不出在问谁（`test/focus-todo-hub.test.mjs` 的组顺序断言与相邻断言两处钉住）。数据只来自 `whale:focus-session` 单条回推，**不另建历史存储** —— 计时状态机只有一条，另起一本账会让同一件事有两本；时间格式复用页面已有的 `fmtHm`，别再造一个 |
+| [ipc.js](file:///e:/Github/AI/Balance-Whale-Widget/public/preload/lib/ipc.js) `whale:focus-session` | 回推取**裁剪后的末条**（`normSessions` 已按结束时刻升序排过），发送失败只 `logErr` 不影响记账。`floating.js` 的 `handlers` 表必须有 `focusSession: []` —— 漏了 `on()` 会静默丢弃，页面表现为「最近计时永远空白」且无任何报错 |
+
 ### 12.4 待修（未处理）
 
 | # | 位置 | 问题 | 处置建议 |

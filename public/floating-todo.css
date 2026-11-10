@@ -1,0 +1,128 @@
+/* public/floating-todo.css
+   待办行的「预估进度点」、&laquo;…&raquo; 编辑入口与行内编辑器（改名 / 提醒 / 删除）。
+   从 floating.css 抽出，免得那块继续撑大后者的行数棘轮（scripts/check-file-size.mjs）。
+   只在 public/floating.html 里紧跟 floating-bubble.css 之后加载；不含 position/z-index，
+   不参与 scripts/check-z-layers.mjs 的层级闸门。 */
+
+/* —— 预估进度点（est 轮，rounds 个填实）——不写数字：8 个点在 40u 上下不会挤窄文字，
+   超过 8 轮时第 8 点代表「8 轮及以后」，真实数字在 title 里 */
+.dshwv-todo-dots { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 2px; }
+.dshwv-todo-dots > i {
+  width: 4px; height: 4px; border-radius: 50%;
+  background: rgba(47,87,214,.2);
+}
+.dshwv-todo-dots > i.on { background: #2f57d6; }
+
+/* —— 「…」编辑入口：与「专注」按钮同档但更小更淡（次要操作别抢视线），命中区靠 padding 撑到 18px */
+.dshwv-todo-more {
+  flex: 0 0 auto; padding: 1px 6px;
+  border: 1px solid transparent; border-radius: 999px;
+  background: transparent; color: #7a87ad;
+  font-size: 12px; font-family: inherit; line-height: 1.2; cursor: pointer;
+  transition: background .15s ease, color .15s ease, border-color .15s ease;
+}
+.dshwv-todo-more:hover { background: rgba(47,87,214,.1); border-color: rgba(47,87,214,.25); color: #2f57d6; }
+/* 展开态：实底表示「下面那块编辑器属于这一行」 */
+.dshwv-todo-more.dshwv-todo-more-on { background: rgba(47,87,214,.14); border-color: rgba(47,87,214,.4); color: #2f57d6; }
+
+/* —— 行内编辑器：整行插在待办行之后（不是 todo-row 的子元素），浅底 + 左引导线表示「挂在上一行下面」 */
+.dshwv-todo-edit {
+  margin: 2px 0 6px; padding: 6px 8px;
+  border-left: 2px solid rgba(47,87,214,.35);
+  border-radius: 0 8px 8px 0;
+  background: rgba(47,87,214,.05);
+  display: flex; flex-direction: column; gap: 4px;
+}
+.dshwv-todo-edit-row { display: flex; align-items: center; gap: 6px; }
+/* 改名输入框沿用快速添加框的皮（同一处输入，长相不该有两套），只去掉 flex:1 的挤压 */
+.dshwv-todo-edit-name { height: 24px; font-size: 12px; }
+.dshwv-todo-edit-sel {
+  flex: 0 0 auto; height: 24px; padding: 0 4px;
+  border: 1px solid rgba(47,87,214,.2); border-radius: 6px;
+  background: rgba(255,255,255,.8); color: #2b3a6b;
+  font-size: 11px; font-family: inherit; outline: none;
+}
+/* datetime-local / time：深色下原生控件底色不跟主题，靠 color-scheme 交给系统 */
+.dshwv-todo-edit-when {
+  flex: 1; min-width: 0; height: 24px; padding: 0 4px;
+  border: 1px solid rgba(47,87,214,.2); border-radius: 6px;
+  background: rgba(255,255,255,.8); color: #2b3a6b;
+  font-size: 11px; font-family: inherit; outline: none;
+  color-scheme: light;
+}
+.dshwv-todo-remind { display: flex; flex-direction: column; gap: 4px; }
+.dshwv-todo-remind-on {
+  display: inline-flex; align-items: center;
+  color: #2b3a6b; font-size: 11px; cursor: pointer; user-select: none;
+}
+.dshwv-todo-remind-on input { width: 12px; height: 12px; margin: 0 2px 0 0; accent-color: #2f57d6; }
+/* 删除：红色文字按钮（不做实心红块，编辑器里一进来就摆红大块会让人不敢点别处） */
+.dshwv-todo-edit-del { align-self: flex-start; color: #e0433f; border-color: rgba(224,67,63,.3); background: rgba(224,67,63,.06); }
+.dshwv-todo-edit-del:hover { background: rgba(224,67,63,.16); border-color: rgba(224,67,63,.55); }
+.dshwv-todo-edit-off { align-self: flex-start; }
+/* 预估轮数：数字框窄到刚放得下两位数 + 上下步进箭头；「已做 N 轮」弱色右对齐，不抢输入 */
+.dshwv-todo-edit-label { flex: 0 0 auto; color: #5b6ba1; font-size: 11px; }
+.dshwv-todo-edit-num {
+  flex: 0 0 auto; width: 44px; height: 24px; padding: 0 4px;
+  border: 1px solid rgba(47,87,214,.2); border-radius: 6px;
+  background: rgba(255,255,255,.8); color: #2b3a6b;
+  font-size: 11px; font-family: inherit; outline: none;
+  font-variant-numeric: tabular-nums;
+}
+.dshwv-todo-edit-hint { flex: 1; min-width: 0; text-align: right; color: #8a95b5; font-size: 10px; }
+
+/* —— 拖拽排序：手柄常驻淡色（不藏起来，否则用户不知道能拖），行拖动中半透，
+   落点用上下两条实线提示「会插到这里」而不是整块高亮（整块高亮和 hover 太像） */
+.dshwv-todo-drag {
+  flex: 0 0 auto; padding: 0 2px;
+  color: #b6c0d8; font-size: 11px; line-height: 1;
+  cursor: grab; user-select: none; -webkit-user-drag: element;
+}
+.dshwv-todo-drag:hover { color: #2f57d6; }
+.dshwv-todo-drag:active { cursor: grabbing; }
+.dshwv-todo-dragging { opacity: .45; }
+.dshwv-todo-drop-before { box-shadow: inset 0 2px 0 0 #2f57d6; }
+.dshwv-todo-drop-after { box-shadow: inset 0 -2px 0 0 #2f57d6; }
+
+html.dark .dshwv-todo-dots > i { background: rgba(138,164,230,.25); }
+html.dark .dshwv-todo-dots > i.on { background: #8aa4e6; }
+html.dark .dshwv-todo-more { color: #8b9ac4; }
+html.dark .dshwv-todo-more:hover { background: rgba(138,164,230,.14); border-color: rgba(138,164,230,.35); color: #a7bdf0; }
+html.dark .dshwv-todo-more.dshwv-todo-more-on { background: rgba(138,164,230,.18); border-color: rgba(138,164,230,.45); color: #a7bdf0; }
+html.dark .dshwv-todo-edit { border-left-color: rgba(138,164,230,.4); background: rgba(138,164,230,.08); }
+html.dark .dshwv-todo-edit-sel { border-color: rgba(138,164,230,.2); background: rgba(255,255,255,.06); color: #dbe2f5; }
+/* 原生日期/时间控件在深色下自己不黑：color-scheme 让系统画深色内嵌面板与图标 */
+html.dark .dshwv-todo-edit-when { border-color: rgba(138,164,230,.2); background: rgba(255,255,255,.06); color: #dbe2f5; color-scheme: dark; }
+html.dark .dshwv-todo-remind-on { color: #dbe2f5; }
+html.dark .dshwv-todo-remind-on input { accent-color: #8aa4e6; }
+html.dark .dshwv-todo-edit-del { border-color: rgba(255,138,133,.35); background: rgba(255,138,133,.1); color: #ff9d99; }
+html.dark .dshwv-todo-edit-del:hover { background: rgba(255,138,133,.22); border-color: rgba(255,138,133,.6); }
+html.dark .dshwv-todo-edit-label { color: #8b9ac4; }
+html.dark .dshwv-todo-edit-num { border-color: rgba(138,164,230,.2); background: rgba(255,255,255,.06); color: #dbe2f5; }
+html.dark .dshwv-todo-edit-hint { color: #6b7aa8; }
+html.dark .dshwv-todo-drag { color: #5f6d94; }
+html.dark .dshwv-todo-drag:hover { color: #a7bdf0; }
+html.dark .dshwv-todo-drop-before { box-shadow: inset 0 2px 0 0 #8aa4e6; }
+html.dark .dshwv-todo-drop-after { box-shadow: inset 0 -2px 0 0 #8aa4e6; }
+
+html.fantasy .dshwv-todo-dots > i { background: rgba(58, 123, 255, 0.3); }
+html.fantasy .dshwv-todo-dots > i.on { background: #77A4FF; }
+html.fantasy .dshwv-todo-more { color: #8FA8CC; }
+html.fantasy .dshwv-todo-more:hover { background: rgba(58, 123, 255, 0.16); border-color: rgba(58, 123, 255, 0.4); color: #A9C6FF; }
+html.fantasy .dshwv-todo-more.dshwv-todo-more-on { background: rgba(58, 123, 255, 0.2); border-color: rgba(58, 123, 255, 0.5); color: #A9C6FF; }
+html.fantasy .dshwv-todo-edit { border-left-color: rgba(58, 123, 255, 0.45); background: rgba(58, 123, 255, 0.1); }
+html.fantasy .dshwv-todo-edit-name,
+html.fantasy .dshwv-todo-edit-sel,
+html.fantasy .dshwv-todo-edit-when { border-color: rgba(58, 123, 255, 0.3); background: rgba(12, 20, 40, 0.55); color: #E8F1FF; }
+html.fantasy .dshwv-todo-edit-when { color-scheme: dark; }
+html.fantasy .dshwv-todo-remind-on { color: #E8F1FF; }
+html.fantasy .dshwv-todo-remind-on input { accent-color: #3A7BFF; }
+html.fantasy .dshwv-todo-edit-del { border-color: rgba(255, 138, 133, 0.4); background: rgba(255, 138, 133, 0.12); color: #FF9D99; }
+html.fantasy .dshwv-todo-edit-del:hover { background: rgba(255, 138, 133, 0.24); border-color: rgba(255, 138, 133, 0.65); }
+html.fantasy .dshwv-todo-edit-label { color: #8FA8CC; }
+html.fantasy .dshwv-todo-edit-num { border-color: rgba(58, 123, 255, 0.3); background: rgba(12, 20, 40, 0.55); color: #E8F1FF; }
+html.fantasy .dshwv-todo-edit-hint { color: #7C90B3; }
+html.fantasy .dshwv-todo-drag { color: #5C6E8E; }
+html.fantasy .dshwv-todo-drag:hover { color: #A9C6FF; }
+html.fantasy .dshwv-todo-drop-before { box-shadow: inset 0 2px 0 0 #77A4FF; }
+html.fantasy .dshwv-todo-drop-after { box-shadow: inset 0 -2px 0 0 #77A4FF; }

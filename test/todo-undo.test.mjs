@@ -114,6 +114,44 @@ test('清单已满时撤回被拒，并回传当前清单', () => {
   assert.equal(stored().items.length, max, '失败时不能悄悄超限写盘')
 })
 
+test('todoSetEst：clamp 0–99，其余字段不动', () => {
+  seed([item('a', { est: 3, rounds: 1, text: '原任务' })])
+  assert.equal(settings.todoSetEst('a', 5).ok, true)
+  assert.equal(stored().items[0].est, 5)
+  settings.todoSetEst('a', 500)
+  assert.equal(stored().items[0].est, 99, '超出上限要 clamp 到 99')
+  settings.todoSetEst('a', -3)
+  assert.equal(stored().items[0].est, 0, '负数按 0（不设）处理')
+  assert.equal(stored().items[0].rounds, 1, 'rounds 是会话派生的，改预估不能动它')
+  assert.equal(stored().items[0].text, '原任务')
+})
+
+// —— 挂件拖拽排序：todoMove 的「先摘后找」语义 ——
+test('todoMove：往前挪、往后挪、挪到末尾都对', () => {
+  seed([item('a'), item('b'), item('c'), item('d')])
+  // 往前：c 挪到 a 之前
+  assert.equal(settings.todoMove('c', 'a').ok, true)
+  assert.deepEqual(stored().items.map((x) => x.id), ['c', 'a', 'b', 'd'])
+  // 往后：c 挪到 b 之前（目标下标原本在 c 之后，摘下后必须重新找）
+  assert.equal(settings.todoMove('c', 'b').ok, true)
+  assert.deepEqual(stored().items.map((x) => x.id), ['a', 'c', 'b', 'd'])
+  // 移到末尾：beforeId 为空
+  assert.equal(settings.todoMove('a', '').ok, true)
+  assert.deepEqual(stored().items.map((x) => x.id), ['c', 'b', 'd', 'a'])
+})
+
+test('todoMove：字段一个不动，未知 id 被拒且不改写', () => {
+  seed([item('a', { est: 3, rounds: 2 }), item('b')])
+  assert.equal(settings.todoMove('b', 'a').ok, true)
+  const moved = stored().items[0]
+  assert.equal(moved.id, 'b')
+  assert.equal(stored().items[1].est, 3, '排序只调顺序，不能碰条目字段')
+  assert.equal(stored().items[1].rounds, 2)
+  assert.equal(settings.todoMove('no-such-id', 'a').ok, false)
+  assert.equal(settings.todoMove('a', 'a').ok, true, '自己挪到自己之前应是空操作而不是报错')
+  assert.deepEqual(stored().items.map((x) => x.id), ['b', 'a'])
+})
+
 // —— 设置页接线：源码级断言（本仓无组件测试环境） ——
 test('FocusView 已接上撤回条：删除成功才弹、可撤回、悬停暂停、卸载清定时器', () => {
   const view = fs.readFileSync(new URL('../src/views/FocusView.vue', import.meta.url), 'utf8')

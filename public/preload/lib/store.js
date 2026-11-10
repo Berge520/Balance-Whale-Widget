@@ -710,7 +710,6 @@ function alertFor(cfg, key) {
   const a = cfg && cfg.alerts
   return a && typeof a[key] === 'string' && a[key] ? a[key] : ALERTS_DEFAULT[key]
 }
-
 // 吸附与翻转：'ratio' = 按比例吸附（吸附区宽度 = 可用区宽/高的 snapRatio%）、
 // 'off' = 关闭吸附（纯自由摆放，但位置仍按「最近边 + 净距离」记锚点，照旧能原样还原）
 const SNAP_MODES = ['ratio', 'off']
@@ -789,8 +788,7 @@ function normCardOrder(v) {
   }
   return out
 }
-// 每张卡的默认展开态：{ foldKey: boolean }。非布尔一律丢掉 ——
-// 宁可回落到模板默认，也不让 'false' 这种字符串变成「真」把卡片全展开
+// 每张卡的默认展开态：{ foldKey: boolean }。非布尔一律丢掉 —— 宁可回落到模板默认，也不让 'false' 这种字符串变成「真」把卡片全展开
 const FOLD_DEFAULTS_MAX = 64
 function normFoldDefaults(v) {
   const out = {}
@@ -812,8 +810,12 @@ function readWage(v) {
   const w = offwork.normWage(v)
   return w === null ? 0 : w
 }
+// 外圈粗细归一：只认三档，其余值一律 'normal'（与旧版硬编码 3.5 等价）
+function normRingWidth(v) {
+  return v === 'thin' || v === 'thick' ? v : 'normal'
+}
 function defaultConfig() {
-  return { scale: 1.3, vol: 0.9, soundOn: true, soundSet: 'duck', usageMode: 'ledger', peakMode: 'default', peakRemindOn: true, bubbleOn: true, menuBtn: true, onTop: true, hideAmounts: false, lowAlertOn: true, lowAlertAmount: LOW_ALERT_BY_CURRENCY.CNY, budgetOn: false, budgetAmount: 0, dropAlertOn: false, dropAlertAmount: 5, remindSec: 8, quietOn: false, quietFrom: '23:00', quietTo: '07:00', timeBubbleOn: true, updateCheckOn: false, dragLock: false, bubbleDwell: 5, dragLines: null, tapAdvance: false, enterMode: 'both', timerNotifyOn: true, timerMailOn: true, timerPersistOn: true, timerMode: 'off', timerSec: 1500, timerAt: '07:30', timerNote: '', timerBreakMin: 5, timerRemindSec: 8, timerBubblePin: true, timerBubbleOnly: true, timerPomoOn: false, timerLongBreakMin: TIMER_LONG_BREAK_DEFAULT, timerLongEvery: TIMER_LONG_EVERY_DEFAULT, timerAutoNext: false, timerPresets: TIMER_PRESETS_DEFAULT.slice(), focusOn: false, todoOn: false, focusGoal: 0, offworkOn: false, offworkStart: offwork.DEFAULTS.start, offworkEnd: offwork.DEFAULTS.end, offworkDays: offwork.DEFAULTS.days.slice(), offworkShowSec: true, offworkWeekendOn: false, offworkPaydayOn: false, offworkPaydayDay: offwork.DEFAULTS.paydayDay, offworkHourlyWage: 0, debugTools: false, guideDone: false, dshNodeDir: '', dshKeepAlive: false, dshElevated: false, dshPort: DSH_PORT_DEFAULT, dshRegistry: '', dshVersion: '', dshReinstall: false, dshNoOpen: true, dshMarketUrl: '', dshMarketMirror: true, dshMarketRegistry: '', dshMarketOfficial: false, dshExportCred: false, dshExportNoMod: true, avoidTaskbar: true, edgeTop: 0, edgeRight: 0, edgeBottom: 0, edgeLeft: 0, scrollGapOn: false, scrollGapPx: SCROLL_GAP_DEFAULT, snapMode: 'ratio', snapRatio: SNAP_RATIO_DEFAULT, opacity: 100, passThrough: false, skin: 'DSniang1', theme: 'default', uiMode: 'auto', bgMode: 'off', bgMediaId: '', bgScrim: 45, bgBlur: 0, bgBrightness: 100, bgVignette: 100, bgFit: 'cover', bgFocusX: 50, bgFocusY: 50, bgZoom: 100, bootIntroOn: false, bootIntroClean: false, bootIntroSource: 'auto', bootIntroMediaId: '', bubble: normBubble(null, null, null), alerts: normAlerts(null), alertVols: normAlertVols(null), quotaTotal: 0, quotaReset: 'monthly', tokenPrice: normTokenPrice(null), historyKeepDays: HISTORY_KEEP_DEFAULT, models: [], mainModelId: DEFAULT_MAIN_MODEL, dshBackupKeep: DSB_KEEP_DEFAULT, ghAccelOn: false, ghAccelIps: normIps(null), ghAccelRefreshedAt: 0, ghAccelSrc: normGhAccelSrc(null), skinPackSrc: '', randomIncludeBuiltin: true, notifySystemOn: true, notifyMailOn: false, mailFrom: '', mailTo: '', mailFromName: '小鲸鱼余额挂件', mailSubjectPrefix: '[小鲸鱼余额挂件]', hiddenTabs: [], hiddenCards: [], tabOrder: [], pinnedCards: [], cardOrder: {}, foldDefaults: {}, foldRemember: true }
+  return { scale: 1.3, vol: 0.9, soundOn: true, soundSet: 'duck', usageMode: 'ledger', peakMode: 'default', peakRemindOn: true, bubbleOn: true, menuBtn: true, onTop: true, hideAmounts: false, lowAlertOn: true, lowAlertAmount: LOW_ALERT_BY_CURRENCY.CNY, budgetOn: false, budgetAmount: 0, dropAlertOn: false, dropAlertAmount: 5, remindSec: 8, quietOn: false, quietFrom: '23:00', quietTo: '07:00', timeBubbleOn: true, updateCheckOn: false, dragLock: false, bubbleDwell: 5, dragLines: null, tapAdvance: false, enterMode: 'both', timerNotifyOn: true, timerMailOn: true, timerPersistOn: true, timerMode: 'off', timerSec: 1500, timerAt: '07:30', timerNote: '', timerBreakMin: 5, timerRemindSec: 8, timerBubblePin: true, timerBubbleOnly: true, timerPomoOn: false, timerLongBreakMin: TIMER_LONG_BREAK_DEFAULT, timerLongEvery: TIMER_LONG_EVERY_DEFAULT, todoAutoNext: false, timerPresets: TIMER_PRESETS_DEFAULT.slice(), todoOn: false, focusGoal: 0, offworkOn: false, offworkStart: offwork.DEFAULTS.start, offworkEnd: offwork.DEFAULTS.end, offworkDays: offwork.DEFAULTS.days.slice(), offworkShowSec: true, offworkRing: true, ringWidth: 'normal', ringFollowTheme: true, offworkWeekendOn: false, offworkPaydayOn: false, offworkPaydayDay: offwork.DEFAULTS.paydayDay, offworkHourlyWage: 0, debugTools: false, guideDone: false, dshNodeDir: '', dshKeepAlive: false, dshElevated: false, dshPort: DSH_PORT_DEFAULT, dshRegistry: '', dshVersion: '', dshReinstall: false, dshNoOpen: true, dshMarketUrl: '', dshMarketMirror: true, dshMarketRegistry: '', dshMarketOfficial: false, dshExportCred: false, dshExportNoMod: true, avoidTaskbar: true, edgeTop: 0, edgeRight: 0, edgeBottom: 0, edgeLeft: 0, scrollGapOn: false, scrollGapPx: SCROLL_GAP_DEFAULT, snapMode: 'ratio', snapRatio: SNAP_RATIO_DEFAULT, opacity: 100, passThrough: false, skin: 'DSniang1', theme: 'default', uiMode: 'auto', bgMode: 'off', bgMediaId: '', bgScrim: 45, bgBlur: 0, bgBrightness: 100, bgVignette: 100, bgFit: 'cover', bgFocusX: 50, bgFocusY: 50, bgZoom: 100, bootIntroOn: false, bootIntroClean: false, bootIntroSource: 'auto', bootIntroMediaId: '', bubble: normBubble(null, null, null), alerts: normAlerts(null), alertVols: normAlertVols(null), quotaTotal: 0, quotaReset: 'monthly', tokenPrice: normTokenPrice(null), historyKeepDays: HISTORY_KEEP_DEFAULT, models: [], mainModelId: DEFAULT_MAIN_MODEL, dshBackupKeep: DSB_KEEP_DEFAULT, ghAccelOn: false, ghAccelIps: normIps(null), ghAccelRefreshedAt: 0, ghAccelSrc: normGhAccelSrc(null), skinPackSrc: '', randomIncludeBuiltin: true, notifySystemOn: true, notifyMailOn: false, mailFrom: '', mailTo: '', mailFromName: '小鲸鱼余额挂件', mailSubjectPrefix: '[小鲸鱼余额挂件]', hiddenTabs: [], hiddenCards: [], tabOrder: [], pinnedCards: [], cardOrder: {}, foldDefaults: {}, foldRemember: true }
 }
 // dsh Web UI 监听端口（默认 3080）。
 // ⚠️ 为什么必须能配：3080 属于 Windows/Hyper-V 的「动态端口保留段」，被系统预留时
@@ -1149,19 +1151,19 @@ function readConfig() {
     timerRemindSec: p.timerRemindSec === 0 || p.timerRemindSec === 5 || p.timerRemindSec === 8 || p.timerRemindSec === 15 ? p.timerRemindSec : dft.timerRemindSec,
     timerBubblePin: p.timerBubblePin !== false,
     timerBubbleOnly: p.timerBubbleOnly !== false,
-    // 番茄循环：短休/长休/每 N 轮/自动衔接。默认全关，与 focusOn 正交 —— 专注记录只记轮数，
-    // 番茄循环管「轮与轮之间怎么休息、要不要自动接下一轮」。两者可单独使用也可组合
+    // 番茄循环：短休/长休/每 N 轮，与专注记录正交（自动衔接下一轮 v1.15 移除）
     timerPomoOn: p.timerPomoOn === true,
     timerLongBreakMin: Math.round(clampNum(p.timerLongBreakMin, 1, 60, dft.timerLongBreakMin)),
     timerLongEvery: Math.round(clampNum(p.timerLongEvery, 2, 12, dft.timerLongEvery)),
-    timerAutoNext: p.timerAutoNext === true,
+    // 到点自动衔接下一条待办：与番茄循环正交，默认关
+    todoAutoNext: p.todoAutoNext === true,
     // 快捷时长四档（分钟）：设置页可改，挂件 chips 直接读它
     timerPresets: normTimerPresets(p.timerPresets),
-    // 专注记录 / 待办：默认全关，不勾时挂件行为与未加这两个功能前完全一致。
-    // 专注记录只有一个开关：开着就把每段计时记成明细，走完的倒计时才计一轮（口径见 lib/focus.js 的 isRound）
-    focusOn: p.focusOn === true,
-    todoOn: p.todoOn === true,
-    // 每日专注目标（轮数，0 = 未设置/关闭）。达成时弹一次提醒（notifyDaily kind='goal'）
+    // 专注与待办：一个总开关。开着才有挂件里的待办块与专注统计，也才记录每段计时。
+    // v1.15 把原来的 focusOn / todoOn 并成一个 —— 两个开关各关一半，用户说不清它们管什么。
+    // 旧的 focusOn 只在读盘 / 打补丁时兜底，保存一次后即收敛掉
+    todoOn: p.todoOn === true || p.focusOn === true,
+    // 每日专注目标（轮数，0 = 关闭），达成时弹一次提醒
     focusGoal: Math.round(clampNum(p.focusGoal, 0, FOCUS_GOAL_MAX, 0)),
     // 下班倒计时（默认关）：只在挂件主体显示，不改余额 / 专注 / 计时的既有分支。
     // offworkDays 用 JS getDay() 口径（0=周日…6=周六），归一去重升序、至少保留一天
@@ -1169,12 +1171,12 @@ function readConfig() {
     offworkStart: offwork.normHm(p.offworkStart, dft.offworkStart),
     offworkEnd: offwork.normHm(p.offworkEnd, dft.offworkEnd),
     offworkDays: offwork.normDays(p.offworkDays, dft.offworkDays),
-    offworkShowSec: p.offworkShowSec !== false,
-    offworkWeekendOn: p.offworkWeekendOn === true,
-    offworkPaydayOn: p.offworkPaydayOn === true,
-    offworkPaydayDay: offwork.normPayday(p.offworkPaydayDay),
-    // 时薪（元/小时，0 = 未配置）：只用于估算挂件上的「今日已赚」，不是真实工资
-    offworkHourlyWage: readWage(p.offworkHourlyWage),
+    // 外圈工时进度环（默认开）：关掉后外圈只归计时，工时进度改看倒计时页里的细进度条。
+    // ringWidth / ringFollowTheme 是同一圈的画法（粗细 / 圈色），只改画法不改进度口径
+    offworkShowSec: p.offworkShowSec !== false, offworkRing: p.offworkRing !== false,
+    ringWidth: normRingWidth(p.ringWidth), ringFollowTheme: p.ringFollowTheme !== false,
+    offworkWeekendOn: p.offworkWeekendOn === true, offworkPaydayOn: p.offworkPaydayOn === true,
+    offworkPaydayDay: offwork.normPayday(p.offworkPaydayDay), offworkHourlyWage: readWage(p.offworkHourlyWage),
     // 首次运行引导是否已结束（点「开始使用」或「跳过」）——默认 false 表示还没走过引导。
     // 只认 true：老配置里没有这个键，若不这样归一，升级上来的老用户会被当成新装用户弹一次设置页的凭据引导
     guideDone: p.guideDone === true,
@@ -1311,13 +1313,10 @@ function writeConfig(cfg) {
       remindSec: cfg.remindSec === 0 || cfg.remindSec === 5 || cfg.remindSec === 8 || cfg.remindSec === 15 ? cfg.remindSec : 8,
       quietOn: cfg.quietOn === true,
       quietFrom: normHm(cfg.quietFrom, '23:00'),
-      quietTo: normHm(cfg.quietTo, '07:00'),
-      timeBubbleOn: cfg.timeBubbleOn !== false,
-      updateCheckOn: cfg.updateCheckOn === true,
-      dragLock: cfg.dragLock === true,
+      quietTo: normHm(cfg.quietTo, '07:00'), timeBubbleOn: cfg.timeBubbleOn !== false,
+      updateCheckOn: cfg.updateCheckOn === true, dragLock: cfg.dragLock === true,
       enterMode: cfg.enterMode === 'widget' || cfg.enterMode === 'settings' ? cfg.enterMode : 'both',
-      timerNotifyOn: cfg.timerNotifyOn !== false,
-      timerMailOn: cfg.timerMailOn !== false,
+      timerNotifyOn: cfg.timerNotifyOn !== false, timerMailOn: cfg.timerMailOn !== false,
       timerPersistOn: cfg.timerPersistOn !== false,
       timerMode: cfg.timerMode === 'up' || cfg.timerMode === 'down' || cfg.timerMode === 'at' ? cfg.timerMode : 'off',
       timerSec: Math.round(clampNum(cfg.timerSec, 1, 86399, 1500)),
@@ -1325,25 +1324,22 @@ function writeConfig(cfg) {
       timerNote: normTimerNote(cfg.timerNote),
       timerBreakMin: Math.round(clampNum(cfg.timerBreakMin, 0, 120, 5)),
       timerRemindSec: cfg.timerRemindSec === 0 || cfg.timerRemindSec === 5 || cfg.timerRemindSec === 8 || cfg.timerRemindSec === 15 ? cfg.timerRemindSec : 8,
-      timerBubblePin: cfg.timerBubblePin !== false,
-      timerBubbleOnly: cfg.timerBubbleOnly !== false,
+      timerBubblePin: cfg.timerBubblePin !== false, timerBubbleOnly: cfg.timerBubbleOnly !== false,
       timerPomoOn: cfg.timerPomoOn === true,
       timerLongBreakMin: Math.round(clampNum(cfg.timerLongBreakMin, 1, 60, TIMER_LONG_BREAK_DEFAULT)),
       timerLongEvery: Math.round(clampNum(cfg.timerLongEvery, 2, 12, TIMER_LONG_EVERY_DEFAULT)),
-      timerAutoNext: cfg.timerAutoNext === true,
-      timerPresets: normTimerPresets(cfg.timerPresets),
-      focusOn: cfg.focusOn === true,
-      todoOn: cfg.todoOn === true,
+      todoAutoNext: cfg.todoAutoNext === true, timerPresets: normTimerPresets(cfg.timerPresets),
+      // 读盘同样吃旧键：老用户只有 focusOn=true 时也不能被当成「没开」
+      todoOn: cfg.todoOn === true || cfg.focusOn === true,
       focusGoal: Math.round(clampNum(cfg.focusGoal, 0, FOCUS_GOAL_MAX, 0)),
       offworkOn: cfg.offworkOn === true,
       offworkStart: offwork.normHm(cfg.offworkStart, offwork.DEFAULTS.start),
       offworkEnd: offwork.normHm(cfg.offworkEnd, offwork.DEFAULTS.end),
       offworkDays: offwork.normDays(cfg.offworkDays),
-      offworkShowSec: cfg.offworkShowSec !== false,
-      offworkWeekendOn: cfg.offworkWeekendOn === true,
-      offworkPaydayOn: cfg.offworkPaydayOn === true,
-      offworkPaydayDay: offwork.normPayday(cfg.offworkPaydayDay),
-      offworkHourlyWage: readWage(cfg.offworkHourlyWage),
+      offworkShowSec: cfg.offworkShowSec !== false, offworkRing: cfg.offworkRing !== false,
+      ringWidth: normRingWidth(cfg.ringWidth), ringFollowTheme: cfg.ringFollowTheme !== false,
+      offworkWeekendOn: cfg.offworkWeekendOn === true, offworkPaydayOn: cfg.offworkPaydayOn === true,
+      offworkPaydayDay: offwork.normPayday(cfg.offworkPaydayDay), offworkHourlyWage: readWage(cfg.offworkHourlyWage),
       guideDone: cfg.guideDone === true,
       dshNodeDir: typeof cfg.dshNodeDir === 'string' ? cfg.dshNodeDir.slice(0, 260) : '',
       dshKeepAlive: cfg.dshKeepAlive === true,
@@ -1486,16 +1482,19 @@ function patchConfig(patch) {
   }
   if (p.timerBubblePin !== undefined) cfg.timerBubblePin = !!p.timerBubblePin
   if (p.timerBubbleOnly !== undefined) cfg.timerBubbleOnly = !!p.timerBubbleOnly
-  // 番茄循环：四个新键，默认值方向与 defaultConfig 一致
+  // 番茄循环：三个键，默认值方向与 defaultConfig 一致（自动衔接下一轮 v1.15 移除）
   if (p.timerPomoOn !== undefined) cfg.timerPomoOn = p.timerPomoOn === true
   if (p.timerLongBreakMin !== undefined) cfg.timerLongBreakMin = Math.round(clampNum(p.timerLongBreakMin, 1, 60, cfg.timerLongBreakMin))
   if (p.timerLongEvery !== undefined) cfg.timerLongEvery = Math.round(clampNum(p.timerLongEvery, 2, 12, cfg.timerLongEvery))
-  if (p.timerAutoNext !== undefined) cfg.timerAutoNext = p.timerAutoNext === true
+  // 待办到点自动接下一条（须显式 true；与番茄循环的自动衔接不是一回事）
+  if (p.todoAutoNext !== undefined) cfg.todoAutoNext = p.todoAutoNext === true
   // 非数组视为「没传」保持现值（与 tabOrder / pinnedCards 同一条坑：传字符串曾被当成空数组清掉）
   if (p.timerPresets !== undefined && Array.isArray(p.timerPresets)) cfg.timerPresets = normTimerPresets(p.timerPresets)
-  // 专注记录 / 待办：两个独立开关，互不联动
-  if (p.focusOn !== undefined) cfg.focusOn = p.focusOn === true
-  if (p.todoOn !== undefined) cfg.todoOn = p.todoOn === true
+  // 专注与待办：唯一开关。旧键 focusOn 一并接受（老设置页 / 老脚本仍会发它），
+  // 落盘只写 todoOn —— 下一次保存后配置里就不会再出现 focusOn
+  if (p.todoOn !== undefined || p.focusOn !== undefined) {
+    cfg.todoOn = (p.todoOn !== undefined ? p.todoOn : p.focusOn) === true
+  }
   // 每日专注目标（轮数，0 = 关闭）
   if (p.focusGoal !== undefined) cfg.focusGoal = Math.round(clampNum(p.focusGoal, 0, FOCUS_GOAL_MAX, cfg.focusGoal))
   // 下班倒计时：时间非法回现值（不静默改用户已存的值），工作日至少保留一天
@@ -1504,6 +1503,9 @@ function patchConfig(patch) {
   if (p.offworkEnd !== undefined) cfg.offworkEnd = offwork.normHm(p.offworkEnd, cfg.offworkEnd)
   if (p.offworkDays !== undefined) cfg.offworkDays = offwork.normDays(p.offworkDays, cfg.offworkDays)
   if (p.offworkShowSec !== undefined) cfg.offworkShowSec = p.offworkShowSec !== false
+  if (p.offworkRing !== undefined) cfg.offworkRing = p.offworkRing !== false
+  if (p.ringWidth !== undefined) cfg.ringWidth = normRingWidth(p.ringWidth)
+  if (p.ringFollowTheme !== undefined) cfg.ringFollowTheme = p.ringFollowTheme !== false
   if (p.offworkWeekendOn !== undefined) cfg.offworkWeekendOn = p.offworkWeekendOn === true
   if (p.offworkPaydayOn !== undefined) cfg.offworkPaydayOn = p.offworkPaydayOn === true
   if (p.offworkPaydayDay !== undefined) cfg.offworkPaydayDay = offwork.normPayday(p.offworkPaydayDay)
@@ -1703,16 +1705,10 @@ function freshLedger() {
     lastGranted: null, lastToppedUp: null, lastSampleAt: '',
     // 当前账本绑定的 Key 指纹：换 Key 只重置基准，不把两边差额记成用量
     lastKeyId: '',
-    // 判定为「非消费」的余额变动：今日合计 + 明细（at/amount/why）
-    todayAdjust: 0, adjustLog: [], lastAdjustWhy: '', lastAdjustAt: '',
-    // 手动校准记录
-    calibrateLog: [],
-    // 今日预算提醒已发过通知的日期（YYYY-MM-DD；空 = 今天还没提醒）
-    budgetNotifiedOn: '',
-    // 低余额预警已发过通知的日期（同上，两类提醒各自每天一次）
-    lowNotifiedOn: '',
-    // 每日专注目标达成已发过通知的日期（同上）
-    focusGoalNotifiedOn: '',
+    // 判定为「非消费」的余额变动：今日合计 + 明细（at/amount/why）；calibrateLog = 手动校准记录
+    todayAdjust: 0, adjustLog: [], lastAdjustWhy: '', lastAdjustAt: '', calibrateLog: [],
+    // 今日预算 / 低余额 / 专注目标达成三类提醒各自「已发过通知的日期」（YYYY-MM-DD；空 = 今天还没提醒）
+    budgetNotifiedOn: '', lowNotifiedOn: '', focusGoalNotifiedOn: '',
     // 额度「不重置」口径的累计已用：跨天归档时把当天用量并入，账本滚动删除历史也不影响它
     quotaUsed: 0,
   }

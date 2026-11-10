@@ -219,11 +219,11 @@ function codexClearCache() {
       <div class="fold">
         <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="helpFold.open" @click="helpFold.open = !helpFold.open">{{ helpFold.open ? '收起说明' : '说明' }}</button>
         <div v-if="helpFold.open" class="guide">
-          <p class="guide-use"><strong>统计口径：</strong>优先用 <code>total_token_usage</code> 的累计差值（单调递增，一次轮次写多条 <code>token_count</code> 也不会重复计数）；累计缺失时退回 <code>last_token_usage</code>。</p>
-          <p class="guide-use"><strong>模型归属：</strong>按 <code>turn_context</code> 事件里的 <code>model</code> 归类，未标注的记为 <code>codex</code>。</p>
-          <p class="guide-use"><strong>订阅窗口：</strong>ChatGPT 订阅的 Codex 会在 <code>token_count</code> 事件里带 <code>rate_limits</code> 快照（5h 与周两个窗口的已用% 与重置时间），字段名各版本不一致，已做多候选键容错；API-key 计费或没有订阅时日志里没有这份快照，这一行不显示。窗口是账号级状态，与上面的本地 token 统计各自独立。</p>
-          <p class="guide-use"><strong>缓存：</strong>按文件的 size/mtime 判断是否变化，只有变过的文件才重新解析（会话日志可能几十 MB）。缓存里只有聚合数与文件指纹，<strong>不含任何凭据</strong>。</p>
-          <p class="guide-use"><strong>读不到数据：</strong>确认 Codex CLI 至少跑过一次、且 <code>~/.codex/sessions</code>（或 <code>$CODEX_HOME</code> 指向的目录）里有 <code>rollout-*.jsonl</code>。</p>
+          <p class="guide-use"><strong>统计口径：</strong>优先用 <code>total_token_usage</code> 的累计差值（单调递增，一轮写多条 <code>token_count</code> 不重复计数）；缺失时退回 <code>last_token_usage</code>。</p>
+          <p class="guide-use"><strong>模型归属：</strong>按 <code>turn_context</code> 的 <code>model</code> 归类，未标注记为 <code>codex</code>。</p>
+          <p class="guide-use"><strong>订阅窗口：</strong>订阅用户的 <code>token_count</code> 里会带 <code>rate_limits</code> 快照（5h 与周窗口的已用%、重置时间），字段名各版本不一已做容错；API-key 计费或无订阅时没有。</p>
+          <p class="guide-use"><strong>缓存：</strong>按 size/mtime 判断文件是否变过，只重解析变过的文件（日志可能几十 MB）。缓存只存聚合数与文件指纹，<strong>不含凭据</strong>。</p>
+          <p class="guide-use"><strong>读不到数据：</strong>确认 Codex CLI 跑过至少一次，且 <code>~/.codex/sessions</code>（或 <code>$CODEX_HOME</code>）里有 <code>rollout-*.jsonl</code>。</p>
         </div>
       </div>
     </template>

@@ -1,15 +1,21 @@
 /*
- * public/ 入库体检：public/ 下不允许存在 git 不认识的文件（未跟踪 `??` / 被忽略 `!!`）。
+ * public/ + resources/ 入库体检：这两棵会被拷进 dist/ 的目录下，不允许存在 git 不认识的文件
+ * （未跟踪 `??` / 被忽略 `!!`）。
  *
  * 为什么需要：打包是 `cd dist && zip -qr ... .`（release.yml），**dist 里有什么就打什么**；
- * 而 dist 的内容由 vite.config.js 的 copyPublicExceptSkip 从 public/ 递归原样拷贝，
- * 排除清单里只有 2 个文件 + 1 个目录，没有任何「排除垃圾文件」的规则。于是路径是：
+ * 而 dist 的内容由 vite.config.js 的 copyPublicExceptSkip / copyResourcesExceptSkip 从
+ * public/ 与仓库根 resources/ 递归原样拷贝，排除清单只排除少数大件。于是路径是：
  * 改 preload 前存一份 `api.js.bak` → 原样进 dist/ → 打进 zip → 用户包里带着它。
- * 上游 DeepSeek-Balance-Whale-Widget 正是这么翻车的（lib/index.js.bak-devpaths 被打进包）。
+ * 上游 DeepSeek-Balance-Whale-Widget 正是这么翻车的（lib/index.js.bak-devpaths 被打进包）；
+ * 本项目也翻过同类：resources/skins-src/DSniang02.webp 被拷进 dist 打成发行包。
  *
  * 为什么连 `!!`（被 .gitignore 忽略）也算：`.gitignore` 里恰好写了 `*.bak` / `*副本*` /
  * `*.log` / `*.tmp`，这些文件**不会**出现在默认的 `git status` 里 —— 只看 `??` 等于没查。
  * 判据统一成「git 不跟踪 = 构建会带进包里」，一条规则覆盖两种来源。
+ *
+ * 例外：vite 构建期**本来就不拷贝**的条目不算 —— 那类文件进不了 dist，要求它入库没有意义。
+ * 清单直接 import vite.config.js 里的常量，不在这里抄一份（抄一份必漂移）。
+ * 目前是 resources/skins-src/（发布者本机素材源，.gitignore 有意排除）与两个 manifest.json。
  *
  * 反向约束（有意为之）：public/ 下新加的文件必须 `git add`。它能进发行包，就该进仓库；
  * 只想本地试一下的东西别往 public/ 放。release zip 那边还有后缀黑名单兜底
@@ -22,10 +28,26 @@
 import { spawnSync } from 'node:child_process'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { SKIP_PUBLIC_DIRS, SKIP_PUBLIC_FILES, SKIP_RESOURCES_DIRS, SKIP_RESOURCES_FILES } from '../vite.config.js'
 
 const root = path.resolve(
   process.env.CPT_ROOT || path.join(path.dirname(fileURLToPath(import.meta.url)), '..'),
 )
+
+const SCAN_DIRS = ['public', 'resources']
+
+// 构建期不拷贝 = 不进 dist = 不必入库。路径一律相对仓库根，便于两个目录共用一份判断。
+function willBeCopied(rel) {
+  if (rel === 'public' || rel === 'resources' || rel === 'public/' || rel === 'resources/') return true
+  if (rel.startsWith('public/')) {
+    const inner = rel.slice('public/'.length)
+    if (SKIP_PUBLIC_FILES.has(inner)) return false
+    return ![...SKIP_PUBLIC_DIRS].some((d) => inner === d || inner.startsWith(`${d}/`))
+  }
+  const inner = rel.slice('resources/'.length)
+  if (SKIP_RESOURCES_FILES.has(inner)) return false
+  return ![...SKIP_RESOURCES_DIRS].some((d) => inner === d || inner.startsWith(`${d}/`))
+}
 
 // porcelain v1 每行形如 `?? public/a.js` / `!! public/b.bak`；含空格或非 ASCII 的路径会被
 // git 加双引号并转义，这里只剥外层引号 —— 路径只用来给人看，不必还原到能 open 的程度。
@@ -36,7 +58,9 @@ function offenders(status) {
     if (line.length < 4) continue
     const code = line.slice(0, 2)
     if (code !== '??' && code !== '!!') continue
-    out.push({ rel: line.slice(3).replace(/^"(.*)"$/, '$1'), ignored: code === '!!' })
+    const rel = line.slice(3).replace(/^"(.*)"$/, '$1')
+    if (!willBeCopied(rel)) continue
+    out.push({ rel, ignored: code === '!!' })
   }
   return out
 }
@@ -44,7 +68,7 @@ function offenders(status) {
 function gitStatus() {
   // `git` 在 Windows 上是 exe（不像 gh 是 .cmd），传参数数组即可，不必走 shell。
   // `--ignored` 必须带上：否则 .gitignore 命中的 .bak / 副本根本不会出现在输出里。
-  const r = spawnSync('git', ['status', '--porcelain', '-uall', '--ignored', '--', 'public'], {
+  const r = spawnSync('git', ['status', '--porcelain', '-uall', '--ignored', '--', ...SCAN_DIRS], {
     cwd: root,
     encoding: 'utf8',
   })
@@ -61,13 +85,13 @@ if (status === null) {
 
 const bad = offenders(status)
 if (!bad.length) {
-  console.log('[public-tracked] public/ 下没有未入库文件')
+  console.log('[public-tracked] public/ 与 resources/ 下没有会被打进包的未入库文件')
   process.exit(0)
 }
 
-console.error('[public-tracked] ✗ public/ 下有 git 不认识的文件，它们会被原样拷进 dist/ 与发行包：')
+console.error('[public-tracked] ✗ 有 git 不认识的文件会被原样拷进 dist/ 与发行包：')
 for (const b of bad) {
   console.error(`  - ${b.rel}${b.ignored ? '（被 .gitignore 忽略，默认 git status 看不到）' : '（未跟踪）'}`)
 }
-console.error('  该进包的就 git add；只是本地试一下的（.bak / 副本 / 日志）请删掉或挪出 public/。')
+console.error('  该进包的就 git add；只是本地试一下的（.bak / 副本 / 日志）请删掉或挪出这两棵目录。')
 process.exit(1)

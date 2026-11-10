@@ -867,8 +867,8 @@ watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = nu
         {{ ghAccelIntroFold ? '收起说明' : '这是什么 / 有什么影响' }}
       </button>
       <div v-if="ghAccelIntroFold" class="guide">
-        <p class="hint">改写系统 <strong>hosts</strong> 让 GitHub 相关域名直连可用 IP，浏览器 / git / 下载全生效，<strong>不占常驻进程</strong>。写入需一次 <strong>UAC 确认</strong>，关闭即删块，不动你原有的 hosts 内容。写入前会逐条做 <strong>HTTPS 探测 + 证书校验</strong>，只写真正可用、且证书确实是该域名的 IP；同一域名会有多个备用 IP 一起写入，主 IP 失效时由系统按顺序自动回退。</p>
-        <p class="hint">IP 失效时<strong>关一次开关再开</strong>即按新表重写（最坏回到慢速，不会更糟）。首次开启会把原 hosts 备份到<strong>插件数据目录 <code>whale-hosts-backup</code></strong>，供手动恢复；卸载不影响系统 hosts，记得先关闭。</p>
+        <p class="hint">改写系统 <strong>hosts</strong>，让 GitHub 相关域名直连可用 IP，浏览器 / git / 下载全生效，不占常驻进程。写入需一次 <strong>UAC 确认</strong>，关闭即删块，不动原有 hosts。只写通过 HTTPS 探测与证书校验的 IP，同域名会写多个备用。</p>
+        <p class="hint">IP 失效时<strong>关一次开关再开</strong>即按新表重写。首次开启会把原 hosts 备份到<strong>插件数据目录 <code>whale-hosts-backup</code></strong>；卸载不影响系统 hosts，记得先关闭。</p>
       </div>
     </div>
     <label class="field row check">
@@ -913,7 +913,7 @@ watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = nu
       <span class="label">上次刷新</span>
       <span class="ver">{{ ghAccelAgeText() }}</span>
     </label>
-    <p v-if="ghAccelStale" class="msg err">IP 表已超 7 天未刷新（CDN IP 会变）。当前开启时会优先用 DoH 实时解析的结果，源表只作回退，所以多半仍可用；想彻底更新源表可点「刷新 IP 表」再「重新写入 hosts」。</p>
+    <p v-if="ghAccelStale" class="msg err">IP 表超过 7 天未刷新（CDN IP 会变）。开启时优先用 DoH 实时解析，源表仅作回退，多半仍可用；想彻底更新请点「刷新 IP 表」再「重新写入 hosts」。</p>
     <!-- github.com 不在已写入的块里：主站仍走被污染的 DNS，这正是「已生效但打不开」的常见原因 -->
     <p v-if="ghAccelActual?.on && ghAccelActual.active && !ghAccelActual.active.includes('github.com')" class="msg err">
       块里<strong>没有 github.com</strong>，主站仍走 DNS 可能打不开。请「刷新 IP 表」后再「重新写入 hosts」。
@@ -933,7 +933,7 @@ watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = nu
     <!-- 能按特征认出「是哪类工具」时把结论带上，省得用户对着 hosts 里一行 127.0.0.1 发愣；
          认不出就用中性说法，绝不瞎猜（猜错会把用户引到错误的软件设置里翻） -->
     <p v-if="ghAccelConflicts.length" class="msg err">
-      检测到第三方条目<span v-if="ghAccelConflictWriters">（像是 {{ ghAccelConflictWriters }} 写的）</span><span v-else>（可能是其它加速工具写的）</span>：{{ ghAccelConflicts.map(c => c.domain).join('、') }}。本插件块写在文件最前会优先生效，可直接使用；若要彻底替换对方，请先在其设置里关闭对应的 GitHub 加速。
+      检测到第三方条目<span v-if="ghAccelConflictWriters">（像是 {{ ghAccelConflictWriters }} 写的）</span><span v-else>（可能是其它加速工具写的）</span>：{{ ghAccelConflicts.map(c => c.domain).join('、') }}。本插件块写在最前会优先生效，可直接用；要彻底替换对方，请先在它的设置里关闭 GitHub 加速。
     </p>
     <div class="btn-row">
       <button class="secondary utils-btn utils-secondary" :class="{ 'btn-busy': ghPendingText('probe') }" :disabled="ghAccelProbing" @click="doGhAccelProbe">
@@ -1002,7 +1002,7 @@ watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = nu
             </li>
           </ul>
         </div>
-        <p v-if="!ghAccelOps.length" class="hint">还没有操作记录：点一次「检测连接」或「刷新 IP 表」，这里会列出每一步做了什么、结果如何。</p>
+        <p v-if="!ghAccelOps.length" class="hint">暂无记录：点「检测连接」或「刷新 IP 表」，这里会列出每步结果。</p>
         <div class="btn-row" v-if="ghAccelOps.length">
           <button class="secondary utils-btn utils-secondary" @click="clearGhAccelLogs">清除日志</button>
         </div>

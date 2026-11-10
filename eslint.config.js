@@ -8,7 +8,7 @@
  * 本项目有四套运行环境，全局变量差别很大，按目录分块声明，别混在一起：
  *   src/                    浏览器 + Vue 3 + TS（Vite 打包）
  *   public/preload/         CommonJS + Node（`utools` 是 uTools 注入的全局，不 require）
- *   public/floating-page.js 浏览器 IIFE（`window.whale` 由 preload 注入）
+ *   public/floating-*.js   浏览器 IIFE（`window.whale` 由 preload 注入）
  *   scripts/ test/ *.js     Node ESM
  */
 import js from '@eslint/js'
@@ -88,7 +88,7 @@ export default defineConfig([
 
   // 悬浮窗页面：浏览器 IIFE（不参与 Vite 打包，原样复制到 dist/）
   {
-    files: ['public/floating-page.js'],
+    files: ['public/floating-*.js'],
     languageOptions: { sourceType: 'script', globals: { ...globals.browser } },
   },
 

@@ -105,8 +105,8 @@ function clearSelectedData() {
       </h2>
     </div>
     <template v-if="cardFold.open">
-    <p class="hint">API Key、平台 Token、各模型密钥与邮件 SMTP 凭据均通过 uTools 加密存储，账本、窗口位置与导入的素材（形象 / 气泡图 / 音效 / 背景与片头媒体）也只保存在本机，不会上传到任何第三方服务器。</p>
-    <p class="hint">卸载 uTools 插件不会自动删除这些数据，需要彻底清除时请勾选下方要清除的内容（<strong>清除前建议先导出一份备份</strong>，见下方「备份与恢复」）：</p>
+    <p class="hint">凭据（API Key / 平台 Token / 各模型密钥 / 邮件 SMTP）经 uTools 加密存储；账本、窗口位置与导入的素材只存本机，不上传任何第三方服务器。</p>
+    <p class="hint">卸载插件不会自动删除这些数据。要彻底清除请勾选下方内容（<strong>建议先导出备份</strong>，见「备份与恢复」）：</p>
     <label class="field row check">
       <span class="label">凭据 <em>（API Key / 平台 Token / 各模型密钥 / 邮件 SMTP 凭据）</em></span>
       <input type="checkbox" v-model="clearItems.secrets" @change="clearConfirm = false" />

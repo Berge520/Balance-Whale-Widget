@@ -157,6 +157,13 @@ const quotaPeriodText = computed(() =>
 const quotaPct = computed(() =>
   props.cfg.quotaTotal > 0 ? Math.min(100, Math.round((quotaUsed.value / props.cfg.quotaTotal) * 100)) : 0)
 const quotaLeft = computed(() => Math.max(0, props.cfg.quotaTotal - quotaUsed.value))
+// 额度折叠：填一次就不动，默认收起；收起态把「填没填、用到哪」说出来
+const quotaFold = useFold('usageQuota', false)
+const quotaBrief = computed(() => {
+  if (!(props.cfg.quotaTotal > 0)) return '未设置（填总量后显示进度与剩余）'
+  const cycle = props.cfg.quotaReset === 'never' ? '不重置' : props.cfg.quotaReset === 'daily' ? '每日重置' : '每月重置'
+  return `${props.fmtMoney(props.cfg.quotaTotal)} · ${cycle} · 已用 ${quotaPct.value}%`
+})
 // 柱子多的时候标签要抽稀（约每 6 个柱子留一个），否则会糊成一片
 const labelEvery = computed(() => Math.max(1, Math.round(usageRange.value / 6)))
 function dayLabel(date: string) {
@@ -605,8 +612,18 @@ defineExpose({ applyHistory, refreshTodayModels, refreshDetail })
         <p v-if="!detailRows.length" class="hint">没有匹配的记录。</p>
       </template>
     </div>
-    <!-- 额度（资源包 / 订阅）：总量与重置周期存配置，已用按周期从账本取（不新增存储与请求） -->
-    <div class="quota">
+    <!-- 额度（资源包 / 订阅）：总量与重置周期存配置，已用按周期从账本取（不新增存储与请求）。
+         默认收起：多数人没填额度总量，这块白白占一行控件 + 一行说明；
+         收起态直接报当前口径，「没填」与「填了但没进度」一眼能分清 -->
+    <h3 class="card-sub card-sub-toggle" role="button" tabindex="0"
+        :aria-expanded="quotaFold.open"
+        @click="quotaFold.open = !quotaFold.open"
+        @keydown.enter.prevent="quotaFold.open = !quotaFold.open"
+        @keydown.space.prevent="quotaFold.open = !quotaFold.open">
+      额度<span class="fold-caret">{{ quotaFold.open ? '▾' : '▸' }}</span>
+      <em v-if="!quotaFold.open">{{ quotaBrief }}</em>
+    </h3>
+    <div v-if="quotaFold.open" class="quota">
       <label class="field row">
         <span class="label">额度总量</span>
         <input class="num" type="number" min="0" step="1" :value="cfg.quotaTotal"

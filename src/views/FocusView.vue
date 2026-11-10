@@ -3,8 +3,6 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { msgCls, useFlashShow } from '../composables/useFlash'
 import { useFold } from '../composables/useFold'
 import type {
-  FocusSession,
-  FocusStatsResult,
   TodoItem,
   TodoLimits,
   TodoMutateResult,
@@ -12,13 +10,19 @@ import type {
   WhaleServices,
 } from '../types/services'
 
-// 「专注与待办」整卡：今日概览 + 待办清单（编辑面）+ 专注统计与明细。
+// 「待办与计时」整卡：总开关 + 待办清单（编辑面）。
 // 从 App.vue 抽出，沿用各 view 的范式：cfg 只读、落盘一律 emit('patch')；
-// 待办与统计都是宿主持有的数据，写操作走 services.todo*，读快照走 services.todoGet / focusStats。
+// 待办是宿主持有的数据，写操作走 services.todo*，读快照走 services.todoGet。
 //
-// 挂件里的待办块可直接开始 / 勾选 / 快速添加；改名 / 删除 / 提醒 / 预估 / 清除已完成仍在这里。
+// v1.16 起本卡的「统计 / 记录」层（今日几轮、连续天数、专注明细、每日目标）全部下线：
+// 那一层要在计时之外额外维护「设目标 → 对齐 → 看进度」的习惯，对绝大多数用户没有决策价值，
+// 而「一轮」的判定又严格（只有倒计时走完且非休息、非放弃才算），
+// 做了正计时却显示 0 轮反而像没记上。计时与番茄循环不依赖它，关掉照常工作。
+// 宿主侧的 focus.js / whale:focus 这一轮先保留不动（数据不丢，可逆），但设置页与挂件不再读。
+//
+// 挂件里的待办块可直接开始 / 勾选 / 快速添加；改名 / 删除 / 提醒 / 计时方式仍在这里。
 const props = defineProps<{
-  // 挂件配置整体传入：本卡只读写 focusOn / todoOn 两个键
+  // 挂件配置整体传入：本卡只读写 todoOn（待办与计时的总开关）
   cfg: any
   // 主窗 preload 注入的宿主 API：按依赖注入传入，避免子组件去读全局
   services: Partial<WhaleServices>
@@ -33,195 +37,22 @@ const emit = defineEmits<{
 
 const { flash, show, stop } = useFlashShow(4000)
 
-// 统计窗口：柱状图放 7 根柱刚好，再长就挤了。明细列表共用这一个常量（见下方 reloadSessions）。
-// 真源在宿主 constants.FOCUS_STATS_DAYS；设置页拿不到 preload 常量，这份副本由 check-shared 钉住
-const STAT_DAYS = 7
-
 function onCheckChange(key: string, e: Event) {
   emit('patch', { [key]: (e.target as HTMLInputElement).checked })
 }
 
-// —— 专注统计 ——
-// setup 里同步取一次：focusStats 是纯本地读，不联网，没必要等 onMounted（否则首帧会闪一下空态）
-const stats = ref<FocusStatsResult | null>(props.services.focusStats?.(STAT_DAYS) ?? null)
-function reloadStats() {
-  stats.value = props.services.focusStats?.(STAT_DAYS) ?? null
-  reloadHeat()
-  reloadSessions()
-}
-// 柱高按窗口内最大值归一；全是 0 时用 1 兜底，避免除零
-const barMax = computed(() => {
-  const s = stats.value
-  if (!s) return 1
-  return Math.max(1, ...s.series.map((d) => d.m))
-})
-// 有分钟数按比例给高度；0 分钟留 2px 基线，让「这天没练」也有柱位、不塌成空白
-function barH(m: number) {
-  if (!(m > 0)) return '2px'
-  return Math.max(4, Math.round((m / barMax.value) * 100)) + '%'
-}
-// —— 近 90 天热力图 ——
-// 7 根柱只能看出一周，看不出「坚持了多久、有没有断」；13×7 的格子才看得出。
-// 窗口取宿主保留上限（FOCUS_KEEP_DAYS = 90），与上面柱图同一份数据源、只是窗口更长。
-// 单独取一份而不是把 STAT_DAYS 改大：柱图 7 根刚好，拉长会挤成一条线。
-// 真源在宿主 constants.FOCUS_KEEP_DAYS；这份副本由 check-shared 钉住
-const HEAT_DAYS = 90
-const heatStats = ref<FocusStatsResult | null>(props.services.focusStats?.(HEAT_DAYS) ?? null)
-function reloadHeat() {
-  heatStats.value = props.services.focusStats?.(HEAT_DAYS) ?? null
-}
-
-// —— 近 7 天趋势（并入摘要行，不单独占一段） ——
-// 只给「比上次多了多少」，不做好坏评价：专注是长期节奏，某天少练不等于退步。
-// 数据来自已有的 90 天序列，不额外取数。
-const trendText = computed(() => {
-  const s = heatStats.value
-  if (!s || s.series.length < 8) return ''
-  const sumR = (list: FocusStatsResult['series']) => list.reduce((a, d) => a + d.r, 0)
-  const last7 = sumR(s.series.slice(-7))
-  const prev7 = sumR(s.series.slice(-14, -7))
-  if (!last7 && !prev7) return ''
-  if (!prev7) return `近 7 天 ${last7} 轮`
-  if (!last7) return `近 7 天没有记录`
-  if (last7 === prev7) return `近 7 天 ${last7} 轮，与前 7 天持平`
-  return `近 7 天 ${last7} 轮，比前 7 天${last7 > prev7 ? '多' : '少'} ${Math.abs(last7 - prev7)} 轮`
-})
-
-// 一行摘要：今日 / 连续 / 近 7 天趋势 / 日均。柱图与热力图负责「每天多少」，不再重复成段
-const statsSummary = computed(() => {
-  const s = stats.value
-  if (!s) return ''
-  // 「日均」的分母必须是**有记录的天**，不能是窗口天数：7 天里只练了 3 天时，
-  // 按 7 天算会把日均摊薄成「几乎没练」
-  const activeDays = s.series.filter((d) => d.m > 0).length
-  const avg = activeDays > 0 ? Math.round(s.total.m / activeDays) : 0
-  const avgText = activeDays > 0 ? ` · 日均 ${avg} 分钟` : ''
-  const trend = trendText.value ? ` · ${trendText.value}` : ''
-  return `今日 ${s.today.r} 轮 · ${s.today.m} 分钟 · 连续 ${s.streak} 天${trend}${avgText}`
-})
-// 首格前面补空位，让同一列落在同一个星期几上（0 = 周日，与 Date#getDay 一致）
-const heatCells = computed(() => {
-  const s = heatStats.value
-  const cells: Array<{ date: string; r: number; m: number } | null> = []
-  if (!s || !s.series.length) return cells
-  const first = new Date(s.series[0].date + 'T00:00:00')
-  const pad = Number.isFinite(first.getTime()) ? first.getDay() : 0
-  for (let i = 0; i < pad; i++) cells.push(null)
-  for (const d of s.series) cells.push(d)
-  return cells
-})
-// 90 天里一次都没有就不画（避免给新用户摆一整块空格子）
-const heatHasData = computed(() => !!heatStats.value && heatStats.value.series.some((d) => d.m > 0))
-const heatRange = computed(() => {
-  const s = heatStats.value
-  if (!s || !s.series.length) return ''
-  return s.series[0].date.slice(5) + ' ~ ' + s.series[s.series.length - 1].date.slice(5)
-})
-const heatAria = computed(() => {
-  const s = heatStats.value
-  if (!s) return ''
-  const active = s.series.filter((d) => d.m > 0).length
-  return `近 ${s.days} 天专注热力图：${active} 天有记录，合计 ${s.total.m} 分钟`
-})
-// 色阶按「当天专注分钟」分档，档位按 25 分钟一轮的常见节奏切：
-// ≤1 轮 / ≤2 轮 / ≤4 轮 / 更多。0 分钟另有底色（与柱图的零值柱同色）
-function heatLevel(m: number) {
-  if (!(m > 0)) return 0
-  if (m <= 25) return 1
-  if (m <= 50) return 2
-  if (m <= 100) return 3
-  return 4
-}
-
-// —— 专注记录（会话明细）——
-// 柱图看的是「每天多少」，这里回答「今天/昨天具体哪几轮、各做了什么」。
-// 窗口与柱图共用 STAT_DAYS（必须同值：分组头数字取柱图那份天表，窗口不一致就缺数字）；
-// 更早的明细翻起来费劲，长期趋势看上方的热力图就够了。
-// 老宿主没有这个服务：整块日志不渲染，其余统计照常工作
-const hasSessionApi = typeof props.services.focusSessions === 'function'
-const sessions = ref<FocusSession[]>(props.services.focusSessions?.(STAT_DAYS) ?? [])
-function reloadSessions() {
-  sessions.value = props.services.focusSessions?.(STAT_DAYS) ?? []
-}
-function fmtClock(t: number) {
-  const d = new Date(t)
-  const p = (n: number) => String(n).padStart(2, '0')
-  return p(d.getHours()) + ':' + p(d.getMinutes())
-}
-// 服务端已按时间倒序；这里只把同一天收拢成一组，并补上「今天 / 昨天」标签。
-// 日期基准用 stats 序列的最后两格（宿主本地日），而不是浏览器的 new Date()：
-// 跨零点前后两边可能差一天，用同一份数据源才不会出现「昨天」标签跳位
-//
-// 分组头的「N 轮 · M 分钟」取宿主天表（与柱图、热力图同一份 series），不在这里按明细累加：
-// 明细里现在有三类「只记时长、不算一轮」的行（正计时 / 定时 / 中途放弃），休息行连时长都不进天表。
-// 早先这里写的是 cur.r += 1 / cur.m += s.m，一进 v2 会话模型就会和上方柱图打架 —— 口径只该有一处。
-const seriesByDate = computed(() => {
-  const map: Record<string, { r: number; m: number }> = {}
-  for (const d of stats.value?.series || []) map[d.date] = { r: d.r, m: d.m }
-  return map
-})
-type SessionGroup = {
-  date: string
-  label: string
-  sum: { r: number; m: number } | null
-  items: FocusSession[]
-}
-const sessionGroups = computed<SessionGroup[]>(() => {
-  const list = sessions.value
-  if (!list.length) return []
-  const series = stats.value?.series || []
-  const today = series.length ? series[series.length - 1].date : ''
-  const yesterday = series.length > 1 ? series[series.length - 2].date : ''
-  const byDate = seriesByDate.value
-  const groups: SessionGroup[] = []
-  let cur: SessionGroup | null = null
-  for (const s of list) {
-    if (!cur || cur.date !== s.d) {
-      cur = {
-        date: s.d,
-        label: s.d === today ? '今天' : s.d === yesterday ? '昨天' : s.d.slice(5),
-        // 查不到这天（明细窗口比统计窗口长时才会发生）就给 null：
-        // 宁可这组不报数，也不自己编一个和柱图不同的口径
-        sum: byDate[s.d] || null,
-        items: [],
-      }
-      groups.push(cur)
-    }
-    cur.items.push(s)
-  }
-  return groups
-})
-// 徽标只回答一件事：这条为什么算 / 不算一轮。没有徽标的行就是走完的一轮。
-// round 由宿主派生（focus.js 的 isRound 唯一口径），这里只读
-const MODE_LABEL: Record<string, string> = { down: '倒计时', up: '正计时', at: '定时' }
-function sessionBadges(s: FocusSession): Array<{ cls: string; text: string }> {
-  const out: Array<{ cls: string; text: string }> = []
-  if (s.k && s.k !== 'down') out.push({ cls: 'badge-mode', text: MODE_LABEL[s.k] || s.k })
-  if (s.b) out.push({ cls: 'badge-rest', text: '休息' })
-  if (s.a) out.push({ cls: 'badge-abort', text: '放弃' })
-  return out
-}
-function sessionTitle(s: FocusSession): string {
-  if (s.round) return '这一轮计入轮数与时长'
-  // 休息行在宿主天表里轮数和时长都不聚合，写「只记时长」会和分组头对不上（列表多 5 分钟、头上不涨）
-  if (s.b) return '休息：只做一行标记，轮数和时长都不计入'
-  return (MODE_LABEL[s.k] || '倒计时') + (s.a ? '中途放弃' : '结束') + '：只记时长，不算一轮'
-}
-// 有历史统计、却没有一条明细：这是升级前的老数据（当时只按天汇总）
-const sessionStale = computed(() => hasSessionApi && !sessions.value.length
-  && (heatStats.value?.total.r || 0) > 0)
-
-// —— 分区折叠：统计与明细都是「回头再看」的长块 ——
-// 本卡默认只留「今日 + 待办清单」，统计与明细收起，卡片不再一进来就顶到两屏开外。
+// —— 分区折叠：只有「今日」与「已完成」两个 ——
+// 已完成的待办是「留着对账」的尾巴：勾掉不等于删掉，长期累积会把今天要做的顶到一屏以外，
+// 故整体收进一个折叠组，标题上直接报条数。
 // 与「计时」卡同一套范式（h3.card-sub-toggle：整行可点 + 三角 + 收起态摘要），
 // 折叠态持久化，展开过一次下次还是展开。
 // 搜索态另有一套开关（searchFoldClosed）：搜索命中时强制展开，用户仍可在搜索态下自己收起
-type FoldKey = 'stat' | 'log'
+type FoldKey = 'today' | 'done'
 const folds: Record<FoldKey, { open: boolean }> = {
-  stat: useFold('focusStat', false),
-  log: useFold('focusLog', false),
+  today: useFold('focusToday', false),
+  done: useFold('focusDone', false),
 }
-const searchFoldClosed = ref<Record<FoldKey, boolean>>({ stat: false, log: false })
+const searchFoldClosed = ref<Record<FoldKey, boolean>>({ today: false, done: false })
 function foldOpen(key: FoldKey) {
   return props.searchActive ? !searchFoldClosed.value[key] : folds[key].open
 }
@@ -234,18 +65,8 @@ function toggleFold(key: FoldKey) {
 }
 // 每次进入搜索态都重置：上一轮搜索里手动收起的，不该让这一轮也看不见
 watch(() => props.searchActive, (on) => {
-  if (on) searchFoldClosed.value = { stat: false, log: false }
+  if (on) searchFoldClosed.value = { today: false, done: false }
 })
-// 收起态的摘要：把「有多少」先说出来，收起不等于把信息藏没
-const statBrief = computed(() => {
-  const s = stats.value
-  if (!s || !s.total.r) return '暂无记录'
-  return `近 ${STAT_DAYS} 天 ${s.total.r} 轮 · ${s.total.m} 分钟`
-})
-// 今日轮数（待办行的徽标）：与仪表盘/挂件同源，任务删了只是查不到，不影响历史明细
-function todayRoundsOf(id: string) {
-  return stats.value?.todayByTodo?.[id] || 0
-}
 
 // —— 待办清单 ——
 // limits 拿不到（老宿主）时按 null 处理：输入框不加 maxlength，上限交给宿主报错兜底，
@@ -329,12 +150,23 @@ watch(editingId, (v) => {
 function toggleDone(it: TodoItem, e: Event) {
   applyResult(props.services.todoSetDone?.(it.id, (e.target as HTMLInputElement).checked))
 }
-function toggleFocus(it: TodoItem) {
-  applyResult(props.services.todoFocus?.(it.id))
+// 「开始」按钮文案：这条配了计时方式就叫「开始」，选「不计时」的那条点下去只会挂上专注标记，
+// 所以如实叫「专注」—— 按钮文案必须能预告点了会发生什么，不能让人以为会跑一个计时。
+function startLabel(it: TodoItem) {
+  return it.tm === 'down' || it.tm === 'up' ? '开始' : '专注'
 }
-function setEst(it: TodoItem, e: Event) {
-  const n = Math.max(0, Math.min(99, Math.round(Number((e.target as HTMLInputElement).value) || 0)))
-  applyResult(props.services.todoSetEst?.(it.id, n))
+// 点「开始」：一次调用就把「设为当前专注 + 让挂件按这条自己的参数启动计时（tm / mins）」做完
+// （宿主 todoFocus 的第二个参数 start，见 settings.js）。计时本体在挂件页，
+// 设置页不复制一套计时状态。取消专注仍走挂件菜单里「专注中」按钮，或换一条点「开始」。
+// ⚠️ 打完卡 / 计时结束不用清 focusId：focusId 只是「这条是当前任务」，到点后挂着是正常的
+// （取消专注走挂件菜单）。所以拿它当「专注进行中」的指示灯会一直亮着 —— 那才是 v1.16 之前的毛病。
+function startTodo(it: TodoItem) {
+  const r = props.services.todoFocus?.(it.id, true)
+  if (!r) { show('当前宿主不支持待办操作', true); return }
+  applyResult(r)
+  if (!r.ok) return
+  // 不计时的条目点下去只会挂上专注标记，如实提示一声，别让人以为在跑计时
+  if (it.tm !== 'down' && it.tm !== 'up') show('已标记为当前专注（这条设为不计时）')
 }
 
 // —— 每条待办自己的计时方式（学番茄 todo）——
@@ -439,7 +271,7 @@ const openTodo = ref<Record<string, boolean>>({})
 function toggleTodoMore(it: TodoItem) {
   openTodo.value[it.id] = !openTodo.value[it.id]
 }
-// 折叠态摘要：只写非默认项（预估 0 / 不计时 / 未提醒都不占字），收起来也不丢信息
+// 折叠态摘要：只写非默认项（不计时 / 未提醒都不占字），收起来也不丢信息
 function remindBrief(it: TodoItem): string {
   if (!it.remindOn) return ''
   const at = Number(it.remindAt) || 0
@@ -455,43 +287,17 @@ function remindBrief(it: TodoItem): string {
 }
 function todoBrief(it: TodoItem): string {
   const parts: string[] = []
-  if (it.est > 0) parts.push(`预估 ${it.est} 轮`)
   if (it.tm === 'down') parts.push(`倒计时 ${it.mins} 分`)
   else if (it.tm === 'up') parts.push('正计时')
-  const r = remindBrief(it)
-  if (r) parts.push(r)
+  // 提醒的摘要归提醒那一行自己（remindBrief），这里不重复，否则收起态会出现两次「提醒 …」
   return parts.join(' · ')
 }
 
-// —— 每日专注目标 ——
-const goalInput = ref<HTMLInputElement | null>(null)
-function onGoalInput(e: Event) {
-  const n = Math.max(0, Math.min(99, Math.round(Number((e.target as HTMLInputElement).value) || 0)))
-  emit('patch', { focusGoal: n })
-}
-const goalProgress = computed(() => {
-  const goal = props.cfg.focusGoal || 0
-  if (goal <= 0) return null
-  const today = stats.value?.today.r || 0
-  const pct = Math.min(100, Math.round((today / goal) * 100))
-  return { today, goal, pct, done: today >= goal }
+// 「今日」区折叠：总开关配一次就不动，日常进这张卡是为了写待办；
+// 收起态直接说出开没开 —— 早先这块常驻在卡头，把单条待办推到一屏以外
+const todayBrief = computed(() => {
+  return props.cfg.todoOn ? '已开启 · 挂件里显示待办与计时入口' : '未开启 · 挂件里不显示待办'
 })
-// 待办计划：未完成条目里「填了预估」的剩余轮数之和（est - 已完成 rounds，最小 0）。
-// 只做展示汇总，不新增字段；未填预估的条目只计入条数，不虚构轮数。
-const todoPlanText = computed(() => {
-  const items = todo.value.items.filter((x) => !x.done)
-  if (!items.length) return ''
-  let left = 0
-  let withEst = 0
-  for (const it of items) {
-    const est = Math.max(0, Math.round(Number(it.est) || 0))
-    if (!est) continue
-    withEst += 1
-    left += Math.max(0, est - (Number(it.rounds) || 0))
-  }
-  return withEst ? `待办 ${items.length} 条 · 预估剩 ${left} 轮` : `待办 ${items.length} 条`
-})
-const todoPlanTitle = '按每条填写的预估轮数减去已完成轮数；未填预估的不计'
 function removeTodo(it: TodoItem) {
   if (editingId.value === it.id) editingId.value = ''
   const r = props.services.todoRemove?.(it.id)
@@ -537,249 +343,186 @@ function clearDone() {
   applyResult(props.services.todoClearDone?.())
 }
 
-// 未完成在前、已完成在后（各自保持存储内相对顺序）：
-// 已完成的条目通常只是「留着看一眼」，压在上面会把今天要做的挤下去
-const orderedTodo = computed(() => {
-  const items = todo.value.items
-  return items.filter((x) => !x.done).concat(items.filter((x) => x.done))
-})
-const doneCount = computed(() => todo.value.items.filter((x) => x.done).length)
+// 未完成与已完成分开渲染。已完成项长期累积（勾掉不等于删掉），混在同一张列表里
+// 会把今天要做的事一路顶下去 —— 所以已完成整体收进一个折叠组，标题上直接报条数
+const openTodoList = computed(() => todo.value.items.filter((x) => !x.done))
+const doneList = computed(() => todo.value.items.filter((x) => x.done))
+const doneCount = computed(() => doneList.value.length)
 
-// 订阅宿主推送：挂件里勾选 / 设为专注、计时结束记一轮，都会让本页立刻跟上
+// 高级设置里的「提醒」再收一层：计时方式与改名是一次性的，提醒要在四种频次 + 周几 + 时刻
+// 里挑，展开就是一大片。收起态用摘要（每天 09:00 这种）兜住，展开后才出现全部控件
+const remindOpen = ref<Record<string, boolean>>({})
+function toggleRemind(it: TodoItem) {
+  remindOpen.value[it.id] = !remindOpen.value[it.id]
+}
+
+// 订阅宿主推送：挂件里勾选 / 设为专注，都会让本页立刻跟上。
+// v1.16 起不再订阅 onFocusChange —— 本页已不显示轮次与明细，计时结束无需刷新这里
 let unsubTodo: (() => void) | undefined
-let unsubFocus: (() => void) | undefined
 onMounted(() => {
   unsubTodo = props.services.onTodoChange?.((t) => { todo.value = t })
-  unsubFocus = props.services.onFocusChange?.(() => { reloadStats() })
 })
 onUnmounted(() => {
   unsubTodo?.()
-  unsubFocus?.()
   stopUndoTimer()
   stop()
 })
 </script>
 
 <template>
-  <!-- [用量] 专注与待办：今日概览 + 待办清单（编辑面）+ 专注统计与明细。
-       待办在挂件「专注」组里可直接开始 / 勾选完成；改名 / 删除 / 清除已完成的入口在本卡 -->
+  <!-- [用量] 待办与计时：总开关 + 待办清单（编辑面）。
+       待办在挂件「待办」组里可直接开始 / 勾选完成；改名 / 删除 / 清除已完成的入口在本卡 -->
   <section class="card-embedded" data-search="focus">
 
-    <!-- 今日：先回答「今天做了多少、还差多少」，再往下才是清单与统计。
-         只有一个记录开关：早先拆成两个，关掉后者整条链路什么都不记，用户只会以为开了功能却坏了 -->
-    <h3 class="card-sub">今日</h3>
+    <!-- 今日：先回答「开没开」，再往下才是清单。
+         只有一个总开关（v1.15 把「专注记录」与「挂件里显示待办」并成一个）：
+         两个开关各关一半时，用户说不清「我到底开了什么」，也常出现「关了记录却在奇怪为什么没统计」 -->
+    <!-- 今日区默认收起（配一次就不动），收起态直接播报开没开；
+         搜索命中时强制展开（同下方其它低频分区口径） -->
+    <h3 class="card-sub card-sub-toggle" role="button" tabindex="0"
+        :aria-expanded="foldOpen('today')"
+        @click="toggleFold('today')"
+        @keydown.enter.prevent="toggleFold('today')"
+        @keydown.space.prevent="toggleFold('today')">
+      今日<span class="fold-caret">{{ foldOpen('today') ? '▾' : '▸' }}</span>
+      <em v-if="!foldOpen('today')">{{ todayBrief }}</em>
+    </h3>
+    <template v-if="foldOpen('today')">
     <label class="field row check">
-      <span class="label">专注记录 <em>（每轮计时记成明细，按天汇总）</em></span>
-      <input type="checkbox" :checked="cfg.focusOn" @change="onCheckChange('focusOn', $event)" />
-    </label>
-    <template v-if="cfg.focusOn">
-      <p class="hint">
-        倒计时走完算 1 轮；正计时、定时、半途放弃只记时长，记录保留 90 天。只决定记录与统计，不挡任务开始。
-      </p>
-      <p v-if="stats && stats.total.r > 0" class="focus-sum">{{ statsSummary }}</p>
-      <div class="focus-goal">
-        <label class="field row focus-goal-row">
-          <span class="label">每日目标 <em>（轮数，0 = 不设）</em></span>
-          <input ref="goalInput" type="number" class="focus-goal-input" min="0" max="99"
-                 :value="cfg.focusGoal" @change="onGoalInput" />
-        </label>
-        <div v-if="goalProgress" class="focus-goal-progress">
-          <div class="focus-goal-bar">
-            <div class="focus-goal-fill" :class="{ done: goalProgress.done }" :style="{ width: goalProgress.pct + '%' }"></div>
-          </div>
-          <span class="focus-goal-text" :class="{ done: goalProgress.done }">
-            今日 {{ goalProgress.today }} / {{ goalProgress.goal }} 轮
-            <template v-if="goalProgress.done">🎉 已达成</template>
-          </span>
-        </div>
-      </div>
-    </template>
-    <p v-if="todoPlanText" class="hint focus-plan" :title="todoPlanTitle">{{ todoPlanText }}</p>
-
-    <h3 class="card-sub">待办清单</h3>
-    <label class="field row check todo-switch">
-      <span class="label">挂件里显示待办 <em>（菜单里可直接勾选）</em></span>
+      <span class="label">待办与计时 <em>（挂件里显示待办清单与计时入口）</em></span>
       <input type="checkbox" :checked="cfg.todoOn" @change="onCheckChange('todoOn', $event)" />
     </label>
-    <!-- 开始 / 设为专注只依赖待办本身；focusOn 只决定是否记录与统计 -->
+    <p class="hint">
+      这一项只管挂件里显不显示待办与计时；计时到点怎么提示、休息多久，见下方「计时设置」。
+    </p>
+    </template>
+
+    <h3 class="card-sub">待办清单</h3>
+    <!-- 开始 / 设为专注只依赖待办本身；总开关只管「挂件里显不显示、记不记账」 -->
     <div class="todo-add">
       <input type="text" :value="newText" :maxlength="limits?.textMax"
              placeholder="添加一条待办，回车保存" @input="onNewInput" @keydown.enter="onAddEnter" />
       <button class="utils-btn utils-primary" @click="addTodo">添加</button>
     </div>
 
-    <ul v-if="orderedTodo.length" class="todo-list">
-      <li v-for="it in orderedTodo" :key="it.id" class="todo-item"
-          :class="{ done: it.done, focus: todo.focusId === it.id }">
-        <input type="checkbox" :checked="it.done"
-               :aria-label="it.done ? '标记为未完成' : '标记为已完成'"
+    <!-- 空态顺手把三个隐藏操作说出来：改名 / 计时与提醒都藏在「更多」里，
+         第一次来的人不会自己想到去双击文字 -->
+    <p v-if="!todo.items.length" class="hint">
+      还没有待办。在上面输入框写一条，回车即可添加；双击文字改名，点「更多」设置计时与提醒。
+    </p>
+
+    <!-- 未完成：常显。行内只放「最常按得到」的动作，其余收进「更多」 -->
+    <ul v-if="openTodoList.length" class="todo-list">
+      <li v-for="it in openTodoList" :key="it.id" class="todo-item"
+          :class="{ focus: todo.focusId === it.id }">
+        <input type="checkbox" :checked="it.done" aria-label="标记为已完成"
                @change="toggleDone(it, $event)" />
         <input v-if="editingId === it.id" ref="editInput" class="todo-edit" type="text"
                :value="editingText" :maxlength="limits?.textMax"
                @input="onEditInput" @keydown.enter="onEditEnter" @keydown.esc="cancelEdit"
                @blur="commitEdit" />
         <span v-else class="todo-text" :title="it.text + '（双击修改）'" @dblclick="startEdit(it)">{{ it.text }}</span>
-        <span v-if="todo.focusId === it.id" class="todo-tag">专注中</span>
-        <span v-if="cfg.focusOn && todayRoundsOf(it.id) > 0" class="todo-tag todo-today"
-              :title="'今天在这条待办上完成 ' + todayRoundsOf(it.id) + ' 轮'">今日 {{ todayRoundsOf(it.id) }} 轮</span>
-        <span v-if="it.est > 0" class="todo-tag todo-rounds"
-              :title="'累计完成 ' + it.rounds + ' 轮 / 预估 ' + it.est + ' 轮'">{{ it.rounds }}/{{ it.est }} 轮</span>
-        <span v-else-if="it.rounds > 0" class="todo-tag todo-rounds"
-              :title="'累计完成 ' + it.rounds + ' 轮'">累计 {{ it.rounds }} 轮</span>
+        <!-- v1.16 起不再挂「当前任务 / 专注中」标签：focusId 到点、暂停、打完卡都不清，
+             拿它当指示灯会一直亮着骗人。状态只由行底色 + 按钮淡化暗示，
+             真正的「还在计时吗」由挂件里的计时窗口回答 -->
         <!-- 行内操作区：固定在主行右侧（窄窗整组换行）。只放动作，
              折叠摘要 / 高级设置另行整行，避免把按钮挤到下一行、每行看着三层高 -->
         <span class="todo-ops">
-          <template v-if="!it.done">
-            <button class="todo-act todo-focus" :class="{ 'is-on': todo.focusId === it.id }" type="button"
-                    @click="toggleFocus(it)">
-              {{ todo.focusId === it.id ? '取消专注' : '设为专注' }}
-            </button>
-            <button class="todo-act todo-more" type="button"
-                    :aria-expanded="!!openTodo[it.id]" @click="toggleTodoMore(it)">
-              {{ openTodo[it.id] ? '收起' : '更多' }}<span class="todo-caret" aria-hidden="true">{{ openTodo[it.id] ? '▴' : '▾' }}</span>
-            </button>
-          </template>
+          <!-- 「开始」= 设为当前专注 + 让挂件按这条自己的计时方式启动（v1.16 起）。
+               原来这里是「设为专注 / 取消专注」独立按钮，与「开始」并列 —— 做一件事却要按两下，
+               且挂件里同一个位置叫「开始」，两处心智对不上。现在：
+               · 未专注 → 点它一次性完成「专注 + 开始」，不计时的那条只标专注（文案随之为「专注」）
+               · 已专注 → 不重复发 focus（宿主是开关语义，再发会取消），只把计时拉起来 -->
+          <button class="todo-act todo-start" type="button"
+                  :title="todo.focusId === it.id ? '在挂件里开始这条的计时' : startLabel(it)"
+                  @click="startTodo(it)">{{ todo.focusId === it.id ? '开始' : startLabel(it) }}</button>
+          <button class="todo-act todo-more" type="button"
+                  :aria-expanded="!!openTodo[it.id]" @click="toggleTodoMore(it)">
+            {{ openTodo[it.id] ? '收起' : '更多' }}<span class="todo-caret" aria-hidden="true">{{ openTodo[it.id] ? '▴' : '▾' }}</span>
+          </button>
           <button class="todo-act todo-del" type="button" @click="removeTodo(it)">删除</button>
         </span>
-        <template v-if="!it.done">
-          <!-- 折叠态摘要：非默认设置用一行灰字兜住，收起来也不丢信息 -->
-          <span v-if="!openTodo[it.id] && todoBrief(it)" class="todo-sum">{{ todoBrief(it) }}</span>
-          <!-- 高级设置：预估 / 计时 / 时长 / 提醒 / 改名。默认收起，避免每行常显五六个控件 -->
-          <div v-if="openTodo[it.id]" class="todo-adv">
-            <label class="todo-est" :title="'预估番茄轮数（0 = 未设置）'">
-              <span class="todo-est-label">预估</span>
-              <input type="number" class="todo-est-input" min="0" max="99" :value="it.est" @change="setEst(it, $event)" />
-            </label>
-            <label class="todo-timer" title="挂件里点这条的「开始」时，按这个方式计时">
-              <span class="todo-est-label">计时</span>
-              <select class="todo-timer-select" :value="it.tm" @change="setTodoTimerMode(it, $event)">
-                <option v-for="m in TIMER_MODES" :key="m.v" :value="m.v">{{ m.label }}</option>
+        <!-- 折叠态摘要：非默认设置用一行灰字兜住，收起来也不丢信息 -->
+        <span v-if="!openTodo[it.id] && todoBrief(it)" class="todo-sum">{{ todoBrief(it) }}</span>
+        <!-- 高级设置：计时 / 时长 / 提醒 / 改名。默认收起，避免每行常显五六个控件 -->
+        <div v-if="openTodo[it.id]" class="todo-adv">
+          <label class="todo-timer" title="挂件里点这条的「开始」时，按这个方式计时">
+            <span class="todo-est-label">计时</span>
+            <select class="todo-timer-select" :value="it.tm" @change="setTodoTimerMode(it, $event)">
+              <option v-for="m in TIMER_MODES" :key="m.v" :value="m.v">{{ m.label }}</option>
+            </select>
+            <template v-if="it.tm === 'down'">
+              <input class="todo-est-input" type="number" min="1" max="600" step="1"
+                     title="倒计时分钟数（1–600）" :value="it.mins" @change="setTodoTimerMins(it, $event)" />
+              <span class="todo-est-label">分</span>
+            </template>
+            <!-- 指向：这里的分钟数只管这一条待办；全局默认时长与四档快捷按钮在下方「计时设置」里认 -->
+            <span class="todo-hint">默认时长与档位见下方「计时设置」</span>
+          </label>
+          <button class="todo-act" type="button" @click="startEdit(it)">改名</button>
+          <!-- 提醒单独一层折叠：四种频次 + 周几 + 时刻一起展开就是一大片，
+               而绝大多数待办并不需要提醒；收起态摘要直接播报「每天 09:00」 -->
+          <span class="todo-remind-row">
+            <button class="todo-act todo-remind-toggle" type="button"
+                    :aria-expanded="!!remindOpen[it.id]" @click="toggleRemind(it)">
+              提醒<span class="todo-caret" aria-hidden="true">{{ remindOpen[it.id] ? '▴' : '▾' }}</span>
+            </button>
+            <em v-if="!remindOpen[it.id]" class="todo-remind-brief">{{ remindBrief(it) || '未设置' }}</em>
+          </span>
+          <label v-if="remindOpen[it.id]" class="todo-remind" title="到点只提醒，不自动开始计时">
+            <input type="checkbox" :checked="it.remindOn" @change="onRemindToggle(it, $event)" />
+            <template v-if="it.remindOn">
+              <select class="todo-timer-select" :value="it.remindKind" @change="onRemindKind(it, $event)">
+                <option v-for="k in REMIND_KINDS" :key="k.v" :value="k.v">{{ k.label }}</option>
               </select>
-              <template v-if="it.tm === 'down'">
-                <input class="todo-est-input" type="number" min="1" max="600" step="1"
-                       title="倒计时分钟数（1–600）" :value="it.mins" @change="setTodoTimerMins(it, $event)" />
-                <span class="todo-est-label">分</span>
-              </template>
-            </label>
-            <label class="todo-remind" title="到点只提醒，不自动开始计时">
-              <span class="todo-est-label">提醒</span>
-              <input type="checkbox" :checked="it.remindOn" @change="onRemindToggle(it, $event)" />
-              <template v-if="it.remindOn">
-                <select class="todo-timer-select" :value="it.remindKind" @change="onRemindKind(it, $event)">
-                  <option v-for="k in REMIND_KINDS" :key="k.v" :value="k.v">{{ k.label }}</option>
-                </select>
-                <select v-if="it.remindKind === 'weekly'" class="todo-timer-select" :value="it.remindDow" @change="onRemindDow(it, $event)">
-                  <option v-for="w in WEEK_DAYS" :key="w.v" :value="w.v">周{{ w.label }}</option>
-                </select>
-                <input :type="it.remindKind === 'once' ? 'datetime-local' : 'time'"
-                       class="todo-est-input" :value="remindShown(it)" @change="onRemindTime(it, $event)" />
-              </template>
-            </label>
-            <button class="todo-act" type="button" @click="startEdit(it)">改名</button>
-          </div>
-        </template>
+              <select v-if="it.remindKind === 'weekly'" class="todo-timer-select" :value="it.remindDow" @change="onRemindDow(it, $event)">
+                <option v-for="w in WEEK_DAYS" :key="w.v" :value="w.v">周{{ w.label }}</option>
+              </select>
+              <input :type="it.remindKind === 'once' ? 'datetime-local' : 'time'"
+                     class="todo-est-input" :value="remindShown(it)" @change="onRemindTime(it, $event)" />
+            </template>
+          </label>
+        </div>
       </li>
     </ul>
-    <p v-else class="hint">还没有待办。在上面输入框写一条，回车即可添加。</p>
 
+    <!-- 已完成：整体折叠，标题直接报条数。勾掉只是「留着对账」，
+         不该继续占着今天的视线；展开后条目与未完成同一套行结构 -->
+    <template v-if="doneList.length">
+      <h3 class="card-sub card-sub-toggle" role="button" tabindex="0"
+          :aria-expanded="foldOpen('done')"
+          @click="toggleFold('done')"
+          @keydown.enter.prevent="toggleFold('done')"
+          @keydown.space.prevent="toggleFold('done')">
+        已完成<span class="fold-caret">{{ foldOpen('done') ? '▾' : '▸' }}</span>
+        <em>共 {{ doneCount }} 条</em>
+      </h3>
+      <ul v-if="foldOpen('done')" class="todo-list">
+        <li v-for="it in doneList" :key="it.id" class="todo-item done">
+          <input type="checkbox" :checked="it.done" aria-label="标记为未完成"
+                 @change="toggleDone(it, $event)" />
+          <!-- 已完成条目只是被一条实线划掉（.todo-item.done .todo-text），不删除、不挪走：
+               留在「已完成」折叠组里对账，勾选框随时能点回来 -->
+          <input v-if="editingId === it.id" ref="editInput" class="todo-edit" type="text"
+                 :value="editingText" :maxlength="limits?.textMax"
+                 @input="onEditInput" @keydown.enter="onEditEnter" @keydown.esc="cancelEdit"
+                 @blur="commitEdit" />
+          <span v-else class="todo-text" :title="it.text + '（双击修改）'" @dblclick="startEdit(it)">{{ it.text }}</span>
+          <span class="todo-ops">
+            <button class="todo-act todo-del" type="button" @click="removeTodo(it)">删除</button>
+          </span>
+        </li>
+      </ul>
+    </template>
+
+    <!-- 上限只在快满时才说：平时「上限 200 条」对用户没有意义，
+         快满时它才是「该清一清了」的提醒 -->
     <p v-if="todo.items.length" class="todo-count">
-      已完成 {{ doneCount }} / 共 {{ todo.items.length }} 条<template v-if="limits">（上限 {{ limits.max }} 条）</template>
+      已完成 {{ doneCount }} / 共 {{ todo.items.length }} 条<template v-if="limits && todo.items.length >= limits.max - 5">（上限 {{ limits.max }} 条，可清除已完成腾位置）</template>
     </p>
     <div v-if="doneCount > 0" class="btn-row">
       <button class="secondary utils-btn utils-secondary" @click="clearDone">清除已完成（{{ doneCount }}）</button>
     </div>
-
-
-    <h3 class="card-sub card-sub-toggle" role="button" tabindex="0"
-        :aria-expanded="foldOpen('stat')"
-        @click="toggleFold('stat')"
-        @keydown.enter.prevent="toggleFold('stat')"
-        @keydown.space.prevent="toggleFold('stat')">
-      专注统计<span class="fold-caret">{{ foldOpen('stat') ? '▾' : '▸' }}</span>
-      <em v-if="!foldOpen('stat')">{{ statBrief }}</em>
-    </h3>
-    <template v-if="foldOpen('stat')">
-    <div class="focus-stat">
-      <div v-if="stats && stats.total.r > 0" class="focus-bars">
-        <div v-for="(d, i) in stats.series" :key="d.date" class="focus-bar-cell"
-             :title="`${d.date} · ${d.r} 轮 · ${d.m} 分钟`">
-          <div class="focus-bar-wrap">
-            <div class="focus-bar" :class="{ zero: !(d.m > 0) }" :style="{ height: barH(d.m) }"></div>
-          </div>
-          <span class="focus-bar-label">{{ i === stats.series.length - 1 ? '今天' : d.date.slice(5) }}</span>
-        </div>
-      </div>
-      <p v-else-if="stats && !cfg.focusOn" class="hint focus-empty">
-        开启「专注记录」后，跑一段计时就会记在这里。
-      </p>
-      <!-- 柱图按「轮」聚合，明细什么段都收：只有正计时 / 定时 / 放弃时会出现「图是空的、列表有行」，
-           这时候说「还没有专注记录」就是在骗人，得把两行数字对上 -->
-      <p v-else-if="stats && sessions.length" class="hint focus-empty">
-        柱状图只画「轮」；明细里的 {{ sessions.length }} 段时长照常保留。
-      </p>
-      <p v-else-if="stats" class="hint focus-empty">
-        跑一段计时就会记进下面的明细。
-      </p>
-      <!-- 近 90 天热力图：7 根柱只能看出一周，13×7 的格子才看得出「断没断」。
-           90 天里一次都没有就整块不画 —— 新用户不必看一整块空格子 -->
-      <div v-if="heatHasData" class="heat">
-        <div class="heat-head">
-          <span class="heat-title">近 {{ heatStats?.days || HEAT_DAYS }} 天</span>
-          <span class="heat-range">{{ heatRange }}</span>
-          <span class="heat-legend">
-            <em>少</em>
-            <i class="heat-swatch lvl-1"></i><i class="heat-swatch lvl-2"></i>
-            <i class="heat-swatch lvl-3"></i><i class="heat-swatch lvl-4"></i>
-            <em>多</em>
-          </span>
-        </div>
-        <div class="heat-grid" role="img" :aria-label="heatAria">
-          <span v-for="(c, i) in heatCells" :key="i" class="heat-cell"
-                :class="c ? 'lvl-' + heatLevel(c.m) : 'pad'"
-                :title="c ? `${c.date} · ${c.r} 轮 · ${c.m} 分钟` : ''"></span>
-        </div>
-      </div>
-    </div>
-    </template>
-
-    <!-- 专注记录明细：柱图看「每天多少」，这里回答「具体哪几轮、各做了什么」。
-         高度封顶、内部滚动 —— 7 天几十轮不滚动的话会把下面的待办清单推到很远。
-         区名和「最近 N 天 · M 条」都并进分区标题：列表里再挂一个自己的表头，同一件事就有两个说法 -->
-    <template v-if="sessionGroups.length || sessionStale">
-      <h3 class="card-sub card-sub-toggle" role="button" tabindex="0"
-          :aria-expanded="foldOpen('log')"
-          @click="toggleFold('log')"
-          @keydown.enter.prevent="toggleFold('log')"
-          @keydown.space.prevent="toggleFold('log')">
-        专注明细<span class="fold-caret">{{ foldOpen('log') ? '▾' : '▸' }}</span>
-        <em v-if="!foldOpen('log')">最近 {{ STAT_DAYS }} 天<template v-if="sessionGroups.length"> · {{ sessions.length }} 条</template></em>
-      </h3>
-      <template v-if="foldOpen('log')">
-      <div class="focus-log">
-        <ul v-if="sessionGroups.length" class="focus-log-list">
-          <li v-for="g in sessionGroups" :key="g.date" class="focus-log-day">
-            <div class="focus-log-date">
-              <span class="focus-log-day-label">{{ g.label }}</span>
-              <span v-if="g.sum" class="focus-log-day-sum">{{ g.sum.r }} 轮 · {{ g.sum.m }} 分钟</span>
-            </div>
-            <ul class="focus-log-items">
-              <li v-for="(s, i) in g.items" :key="s.id || (g.date + '-' + i)" class="focus-log-item"
-                  :class="{ 'is-extra': !s.round }" :title="sessionTitle(s)">
-                <span class="focus-log-time">{{ fmtClock(s.t) }}</span>
-                <span class="focus-log-mins">{{ s.m }} 分钟</span>
-                <span v-for="(b, bi) in sessionBadges(s)" :key="bi" class="focus-log-badge" :class="b.cls">{{ b.text }}</span>
-                <span v-if="s.todoText" class="focus-log-todo" :title="s.todoText">{{ s.todoText }}</span>
-                <span v-else class="focus-log-todo focus-log-none">未关联待办</span>
-              </li>
-            </ul>
-          </li>
-        </ul>
-        <p v-else class="hint focus-empty">
-          之前的专注只按天汇总；从现在起每一轮都会列在这里。
-        </p>
-      </div>
-      </template>
-    </template>
 
     <!-- 删除撤回：固定视口底部，长列表也不会把提示滚出视野；
          Teleport 到 body，避免被卡片 / 吸顶条裁掉；悬停暂停自动消失 -->
@@ -799,287 +542,14 @@ onUnmounted(() => {
 <style scoped>
 /* 设计令牌（--fg / --accent / --line / --track / --input-bg 等）全部来自 main.css 的 :root；
    .field / .hint / .msg / .btn-row / .link-btn / utils 按钮档位 / 分区标题 .card-sub
-   也由 main.css 统一提供，这里只留本卡特有的统计图与待办列表样式。 */
+   也由 main.css 统一提供，这里只留本卡特有的待办列表样式。 */
 
-.focus-stat {
-  margin: 4px 0 16px;
-}
-/* 跨卡链接：默认时长 / 番茄规则在「计时」卡，本卡只留每条待办的计时方式 */
-.focus-goal {
-  margin: 0 0 16px;
-}
-/* 待办计划行：今日块末尾的一行弱色汇总，不占独立分区 */
-.focus-plan {
-  margin: 0 0 12px;
-}
-.focus-goal-row {
-  margin: 0 0 8px;
-}
-.focus-goal-input {
-  width: 64px;
-  padding: 4px 8px;
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  background: var(--input-bg);
-  font-size: 13px;
-  text-align: center;
-}
-.focus-goal-input::-webkit-inner-spin-button {
-  opacity: 0.5;
-}
-.focus-goal-progress {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-}
-.focus-goal-bar {
-  flex: 1;
-  height: 8px;
-  background: var(--track);
-  border-radius: 4px;
-  overflow: hidden;
-}
-.focus-goal-fill {
-  height: 100%;
-  background: var(--accent);
-  border-radius: 4px;
-  transition: width 0.3s ease;
-}
-.focus-goal-fill.done {
-  background: var(--success, #4caf50);
-}
-.focus-goal-text {
-  font-size: 12px;
-  color: var(--fg-dim);
-  white-space: nowrap;
-}
-.focus-goal-text.done {
-  color: var(--success, #4caf50);
-  font-weight: 500;
-}
-.focus-sum {
-  margin: 0 0 8px;
-  font-size: 13px;
-  color: var(--fg-dim);
-}
-.focus-bars {
-  display: flex;
-  align-items: flex-end;
-  gap: 6px;
-  height: 92px;
-}
-.focus-bar-cell {
-  flex: 1;
-  min-width: 0;
-  height: 100%;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-}
-.focus-bar-wrap {
-  flex: 1;
-  width: 100%;
-  display: flex;
-  align-items: flex-end;
-  background: var(--track);
-  border-radius: 4px;
-  overflow: hidden;
-}
-.focus-bar {
-  width: 100%;
-  background: var(--accent);
-  border-radius: 4px;
-}
-/* 0 分钟的柱只留一条基线，用淡色区分「没记录」而不是「记录了很少」 */
-.focus-bar.zero {
-  background: var(--line);
-}
-.focus-bar-label {
-  margin-top: 4px;
-  font-size: 11px;
-  color: var(--fg-faint);
-  white-space: nowrap;
-}
-.focus-empty {
-  margin: 0;
-}
-/* 对比回顾：与柱图同一窗口的「比上次多/少」，弱色 + 左侧细线，像一句旁注而不是新面板 */
+/* v1.16 随「统计 / 记录」层下线的样式：7 天柱图（.focus-stat / .focus-bars）、
+   90 天热力图、今日摘要（.focus-sum）、每日目标（.focus-goal*）、
+   专注明细（.focus-log* 与 .badge-*）。宿主侧 focus.js 与 whale:focus 暂留未删，
+   若哪天要把统计接回来，样式需一并恢复 —— 故这里不逐个注释回溯 */
 
-/* —— 专注记录明细 ——
-   区名与条数在分区标题（.card-sub）里，这里只管列表本身。
-   高度封顶内部滚动：7 天几十轮全铺开会把下面的待办清单推到很远；
-   overscroll-behavior 防止滚到底后继续带着整页滚 */
-.focus-log {
-  margin: 0 0 16px;
-}
-.focus-log-list {
-  list-style: none;
-  margin: 0;
-  padding: 0 4px 0 0;
-  max-height: 220px;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-}
-.focus-log-day {
-  padding: 6px 0;
-  border-top: 1px dashed var(--line);
-}
-.focus-log-day:first-child {
-  padding-top: 0;
-  border-top: none;
-}
-.focus-log-date {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
-  font-size: 12px;
-}
-.focus-log-day-label {
-  color: var(--fg);
-  font-weight: 600;
-}
-.focus-log-day-sum {
-  color: var(--fg-faint);
-  font-variant-numeric: tabular-nums;
-}
-.focus-log-items {
-  list-style: none;
-  margin: 4px 0 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.focus-log-item {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  padding: 2px 4px;
-  border-radius: 6px;
-  font-size: 12px;
-  color: var(--fg-dim);
-}
-.focus-log-item:hover {
-  background: var(--track);
-}
-.focus-log-time {
-  flex: 0 0 auto;
-  color: var(--fg-faint);
-  font-variant-numeric: tabular-nums;
-}
-.focus-log-mins {
-  flex: 0 0 auto;
-}
-/* 徽标：解释「这条为什么不算一轮」，所以只给不计轮的三种情况加彩色底，
-   走完的倒计时保持无徽标 —— 满屏标签比没标签更难读 */
-.focus-log-badge {
-  flex: 0 0 auto;
-  padding: 0 5px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: var(--track);
-  font-size: 11px;
-  line-height: 16px;
-  color: var(--fg-dim);
-  white-space: nowrap;
-}
-.badge-rest {
-  border-color: rgba(46, 160, 67, 0.4);
-  color: #2ea043;
-}
-.badge-abort {
-  border-color: rgba(207, 103, 35, 0.4);
-  color: #cf6723;
-}
-/* 不计轮的行整行压暗：一眼能扫出「哪些进了轮数」，不用逐条读徽标 */
-.focus-log-item.is-extra .focus-log-mins,
-.focus-log-item.is-extra .focus-log-todo {
-  color: var(--fg-faint);
-}
-.focus-log-todo {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--fg);
-}
-.focus-log-none {
-  color: var(--fg-faint);
-}
-
-/* —— 近 90 天热力图 ——
-   13 列 × 7 行（列 = 周，行 = 星期几），grid-auto-flow:column 让数据按周自然折行。
-   色阶不用 color-mix：那要 Chromium 111+，且变量本身带 alpha 时不可靠；
-   深浅两套各给一份固定 rgba，与 --accent 同源（浅 #536ba9 / 深 #8aa4e6） */
-.heat {
-  margin: 12px 0 0;
-}
-.heat-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 0 0 6px;
-  font-size: 12px;
-  color: var(--fg-dim);
-}
-.heat-title {
-  color: var(--fg);
-  font-weight: 600;
-}
-.heat-range {
-  color: var(--fg-faint);
-}
-.heat-legend {
-  display: flex;
-  align-items: center;
-  gap: 3px;
-  margin-left: auto;
-  color: var(--fg-faint);
-}
-.heat-legend em {
-  font-style: normal;
-  font-size: 11px;
-}
-.heat-swatch,
-.heat-cell {
-  display: inline-block;
-  width: 13px;
-  height: 13px;
-  border-radius: 3px;
-  background: var(--track);
-}
-.heat-swatch {
-  width: 11px;
-  height: 11px;
-}
-/* 13 列 × 7 行固定尺寸的方格：卡片本身是整宽的，但热力图必须保持正方形格子，
-   所以不拉伸、整体居中（横向铺满会变成 50px 宽的长条） */
-.heat-grid {
-  display: grid;
-  grid-auto-flow: column;
-  grid-template-rows: repeat(7, 13px);
-  gap: 3px;
-  justify-content: center;
-}
-.heat-cell.pad {
-  background: transparent;
-}
-/* 0 分钟沿用 .heat-cell 的 --track 底色（与柱图零值柱同色），以下只覆盖有记录的四档 */
-.lvl-1 { background: rgba(83, 107, 169, 0.25); }
-.lvl-2 { background: rgba(83, 107, 169, 0.45); }
-.lvl-3 { background: rgba(83, 107, 169, 0.68); }
-.lvl-4 { background: rgba(83, 107, 169, 0.92); }
-html.dark .lvl-1 { background: rgba(138, 164, 230, 0.25); }
-html.dark .lvl-2 { background: rgba(138, 164, 230, 0.45); }
-html.dark .lvl-3 { background: rgba(138, 164, 230, 0.68); }
-html.dark .lvl-4 { background: rgba(138, 164, 230, 0.92); }
-
-/* 待办：与专注统计之间留一条分隔，避免两件事视觉上粘在一起 */
-.todo-switch {
-  margin-top: 0;
-}
+/* 待办列表 */
 .todo-add {
   display: flex;
   gap: 8px;
@@ -1120,32 +590,20 @@ html.dark .lvl-4 { background: rgba(138, 164, 230, 0.92); }
   word-break: break-all;
   cursor: text;
 }
+/* 已完成：一条实线划掉、但不删条目 —— 留着对账，也随时能点回来。
+   用 1px solid（不是默认的 line-through 细单线，也不必双线）：和正文同一档虚实，
+   读起来是「划掉了」而不是「看不清的灰字」 */
 .todo-item.done .todo-text {
   text-decoration: line-through;
+  text-decoration-thickness: 1px;
+  text-decoration-color: var(--fg);
   color: var(--fg-faint);
 }
+/* v1.16 起待办行不挂任何常驻文字标签：focusId 到点 / 暂停 / 打完卡都不清，
+   拿它当指示灯会一直亮着骗人。真正的「还在计时吗」由挂件里的计时窗口回答 */
 .todo-edit {
   flex: 1;
   min-width: 0;
-}
-.todo-tag {
-  padding: 0 6px;
-  border: 1px solid var(--accent);
-  border-radius: 999px;
-  font-size: 11px;
-  color: var(--accent);
-  white-space: nowrap;
-}
-.todo-rounds {
-  border-color: var(--line);
-  color: var(--fg-dim);
-  background: var(--track);
-}
-/* 今日轮数：与「累计 N 轮」区分开 —— 今日是行动信号，用主题色底衬托；累计是历史，保持灰调 */
-.todo-today {
-  border-color: var(--accent);
-  color: var(--accent);
-  background: var(--accent-weak);
 }
 /* 折叠态摘要：非默认设置收成一行灰字，控件收起来也不丢信息 */
 .todo-sum {
@@ -1166,14 +624,6 @@ html.dark .lvl-4 { background: rgba(138, 164, 230, 0.92); }
   padding-top: 6px;
   border-top: 1px dashed var(--line);
 }
-.todo-est {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 12px;
-  color: var(--fg-dim);
-  white-space: nowrap;
-}
 .todo-est-label {
   font-size: 11px;
 }
@@ -1189,7 +639,13 @@ html.dark .lvl-4 { background: rgba(138, 164, 230, 0.92); }
 .todo-est-input::-webkit-inner-spin-button {
   opacity: 0.5;
 }
-/* 计时方式下拉：与「预估」同一行同一档字号，宽度吃内容（最长「倒计时 45 分钟」） */
+/* 指向「计时设置」的一句：只在高级设置里出现，弱色小字，跟在计时下拉后面 */
+.todo-hint {
+  margin-left: 4px;
+  color: var(--muted);
+  font-size: 11px;
+}
+/* 行内小标签（计时 / 分 / 提醒）：同档字号与弱色，宽度吃内容 */
 .todo-timer {
   display: inline-flex;
   align-items: center;
@@ -1202,7 +658,7 @@ html.dark .lvl-4 { background: rgba(138, 164, 230, 0.92); }
   padding: 2px 4px;
   font-size: 12px;
 }
-/* 到点提醒：与「预估 / 计时」同一档字号与弱色，时刻输入框放宽到能放下 datetime-local 的日期 */
+/* 到点提醒：与「计时」同一档字号与弱色，时刻输入框放宽到能放下 datetime-local 的日期 */
 .todo-remind {
   display: inline-flex;
   align-items: center;
@@ -1213,6 +669,19 @@ html.dark .lvl-4 { background: rgba(138, 164, 230, 0.92); }
   white-space: nowrap;
 }
 .todo-remind .todo-est-input { width: 130px; }
+/* 提醒开关行：默认收起只露「提醒 ▸ 每天 09:00」这一条，展开后才出现频次 / 周几 / 时刻 */
+.todo-remind-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 4px;
+}
+.todo-remind-brief {
+  font-size: 11px;
+  font-style: normal;
+  color: var(--fg-faint);
+  white-space: nowrap;
+}
 /* 行内操作区：固定在主行右侧；窄窗时整组换行而不是把三个按钮拆散 */
 .todo-ops {
   display: flex;
@@ -1246,22 +715,25 @@ html.dark .lvl-4 { background: rgba(138, 164, 230, 0.92); }
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
-.todo-focus {
+.todo-start {
   color: var(--accent);
   background: var(--accent-weak);
   border-color: color-mix(in srgb, var(--accent) 32%, transparent);
 }
-.todo-focus:hover {
+.todo-start:hover {
   color: var(--accent);
   background: var(--accent-weak);
   border-color: var(--accent);
 }
-/* 已在专注中：整行已有强调底色，按钮改成描边即可，避免和行底色糊在一起 */
-.todo-focus.is-on,
-.todo-focus.is-on:hover {
+/* 已在专注中：整行已有强调底色，按钮改成描边即可，避免和行底色糊在一起。
+   「不用再点」也靠这一点暗示：灰下去的不是重点，重点在行本身 */
+.todo-item.focus .todo-start {
   background: transparent;
+  color: var(--fg-dim);
+  border-color: color-mix(in srgb, var(--accent) 32%, transparent);
 }
-.todo-more {
+.todo-more,
+.todo-remind-toggle {
   display: inline-flex;
   align-items: center;
   gap: 3px;

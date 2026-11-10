@@ -1382,9 +1382,8 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
         </span>
       </label>
       <p class="hint">
-        「清除未使用」只删当前设置不会用到的素材（画廊里没在用形象、已关掉的提醒音、没在用的背景/片头媒体等），正在使用的一律保留；
-        「清除全部素材」把导入的形象、气泡图与音效全删掉，形象 / 音色一并回退为内置（与「数据」页勾「导入的素材」是同一操作）。
-        两者都只动素材，不影响其它设置。
+        「清除未使用」只删当前设置用不到的素材（没在用的形象、已关掉的提醒音、没在用的背景 / 片头媒体等），正在使用的一律保留；
+        「清除全部素材」把导入的形象、气泡图与音效全删掉，形象 / 音色回退内置（同「数据」页勾「导入的素材」）。两者都不影响其它设置。
       </p>
 
       <div class="fold">
@@ -1624,7 +1623,7 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
       <template v-if="galleryOpen('skins')">
       <!-- 上段：已落盘的形象。包含用户导入的（占 20 张配额、删了要重导）与已下载的内置 / 共享
            （不占配额、删了能重下）—— 两类靠悬停「删」的 title 文案区分，不必再分两张卡 -->
-      <p class="group-title skin-group-title">我的形象 <em>（共 {{ skinGallery.items.length }} 张 · 点缩略图选用；单击选中可批量整理）</em></p>
+      <p class="group-title skin-group-title">我的形象 <em>（共 {{ skinGallery.items.length }} 张 · 点缩略图选用，单击可批量整理）</em></p>
       <div class="skin-grid">
         <div v-for="(it, idx) in skinGallery.items" :key="it.id" class="skin-cell"
              :class="{ active: it.id === skinGallery.current, picked: skinPicked.indexOf(it.id) >= 0, broken: thumbBroken[it.id], noprev: !it.thumb && !thumbBroken[it.id], dragging: draggingId === it.id, 'drop-before': dragOverId === it.id && !dragOverAfter, 'drop-after': dragOverId === it.id && dragOverAfter }"
@@ -1699,7 +1698,7 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
                 :aria-expanded="dlFolds.skins"
                 @click="dlFolds.skins = !dlFolds.skins">
           <span class="dl-caret">{{ dlFolds.skins ? '▾' : '▸' }}</span>
-          可下载形象 <em>（点缩略图即可下载那一张，下完自动切到它；{{ remoteSkinInstalledCount }} / {{ remoteSkinCount }} 已下载）</em>
+          可下载形象 <em>（点缩略图下载，下完自动切换；{{ remoteSkinInstalledCount }} / {{ remoteSkinCount }} 已下载）</em>
           <span class="dl-action">{{ dlFolds.skins ? '收起' : '展开' }}</span>
         </button>
         <template v-if="dlFolds.skins">
@@ -1744,7 +1743,7 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
         </div>
         <!-- 共享角色（上游 QQ 群 36 张）：与内置那批同一套交互。清单是异步拉的，
              未拉到时整组不渲染，免得出现「下载全部 0 张（约 0 KB）」的空壳 -->
-        <p v-if="sharedSkinItems.length" class="skin-sub-title">共享角色 <em>（上游分享、不随插件包分发；{{ sharedSkinInstalledCount }} / {{ sharedSkinItems.length }} 已下载）</em></p>
+        <p v-if="sharedSkinItems.length" class="skin-sub-title">共享角色 <em>（上游分享，不随插件分发；{{ sharedSkinInstalledCount }} / {{ sharedSkinItems.length }} 已下载）</em></p>
         <div v-if="sharedSkinItems.length" class="skin-grid">
           <div v-for="s in sharedSkinItems" :key="'sh-' + s.id" class="skin-cell"
                :class="{ active: cfg.skin === s.id, 'is-remote': !sharedSkinInstalled[s.id] }">
@@ -1987,7 +1986,7 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
                 :aria-expanded="dlFolds.sounds"
                 @click="dlFolds.sounds = !dlFolds.sounds">
           <span class="dl-caret">{{ dlFolds.sounds ? '▾' : '▸' }}</span>
-          可下载音效 <em>（上游分享、不随插件包分发；{{ sharedSoundInstalledCount }} / {{ sharedSoundItems.length }} 已下载，点行展开可勾选参加哪些槽位）</em>
+          可下载音效 <em>（上游分享、不随插件分发；已下载 {{ sharedSoundInstalledCount }} / {{ sharedSoundItems.length }}，点行可勾选启用槽位）</em>
           <span class="dl-action">{{ dlFolds.sounds ? '收起' : '展开' }}</span>
         </button>
         <template v-if="dlFolds.sounds">
@@ -1999,7 +1998,7 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
              免得 45 行未下载项把「已下载」这半截推到屏外。 -->
         <div class="shs-list">
           <template v-if="sharedSoundInstalledItems.length">
-            <p class="skin-sub-title">已下载 <em>（{{ sharedSoundInstalledItems.length }} 段，点行展开勾选槽位 / 可试听 / 可删）</em></p>
+            <p class="skin-sub-title">已下载 <em>（{{ sharedSoundInstalledItems.length }} 段，点行可勾选槽位、试听或删除）</em></p>
             <!-- 45 行铺开时找一段要滚很久；搜索 + 三档筛选把「已下载」这半截收窄。
                  筛选只作用于本组（未下载组是逐段补下载用的，筛它没意义） -->
             <div class="shs-filter">
@@ -2102,11 +2101,11 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
           {{ soundHelpOpen ? '收起音效使用说明' : '音效使用说明' }}
         </button>
         <div v-if="soundHelpOpen" class="guide">
-          <p class="hint">每槽位一段手导，再导入 = 替换；想加更多，用槽位头的「从共享库添加…」挂共享段，一起随机播放。</p>
-          <p class="hint">共享库的段来自上游 QQ 群分享、不随插件包分发，改为按需从 GitHub 直链下载；下载后默认不参加任何槽位（不打扰），点开行勾选想让它响的槽位即可。</p>
-          <p class="hint">加入播放后它<strong>不会顶掉</strong>你手导的那段：挂件每次触发会在「手导的那段 + 挂到本槽位的共享段」里<strong>随机选一段</strong>。一段能同时挂多个槽位，一个槽位也能同时挂多段。</p>
-          <p class="hint">提醒音留空时用内置提醒音，导入后换成你自己的；播放跟随「挂件外观」的音效开关与音量。</p>
-          <p class="hint">支持 mp3 / wav / ogg，导入时可拖选片段试听（最长 10 秒），存为单声道 WAV。</p>
+          <p class="hint">每槽位一段手导，再导入即替换。想多几段就点槽位头的「从共享库添加…」，一起随机播放。</p>
+          <p class="hint">共享段不随插件分发，按需从 GitHub 下载；下载后默认不挂任何槽位，勾选后才会响。</p>
+          <p class="hint">共享段<strong>不会顶掉</strong>手导的那段：每次触发在两者间<strong>随机选一段</strong>。一段可挂多个槽位，一个槽位也可挂多段。</p>
+          <p class="hint">提醒音留空则用内置提醒音；播放跟随「挂件外观」的音效开关与音量。</p>
+          <p class="hint">支持 mp3 / wav / ogg，导入时可拖选片段（最长 10 秒），存为单声道 WAV。</p>
         </div>
       </div>
       <p v-if="soundFlash.msg" class="msg" :class="msgCls(soundFlash)">{{ soundFlash.msg }}</p>

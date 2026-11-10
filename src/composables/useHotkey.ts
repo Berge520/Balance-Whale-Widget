@@ -1,4 +1,5 @@
 import { onBeforeUnmount, onMounted, ref } from 'vue'
+import { CMD_TOGGLE } from '../constants/commands'
 import type { WhaleServices } from '../types/services'
 
 // 读取指令当前绑定的全局快捷键（uTools 8.0 的 utools.getCmdHotKey）。
@@ -10,7 +11,9 @@ import type { WhaleServices } from '../types/services'
 // 时序：绑定动作发生在 uTools 自己的设置窗口，用户切回来时本窗口重新获得焦点，
 // 所以除了挂载时读一次，还要在 window focus 时再读一次，否则页面停在旧值。
 // 7.x 没有该 API，宿主回空串，模板统一按「未绑定」展示（措辞不能承诺已绑定）。
-export function useHotkey(services: Partial<WhaleServices>, label: string) {
+// 绑定目标默认是「显示/隐藏挂件」：绝大多数用户只需要这一个，
+// 指令名统一从 constants/commands 取，避免与 plugin.json 的 cmds 漂移。
+export function useHotkey(services: Partial<WhaleServices>, label: string = CMD_TOGGLE) {
   const hotkey = ref('')
   function refresh() {
     try {

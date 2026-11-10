@@ -15,7 +15,7 @@ export const TABS: readonly { key: TabKey; label: string; desc: string; devOnly?
 
 export const SEARCH_INDEX: Record<string, { label: string; tab: TabKey; keys: string }> = {
   credentials: { label: 'DeepSeek 凭据（API Key / 平台 Token）', tab: 'data', keys: 'apikey api key 密钥 token 令牌 凭据 授权 余额 认证' },
-  look: { label: '挂件外观', tab: 'look', keys: '形象 皮肤 音色 音效 音量 大小 缩放 气泡 主题 报时 点按 播放 界面 深浅色 深色 浅色 暗色 亮色 跟随 uTools 未至之境 深海 深蓝 幻想 fantasy 预览 峰谷 文案 随机 节假日 法定节假日表 更新' },
+  look: { label: '挂件外观', tab: 'look', keys: '形象 皮肤 音色 音效 音量 大小 缩放 气泡 主题 报时 点按 播放 界面 深浅色 深色 浅色 暗色 亮色 跟随 uTools 未至之境 深海 深蓝 幻想 fantasy 预览 峰谷 文案 随机 节假日 法定节假日表 更新 外圈 进度圈 粗细 圈色' },
   pageVisual: { label: '设置页视觉', tab: 'look', keys: '设置页 背景 氛围 光晕 极光 星海 薄雾 极夜 暖光 画廊 视频 壁纸 鲸鱼娘 下载 片头 启动 开机 动画 纯净播放 纯净 遮罩 模糊 亮度 暗角 适配 焦点 缩放 智能 预览 自定义 媒体 纯 CSS 系统动画' },
   bubbleCustom: { label: '按压气泡（自定义泡泡）', tab: 'look', keys: '按压气泡 自定义泡泡 泡泡 气泡 编辑 撤销 重做 队列 排序 步骤 模块 行 文本 报时 余额 赠金 充值 今日 峰谷 对话名 随机 超链接 图片 动图 额度 订阅 试播 预览 开关 思考 点我 点击 停留' },
   assetsOverview: { label: '资源概览', tab: 'assets', keys: '素材 形象 音效 气泡图 背景 片头 媒体 占用 体积 清除 未使用 素材包 导出 导入' },
@@ -27,8 +27,8 @@ export const SEARCH_INDEX: Record<string, { label: string; tab: TabKey; keys: st
   models: { label: '模型与余额', tab: 'usage', keys: '模型 余额 提供商 厂商 刷新 api key 额度 主显示 密钥 凭据 token 名称 类型 币种 接口 地址 base url scale 认证 字段 路径 取值 倍数 重置 提醒 阈值' },
   notify: { label: '提醒与通知', tab: 'usage', keys: '提醒 通知 系统通知 邮件 smtp 预算 低余额 波动 免打扰 预警 阈值 端口 ssl tls 直连 账号 授权码 发件人 收件人 主题 前缀 停留 峰谷 切换' },
   focus: { label: '专注与待办', tab: 'usage', keys: '专注 专注与计时 专注与待办 番茄 计时 倒计时 统计 连续 待办 清单 任务 勾选 完成 轮次 分钟 目标 专注中 改名 删除' },
-  timer: { label: '计时设置', tab: 'usage', keys: '计时 计时器 番茄 番茄钟 番茄循环 倒计时 正计时 定时 默认时长 快捷时长 档位 休息 短休 长休 每几轮进长休 自动衔接 到点 到点提醒 留言 气泡 常驻 只显计时 记住 邮件 系统通知 计时设置' },
-  offwork: { label: '下班倒计时', tab: 'usage', keys: '下班 倒计时 上班 工时 打卡 工作日 周末 发薪日 发薪 工资 时薪 今日已赚 估算 秒 显示 距离下班 距离上班 已下班 休息日' },
+  timer: { label: '计时设置', tab: 'usage', keys: '计时 计时器 番茄 番茄钟 番茄循环 倒计时 正计时 定时 默认时长 快捷时长 档位 休息 短休 长休 每几轮进长休 自动衔接 下一条待办 待办 自动开始 到点 到点提醒 留言 气泡 常驻 只显计时 记住 邮件 系统通知 计时设置' },
+  offwork: { label: '下班倒计时', tab: 'usage', keys: '下班 倒计时 上班 工时 打卡 工作日 周末 发薪日 发薪 工资 时薪 今日已赚 估算 秒 显示 距离下班 距离上班 已下班 休息日 外圈 进度圈 进度环 进度 圈' },
   window: { label: '挂件窗口', tab: 'window', keys: '窗口 显隐 位置 复位 透明度 穿透 吸附 翻转 避让 任务栏 间距 插件 滚动条 置顶 锁定 贴边 宽度' },
   help: { label: '使用帮助', tab: 'help', keys: '帮助 快捷键 使用说明 故障排查 日志 新手引导 异常 详情' },
   backup: { label: '备份与恢复', tab: 'data', keys: '备份 恢复 导出 导入 json 迁移 密码 加密 凭据 气泡 泡泡 素材 待办 专注 记录' },

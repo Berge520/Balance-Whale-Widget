@@ -173,6 +173,8 @@ function backupCancelPick() {
 // 收起后只留标题栏摘要（是否已读取备份待恢复）
 const cardFold = useFold('backup', false)
 const cardSummary = computed(() => backupPreview.value ? '已读取备份，待恢复' : '导出 / 导入 JSON 备份')
+// 备份范围与安全说明的折叠态：纯展示、不落盘
+const hintOpen = ref(false)
 </script>
 
 <template>
@@ -188,7 +190,16 @@ const cardSummary = computed(() => backupPreview.value ? '已读取备份，待�
       </h2>
     </div>
     <template v-if="cardFold.open">
-    <p class="hint">把「挂件设置 / 账本 / 窗口位置 / 计时 / 节假日表」打包成一个 JSON 文件；<strong>不含</strong> dsh 开发者配置与已导入的形象 / 音效素材（这几类可用「资源」页的素材包单独导出）。<strong>凭据默认不导出</strong>，勾选「包含凭据」后必须设密码，凭据（API Key / 平台 Token / 各模型密钥 / SMTP 密码）会用 scrypt + AES-256-GCM 加密后才写入文件（文件里没有明文）。<strong>按压气泡</strong>的文字与开关随「挂件设置」一起备份，自定义配图默认不导出，勾选「包含气泡图素材」才会一并打包。<strong>安全提示：</strong>密码不会保存到任何地方，忘记就无法解密（其余项仍可正常恢复）；备份文件本身含你的设置与用量记录，请妥善保管。</p>
+    <div class="fold">
+      <!-- 备份范围与安全说明原先是一整段 300 字密文，压在勾选项与按钮之前：用户展开本卡的目的是
+           导出/导入，却要先滚过一屏说明。按「一次性阅读」收进折叠，默认收起 -->
+      <button class="link-btn utils-btn utils-secondary fold-toggle" type="button" :aria-expanded="hintOpen" @click="hintOpen = !hintOpen">{{ hintOpen ? '收起说明' : '备份包含什么 · 安全说明' }}</button>
+      <div v-if="hintOpen" class="guide">
+        <p class="hint">打包内容：挂件设置 · 账本 · 窗口位置 · 计时 · 节假日表 · 待办与专注。不含 dsh 配置与素材（素材用「资源」页的素材包导出）。</p>
+        <p class="hint"><strong>凭据默认不导出</strong>；勾选后需设密码，以 scrypt + AES-256-GCM 加密写入，文件里没有明文。</p>
+        <p class="hint">密码不做任何保存，忘记就无法解密凭据（其余项仍可恢复）。备份文件含设置与用量记录，请妥善保管。</p>
+      </div>
+    </div>
     <label class="field row check">
       <span class="label">包含凭据 <em>（需设密码，加密后写入）</em></span>
       <input type="checkbox" v-model="backupWithSecrets" @change="backupFlash.msg = ''" />
@@ -208,7 +219,7 @@ const cardSummary = computed(() => backupPreview.value ? '已读取备份，待�
     </div>
 
     <div v-if="backupPreview">
-      <p class="guide-use">已选文件：<code>{{ backupPreview.path }}</code><br />导出时间：{{ backupPreview.exportedAt || '未知' }} · 插件版本：{{ backupPreview.appVersion || '未知' }}</p>
+      <p class="guide-use">已选：<code>{{ backupPreview.path }}</code><br />导出于 {{ backupPreview.exportedAt || '未知' }} · 版本 {{ backupPreview.appVersion || '未知' }}</p>
       <label v-for="it in backupItems" :key="it.key" class="field row check">
         <span class="label">{{ it.label }} <em>{{ it.note }}{{ backupHas(it.key) ? '' : '：备份里没有这一项' }}</em></span>
         <input type="checkbox" v-model="backupPicks[it.key]" :disabled="!backupHas(it.key)" @change="backupConfirm = false" />

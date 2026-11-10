@@ -122,31 +122,24 @@
     0%, 100% { box-shadow: 0 0 0 0 rgba(47,87,214,0); }
     50% { box-shadow: 0 0 0 6px rgba(47,87,214,.22); }
   }
-  /* 计时器环形进度条：覆盖在鲸鱼形象上方，计时进行中才显示。
-     颜色按阶段区分：专注=蓝、短休=绿、长休=橙（由 JS 写 --dshw-ring-color）。
-     进度通过 stroke-dashoffset 控制，每秒在 timerStep 里刷新。 */
+  /* 环形进度条：覆盖在鲸鱼形象上方。计时中显示阶段色（专注蓝 / 短休绿 / 长休橙）；
+     计时未跑而下班倒计时可渲染时，同一只圈改画当日工时进度。颜色由 JS 写 --dshw-ring-color，
+     进度走 stroke-dashoffset，每秒刷新。 */
   .dshwv-ring {
-    position: absolute;
-    right: 0; bottom: 0;
-    width: 59.45%; height: 59.45%;
-    pointer-events: none;
-    opacity: 0;
-    transition: opacity .4s ease;
-    z-index: 1;
+    position: absolute; right: 0; bottom: 0; width: 59.45%; height: 59.45%;
+    pointer-events: none; opacity: 0; transition: opacity .4s ease; z-index: 1;
   }
   .dshwv-ring.dshwv-ring-active { opacity: .72; }
   .dshwv-ring circle {
-    fill: none;
-    stroke-width: 3.5;
-    stroke-linecap: round;
-    transform: rotate(-90deg);
-    transform-origin: 50% 50%;
+    /* 粗细由页面按「细 / 标准 / 粗」写内联变量，3.5 是旧版硬编码值，缺省与旧行为一致 */
+    fill: none; stroke-width: var(--dshw-ring-width, 3.5); stroke-linecap: round;
+    transform: rotate(-90deg); transform-origin: 50% 50%;
   }
   .dshwv-ring-track { stroke: rgba(128, 128, 128, 0.12); }
-  .dshwv-ring-fill {
-    stroke: var(--dshw-ring-color, #4a90d9);
-    transition: stroke-dashoffset .9s linear, stroke .4s ease;
-  }
+  .dshwv-ring-fill { stroke: var(--dshw-ring-color, #4a90d9); transition: stroke-dashoffset .9s linear, stroke .4s ease; }
+  /* 最后 30 分钟：圈切橙红并呼吸（只动 stroke-opacity，svg 的 opacity 归 active 淡入） */
+  .dshwv-ring.dshwv-ring-hot .dshwv-ring-fill { animation: whale-ring-hot 1.6s ease-in-out infinite; }
+  @keyframes whale-ring-hot { 50% { stroke-opacity: .45; } }
   /* 气泡本体样式已拆到 public/floating-bubble.css（悬浮窗与设置页共享同一份） */
   .dshwv-menu-btn {
     position: absolute;
@@ -333,21 +326,16 @@
     color: #7a87ad;
     font-variant-numeric: tabular-nums;
   }
-  /* 今日轮数：浅主题底 + 主色字，和灰色的「累计 / 预估」区分开；只显示今天，不占太多宽度 */
-  .dshwv-todo-today {
-    flex: 0 0 auto;
-    padding: 0 5px;
-    border-radius: 999px;
-    background: rgba(47,87,214,.12);
-    color: #2f57d6;
-    font-size: 10px;
-    font-weight: 600;
-    white-space: nowrap;
-    font-variant-numeric: tabular-nums;
+  /* 「今日 N 轮」徽标已随专注统计层在 v1.16 移除（.dshwv-todo-today） */
+  /* 已完成：一条实线划掉 + 弱化，条目留着不删（位置不变，随时能勾回来）。
+     thickness 显式写 1px：默认的 line-through 在 12px 字上细到几乎看不见 */
+  .dshwv-todo-done .dshwv-todo-text {
+    color: #8a95b5;
+    text-decoration: line-through;
+    text-decoration-thickness: 1px;
+    text-decoration-color: #8a95b5;
   }
-  /* 已完成：删除线 + 弱化，和未完成的读起来一眼分得开 */
-  .dshwv-todo-done .dshwv-todo-text { color: #8a95b5; text-decoration: line-through; }
-  /* 到点提醒徽标：只读展示，编辑在设置页；一次性过期转红，与「今日轮数」的蓝底胶囊区分 */
+  /* 到点提醒徽标：只读展示，编辑在设置页；一次性过期转红 */
   .dshwv-todo-due { font-size: 10px; color: #4a90d9; }
   .dshwv-todo-due-over { color: #d9534f; }
   .dshwv-todo-focusbtn {
@@ -390,13 +378,11 @@
   }
   .dshwv-todo-add-btn:hover { background: rgba(47,87,214,.16); }
 
-  /* —— 专注统计分组 ——
-     标签走共享的 .dshwv-menu-label（与其他组的列宽/字色/字号一致），说明行走 .dshwv-menu-hint/-act，
-     这里只留「这些行不可点」的差异：不套 .dshwv-menu-row，因此没有 hover 底色。
-     左右留白交给行自己（4px 6px，与 .dshwv-menu-row 同 inset），容器只补一点顶距，
-     免得早先「容器 pad 6px + 行不 pad」把专注组的标签缩进一格、和上下组对不齐 */
-  .dshwv-focus-stats { padding-top: 2px; }
-  /* 待办块与上方今日/当前行之间留一条虚线，任务清单不从统计里长出来 */
+  /* 待办行的进度点 / 「…」编辑入口 / 行内编辑器在 floating-todo.css —— 独立成文件是为了
+     不撑大本文件的行数棘轮（scripts/check-file-size.mjs） */
+
+  /* 今日轮数 / 每日目标进度 / 连续天数这些统计样式已随专注统计层在 v1.16 移除。
+     待办块的分隔虚线与主题色仍要留着 */
   .dshwv-focus-todo {
     border-top: 1px dashed rgba(32, 49, 112, .12);
     margin-top: 2px;
@@ -404,45 +390,6 @@
   }
   html.dark .dshwv-focus-todo { border-top-color: rgba(255, 255, 255, .12); }
   html.fantasy .dshwv-focus-todo { border-top-color: rgba(58, 123, 255, .2); }
-  /* 今日统计的第二行：连续 / 近 N 天，压成一行弱色旁注 */
-  .dshwv-focus-meta {
-    padding: 2px 6px 4px;
-    font-size: 10px;
-    line-height: 1.4;
-    color: #7c8bb8;
-    font-variant-numeric: tabular-nums;
-    white-space: normal;
-  }
-  .dshwv-focus-row {
-    display: flex; align-items: center; gap: 8px;
-    margin: 1px 0; padding: 4px 6px; font-size: 12px;
-  }
-  .dshwv-focus-value { flex: 1; min-width: 0; color: #2f3d6e; font-weight: 500; }
-  .dshwv-focus-value.dshwv-focus-done { color: #16a34a; }
-  .dshwv-focus-bar {
-    flex: 1; height: 6px; background: rgba(32,49,112,.08);
-    border-radius: 3px; overflow: hidden;
-  }
-  .dshwv-focus-fill {
-    height: 100%; background: #2f57d6; border-radius: 3px;
-    transition: width .5s cubic-bezier(.4,0,.2,1);
-  }
-  .dshwv-focus-fill-done { background: #16a34a; }
-  /* 达成目标时的脉冲动画：吸引用户注意，给予正反馈 */
-  @keyframes focus-pulse {
-    0%, 100% { box-shadow: 0 0 0 0 rgba(22,163,74,.4); }
-    50% { box-shadow: 0 0 0 4px rgba(22,163,74,0); }
-  }
-  .dshwv-focus-fill-done {
-    animation: focus-pulse 1.5s ease-in-out;
-    animation-iteration-count: 2;
-  }
-  html.dark .dshwv-focus-value { color: #dbe2f5; }
-  html.dark .dshwv-focus-value.dshwv-focus-done { color: #4ade80; }
-  html.dark .dshwv-focus-meta { color: #7f8db3; }
-  html.dark .dshwv-focus-bar { background: rgba(255,255,255,.1); }
-  html.dark .dshwv-focus-fill { background: #5f7fe6; }
-  html.dark .dshwv-focus-fill-done { background: #4ade80; }
 
   /* —— 分组：标题可点击折叠，组间用细分隔线区分 —— */
   /* min-width:0 贯穿「组 → grid 体 → inner → 行」这一串：它们的默认 min-width 是 auto，
@@ -454,12 +401,10 @@
   .dshwv-group { border-top: 1px solid rgba(32,49,112,.1); min-width: 0; }
   .dshwv-group:first-child { border-top: none; }
   .dshwv-group-head {
-    display: flex; align-items: center; gap: 6px;
-    width: 100%; padding: 7px 6px;
+    display: flex; align-items: center; gap: 6px; width: 100%; padding: 7px 6px;
     border: none; border-radius: 8px; background: none; cursor: pointer;
     color: #4a5a92; font-size: 11px; font-weight: 700; letter-spacing: .1em;
-    text-align: left;
-    transition: background .15s ease, color .15s ease;
+    text-align: left; transition: background .15s ease, color .15s ease;
   }
   .dshwv-group-head:hover { background: rgba(47,87,214,.08); color: #1b2a5e; }
   .dshwv-group-arrow { width: 11px; font-size: 9px; opacity: .6; }
@@ -471,6 +416,11 @@
     color: #7c8bb8; font-size: 10px; font-weight: 600; letter-spacing: 0;
     font-variant-numeric: tabular-nums;
   }
+  /* 组头的次级变体：专注组里的待办折叠标题。只降一档字号字重，摘要不限宽（里面是「N 条未做」+ 任务名） */
+  .dshwv-todo-fold-head {
+    margin: 0; padding: 5px 6px; font-size: 10px; font-weight: 600; letter-spacing: .04em;
+  }
+  .dshwv-todo-fold-head .dshwv-group-sum { max-width: none; }
   /* 余额置顶条：菜单第一行，是「信息」不是「入口」，用一条分隔线与下面的分组区分 */
   .dshwv-menu-toprow {
     margin: 0 0 6px; padding: 2px 6px 7px;
@@ -677,6 +627,27 @@
   .dshwv-timer-current { flex: 0 0 auto; padding: 3px 7px; font-size: 11px; }
   html.dark .dshwv-focus-task { color: #dbe2f5; }
   html.fantasy .dshwv-focus-task { color: #E8F1FF; }
+  /* —— 最近计时：一行小胶囊，紧贴当前行 ——
+     没有记录时整行不渲染（页面侧 display:none），所以这里不必给空态留高度 */
+  .dshwv-timer-hist { flex-wrap: wrap; gap: 4px; }
+  .dshwv-timer-hist-cap { flex: 0 0 auto; font-size: 10px; color: #8a95b5; }
+  .dshwv-timer-hist-item {
+    flex: 0 0 auto; padding: 1px 6px;
+    border: 1px solid rgba(47,87,214,.14); border-radius: 999px;
+    background: rgba(47,87,214,.06); color: #4a5a92;
+    font-size: 10px; font-variant-numeric: tabular-nums;
+  }
+  /* 休息轮与放弃轮在胶囊上要能区分：休息降饱和加虚线，放弃加删除线味的淡红 */
+  .dshwv-timer-hist-break { border-style: dashed; background: transparent; color: #7a86a8; }
+  .dshwv-timer-hist-a { border-color: rgba(224,67,63,.28); background: rgba(224,67,63,.06); color: #b1403c; }
+  html.dark .dshwv-timer-hist-cap { color: #6b7aa8; }
+  html.dark .dshwv-timer-hist-item { border-color: rgba(138,164,230,.18); background: rgba(138,164,230,.1); color: #b9c6e8; }
+  html.dark .dshwv-timer-hist-break { background: transparent; color: #8593b7; }
+  html.dark .dshwv-timer-hist-a { border-color: rgba(255,138,133,.3); background: rgba(255,138,133,.1); color: #ff9d99; }
+  html.fantasy .dshwv-timer-hist-cap { color: #7C90B3; }
+  html.fantasy .dshwv-timer-hist-item { border-color: rgba(58,123,255,.24); background: rgba(58,123,255,.12); color: #C8D9F5; }
+  html.fantasy .dshwv-timer-hist-break { background: transparent; color: #92A6C6; }
+  html.fantasy .dshwv-timer-hist-a { border-color: rgba(255,138,133,.32); background: rgba(255,138,133,.12); color: #FF9D99; }
   /* —— 放弃本轮的内联确认：菜单内的警示块，不用系统对话框（对话框会抢焦点、把菜单顶掉） —— */
   .dshwv-timer-confirm {
     margin: 2px 0 6px;
@@ -797,9 +768,12 @@
   html.dark .dshwv-todo-row { color: #dbe2f5; }
   html.dark .dshwv-todo-row:hover { background: rgba(138,164,230,.1); }
   html.dark .dshwv-todo-check { accent-color: #8aa4e6; }
-  html.dark .dshwv-todo-done .dshwv-todo-text { color: #7f8db3; }
+  /* 深色下只换颜色，划线的粗细与颜色跟着走（text-decoration-color 单独指定过，这里必须一起改） */
+  html.dark .dshwv-todo-done .dshwv-todo-text {
+    color: #7f8db3;
+    text-decoration-color: #7f8db3;
+  }
   html.dark .dshwv-todo-est { color: #8b9ac4; }
-  html.dark .dshwv-todo-today { background: rgba(138,164,230,.18); color: #a7bdf0; }
   html.dark .dshwv-todo-focusbtn { border-color: rgba(138,164,230,.3); background: rgba(138,164,230,.12); color: #a7bdf0; }
   html.dark .dshwv-todo-focusbtn:hover { background: rgba(138,164,230,.2); border-color: rgba(138,164,230,.45); }
   /* 专注中：实色底白字，深浅色下都成立（同 .dshwv-timer-act 的处理思路，但强调态更亮一档） */
@@ -921,7 +895,6 @@
   html.fantasy .dshwv-group-head { color: #8FA8CC; box-shadow: inset 2px 0 0 rgba(57, 255, 209, 0.22); }
   html.fantasy .dshwv-group-head:hover { background: rgba(58, 123, 255, 0.14); color: #E8F1FF; box-shadow: inset 2px 0 0 rgba(57, 255, 209, 0.5); }
   html.fantasy .dshwv-group-sum { color: #6E82A1; }
-  html.fantasy .dshwv-focus-meta { color: #6E82A1; }
   /* 吸顶头必须与 .dshwv-menu 同底，否则滚动时会出现一条亮带（与深色块同口径） */
   html.fantasy .dshwv-group-open > .dshwv-group-head { background: rgba(5, 7, 13, 0.97); box-shadow: inset 2px 0 0 rgba(57, 255, 209, 0.45); }
   html.fantasy .dshwv-model-row { color: #E8F1FF; }
@@ -934,7 +907,6 @@
   html.fantasy .dshwv-menu-link:hover { background: rgba(58, 123, 255, 0.24); border-color: rgba(58, 123, 255, 0.55); }
   html.fantasy .dshwv-todo-row { color: #E8F1FF; }
   html.fantasy .dshwv-todo-row:hover { background: rgba(58, 123, 255, 0.14); }
-  html.fantasy .dshwv-todo-today { background: rgba(58, 123, 255, 0.22); color: #A9C6FF; }
   html.fantasy .dshwv-todo-focusbtn { border-color: rgba(58, 123, 255, 0.35); background: rgba(58, 123, 255, 0.14); color: #A9C6FF; }
   html.fantasy .dshwv-todo-focusbtn:hover { background: rgba(58, 123, 255, 0.24); border-color: rgba(58, 123, 255, 0.55); }
   html.fantasy .dshwv-timer-chip { border-color: rgba(58, 123, 255, 0.35); background: rgba(58, 123, 255, 0.14); color: #A9C6FF; }

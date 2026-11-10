@@ -115,8 +115,7 @@ const randomPoolNote = computed(() => (props.cfg.randomIncludeBuiltin === false
 // 常规三行气泡（含它的首行报时）不再渲染 —— 顶层的「小鲸鱼报时」开关随之失效。
 // 这里据此把该开关置灰并给提示，避免用户以为是开关坏了（报时改在按压气泡里加「报时」模块）
 const bubbleModelOn = computed(() => props.cfg.bubble?.on === true)
-
-// 统一的消息态（Flash）：定义收口在 composables/useFlash.ts，各卡不再各持一份。
+// 统一的消息态（Flash）收口在 composables/useFlash.ts，各卡不再各持一份。
 
 // 两个折叠组（气泡与文案 / 音效）：仅本卡消费，随卡搬入。
 // 默认收起：这两组都是「配置一次后很少再动」的低频项（气泡配色 / 峰谷文案 / 节假日表 /
@@ -474,9 +473,21 @@ onUnmounted(() => {
       「未至之境」恒为暗色。不影响气泡配色（在下方「气泡与文案」里单独设置）。
     </p>
 
+    <!-- 外圈：计时与下班倒计时共用同一圈（谁在跑归谁），样式放这里；「要不要给倒计时画」仍在下班倒计时卡 -->
+    <label class="field row">
+      <span class="label">外圈粗细</span>
+      <select class="auto" :value="cfg.ringWidth" @change="emit('patch', { ringWidth: ($event.target as HTMLSelectElement).value })">
+        <option value="thin">细</option><option value="normal">标准</option><option value="thick">粗</option>
+      </select>
+    </label>
+    <label class="field row check">
+      <span class="label">圈色跟随气泡主题 <em>（深色主题下换亮一档）</em></span>
+      <input type="checkbox" :checked="cfg.ringFollowTheme !== false"
+             @change="emit('patch', { ringFollowTheme: ($event.target as HTMLInputElement).checked })" />
+    </label>
 
     <div class="fold">
-      <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="lookFolds.bubble" @click="lookFolds.bubble = !lookFolds.bubble">{{ lookFolds.bubble ? '收起气泡与文案' : '气泡与文案（主题 · 峰谷 · 思考气泡 · 报时 · 菜单按钮）' }}</button>
+      <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="lookFolds.bubble" @click="lookFolds.bubble = !lookFolds.bubble">{{ lookFolds.bubble ? '收起气泡与文案' : '气泡与文案（主题 · 峰谷 · 报时等）' }}</button>
       <div v-if="lookFolds.bubble">
         <label class="field row">
           <span class="label">气泡配色</span>
@@ -491,7 +502,6 @@ onUnmounted(() => {
           <div class="theme-preview-label">效果预览</div>
           <BubblePreview :lines="themePreviewLines" :theme="cfg.theme" :scale="0.5" />
         </div>
-
         <label class="field row">
           <span class="label">峰谷文案</span>
           <select :value="cfg.peakMode" @change="emit('patch', { peakMode: ($event.target as HTMLSelectElement).value })">
@@ -514,7 +524,6 @@ onUnmounted(() => {
           <p class="hint holiday-note">{{ holidayNote }}（表内日期全天谷价）</p>
           <p v-if="holidayFlash" class="hint" :class="msgCls(holidayFlash)">{{ holidayFlash.msg }}</p>
         </div>
-
         <label class="field row check">
           <span class="label">思考气泡</span>
           <input type="checkbox" :checked="cfg.bubbleOn" @change="emit('patch', { bubbleOn: ($event.target as HTMLInputElement).checked })" />
@@ -526,24 +535,20 @@ onUnmounted(() => {
           已关闭：挂件不再弹任何气泡 —— 峰谷 / 预算 / 低余额提醒、计时气泡，以及计时到点后气泡旁的
           「休息 / 再来一轮」按钮都跟着消失，只剩系统通知（若开着）。
         </p>
-
         <label class="field row check">
           <span class="label">小鲸鱼报时 <em>（气泡首行显示当前时间）</em></span>
           <input type="checkbox" :checked="cfg.timeBubbleOn" :disabled="bubbleModelOn"
                  @change="emit('patch', { timeBubbleOn: ($event.target as HTMLInputElement).checked })" />
         </label>
-        <p v-if="bubbleModelOn" class="hint">
-          已启用「按压气泡（自定义泡泡）」，气泡内容由那里的模块决定，本开关不再生效 ——
-          报时请到「按压气泡」卡片里加一个「报时」模块（可写成 <em>现在是 {time}</em> 之类）。
-        </p>
-
+        <!-- 报时与「下班倒计时」可同时开启：倒计时只在最后一张「倒计时页」出现，第一张气泡始终是步骤页 -->
+        <p v-if="bubbleModelOn" class="hint">已启用「按压气泡」，气泡内容由那里的模块决定，本开关失效 —— 报时请在「按压气泡」卡里加一个「报时」模块（如「现在是 {time}」）。</p>
+        <p v-else-if="cfg.offworkOn === true" class="hint">已开启「下班倒计时」，两者可同时生效：倒计时占用最后一张「倒计时页」，第一张气泡仍是步骤页。</p>
         <label class="field row check">
-          <span class="label">挂件右上角菜单按钮 <em>（关掉后悬停不再出现；右键点鲸鱼仍能唤出同一个菜单）</em></span>
+          <span class="label">挂件右上角菜单按钮 <em>（关掉后悬停不出现；右键点鲸鱼仍可唤出）</em></span>
           <input type="checkbox" :checked="cfg.menuBtn" @change="emit('patch', { menuBtn: ($event.target as HTMLInputElement).checked })" />
         </label>
       </div>
     </div>
-
     <div class="fold">
       <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="lookFolds.sound" @click="lookFolds.sound = !lookFolds.sound">{{ lookFolds.sound ? '收起音效' : '音效（开关 · 音色 · 音量）' }}</button>
       <div v-if="lookFolds.sound">
@@ -551,7 +556,6 @@ onUnmounted(() => {
           <span class="label">音效开关</span>
           <input type="checkbox" :checked="cfg.soundOn" @change="emit('patch', { soundOn: ($event.target as HTMLInputElement).checked })" />
         </label>
-
         <label class="field row">
           <span class="label">音色</span>
           <select :value="cfg.soundSet" :disabled="!cfg.soundOn" @change="emit('patch', { soundSet: ($event.target as HTMLSelectElement).value })">
@@ -568,14 +572,12 @@ onUnmounted(() => {
           <button class="export-btn utils-btn utils-outline" type="button" @click="emit('preview-builtin-sound', g.press)">试听按压</button>
           <button class="export-btn utils-btn utils-outline" type="button" @click="emit('preview-builtin-sound', g.release)">试听释放</button>
         </div>
-
         <label class="field row">
           <span class="label">音量</span>
           <input class="range" type="range" min="0" max="1" step="0.05" :value="volDraft"
                  :disabled="!cfg.soundOn" @input="onVolInput" />
           <span class="num-text">{{ Math.round(volDraft * 100) }}%</span>
         </label>
-
         <p v-if="cfg.soundSet === 'custom' && !soundsMeta.press.length" class="hint">
           还没有导入按压音，去「资源」页加一个后这里才有「自定义」可用（当前会回退为「小黄鸭」）。
         </p>
@@ -622,7 +624,7 @@ onUnmounted(() => {
         </button>
       </div>
     </div>
-    <p class="hint">纯 CSS 背景零素材；视频壁纸需单独下载，自定义媒体在「资源」页导入；都只在设置页播放，不进入挂件。画面会跟随界面深浅色自动适配。</p>
+    <p class="hint">纯 CSS 背景零素材；视频壁纸需单独下载、自定义媒体在「资源」页导入，都只在设置页播放，不进挂件。画面随界面深浅色自动适配。</p>
 
     <div v-if="cfg.bgMode === 'video'" class="bg-video-box">
       <template v-if="bgVideo.installed">
@@ -813,6 +815,10 @@ onUnmounted(() => {
    通用控件样式已由 main.css 统一提供（全局唯一来源），本组件只留自身特有的控件样式。
    .btn-row 骨架、utils 档位配色与 .link-btn 基类也已在 main.css，此处不再留副本。 */
 
+/* 外圈粗细的档位下拉只容纳「细 / 标准 / 粗」：`.field.row select` 全局 flex: 1 会撑满整行像个空输入框，
+   这里收回自然宽度 */
+.field.row select.auto { flex: 0 0 auto; min-width: 84px }
+
 /* 正文里嵌的「参与随机」图例小圆点：与「资源 → 导入的形象」格子上那枚角标
    （.skin-cell-pool）保持同一形态与配色，用户在这边读到时能对上那边的视觉 */
 .skin-pool-legend-dot {
@@ -916,9 +922,7 @@ onUnmounted(() => {
   border-radius: 8px;
   background: var(--track);
 }
-.bg-video-box .hint {
-  margin: 0 0 8px;
-}
+.bg-video-box .hint { margin: 0 0 8px }
 .bg-video-actions {
   display: flex;
   flex-wrap: wrap;
@@ -932,10 +936,7 @@ onUnmounted(() => {
   gap: 8px;
   margin-top: 8px;
 }
-.bg-video-play-row .hint {
-  flex: 1 1 auto;
-  margin: 0;
-}
+.bg-video-play-row .hint { flex: 1 1 auto; margin: 0 }
 /* 背景画廊：九张卡片直接看效果，替代单个下拉 */
 .bg-gallery {
   display: grid;
@@ -958,10 +959,7 @@ onUnmounted(() => {
   cursor: pointer;
 }
 .bg-card:hover { border-color: var(--accent); }
-.bg-card.is-active {
-  border-color: var(--accent);
-  box-shadow: inset 0 0 0 1px var(--accent);
-}
+.bg-card.is-active { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent) }
 .bg-swatch {
   position: relative;
   display: flex;
