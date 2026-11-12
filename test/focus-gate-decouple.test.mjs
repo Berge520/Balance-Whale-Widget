@@ -24,7 +24,7 @@ test('设置页：待办行不挂常驻标签 / 开始按钮不再被总开关�
   assert.match(view, /@click="startTodo\(it\)"/, '主操作应为「开始」')
   assert.doesNotMatch(view, /v-if="cfg\.todoOn"[\s\S]{0,120}@click="startTodo/, '开始按钮仍被总开关门控')
   assert.doesNotMatch(view, /开启上方「专注记录」后才能设为专注/, '旧提示还在')
-  // v1.16 专注统计层已下线：待办行不该再有「今日 N 轮」这类统计徽标
+  // 今日轮数徽标已下线（累计轮数另见 focus-today-view 的用例）
   assert.doesNotMatch(view, /todayRoundsOf/, '今日轮数徽标应随统计层一起移除')
 })
 

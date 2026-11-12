@@ -54,7 +54,9 @@ test('待办行不再挂「当前任务 / 专注中」标签', () => {
   assert.doesNotMatch(tpl, />专注中</, '专注中标签应已移除')
   assert.doesNotMatch(css, /\.todo-tag/, '无用的 .todo-tag 样式应清掉')
   assert.doesNotMatch(tplCode, /今日 \{\{ todayRoundsOf/, '今日轮数徽标应已下线')
-  assert.doesNotMatch(tplCode, /累计 \{\{ it\.rounds \}\} 轮/, '累计轮数标签应已移除')
+  // 累计轮数（后续版本恢复）：宿主回填的派生值，只在 >0 时占位，不解释口径
+  assert.match(tplCode, /class="todo-rounds"/, '累计轮数徽标应显示')
+  assert.match(tplCode, /v-if="it\.rounds > 0"/, '没有轮数时不该占位')
   assert.doesNotMatch(tpl, /it\.est/, '模板仍引用预估 est')
   assert.doesNotMatch(view, /todoSetEst\?\./, '脚本仍调用 todoSetEst')
 })

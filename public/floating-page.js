@@ -913,7 +913,6 @@
       var todoLeft = 0;
       var todoAll = (todoState && todoState.items) || [];
       for (var ti = 0; ti < todoAll.length; ti++) if (!todoAll[ti].done) todoLeft++;
-      // v1.16 起不再拼「今日 N 轮」：挂件的专注统计层已下线，摘要只说还剩几项
       if (todoLeft > 0) timerSum = todoLeft + ' 项';
     }
     setGroupSummary(groupFocus, 'focus', timerSum);
@@ -925,8 +924,7 @@
   // 清单常驻在「专注」组里：专注时最想看到的就是「现在做哪条、还剩几条」
   // 「专注与待办」唯一开关（v1.15 合并了原先的 focusOn / todoOn）：挂件里的待办块与计时记录
   // 都只看它。任务开始 / 气泡任务名 / 到点「完成这条」不受它门控（见 2026-11-01 spec）。
-  // v1.16 起挂件的专注统计层（今日轮数 / 每日目标进度 / 连续天数 / 近 7 天）整体下线，
-  // 只留待办本身；宿主侧 focus.js 与 whale:focus 暂留不动（数据不丢、可逆）
+  // 每日目标 / 连续天数 / 近 7 天仍不回到挂件（v1.16 下线，宿主数据一直在）；这里只加「最近」行标题的今日轮数
   var todoOn = false;
   var todoState = { items: [], focusId: '' };
   // 本次菜单里刚勾掉的条目：勾完仍留在原位置灰，手滑了点错能马上撤回；
@@ -1090,18 +1088,22 @@
   // 再存一份「计时历史」等于让同一件事有两本账。
   // 所以这项能力是「把宿主已经记下的东西在挂件里露出来」，不是挂件自己记
   var RECENT_MAX = 3;
+  var focusStats = null; // 宿主推来的今日轮数快照 { summary: { today: { r, m } } }，跨零点由宿主重推
   var recentDone = [];   // 已落库的会话，最新在前；本次运行内有效，重载即清
   var rowTimerHistory = menuRow();
   rowTimerHistory.className = 'dshwv-menu-row dshwv-timer-hist';
   rowTimerHistory.style.display = 'none';
   function renderTimerHistory() {
     rowTimerHistory.textContent = '';
-    if (!recentDone.length) { rowTimerHistory.style.display = 'none'; return; }
+    // 今日轮数来自宿主按本地零点算好的快照（跨零点重推）；两样都空时整行不占位
+    var today = focusStats && focusStats.summary ? focusStats.summary.today : null;
+    var hasToday = !!(today && today.r > 0);
+    if (!recentDone.length && !hasToday) { rowTimerHistory.style.display = 'none'; return; }
     rowTimerHistory.style.display = '';
     var cap = document.createElement('span');
     cap.className = 'dshwv-timer-hist-cap';
-    cap.textContent = '最近';
-    cap.title = '最近结束的计时（来自专注记录，最多显示 ' + RECENT_MAX + ' 条）';
+    cap.textContent = hasToday ? '今日 ' + today.r + ' 轮 · ' + today.m + ' 分' : '最近';
+    cap.title = hasToday ? '今天完成的专注轮数与分钟（倒计时走完才算一轮，休息与中途放弃不计）' : '最近结束的计时（来自专注记录，最多显示 ' + RECENT_MAX + ' 条）';
     rowTimerHistory.appendChild(cap);
     for (var i = 0; i < recentDone.length; i++) {
       var s = recentDone[i];
@@ -6016,8 +6018,7 @@
     // 待办条数上限（宿主 constants.js 的 TODO_MAX，随 init 下发）：满额时页面先拦一道，
     // 否则宿主会静默丢弃这次 add，用户看到的是「输入框清空但清单没变」
     todoMax = Number(data.todoMax) || 0;
-    // v1.16 起不再读 data.focusStats：挂件的专注统计层已下线（今日轮数 / 目标 / 连续天数），
-    // 这里只送待办整份快照。宿主仍会推这个字段，静默忽略即可
+    focusStats = data.focusStats || null; renderTimerHistory(); // 今日轮数快照：菜单「最近」行标题据此显示
     applyConfig(data.config);
     renderTodoMenu();
     passNoticeReady = true; // 之后的配置变更（快捷键/设置页切换）才弹说明气泡
@@ -6080,9 +6081,8 @@
       try { whaleApi.todoDueAck({ id: d.id, dueAt: d.dueAt, shown: shown, debug: d.debug === true }); } catch (err) {}
     }
   });
-  // 专注统计回推：v1.16 起挂件的统计层已下线（今日轮数 / 目标 / 待办行徽标），收到什么也不做。
-  // 订阅照样注册：宿主那边仍在推，注册一下零成本，日后要接回统计时不用再改两处
-  if (whaleApi.onFocusStats) whaleApi.onFocusStats(function () {});
+  // 专注统计回推（记一轮 / 设置页刷新 / 跨零点都会推）：只重画「最近」行标题，最近几条仍由 onFocusSession 单条推
+  if (whaleApi.onFocusStats) whaleApi.onFocusStats(function (d) { focusStats = d || null; renderTimerHistory(); });
   // 刚落库的那一段计时（宿主 whale:focus 记账后回推单条会话）：
   // 菜单里的「最近」直接拿它插到列表头，不必为了一段刚结束的计时拉整份历史
   if (whaleApi.onFocusSession) whaleApi.onFocusSession(function (s) { pushRecentSession(s); });

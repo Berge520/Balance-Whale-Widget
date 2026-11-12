@@ -422,6 +422,10 @@ onUnmounted(() => {
                @input="onEditInput" @keydown.enter="onEditEnter" @keydown.esc="cancelEdit"
                @blur="commitEdit" />
         <span v-else class="todo-text" :title="it.text + '（双击修改）'" @dblclick="startEdit(it)">{{ it.text }}</span>
+        <!-- 累计轮数：宿主 syncTodoRounds 从会话明细回填的派生值，只在有过记录时出现。
+             口径与挂件「最近」一致 —— 倒计时走完才算一轮，休息与中途放弃不计 -->
+        <em v-if="it.rounds > 0" class="todo-rounds"
+            :title="'累计完成 ' + it.rounds + ' 轮'">{{ it.rounds }} 轮</em>
         <!-- v1.16 起不再挂「当前任务 / 专注中」标签：focusId 到点、暂停、打完卡都不清，
              拿它当指示灯会一直亮着骗人。状态只由行底色 + 按钮淡化暗示，
              真正的「还在计时吗」由挂件里的计时窗口回答 -->
@@ -508,6 +512,9 @@ onUnmounted(() => {
                  @input="onEditInput" @keydown.enter="onEditEnter" @keydown.esc="cancelEdit"
                  @blur="commitEdit" />
           <span v-else class="todo-text" :title="it.text + '（双击修改）'" @dblclick="startEdit(it)">{{ it.text }}</span>
+          <!-- 已完成条目也留着累计轮数：勾掉只是对账，轮数是「这条到底做了多少」的记录 -->
+          <em v-if="it.rounds > 0" class="todo-rounds"
+              :title="'累计完成 ' + it.rounds + ' 轮'">{{ it.rounds }} 轮</em>
           <span class="todo-ops">
             <button class="todo-act todo-del" type="button" @click="removeTodo(it)">删除</button>
           </span>
@@ -598,6 +605,15 @@ onUnmounted(() => {
   text-decoration-thickness: 1px;
   text-decoration-color: var(--fg);
   color: var(--fg-faint);
+}
+/* 累计轮数：正文之外的一枚弱提示，不抢「开始 / 更多 / 删除」的视线；
+   没有轮数时模板不渲染，行高与间距不受影响 */
+.todo-rounds {
+  flex: none;
+  font-size: 11px;
+  font-style: normal;
+  color: var(--fg-faint);
+  white-space: nowrap;
 }
 /* v1.16 起待办行不挂任何常驻文字标签：focusId 到点 / 暂停 / 打完卡都不清，
    拿它当指示灯会一直亮着骗人。真正的「还在计时吗」由挂件里的计时窗口回答 */

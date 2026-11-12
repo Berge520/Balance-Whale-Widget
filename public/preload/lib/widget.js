@@ -980,8 +980,9 @@ function pushInit() {
     // 待办条数上限：页面在提交前先判一次（满额时宿主会静默丢弃 add），
     // 单一来源仍是 constants.js 的 TODO_MAX，页面不再抄一份副本
     todoMax: TODO_MAX,
-    // 专注统计与每日目标：v1.16 起挂件页已不读（统计层下线），这里停止下发；
-    // 推送函数本身保留（宿主侧仍有别人调用），恢复统计时把这一行加回即可
+    // 专注统计与每日目标：待办开关开着才发（专注轮次只跟着待办记账），
+    // 挂件拿它给「最近」行补一句「今日 N 轮 · M 分」，统计层其余部分仍不回挂件
+    focusStats: cfg.todoOn ? focusStatsPayload() : null,
   }
   sendToWidget('whale:init', payload)
   // 共享角色图池（台词 randimg 段的图）不并进 init，而且只推**清单**不推本体：
