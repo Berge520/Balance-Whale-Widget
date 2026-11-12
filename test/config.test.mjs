@@ -104,6 +104,8 @@ const PATCH_FIXTURES = {
   dshPort: { dshPort: 4080 },
   dshRegistry: { dshRegistry: 'https://example.com/npm' }, dshVersion: { dshVersion: '1.2.3' },
   dshReinstall: { dshReinstall: true }, dshNoOpen: { dshNoOpen: false },
+  // 「打开 Web UI」用哪个浏览器：默认 builtin，夹具取 external 才算「改过」
+  dshOpenIn: { dshOpenIn: 'external' },
   dshMarketUrl: { dshMarketUrl: 'https://example.com/cat' }, dshMarketMirror: { dshMarketMirror: false },
   dshMarketRegistry: { dshMarketRegistry: 'https://example.com/reg' }, dshMarketOfficial: { dshMarketOfficial: true },
   dshExportCred: { dshExportCred: true }, dshExportNoMod: { dshExportNoMod: false },

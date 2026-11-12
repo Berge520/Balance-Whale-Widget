@@ -253,8 +253,8 @@ function sideModCount(step: any, side: number): number {
     </div>
 
     <p class="bqe-hint">
-      点一下弹一步。每步可以是「单泡」或「并列」—— 并列泡每次按权重在 A / B 两个候选里抽一个。
-      拖序号圆点排序；把一个单泡拖到另一单泡的左 / 右边缘可并成 A / B（拖到并列泡边缘 = 替换该侧）。
+      点一下弹一步。每步可为「单泡」或「并列」——并列泡按权重在 A / B 中抽一个。
+      拖序号圆点排序；单泡拖到另一单泡左右边缘可并成 A / B（拖到并列泡边缘 = 替换该侧）。
     </p>
 
     <ol class="bqe-list">
@@ -343,7 +343,7 @@ function sideModCount(step: any, side: number): number {
         </div>
       </li>
 
-      <li v-if="!rows.length" class="bqe-empty">队列已删空 —— 保存后会恢复出厂默认队列（2 步），不是「删不掉」；也可用下方「恢复默认」按钮立即重置</li>
+      <li v-if="!rows.length" class="bqe-empty">队列已删空：保存后恢复出厂默认队列（2 步），也可用下方「恢复默认」立即重置</li>
     </ol>
   </div>
 </template>

@@ -38,11 +38,12 @@ const todos = computed(() => {
     return []
   }
 })
-// 结构固定（五条），用常量数组驱动模板，省得五行重复抄一遍
+// 三条只读自检结构相同，用常量数组驱动模板，省得三行重复抄一遍；
+// 下面的「演练提醒」（带下拉）与「注入旧数据」（会真写入）形态不同，单独手写
 const ROWS = reactive([
   { key: 'focus', name: '专注', tip: '明细 / 今日时长 / 开关三者是否自洽，只读', btn: '自检', ev: 'focus-check' },
   { key: 'todo', name: '待办', tip: '条数 / 专注目标是否还指向存在的条目，只读', btn: '自检', ev: 'todo-check' },
-  { key: 'timer', name: '计时', tip: '宿主手里的计时快照能否原样恢复，只读', btn: '自检', ev: 'timer-check' },
+  { key: 'timer', name: '计时', tip: '宿主计时快照能否原样恢复，只读', btn: '自检', ev: 'timer-check' },
 ])
 </script>
 
@@ -61,7 +62,7 @@ const ROWS = reactive([
         <span class="debug-out" :class="{ bad: row(r.key).bad }">{{ row(r.key).msg }}</span>
       </div>
       <div class="field row">
-        <span class="label">演练提醒 <em>（对选中条目走一次通知 + 气泡，不写幂等位、不发邮件）</em></span>
+        <span class="label">演练提醒 <em>（对选中条目发一次通知 + 气泡，不写幂等位、不发邮件）</em></span>
         <select v-model="todoId">
           <option value="">选择一条待办…</option>
           <option v-for="it in todos" :key="it.id" :value="it.id">{{ it.text }}</option>

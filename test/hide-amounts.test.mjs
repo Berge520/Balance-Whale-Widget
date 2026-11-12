@@ -41,9 +41,11 @@ test('遮蔽不影响真实值：复制到剪贴板走 withRealAmounts', () => {
   assert.match(page, /function withRealAmounts\(fn\) \{[\s\S]*?hideAmounts = false;[\s\S]*?finally \{ hideAmounts = prev; \}/)
 })
 
-test('设置页预览与挂件一致：预览样本读同一个 hideAmounts', () => {
-  assert.match(lookView, /props\.cfg\.hideAmounts === true \? '\*\*\*'/)
-  assert.match(lookView, /props\.cfg\.hideAmounts === true \? '今日已用 \*\*\*'/)
+// 设置页里唯一的气泡预览在「按压气泡」卡（BubbleModPanel），样本不走实时余额；
+// 「气泡配色」那一行不再有预览图，改配色直接在真实挂件上弹泡演示（theme-preview）
+test('挂件外观不再重复内置预览样本：配色改由真实挂件预览', () => {
+  assert.doesNotMatch(lookView, /BubblePreview/)
+  assert.match(lookView, /window\.services\?\.themePreview\?\.\(\{ theme, ms: 3200 \}\)/)
 })
 
 test('今日已赚：未配置时薪时整项不显示，配置后才显示', () => {

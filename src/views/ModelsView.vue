@@ -339,8 +339,8 @@ defineExpose({ closeModelForm })
     </div>
     <template v-if="cardFold.open">
     <p class="hint">
-      挂件默认显示 DeepSeek 余额；这里添加的厂商模型（{{ modelConfigs.length }}/{{ modelMax }}）可在挂件菜单里切换成主显示。
-      余额按原币种展示、不折算汇率，只在本机查询；密钥用 uTools 加密存储，不写进备份文件。
+      挂件默认显示 DeepSeek 余额，这里添加的模型（{{ modelConfigs.length }}/{{ modelMax }}）可在挂件菜单切换主显示。
+      余额按原币种、不折算汇率，仅本机查询；密钥用 uTools 加密存储，不进备份。
     </p>
     <div class="mm-list">
       <div v-for="m in modelRows" :key="m.id" class="mm-item">
@@ -360,7 +360,7 @@ defineExpose({ closeModelForm })
           </template>
         </div>
         <div v-if="m.id !== NEW_MODEL_ROW && modelDelConfirm === m.id" class="mm-confirm">
-          <span>删除「{{ m.name }}」？它的密钥与余额记录会一并清除。</span>
+          <span>删除「{{ m.name }}」？密钥与余额记录一并清除。</span>
           <button class="export-btn utils-btn utils-outline" @click="removeModelRow(m.id)">确认删除</button>
           <button class="link-btn mm-act utils-btn utils-secondary" @click="modelDelConfirm = ''">取消</button>
         </div>
@@ -394,11 +394,11 @@ defineExpose({ closeModelForm })
             </label>
           </div>
           <p v-if="modelForm.kind === 'codex'" class="hint">
-            Codex 本地会话统计：读取本机 ~/.codex 下的会话日志（rollout JSONL）统计今日 token 用量，
-            不需要 API Key、也不发网络请求。挂件上按今日 token 显示，点「测试连接」可立即统计一次。
+            读取本机 ~/.codex 的会话日志（rollout JSONL）统计今日 token，无需 API Key、不联网；
+            点「测试连接」可立即统计一次。
           </p>
           <label v-if="modelForm.kind !== 'codex'" class="field">
-            <span class="label">API Key <em>（留空 = 不改动已存的；本机加密存储）</em></span>
+            <span class="label">API Key <em>（留空不改；本机加密存储）</em></span>
             <input v-model="modelKeys[modelForm.id]" type="password" placeholder="该厂商的 API Key" autocomplete="off" />
           </label>
           <label v-if="modelForm.kind !== 'codex'" class="field">
@@ -418,7 +418,7 @@ defineExpose({ closeModelForm })
             <input v-model="modelForm.usedPctPath" placeholder="data.limits[0].TOKENS_LIMIT.percentage" />
           </label>
           <label v-if="modelForm.kind === 'balance'" class="field">
-            <span class="label">取值倍数 scale <em>（接口单位与展示单位不一致时用，如 0.0001）</em></span>
+            <span class="label">取值倍数 scale <em>（接口与展示单位不一致时用，如 0.0001）</em></span>
             <input class="num" type="number" step="any" min="0" v-model.number="modelForm.scale" />
           </label>
           <button v-if="modelForm.kind !== 'codex'" class="link-btn utils-btn utils-secondary" @click="modelAdv[modelForm.id] = !modelAdv[modelForm.id]">
@@ -442,7 +442,7 @@ defineExpose({ closeModelForm })
                 <input class="num" type="number" step="any" min="0" v-model.number="modelForm.usedScale" />
               </label>
               <label class="field">
-                <span class="label">已用额度接口地址 <em>（留空 = 与余额同接口）</em></span>
+                <span class="label">已用额度接口地址 <em>（留空同余额接口）</em></span>
                 <input v-model="modelForm.usedUrl" placeholder="https://..." />
               </label>
             </template>
@@ -468,7 +468,7 @@ defineExpose({ closeModelForm })
           <!-- 低余额提醒只对「余额类」实现：额度类（百分比）与 Codex 既不弹系统通知，挂件也不会变红，
                所以这两类不显示开关，免得用户设了阈值却永远等不到提醒 -->
           <label v-if="modelForm.kind === 'balance'" class="field row check">
-            <span class="label">低余额提醒 <em>（余额低于阈值时弹系统通知，每模型每天一次）</em></span>
+            <span class="label">低余额提醒 <em>（低于阈值弹系统通知，每模型每天一次）</em></span>
             <input type="checkbox" v-model="modelForm.lowAlertOn" />
           </label>
           <label v-if="modelForm.kind === 'balance' && modelForm.lowAlertOn" class="field row">

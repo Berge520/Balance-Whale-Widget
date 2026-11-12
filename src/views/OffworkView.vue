@@ -48,7 +48,7 @@ function onWage(e: Event) {
   const n = Number(raw)
   const valid = /^\d+(\.\d{1,2})?$/.test(raw) && n > 0 && n <= WAGE_MAX
   if (!valid) {
-    wageFlashShow(`时薪需为大于 0、不超过 ${WAGE_MAX} 的数字，最多两位小数；本次未保存`, true)
+    wageFlashShow(`时薪需为大于 0、不超过 ${WAGE_MAX} 且最多两位小数的数字；本次未保存`, true)
     // 回退到已保存的值：否则输入框里会留着一个没生效的数，用户以为已经改了
     el.value = props.cfg.offworkHourlyWage > 0 ? String(props.cfg.offworkHourlyWage) : ''
     return
@@ -96,20 +96,19 @@ function toggleDay(d: number) {
         <input type="checkbox" :checked="cfg.offworkOn" @change="onCheck('offworkOn', $event)" />
       </label>
       <p class="hint">
-        开启后气泡队列末尾多一张「倒计时页」，首行显示「距离下班 08:12:34 · 09:00–18:00」（下班后 / 未上班换成「距上班」等措辞），其余内容照常。第一张永远是步骤页，不与「小鲸鱼报时」冲突；关闭后与未开启完全一致。
+        开启后气泡队列末尾多一张「倒计时页」，首行如「距离下班 08:12:34 · 09:00–18:00」（下班后改「距上班」），其余照常；第一张仍是步骤页，不与报时冲突；关闭后与未开启一致。
       </p>
 
       <div class="field row">
         <span class="label">上班时间</span>
         <input class="time" type="time" :value="cfg.offworkStart" @change="onText('offworkStart', $event)" />
       </div>
+      <!-- 跨日班说明并进「下班时间」行内：原先独立成段夹在「上下班时间」与「工作日」之间，
+           读起来像工作日的一部分；它其实只解释「下班早于上班」这一种填法 -->
       <div class="field row">
-        <span class="label">下班时间</span>
+        <span class="label">下班时间 <em>（早于上班按跨日班，如 22:00–次日 06:00）</em></span>
         <input class="time" type="time" :value="cfg.offworkEnd" @change="onText('offworkEnd', $event)" />
       </div>
-      <p class="hint">
-        下班时间早于上班时间按跨日班处理（例如 22:00–次日 06:00）；跨日、凌晨仍在上一班、周切换都按本地时间实时计算。
-      </p>
 
       <div class="field">
         <span class="label">工作日</span>
@@ -141,7 +140,7 @@ function toggleDay(d: number) {
         />
       </div>
       <p class="hint">
-        按「时薪 × 今日已工作小时」估算挂件上的「今日已赚」（需开启下班倒计时），只在工作日上班时段递增、下班后封顶。不是真实工资，不含月薪折算与个税社保；留空则不显示。
+        按「时薪 × 今日已工作小时」估算「今日已赚」（需开启倒计时），仅工作日上班时段递增、下班后封顶；非真实工资，不含月薪折算与个税社保；留空不显示。
       </p>
       <p v-if="wageFlash.msg" class="msg" :class="msgCls(wageFlash)">{{ wageFlash.msg }}</p>
 
@@ -151,7 +150,7 @@ function toggleDay(d: number) {
       </label>
 
       <label class="field row check">
-        <span class="label">挂件外圈进度圈 <em>（关掉后外圈只给计时用，工时进度改看倒计时页里的细进度条）</em></span>
+        <span class="label">挂件外圈进度圈 <em>（关掉后外圈只给计时，工时进度看倒计时页的细进度条）</em></span>
         <input type="checkbox" :checked="cfg.offworkRing" @change="onCheck('offworkRing', $event)" />
       </label>
 
@@ -171,7 +170,7 @@ function toggleDay(d: number) {
       </label>
 
       <p class="hint">
-        附加项接在倒计时页「今日已用 ¥x」之后，用「·」分隔；只占两行，放不下按「距周末 → 距发薪 → 今日已赚」丢整项。临近下班（最后 30 / 10 分钟）标题行会轻变颜色，不弹窗、不响铃。
+        附加项接在「今日已用 ¥x」后以「·」分隔；只占两行，放不下按「距周末 → 距发薪 → 今日已赚」整项丢弃。临近下班（最后 30 / 10 分钟）标题行轻变色，不弹窗、不响铃。
       </p>
     </template>
   </section>

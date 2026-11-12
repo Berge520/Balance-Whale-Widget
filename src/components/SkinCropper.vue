@@ -59,7 +59,7 @@ function onImgLoad() {
 }
 
 function onImgError() {
-  tip.value = '图片无法加载，请换一张试试'
+  tip.value = '图片无法加载，请换一张'
 }
 
 // 拖拽：框内拖动 = 整体平移，四角/四边 = 缩放。指针事件挂在 window 上，
@@ -161,7 +161,7 @@ function confirmCrop() {
   cv.height = ch
   const ctx = cv.getContext('2d')
   if (!ctx) {
-    tip.value = '当前环境不支持裁剪，请换一张图片'
+    tip.value = '当前环境不支持裁剪，请换一张'
     return
   }
   ctx.drawImage(el, sx, sy, sw, sh, 0, 0, cw, ch)
@@ -169,7 +169,7 @@ function confirmCrop() {
   try {
     url = cv.toDataURL('image/png')
   } catch (err) {
-    tip.value = '导出图片失败，请换一张试试'
+    tip.value = '导出图片失败，请换一张'
     return
   }
   emit('confirm', { dataUrl: url, name: props.name })
@@ -209,7 +209,7 @@ onUnmounted(endDrag)
       </div>
       <p v-if="tip" class="tip">{{ tip }}</p>
       <p class="hint">
-        拖动框内可移动，拖四角/四边可缩放；裁剪结果会存为 PNG（保留透明通道）。GIF 裁剪后会变成静态 PNG。
+        拖动框内移动，拖四角 / 四边缩放；结果存为 PNG（保留透明通道），GIF 会变成静态 PNG。
       </p>
 
       <div class="btn-row">

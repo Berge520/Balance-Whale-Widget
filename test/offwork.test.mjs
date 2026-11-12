@@ -172,8 +172,9 @@ test('关闭开关不渲染：页面侧有 offworkOn 守卫，默认配置为关
   assert.match(page, /\(!bubbleActive \|\| bubbleQueue\(\)\[bubbleIdx\] === OFFWORK_PAGE\)/)
   // tick 复用既有每秒巡检；计时在跑时它同时是计时圈的每秒刷新入口，不能只按 offworkOn 跳
   assert.match(page, /function bubbleTtlSweep\(\) \{[\s\S]*?if \(offworkOn \|\| timerRunning\) offworkStep\(\)/)
-  // 气泡没开时 offworkStep 直接返回、不碰文案（圈在此之前已由 updateTimerRing 刷过）
-  assert.match(page, /function offworkStep\(\) \{[\s\S]*?if \(!bubbleShown && !timerRunning\) return;[\s\S]*?if \(!bubbleActive\) updateTimerRing\(\);/)
+  // 气泡没开时 offworkStep 只刷圈、不碰文案（早先这里直接 return，倒计时圈会冻在开气泡那一刻的比例）
+  assert.match(page, /if \(!bubbleShown && !timerRunning\) \{ if \(offworkOwnsRing\(\)\) updateTimerRing\(\); return; \}/)
+  assert.match(page, /if \(!bubbleActive\) updateTimerRing\(\);/)
 })
 
 // 「今天已过百分比」：分母 = 当日「上班 → 下班」区间；上班前 0%、下班后 100%，

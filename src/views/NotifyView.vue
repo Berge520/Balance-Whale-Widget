@@ -232,12 +232,12 @@ defineExpose({ syncAlertsBaseline })
          读起来断成两段（v1.16 重排） -->
     <h3 class="card-sub">通知方式</h3>
     <label class="field row check">
-      <span class="label">系统通知 <em>（桌面弹窗；关闭后所有自动提醒与计时都不再弹窗）</em></span>
+      <span class="label">系统通知 <em>（桌面弹窗；关闭后自动提醒与计时都不弹窗）</em></span>
       <input type="checkbox" :checked="cfg.notifySystemOn" @change="emit('patch', { notifySystemOn: ($event.target as HTMLInputElement).checked })" />
     </label>
 
     <label class="field row check">
-      <span class="label">邮件通知 <em>（把提醒发到邮箱；需先填下方 SMTP 配置）</em></span>
+      <span class="label">邮件通知 <em>（提醒发到邮箱；需先填下方 SMTP 配置）</em></span>
       <input type="checkbox" :checked="cfg.notifyMailOn" @change="emit('patch', { notifyMailOn: ($event.target as HTMLInputElement).checked })" />
     </label>
 
@@ -264,7 +264,7 @@ defineExpose({ syncAlertsBaseline })
       <p v-if="!timerFold.open" class="hint vol-sum">{{ timerBrief }}</p>
       <div v-if="timerFold.open" class="guide">
         <label class="field row">
-          <span class="label">到点提醒我 <em>（到点显示在气泡与通知里）</em></span>
+          <span class="label">到点提醒我 <em>（到点显示在气泡与通知）</em></span>
           <input type="text" :value="cfg.timerNote" :maxlength="TIMER_NOTE_MAX" placeholder="例如：起来喝水、活动一下"
                  @change="emit('patch', { timerNote: ($event.target as HTMLInputElement).value })" />
         </label>
@@ -275,7 +275,7 @@ defineExpose({ syncAlertsBaseline })
         </label>
 
         <label class="field row">
-          <span class="label">到点气泡停留 <em>（常驻 = 手动点掉；自动提醒的停留时长在下方「更多提醒设置」里）</em></span>
+          <span class="label">到点气泡停留 <em>（常驻＝手动点掉；自动提醒的停留时长见「更多提醒设置」）</em></span>
           <select :value="cfg.timerRemindSec" @change="emit('patch', { timerRemindSec: Number(($event.target as HTMLSelectElement).value) })">
             <option :value="5">5 秒</option>
             <option :value="8">8 秒</option>
@@ -285,7 +285,7 @@ defineExpose({ syncAlertsBaseline })
         </label>
 
         <label class="field row check">
-          <span class="label">计时到点也发邮件 <em>（需先开启上方「邮件通知」并填好 SMTP）</em></span>
+          <span class="label">计时到点也发邮件 <em>（需先开启「邮件通知」并填好 SMTP）</em></span>
           <input type="checkbox" :checked="cfg.timerMailOn" @change="emit('patch', { timerMailOn: ($event.target as HTMLInputElement).checked })" />
         </label>
       </div>
@@ -301,7 +301,7 @@ defineExpose({ syncAlertsBaseline })
     </label>
 
     <label class="field row check">
-      <span class="label">低余额预警 <em>（余额低于阈值时数字变红，并弹一次提醒气泡 + 每天一次系统通知）</em></span>
+      <span class="label">低余额预警 <em>（低于阈值数字变红，弹一次气泡 + 每天一次系统通知）</em></span>
       <input type="checkbox" :checked="cfg.lowAlertOn" @change="emit('patch', { lowAlertOn: ($event.target as HTMLInputElement).checked })" />
     </label>
     <label v-if="cfg.lowAlertOn" class="field row">
@@ -312,7 +312,7 @@ defineExpose({ syncAlertsBaseline })
     </label>
 
     <label class="field row check">
-      <span class="label">今日预算提醒 <em>（今日用量超出预算时气泡提示，并每天弹一次系统通知）</em></span>
+      <span class="label">今日预算提醒 <em>（用量超预算时气泡提示 + 每天一次系统通知）</em></span>
       <input type="checkbox" :checked="cfg.budgetOn" @change="onBudgetToggle(($event.target as HTMLInputElement).checked)" />
     </label>
     <label v-if="cfg.budgetOn" class="field row">
@@ -323,7 +323,7 @@ defineExpose({ syncAlertsBaseline })
     </label>
 
     <label class="field row check">
-      <span class="label">余额大幅波动通知 <em>（单次采样余额下降超过阈值时弹一次系统通知）</em></span>
+      <span class="label">余额大幅波动通知 <em>（单次采样余额降幅超阈值时弹一次系统通知）</em></span>
       <input type="checkbox" :checked="cfg.dropAlertOn" @change="onDropToggle(($event.target as HTMLInputElement).checked)" />
     </label>
     <label v-if="cfg.dropAlertOn" class="field row">
@@ -333,7 +333,7 @@ defineExpose({ syncAlertsBaseline })
       <span class="num-text">{{ usageCurrency === 'CNY' ? '元' : '美元' }}</span>
     </label>
     <p v-if="cfg.dropAlertOn" class="hint">
-      每少掉 ≥ 阈值就通知一次（不受「每天一次」限制）；被防误判拦下的下降（赠送额到期、异常跳变）也会通知并注明原因。换币种、换 API Key 时余额不可比，不会误报。
+      每少 ≥ 阈值通知一次（不受「每天一次」限制）；被拦下的下降（赠送额到期、异常跳变）也会通知并注明原因；换币种或 API Key 不误报。
     </p>
 
     <!-- 低频的「提醒表现 + 时段 + 文案」收在一处折叠，卡片默认只留「哪几类提醒要开」 -->
@@ -351,10 +351,10 @@ defineExpose({ syncAlertsBaseline })
             <option :value="15">15 秒</option>
           </select>
         </label>
-        <p class="hint">峰谷切换 / 今日预算 / 低余额 / 穿透这几类提醒气泡的停留时间（随机台词与计时到点不受影响，后者在「计时到点」里单独设）。</p>
+        <p class="hint">峰谷 / 预算 / 低余额 / 穿透提醒气泡的停留时长（随机台词与计时到点不受影响，后者见「计时到点」）。</p>
 
         <label class="field row check">
-          <span class="label">免打扰时段 <em>（只静音系统通知与邮件，挂件气泡照常弹；跨午夜如 23:00–07:00 也支持）</em></span>
+          <span class="label">免打扰时段 <em>（只静音系统通知与邮件，气泡照常；支持跨午夜如 23:00–07:00）</em></span>
           <input type="checkbox" :checked="cfg.quietOn" @change="emit('patch', { quietOn: ($event.target as HTMLInputElement).checked })" />
         </label>
         <label v-if="cfg.quietOn" class="field row">
@@ -364,9 +364,7 @@ defineExpose({ syncAlertsBaseline })
           <input class="time" type="time" :value="cfg.quietTo" @change="emit('patch', { quietTo: ($event.target as HTMLInputElement).value })" />
         </label>
         <p v-if="cfg.quietOn" class="hint">
-          免打扰只压「系统通知」与「邮件」，挂件气泡不受影响：
-          「今日预算」「低余额」的系统通知不占用当天名额（出时段后补发一次），「余额大幅波动」本来就是一次性、不补发。
-          待办到点提醒在时段内也只弹挂件气泡（不发系统通知与邮件），气泡弹出后该轮即算完成。
+          免打扰只压系统通知与邮件，气泡照常：「今日预算」「低余额」不占当天名额、出时段补发；大幅波动一次性不补发；待办到点只弹气泡即算完成。
         </p>
 
         <!-- 提醒文案：四类自动提醒（低余额 / 预算 / 峰谷 / 穿透）的气泡与系统通知文案 -->
@@ -377,16 +375,14 @@ defineExpose({ syncAlertsBaseline })
         </label>
 
         <p class="hint">
-          低余额 / 今日预算 / 峰谷切换 / 鼠标穿透这几类自动提醒的<b>气泡与系统通知共用这里的文案</b>。
-          <b>最多三行</b>，依次对应气泡的「标题 / 大字 / 说明」；行数不够则后面的行留空，多于三行的并进说明行。
-          系统通知取全文（换行合并成一行）。空行会被丢掉，清空某一条 = 该条恢复内置默认。
-          占位符按各输入框里的提示填写，写错的会原样显示出来。改完点「保存」才生效，挂件已开着的话立即生效。
+          四类提醒的<b>气泡与通知共用此文案</b>，<b>最多三行</b>（标题 / 大字 / 说明，超出并入说明行），通知取全文；
+          空行丢弃、清空即恢复默认；占位符见输入框提示，写错原样显示；点「保存」生效。
         </p>
         <p class="hint">
-          注意：低余额文案用于内置 DeepSeek 的预警；多厂商模型的余额通知带模型名，不受这里影响。
+          低余额文案仅用于内置 DeepSeek 预警；多厂商模型的余额通知带模型名，不受影响。
         </p>
         <p v-if="alertResetConfirm" class="hint">
-          将丢弃全部自定义提醒文案，恢复为内置默认，此操作不可撤销。
+          将丢弃全部自定义文案并恢复内置默认，不可撤销。
         </p>
         <div class="btn-row">
           <span v-if="alertsDirty" class="dirty-tag">未保存</span>
@@ -419,8 +415,8 @@ defineExpose({ syncAlertsBaseline })
                   type="button" :disabled="!cfg.soundOn" @click="resetAlertVol(r)">恢复跟随</button>
         </div>
         <p class="hint">
-          默认跟随「外观」页的全局音量；单独拖动某一类后即独立生效（不再跟随），
-          点「恢复跟随」回到随全局音量变化。提醒音的导入与更换（留空用内置音）在「资源」页。
+          默认跟随「外观」页的全局音量；拖动某一类后即独立生效，点「恢复跟随」回到跟随。
+          提醒音的导入与更换（留空用内置音）见「资源」页。
         </p>
       </div>
     </div>

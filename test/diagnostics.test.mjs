@@ -369,6 +369,24 @@ test('probePort：force 另起一轮，旧轮不得覆盖新轮结果（gen 是�
   assert.equal(dsh.__isStale(g0, g0), false)
 })
 
+// ── 端口精确匹配：就绪检测「一直显示启动中」/ 误报的根因之一 ──
+// 旧实现用 parts[1].indexOf(':' + state.port) 做**子串**匹配，127.0.0.1:30800 也被算成 3080 在监听。
+test('parsePortPid：按最后一个冒号取纯端口号，不做子串匹配', () => {
+  const dsh = require('../public/preload/lib/dsh.js')
+  const st = dsh.__probeState()
+  if (process.platform !== 'win32') return // 只有 Windows 走 netstat 解析分支
+  // 构造 netstat -ano 的典型行：Proto 本地地址 外部地址 状态 PID
+  const line = (local, pid) => `  TCP    ${local}    0.0.0.0:0    LISTENING    ${pid}`
+  const port = st.port || 3080
+  const exact = dsh.parsePortPid(line('127.0.0.1:' + port, 111))
+  assert.equal(exact, 111, '精确端口 → 命中')
+  const longer = dsh.parsePortPid(line('127.0.0.1:' + port + '0', 222))
+  // 只有「配置端口恰好是 <port>0 的前缀」时才会撞上，与具体端口值无关：断言只看它不误判成 222
+  assert.notEqual(longer, 222, '以配置端口开头的更长端口号不得算作同一端口')
+  assert.equal(dsh.parsePortPid(line('[::]:' + port, 333)), 333, 'IPv6 本地地址同样按冒号切端口')
+  assert.equal(dsh.parsePortPid(line('127.0.0.1:' + port, 444).replace('LISTENING', 'ESTABLISHED')), 0, '非 LISTENING 行忽略')
+})
+
 // ── C1 指纹判据（D25 必测）──
 test('D25：指纹只认 name+version，路径不同也判为「同一份装了两遍」', () => {
   const a = { name: '@deepseek-ai/cordis', version: '1.2.3', dir: 'C:\\A\\node_modules\\x' }

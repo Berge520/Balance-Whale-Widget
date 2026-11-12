@@ -867,8 +867,8 @@ watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = nu
         {{ ghAccelIntroFold ? '收起说明' : '这是什么 / 有什么影响' }}
       </button>
       <div v-if="ghAccelIntroFold" class="guide">
-        <p class="hint">改写系统 <strong>hosts</strong>，让 GitHub 相关域名直连可用 IP，浏览器 / git / 下载全生效，不占常驻进程。写入需一次 <strong>UAC 确认</strong>，关闭即删块，不动原有 hosts。只写通过 HTTPS 探测与证书校验的 IP，同域名会写多个备用。</p>
-        <p class="hint">IP 失效时<strong>关一次开关再开</strong>即按新表重写。首次开启会把原 hosts 备份到<strong>插件数据目录 <code>whale-hosts-backup</code></strong>；卸载不影响系统 hosts，记得先关闭。</p>
+        <p class="hint">改写系统 <strong>hosts</strong>，让 GitHub 域名直连可用 IP，浏览器 / git / 下载全生效，不占常驻进程。写入需一次 <strong>UAC 确认</strong>，关闭即删块，不动原有内容。只写通过 HTTPS 探测与证书校验的 IP，同域名写多个备用。</p>
+        <p class="hint">IP 失效时<strong>关一次开关再开</strong>即按新表重写。首次开启会把原 hosts 备份到<strong>插件数据目录 <code>whale-hosts-backup</code></strong>；卸载不会清理系统 hosts，请先关闭。</p>
       </div>
     </div>
     <label class="field row check">
@@ -913,19 +913,19 @@ watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = nu
       <span class="label">上次刷新</span>
       <span class="ver">{{ ghAccelAgeText() }}</span>
     </label>
-    <p v-if="ghAccelStale" class="msg err">IP 表超过 7 天未刷新（CDN IP 会变）。开启时优先用 DoH 实时解析，源表仅作回退，多半仍可用；想彻底更新请点「刷新 IP 表」再「重新写入 hosts」。</p>
+    <p v-if="ghAccelStale" class="msg err">IP 表超过 7 天未刷新（CDN IP 会变）。开启时优先 DoH 实时解析、源表仅作回退，多半仍可用；要彻底更新请点「刷新 IP 表」再「重新写入 hosts」。</p>
     <!-- github.com 不在已写入的块里：主站仍走被污染的 DNS，这正是「已生效但打不开」的常见原因 -->
     <p v-if="ghAccelActual?.on && ghAccelActual.active && !ghAccelActual.active.includes('github.com')" class="msg err">
       块里<strong>没有 github.com</strong>，主站仍走 DNS 可能打不开。请「刷新 IP 表」后再「重新写入 hosts」。
     </p>
     <!-- 块被挤出文件最前：其它工具在本插件之后又写了 hosts，first-match 被抢、加速失效 -->
     <p v-if="ghAccelActual?.on && ghAccelActual.degraded" class="msg err">
-      检测到本插件写入的 hosts 块被其它工具<strong>挤到了文件后段</strong>（可能是在本插件之后又写过 hosts），会被其条目抢先解析。点「重新写入 hosts」把块移回文件最前。
+      本插件的 hosts 块被其它工具<strong>挤到文件后段</strong>（可能之后又写过 hosts），其条目会抢先解析。点「重新写入 hosts」把块移回最前。
     </p>
     <!-- 块残缺：头标记在、尾标记不在（被其它工具或编辑器截断）。此时块内容不生效，
          反而留下残留 —— 残留里若有失效 IP 会把域名解析到死地址，必须提示清掉 -->
     <p v-if="ghAccelActual?.broken" class="msg err">
-      hosts 里本插件的标记块<strong>只有开头没有结尾</strong>（可能被其它工具或编辑器改坏/截断），该块内容不会生效且留有残留。点「重新写入 hosts」可修复为完整块。
+      本插件的标记块<strong>只有开头没有结尾</strong>（可能被其它工具或编辑器截断），内容不生效且留残留。点「重新写入 hosts」可修复。
     </p>
     <p class="hint" v-if="ghAccelActual && ghAccelActual.hostsPath">hosts 文件：<code>{{ ghAccelActual.hostsPath }}</code></p>
     <!-- 冲突提示：其它工具常驻 127.0.0.1 条目；本插件块写在文件最前，first-match 优先生效 -->
@@ -933,7 +933,7 @@ watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = nu
     <!-- 能按特征认出「是哪类工具」时把结论带上，省得用户对着 hosts 里一行 127.0.0.1 发愣；
          认不出就用中性说法，绝不瞎猜（猜错会把用户引到错误的软件设置里翻） -->
     <p v-if="ghAccelConflicts.length" class="msg err">
-      检测到第三方条目<span v-if="ghAccelConflictWriters">（像是 {{ ghAccelConflictWriters }} 写的）</span><span v-else>（可能是其它加速工具写的）</span>：{{ ghAccelConflicts.map(c => c.domain).join('、') }}。本插件块写在最前会优先生效，可直接用；要彻底替换对方，请先在它的设置里关闭 GitHub 加速。
+      检测到第三方条目<span v-if="ghAccelConflictWriters">（像是 {{ ghAccelConflictWriters }} 写的）</span><span v-else>（可能是其它加速工具写的）</span>：{{ ghAccelConflicts.map(c => c.domain).join('、') }}。本插件块写在最前、优先生效，可直接用；要彻底替换，请先在对方设置里关闭 GitHub 加速。
     </p>
     <div class="btn-row">
       <button class="secondary utils-btn utils-secondary" :class="{ 'btn-busy': ghPendingText('probe') }" :disabled="ghAccelProbing" @click="doGhAccelProbe">
@@ -950,7 +950,7 @@ watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = nu
       </button>
     </div>
     <p v-if="ghAccelProbe" class="msg" :class="ghAccelProbe.ok ? 'ok' : 'err'">
-      {{ ghAccelProbe.ok ? 'github.com 可达，耗时 ' + ghAccelProbe.ms + 'ms' + (ghAccelProbe.status ? '（HTTP ' + ghAccelProbe.status + '）' : '') : '无法访问 github.com：' + (ghAccelProbe.error || '未知错误') }}<template v-if="ghAccelProbe.ok && !ghAccelActual?.on"> —— 开启前已可达（可能靠其它加速工具或代理），hosts 直连可能绕开现有代理，建议开启后再测一次对比</template>
+      {{ ghAccelProbe.ok ? 'github.com 可达，耗时 ' + ghAccelProbe.ms + 'ms' + (ghAccelProbe.status ? '（HTTP ' + ghAccelProbe.status + '）' : '') : '无法访问 github.com：' + (ghAccelProbe.error || '未知错误') }}<template v-if="ghAccelProbe.ok && !ghAccelActual?.on"> —— 开启前已可达（可能靠其它加速工具或代理），hosts 直连可能绕开代理，建议开启后再测对比</template>
     </p>
     <!-- 探测失败但块里确实有 github.com：写入的那个 IP 刚失效，重写一次让插件重新探测换 IP。
          这里内联「重新写入」+「关闭加速」两个就近出口：用户此刻正卡在「开着却打不开」，
@@ -1069,7 +1069,7 @@ watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = nu
       </button>
       <div v-if="ghAccelSrcFold" class="guide">
         <p class="hint">
-          勾选决定哪些来源参与候选链，<strong>行序即优先级</strong>（排在前面的先当首选，探测通过后写入 hosts 的第一行，后面的只作回退）。三者默认全开；<strong>全关则无法开启</strong>。
+          勾选决定参与候选链的来源，<strong>行序即优先级</strong>（靠前的作首选，探测通过后写入 hosts 第一行，其余只作回退）。三者默认全开；<strong>全关则无法开启</strong>。
         </p>
         <ul class="gh-order">
           <li v-for="(r, i) in ghAccelSrcRows" :key="r.code" :class="{ 'gh-order-child': r.depth === 1 }">
@@ -1142,8 +1142,8 @@ watch(() => props.activeTab, (k) => { if (k !== 'help') ghAccelVerify.value = nu
           >{{ ghAccelSrcPending || '添加' }}</button>
         </div>
         <p class="hint">
-          可添加自建的 hosts 源表（上限 {{ ghAccelSrcMax }} 个），需为 http(s) 链接；
-          新加的源<strong>默认不参与</strong>，要在上面列表里勾选才生效。只采纳本插件关心的域名，其余条目会被忽略。
+          可添加自建 hosts 源表（上限 {{ ghAccelSrcMax }} 个），需为 http(s) 链接；
+          新加的源<strong>默认不参与</strong>，需在上方列表勾选。只采纳本插件关心的域名，其余忽略。
         </p>
         <p v-if="ghAccelSrcMsg" class="hint">{{ ghAccelSrcMsg }}</p>
       </div>

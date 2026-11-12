@@ -242,7 +242,7 @@ onMounted(async () => {
     tip.value = decoded.duration > MAX_SEL ? '已默认选中前 10 秒' : ''
     drawWave()
   } catch (err: any) {
-    tip.value = '音频解码失败（该格式可能不受支持）：' + String(err?.message || err)
+    tip.value = '音频解码失败（格式可能不支持）：' + String(err?.message || err)
   }
 })
 
@@ -283,7 +283,7 @@ onUnmounted(() => {
       </div>
       <p v-if="tip" class="tip">{{ tip }}</p>
       <p class="hint">
-        拖动两侧手柄选择要保留的片段（最长 10 秒）；导入后会转成 WAV 单声道，音效会复制到本地数据目录。
+        拖动两侧手柄选择保留片段（最长 10 秒）；导入后转成单声道 WAV，并复制到本地数据目录。
       </p>
 
       <div class="btn-row">

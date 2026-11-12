@@ -95,7 +95,7 @@ function openLogFile() {
       </h2>
     </div>
     <template v-if="cardFold.open">
-    <p class="hint">给「{{ CMD_TOGGLE }}」绑定一个全局快捷键（想给「鼠标穿透」也绑一个，见「外观」组的「挂件窗口」卡）。</p>
+    <p class="hint">给「{{ CMD_TOGGLE }}」绑一个全局快捷键；「鼠标穿透」的绑法见「外观」组「挂件窗口」卡。</p>
     <div class="btn-row">
       <button class="secondary utils-btn utils-secondary" @click="emit('copy-cmd')">复制指令名</button>
       <button class="secondary utils-btn utils-secondary" @click="emit('add-hotkey')">新增快捷键</button>
@@ -103,7 +103,7 @@ function openLogFile() {
     <!-- 绑定状态：告诉用户「到底绑没绑、绑的是什么键」，省得自己去 uTools 设置里翻 -->
     <p class="hint">
       当前绑定：<strong>{{ hotkey || '未检测到' }}</strong>
-      <span v-if="!hotkey">（点「新增快捷键」后按下组合键即可）</span>
+      <span v-if="!hotkey">（点「新增快捷键」后按组合键）</span>
     </p>
     <!-- 新手引导入口：首次引导只弹一次（guideDone），之后从帮助 Tab 重开。
          与「使用说明」「故障排查」同为折叠块、同一视觉语言，不额外占版面 -->
@@ -114,17 +114,17 @@ function openLogFile() {
       <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="widgetFolds.help" @click="widgetFolds.help = !widgetFolds.help">{{ widgetFolds.help ? '收起使用说明' : '使用说明' }}</button>
       <div v-if="widgetFolds.help" class="guide">
         <p class="guide-use"><strong>进入插件时：</strong>挂件出现会抢焦点，设置窗自动收起；改设置点挂件右上角菜单（或右键）→「打开设置」。</p>
-        <p class="guide-use"><strong>挂件操作：</strong>可拖到屏幕四边吸附（吸附区见「挂件窗口」卡），鲸鱼始终朝屏幕内侧；点鲸鱼刷新余额，悬停后点右上角菜单调设置。</p>
-        <p class="guide-use"><strong>设置页导航：</strong>Ctrl+1~7 切分组、Ctrl+K 搜索、Alt+←/→ 切相邻分组；会记住上次停留的分组（弹层打开时快捷键让位）。</p>
-        <p class="guide-use"><strong>快捷键：</strong>Ctrl+, 打开 uTools 设置 → 全局功能 → 新增 → 指令填「{{ CMD_TOGGLE }}」→ 按组合键。可用上方「复制指令名」。鼠标穿透填「{{ CMD_PASSTHROUGH }}」。</p>
-        <p class="guide-use"><strong>常驻：</strong>退出到后台挂件保留。分离设置窗用顶部 ⋮ 的「分离为独立窗口」，分离后点最小化收起；点 X 或 Alt+F4 会结束插件、挂件一起消失，重开插件即可，配置不丢（细节见「挂件窗口」卡）。</p>
+        <p class="guide-use"><strong>挂件操作：</strong>可拖到四边吸附（吸附区见「挂件窗口」卡），鲸鱼始终朝屏幕内侧；点鲸鱼刷新余额，悬停点右上角菜单调设置。</p>
+        <p class="guide-use"><strong>设置页导航：</strong>Ctrl+1~7 切分组、Ctrl+K 搜索、Alt+←/→ 切相邻分组；记住上次停留的分组（弹层打开时快捷键让位）。</p>
+        <p class="guide-use"><strong>快捷键：</strong>Ctrl+, 打开 uTools 设置 → 全局功能 → 新增 → 指令填「{{ CMD_TOGGLE }}」→ 按组合键。鼠标穿透填「{{ CMD_PASSTHROUGH }}」。</p>
+        <p class="guide-use"><strong>常驻：</strong>退出到后台挂件保留。分离设置窗用顶部 ⋮ 的「分离为独立窗口」，分离后最小化收起；点 X 或 Alt+F4 会结束插件、挂件同关，重开即可，配置不丢。</p>
       </div>
     </div>
     <!-- 自定义显示：如何恢复隐藏的卡片 -->
     <div class="fold">
       <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="widgetFolds.displayManager" @click="widgetFolds.displayManager = !widgetFolds.displayManager">{{ widgetFolds.displayManager ? '收起' : '如何恢复隐藏的卡片？' }}</button>
       <div v-if="widgetFolds.displayManager" class="guide">
-        <p class="guide-use">隐藏了某个 Tab 或卡片时：点 Tab 栏右侧 <strong>⚙ 显示管理</strong> → 勾选要显示的项 → 可点「恢复默认」一键还原（同时清空置顶与自定义顺序）。</p>
+        <p class="guide-use">隐藏了 Tab 或卡片时：点 Tab 栏右侧 <strong>⚙ 显示管理</strong> → 勾选要显示的项；「恢复默认」一键还原（同时清空置顶与自定义顺序）。</p>
         <p class="guide-use">DeepSeek 凭据、挂件窗口、挂件外观三张核心卡不可隐藏，所在 Tab 也不能整组隐藏。</p>
       </div>
     </div>
@@ -133,7 +133,7 @@ function openLogFile() {
       <div v-if="widgetFolds.trouble" class="guide">
         <!-- 标题与日志按钮都带「挂件」前缀：dsh 卡里另有一块「dsh 故障排查」讲 dsh 子进程日志，
              两块都叫「故障排查」时用户会把两处的日志当成同一份 -->
-        <p class="guide-use">挂件消失或显示异常时，可复制插件自身诊断日志（%TEMP%\whale-debug.log）或用系统程序打开。<strong>只含挂件与插件日志</strong>；dsh 日志见「开发者 → dsh」卡的「查看 dsh 日志」。</p>
+        <p class="guide-use">挂件消失或显示异常时，可复制诊断日志（%TEMP%\whale-debug.log）或用系统程序打开。<strong>只含挂件与插件日志</strong>；dsh 日志见「开发者 → dsh」卡。</p>
         <div class="btn-row">
           <button class="secondary utils-btn utils-secondary" @click="copyDebugLog">复制挂件日志</button>
           <button class="secondary utils-btn utils-secondary" @click="openLogFile">打开挂件日志文件</button>

@@ -145,8 +145,8 @@ function codexClearCache() {
     </div>
     <template v-if="folds.open">
     <p class="hint">
-      直接读 Codex CLI 写在 <code>~/.codex/sessions</code> 的会话日志（<code>rollout-*.jsonl</code>）做统计，
-      <strong>纯本地读取、不需要 API Key、不发任何网络请求</strong>。用量取累计量的差值，天然免疫重复计数。
+      读取 Codex CLI 写在 <code>~/.codex/sessions</code> 的会话日志（<code>rollout-*.jsonl</code>）统计，
+      <strong>纯本地、不需要 API Key、不发网络请求</strong>。用量取累计差值，不重复计数。
     </p>
     <div class="btn-row">
       <!-- 首次展开已自动读过一次，按钮主要当「刷新」用 -->
@@ -219,10 +219,10 @@ function codexClearCache() {
       <div class="fold">
         <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="helpFold.open" @click="helpFold.open = !helpFold.open">{{ helpFold.open ? '收起说明' : '说明' }}</button>
         <div v-if="helpFold.open" class="guide">
-          <p class="guide-use"><strong>统计口径：</strong>优先用 <code>total_token_usage</code> 的累计差值（单调递增，一轮写多条 <code>token_count</code> 不重复计数）；缺失时退回 <code>last_token_usage</code>。</p>
+          <p class="guide-use"><strong>统计口径：</strong>优先取 <code>total_token_usage</code> 的累计差值（单调递增，一轮多条 <code>token_count</code> 也不重复计数）；缺失时用 <code>last_token_usage</code>。</p>
           <p class="guide-use"><strong>模型归属：</strong>按 <code>turn_context</code> 的 <code>model</code> 归类，未标注记为 <code>codex</code>。</p>
-          <p class="guide-use"><strong>订阅窗口：</strong>订阅用户的 <code>token_count</code> 里会带 <code>rate_limits</code> 快照（5h 与周窗口的已用%、重置时间），字段名各版本不一已做容错；API-key 计费或无订阅时没有。</p>
-          <p class="guide-use"><strong>缓存：</strong>按 size/mtime 判断文件是否变过，只重解析变过的文件（日志可能几十 MB）。缓存只存聚合数与文件指纹，<strong>不含凭据</strong>。</p>
+          <p class="guide-use"><strong>订阅窗口：</strong>订阅用户的 <code>token_count</code> 带 <code>rate_limits</code> 快照（5h 与周窗口的已用%、重置时间），字段名已做容错；API-key 计费或无订阅时没有。</p>
+          <p class="guide-use"><strong>缓存：</strong>按 size/mtime 判断文件是否变化，只重解析变过的文件（日志可能几十 MB）；只存聚合数与文件指纹，<strong>不含凭据</strong>。</p>
           <p class="guide-use"><strong>读不到数据：</strong>确认 Codex CLI 跑过至少一次，且 <code>~/.codex/sessions</code>（或 <code>$CODEX_HOME</code>）里有 <code>rollout-*.jsonl</code>。</p>
         </div>
       </div>

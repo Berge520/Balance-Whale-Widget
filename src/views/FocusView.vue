@@ -389,11 +389,11 @@ onUnmounted(() => {
     </h3>
     <template v-if="foldOpen('today')">
     <label class="field row check">
-      <span class="label">待办与计时 <em>（挂件里显示待办清单与计时入口）</em></span>
+      <span class="label">待办与计时 <em>（挂件里显示待办与计时入口）</em></span>
       <input type="checkbox" :checked="cfg.todoOn" @change="onCheckChange('todoOn', $event)" />
     </label>
     <p class="hint">
-      这一项只管挂件里显不显示待办与计时；计时到点怎么提示、休息多久，见下方「计时设置」。
+      只管挂件是否显示待办与计时；到点提示与休息时长见下方「计时设置」。
     </p>
     </template>
 
@@ -408,7 +408,7 @@ onUnmounted(() => {
     <!-- 空态顺手把三个隐藏操作说出来：改名 / 计时与提醒都藏在「更多」里，
          第一次来的人不会自己想到去双击文字 -->
     <p v-if="!todo.items.length" class="hint">
-      还没有待办。在上面输入框写一条，回车即可添加；双击文字改名，点「更多」设置计时与提醒。
+      还没有待办。上方输入框写一条回车即添加；双击文字改名，「更多」里设计时与提醒。
     </p>
 
     <!-- 未完成：常显。行内只放「最常按得到」的动作，其余收进「更多」 -->

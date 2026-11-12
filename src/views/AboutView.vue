@@ -79,18 +79,18 @@ function marketSearch() {
     <p v-if="updateMsg" class="msg" :class="[updateOk ? 'ok' : 'err', hasUpdate ? 'clickable' : '']"
        :title="hasUpdate ? '点击前往插件市场更新' : ''"
        @click="hasUpdate && marketSearch()">{{ updateMsg }}</p>
-    <p class="hint">开启后每次呼出自动检查（12 小时内最多一次），有新版本会发系统通知。</p>
+    <p class="hint">开启后每次呼出自动检查（12 小时内最多一次），有新版本发系统通知。</p>
 
     <!-- 上游要求衍生版必须标注「个人衍生版」：既避免被误认成官方版，也说明售后归属。
          属一次性免责声明，压在版本信息与更新按钮之前会挡路，故下移并收进折叠 -->
-    <p class="hint">本插件是<strong>个人衍生版</strong>，移植自 <a href="#" @click.prevent="emit('doc', 'https://github.com/MeteorNOX/DeepSeek-Balance-Whale-Widget')">MeteorNOX/DeepSeek-Balance-Whale-Widget</a>（MIT License）。<strong>非官方版本，与 DeepSeek、uTools 官方均无关联</strong>，无官方支持；问题请走下方反馈入口。</p>
+    <p class="hint">本插件是<strong>个人衍生版</strong>，移植自 <a href="#" @click.prevent="emit('doc', 'https://github.com/MeteorNOX/DeepSeek-Balance-Whale-Widget')">MeteorNOX/DeepSeek-Balance-Whale-Widget</a>（MIT License）。<strong>非官方版本，与 DeepSeek、uTools 官方均无关联</strong>，无官方支持；问题走下方反馈。</p>
 
     <div class="fold">
       <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="aboutFolds.feedback" @click="aboutFolds.feedback = !aboutFolds.feedback">
         {{ aboutFolds.feedback ? '收起反馈与建议' : '反馈与建议' }}
       </button>
       <div v-show="aboutFolds.feedback" class="guide">
-        <p class="hint">想提新功能、报 bug 或随便吐槽，去<a href="#" @click.prevent="emit('doc', 'https://www.u-tools.cn/plugins/detail/%E5%B0%8F%E9%B2%B8%E9%B1%BC%E4%BD%99%E9%A2%9D%E6%8C%82%E4%BB%B6/')">插件市场留言区</a>或 <a href="#" @click.prevent="emit('doc', 'https://github.com/Berge520/Balance-Whale-Widget/issues')">GitHub Issues</a> 都可以，每条都会看。</p>
+        <p class="hint">提新功能、报 bug 或吐槽，可去<a href="#" @click.prevent="emit('doc', 'https://www.u-tools.cn/plugins/detail/%E5%B0%8F%E9%B2%B8%E9%B1%BC%E4%BD%99%E9%A2%9D%E6%8C%82%E4%BB%B6/')">插件市场留言区</a>或 <a href="#" @click.prevent="emit('doc', 'https://github.com/Berge520/Balance-Whale-Widget/issues')">GitHub Issues</a>，每条都会看。</p>
       </div>
     </div>
     </template>

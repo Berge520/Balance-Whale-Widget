@@ -404,20 +404,19 @@ const dshPolling = usePolling(() => dshStatus(false), 4000)
 // dsh 状态只在「开发者」Tab 激活时轮询：dsh 是低频开发功能，用户停在其它 Tab 时没必要空转
 // （首次进入补一次 deep 探测，识别外部终端里跑的 dsh；启停操作另有 deep 补读，见 dshDo/dshQueryVersions）
 let dshDeepOnce = false
-watch(activeTab, (tab) => {
-  if (tab !== 'dev') {
-    dshPolling.stop()
-    return
-  }
-  if (!dshDeepOnce) {
-    dshDeepOnce = true
-    dshStatus(true)
-  }
+function dshSyncPolling() {
+  if (activeTab.value !== 'dev') { dshPolling.stop(); return }
+  if (!dshDeepOnce) { dshDeepOnce = true; dshStatus(true) }
   // 勾了「自动刷新版本」就每次进 Tab 重查一次：与手动点「重新查询」同一入口（dshQueryVersions），
   // busy 由宿主快照带回、按钮自身禁用，查询期间重复进 Tab 会被 dshDo 的 busy 拦截，不会叠发 npm view
   if (dshAutoRefresh.value && dsh.busy !== 'versions' && !dshQueryFailed.value) dshQueryVersions()
   dshPolling.start()
-})
+}
+watch(activeTab, dshSyncPolling)
+// ⚠️ 不能给 watch 加 immediate（回调引用后段声明的 dshAutoRefresh / dshQueryVersions 会踩 TDZ）；而
+// activeTab 初值取自 localStorage 的 whale:lastTab，Tab 可能一上来就是 dev（watch 不触发）→ 轮询永不
+// 启动、状态冻结在 running=true / ready=false，点「启动」后卡片一直显示「启动中」（2026-11-12 实测）
+onMounted(() => { if (activeTab.value === 'dev') dshSyncPolling() })
 // 启动/结束是同步返回；重启要等旧进程退出、更新要下载，之后再补一次状态
 function dshDo(action: 'start' | 'stop' | 'restart' | 'update') {
   try {
@@ -554,23 +553,19 @@ function dshValueTip(key: string, tip: string, err = false) {
   window.setTimeout(() => { if (token === dshValueTick) dshValueFlash.value = { key: '', text: '', err: false } }, 2000)
 }
 function dshOpenPage() {
-  // 用户已经找到入口了，脉动的使命到此为止 —— 再闪就是干扰
   dshWebHint.value = false
-  try {
-    const url = services.dshOpenWeb?.()
-    if (!url) {
-      dshFlash.err = true
-      dshFlash.msg = '打开失败：无法调用系统浏览器'
-      return
-    }
-    dshFlash.err = !dsh.webUrl
-    dshFlash.msg = dsh.webUrl
-      ? '已用系统浏览器打开：' + url
-      : '已打开 ' + url + '（还没拿到带 token 的地址：若提示需要认证，等 dsh 完全启动后再点一次）'
-  } catch (err: any) {
+  // 回执要说清「弹在哪儿」，否则用户会以为设置没生效。调用地址与文案只隔一行，合并写省行
+  const where = cfg.dshOpenIn === 'external' ? '系统浏览器' : '内置浏览器'
+  const url = (() => { try { return services.dshOpenWeb?.() } catch { return '' } })()
+  if (!url) {
     dshFlash.err = true
-    dshFlash.msg = '打开失败：' + String(err?.message || err)
+    dshFlash.msg = '打开失败：无法调用浏览器'
+    return
   }
+  dshFlash.err = !dsh.webUrl
+  dshFlash.msg = dsh.webUrl
+    ? '已用' + where + '打开：' + url
+    : '已打开 ' + url + '（还没拿到带 token 的地址：若提示需要认证，等 dsh 完全启动后再点一次）'
 }
 function dshCopyUrl() {
   // 兜底与「页面地址」那一行的展示文案保持一致：未启动时展示端会拼出默认地址，
@@ -684,7 +679,9 @@ const dshStateText = computed(() => {
     const who = dsh.runElevated ? '管理员' : ''
     if (!dsh.ready && !dsh.needsPortRestart) {
       const wait = dsh.startedAt ? Math.max(0, Math.round((dshNow.value - dsh.startedAt) / 1000)) : 0
-      return (who ? who + '启动中' : '启动中') + '…（' + dsh.port + ' 未就绪' + (wait > 3 ? '，已等待 ' + wait + ' 秒' : '，首次安装需要下载') + '）'
+      // 超过 90s 仍无正面证据：措辞从「首次安装要下载」改成「可能没起来」，并指向日志 —— 旧文案在等了 5 分钟时还写「首次安装需要下载」，把异常说成了正常
+      const hint = wait > 3 ? '，已等待 ' + wait + ' 秒' + (wait > 90 ? '，可能没起来，请看下方日志' : '') : '，首次安装需要下载'
+      return (who ? who + '启动中' : '启动中') + '…（' + dsh.port + ' 未就绪' + hint + '）'
     }
     const sec = dsh.startedAt && dsh.readyAt ? ((dsh.readyAt - dsh.startedAt) / 1000).toFixed(1) + 's' : ''
     return (who ? who + '运行中' : '运行中') + ' · pid ' + dsh.pid + (sec ? '（就绪用时 ' + sec + '）' : '') +
@@ -965,7 +962,7 @@ function dshQueryVersions() {
 const dshUsage = ref<DshUsageResult | null>(null)
 const dshUsageBusy = ref(false)
 const dshUsageFlash: Flash = useFlash()
-const dshUsageFolds = reactive({ help: true })
+const dshUsageFolds = reactive({ help: false })
 // 图表档位：宿主一次给 31 天（days31，索引 0 是今天），切档只改前端切片、不重扫
 const DSH_USAGE_RANGES = [7, 14, 30] as const
 const dshUsageRange = ref(7)
@@ -1065,7 +1062,7 @@ function dshUsageClearCache() {
 const diagnose = ref<DshDiagnoseResult | null>(null)
 const diagnoseBusy = ref(false)
 const diagnoseFlash: Flash = useFlash()
-const diagnoseFolds = reactive({ help: true })
+const diagnoseFolds = reactive({ help: false })
 function diagnoseRefresh(force = false) {
   if (diagnoseBusy.value) return
   diagnoseBusy.value = true
@@ -1844,7 +1841,7 @@ const DSH_ISOLATE_MAX_BATCH = 100
 const dshIsolateFlash: Flash = useFlash()
 const dshIsolate = ref<DshIsolateCandidatesResult | null>(null)
 const dshIsolateBusy = ref(false)
-const dshIsolateFolds = reactive({ help: true, list: false })
+const dshIsolateFolds = reactive({ help: false, list: false })
 // 勾选名单（用 Set 因为要频繁增删；渲染时再转数组）
 const dshIsolatePicked = ref<Set<string>>(new Set())
 // dryRun 探出来的改动计划：非空即处于「待确认」态（两步确认的第一步）
@@ -2121,7 +2118,7 @@ const dshMarketLoaded = ref(false)
 // 里面的来源单选、测速、已装状态就会跟着跑（改来源会触发 dshMarketLoad）。
 // 用一个显式开关把「打开卡片」与「进入市场」分开，保证**展开卡片本身零网络请求**。
 const dshMarketRevealed = ref(false)
-const dshMarketFolds = reactive({ help: true, filters: false, source: false, install: false })
+const dshMarketFolds = reactive({ help: false, filters: false, source: false, install: false })
 // 分类 chip 行是否展开全部。默认收起：24 类平铺会占三行，把「范围 / 排序」挤到首屏之外，
 // 而这 24 类里绝大多数人只看前几个；点 ⌄ 才铺开其余
 const dshMarketCatExpand = ref(false)

@@ -99,7 +99,7 @@ function onTest() {
 
       <div class="head">
         <span class="title">{{ title }}</span>
-        <span class="sub">{{ reopen ? '随时可以调完就关，不影响已保存的配置' : '三步就能用起来' }}</span>
+        <span class="sub">{{ reopen ? '可随时关闭，不影响已保存的配置' : '三步就能用起来' }}</span>
       </div>
 
       <!-- 进度点：兼作当前步提示。不可点击 —— 前面没有分支，跳步只会让用户漏填 -->
@@ -113,8 +113,8 @@ function onTest() {
       <!-- 第一步：API Key +（可选）平台 Token -->
       <template v-if="step === 0">
         <p class="lead">
-          填入 DeepSeek 的 <strong>API Key</strong>，挂件才能读到账户余额。不知道去哪拿就展开下面的教程，
-          或者先跳过、以后在<strong>数据</strong> Tab 里再配。
+          填入 DeepSeek 的 <strong>API Key</strong>，挂件才能读到余额。不知道去哪拿就展开下方教程，
+          或先跳过、以后在<strong>数据</strong> Tab 里再配。
         </p>
 
         <label class="field">
@@ -150,13 +150,13 @@ function onTest() {
             <li>复制其 Request Headers 里 <code>Authorization</code> 的值（<code>Bearer eyJ...</code>）。</li>
             <li>粘贴到上方。</li>
           </ol>
-          <p class="guide-meta"><strong>保存与安全：</strong>同 API Key，本机加密存储、不上传服务器。它属网页会话令牌，重登后可能失效，届时自动回落本地记账。</p>
+          <p class="guide-meta"><strong>保存与安全：</strong>同 API Key，本机加密存储、不上传服务器。属网页会话令牌，重登后可能失效，届时自动回落本地记账。</p>
         </div>
       </template>
 
       <!-- 第二步：进入方式 -->
       <template v-else-if="step === 1">
-        <p class="lead">每次呼出插件时，先看到什么？选一个就行，之后可在「外观」Tab 的「挂件窗口」卡里随时改。</p>
+        <p class="lead">每次呼出插件时先看到什么？选一个即可，之后可在「外观」Tab 的「挂件窗口」卡里改。</p>
         <div class="opts">
           <label v-for="o in [
             { v: 'both', t: '设置窗口 + 挂件', d: '两个都开，第一次装通常选这个' },
@@ -178,14 +178,14 @@ function onTest() {
            组件刻意不依赖形象下载的实现（那是 App.vue 的活儿），只 emit 一个「带我去看看」 -->
       <template v-else>
         <p class="lead" :class="{ bad: !hasKey }">
-          <template v-if="hasKey">配置已保存，挂件马上就能读到余额。桌面上的小鲸鱼就是它，右键点它会弹出菜单。</template>
+          <template v-if="hasKey">配置已保存，挂件马上能读到余额。桌面上的小鲸鱼就是它，右键点会弹出菜单。</template>
           <template v-else>没有填 API Key，设置已保存，但挂件还读不到余额。可在<strong>数据</strong> Tab 里补上。</template>
         </p>
         <div class="extra">
           <span class="extra-title">想换个形象？</span>
           <!-- 不写具体张数：可下载形象分「内置补充包」与「上游共享角色」两批，
                数量由宿主清单决定（会随素材更新变化），写死就会变成过期的假承诺 -->
-          <span class="extra-desc">插件包只带了默认那张；更多形象（内置补充包与上游共享角色）在「资源」Tab 里按需下载，点哪张下哪张。现在不挑也行，随时都能去。</span>
+          <span class="extra-desc">插件包只带默认那张；更多形象（内置补充包与上游共享角色）在「资源」Tab 按需下载，点哪张下哪张。现在不挑也行，随时可去。</span>
         </div>
       </template>
 

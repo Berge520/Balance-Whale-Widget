@@ -4,6 +4,12 @@
 2. **`webPreferences.preload` 也必须是相对路径**（如 `'preload/floating.js'`），传绝对路径会导致子窗 preload 不加载（`window.whale` 缺失）。
 3. **主窗 → 悬浮窗只能 `win.webContents.send(channel, ...)`**；**悬浮窗 → 主窗只能 `utools.sendToParent(channel, ...)`**；接收统一 `ipcRenderer.on(channel, ...)`。不要用 `ipcRenderer.sendTo`（uTools 定制窗口上无效）。
 4. 返回的窗口**不支持 BrowserWindow/webContents 实例事件**（`win.on('closed')`、`webContents.on('did-finish-load')` 等不触发）；页面加载完成用 `createBrowserWindow` 的第三参 `callback`。
+   - **`webContents` 与实例方法不是一回事**：`win.reload()` / `win.isLoading()` / `win.stop()` 等按官方文档挂在窗口实例上；但 `loadURL` / `loadFile` **在本项目实测不可用**（见下一条），别照着 window.md 直接写。
+   - **「在 uTools 里打开任意网页」不要用 `createBrowserWindow`，用 `utools.ubrowser`**（2026-11-11 实测结论）：定制窗口第一参只收包内相对路径，想塞进在线页面就得建壳页再导航；而导航这条路两次实测都走不通（`win.webContents.loadURL` / `win.loadURL` 均报 `is not a function`，窗口永远停在壳页「正在打开 dsh…」）。官方给「用内置浏览器打开网页」的入口是 uBrowser 链式 API：
+     ```js
+     utools.ubrowser.goto(url).run({ show: true, title: 'dsh · Web UI', width: 1200, height: 800 })
+     ```
+     `run(窗口选项)` 直接开一个**可视化浏览器窗口**并加载目标页，不需要壳页、不需要手动导航；返回 Promise，resolve 后没后续操作时若窗口隐藏会被 uTools 自动销毁 —— 所以**显式 `show: true`**。会话按插件应用隔离（Cookie 可持久化）。`lib/dsh-web.js` 的内置模式即走这条，失败才回退 `shellOpenExternal`。以后接同类需求照这个写。
 5. 透明窗关键选项：`transparent:true`、`backgroundColor:'#00000000'`、`frame:false`、`thickFrame:false`、`hasShadow:false`、`roundedCorners:false`、`skipTaskbar:true`、`enableLargerThanScreen:true`；置顶 `alwaysOnTop`（类型里也有拼写 `alwayOnTop`，两个都给）+ `win.setAlwaysOnTop(true,'screen-saver')`。
 6. **Windows 下渲染进程直接 setBounds/移动透明窗会异常**：窗口移动/尺寸统一由主窗 preload 用 `win.setPosition/setSize` 完成，悬浮窗只上报目标坐标。
 7. 透明区点击穿透：`win.setIgnoreMouseEvents(ignore, { forward:true })`，配合页面侧 `document.elementFromPoint` + 鲸鱼像素 alpha 命中测试，动态开关。**去重要点**：`forward:true` 下页面会收到高频 mousemove，每次移动都发一次 `whale:ignore-mouse` 纯属浪费：页面侧 `sendIgnoreMouse()` 与宿主侧 `ipc.js` 各自缓存「上次下发的值」，值不变直接 return；宿主侧缓存必须**按窗口实例失效**（`getWindow()` 引用变化即清空），窗口重建后的新窗口默认不穿透，必须重新下发。页面侧 pointermove 的命中测试用 rAF 合并（每帧最多一次）。另见第 16 条（穿透总开关与悬停接管）。

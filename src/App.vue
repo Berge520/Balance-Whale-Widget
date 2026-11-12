@@ -1328,6 +1328,7 @@ const cfg = reactive({
   dshVersion: '',
   dshReinstall: false,
   dshNoOpen: true,
+  dshOpenIn: 'builtin' as 'builtin' | 'external', // builtin = uTools 内置浏览器（默认）/ external = 系统默认浏览器
   // dsh 插件市场目录源（**并发竞速**，见 dsh-market.js 的 loadCatalog）：
   //   · url      —— 自定义目录 URL（自己搭的镜像），空则不加这条
   //   · mirror   —— 是否让镜像源参赛（默认开）
@@ -2036,7 +2037,7 @@ function patchCfg(p: Record<string, any>): boolean {
   }
   saveFail.patch = p
   saveFail.msg = '有一处设置没保存上（' + String((lastErr as Error)?.message || lastErr) + '）。'
-    + '界面上的值可能已经变回去了 —— 存储空间不足或被占用时会这样。'
+    + '界面上的值可能已回退（存储空间不足或被占用时会这样）。'
   // 失败回滚成已落盘的真实值（理由见函数头注释）
   applyConfig(services.getConfig?.())
   return false
@@ -3409,6 +3410,7 @@ function applyConfig(c: any) {
   cfg.dshVersion = typeof c.dshVersion === 'string' ? c.dshVersion : ''
   cfg.dshReinstall = c.dshReinstall === true
   cfg.dshNoOpen = c.dshNoOpen !== false
+  cfg.dshOpenIn = c.dshOpenIn === 'builtin' ? 'builtin' : 'external'
   cfg.dshMarketUrl = typeof c.dshMarketUrl === 'string' ? c.dshMarketUrl : ''
   cfg.dshMarketMirror = c.dshMarketMirror !== false
   cfg.dshMarketRegistry = typeof c.dshMarketRegistry === 'string' ? c.dshMarketRegistry : ''
@@ -3735,8 +3737,8 @@ onUnmounted(() => {
 
       <!-- 搜索结果为空时的指引：搜索是跨组过滤，匹配不到任何卡的可见文本 -->
       <p v-if="searchActive && !searchHits.length" class="card search-empty">
-        没找到含「{{ searchQuery.trim() }}」的卡片。搜索匹配的是卡片标题与关键词（含同义词），
-        试试更短或更常见的词，如「形象」「用量」「通知」「hosts」。
+        没找到含「{{ searchQuery.trim() }}」的卡片。搜索匹配卡片标题与关键词（含同义词），
+        试试更短的词，如「形象」「用量」「通知」「hosts」。
       </p>
       <!-- 搜索态下每张命中卡标出「本来在哪一组」，点标签直接滚到那张卡（命中卡按索引顺序渲染、不带分组名会找不到北） -->
       <div v-if="searchActive && searchHits.length" class="search-hits">
@@ -3774,11 +3776,11 @@ onUnmounted(() => {
               <li>复制 <code>sk-</code> 开头的密钥（仅完整显示一次）。</li>
               <li>粘贴到上方，点「保存凭据」。</li>
             </ol>
-            <p class="guide-meta"><strong>保存与安全：</strong>存于本机 uTools 加密存储，仅本插件可读、不上传服务器；只随请求发往 <code>api.deepseek.com</code>，不写日志。API Key 长期有效，泄露可在平台删旧 key 后换新。</p>
+            <p class="guide-meta"><strong>保存与安全：</strong>存于本机 uTools 加密存储，仅本插件可读、不上传；只随请求发往 <code>api.deepseek.com</code>，不写日志。长期有效，泄露可在平台删旧 key 换新。</p>
             <p class="guide-note">注意：这是接口密钥，不是「平台 Token」；请勿泄露。</p>
           </div>
           <label class="field">
-            <span class="label">平台 Token <em>（可选，「实时·令牌」用量模式需要）</em></span>
+            <span class="label">平台 Token <em>（可选，「实时·令牌」模式需要）</em></span>
             <input v-model="secrets.platformToken" type="password" placeholder="platform.deepseek.com 令牌" autocomplete="off" />
           </label>
           <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="guides.token" @click="guides.token = !guides.token">
@@ -3792,7 +3794,7 @@ onUnmounted(() => {
               <li>复制其 Request Headers 里 <code>Authorization</code> 的值（<code>Bearer eyJ...</code>）。</li>
               <li>粘贴到上方，点「保存凭据」。</li>
             </ol>
-            <p class="guide-meta"><strong>保存与安全：</strong>同 API Key，本机加密存储、不上传服务器；只随请求发往 <code>platform.deepseek.com</code>。它属网页会话令牌，重登后可能失效，届时自动回落本地记账，重新复制一次即可。</p>
+            <p class="guide-meta"><strong>保存与安全：</strong>同 API Key，本机加密存储、不上传；只发往 <code>platform.deepseek.com</code>。属网页会话令牌，重登后可能失效，届时自动回落本地记账，重新复制即可。</p>
           </div>
           <div class="btn-row">
             <button class="utils-btn utils-primary" @click="saveSecrets">保存凭据（加密存储）</button>
@@ -4062,7 +4064,7 @@ onUnmounted(() => {
         </h2>
       </div>
       <template v-if="dshMainFold.open">
-      <p class="hint">在挂件菜单「dsh」分组或本卡里启动 / 重启 / 结束 / 更新 dsh 并打开 Web UI（默认 <code>http://127.0.0.1:{{ DEFAULT_DSH_PORT }}</code>，端口可在「高级选项」改）。优先用已全局安装的那份，没有才装到插件数据目录。</p>
+      <p class="hint">在挂件菜单「dsh」分组或本卡里启动 / 重启 / 结束 / 更新 dsh，并打开 Web UI（默认 <code>http://127.0.0.1:{{ DEFAULT_DSH_PORT }}</code>，端口见「高级选项」）。优先用全局安装，没有才装到插件目录。</p>
 
       <label class="field row">
         <span class="label">状态</span>
@@ -4094,7 +4096,7 @@ onUnmounted(() => {
         </button>
       </div>
       <label class="field row check">
-        <span class="label">进入开发者页自动刷新版本 <em>（勾选：每次切到本 Tab 重查一次 npm，约 1–3 秒；不勾则用缓存的版本列表）</em></span>
+        <span class="label">进入开发者页自动刷新版本 <em>（每次切到本 Tab 重查 npm，约 1–3 秒；不勾用缓存）</em></span>
         <input type="checkbox" :checked="dshAutoRefresh" @change="dshToggleAutoRefresh" />
       </label>
       <!-- 安装 / 更新的终态横幅：紧贴「更新版本」行，用户点完不用往下滚就能看到结果。
@@ -4105,8 +4107,8 @@ onUnmounted(() => {
         <span class="dsh-result-text">{{ dshResult.msg }}</span>
         <button class="dsh-result-close utils-btn" title="关闭提示" @click="dshResult = null">×</button>
       </div>
-      <p v-if="dsh.external" class="hint">{{ dsh.port }} 上检测到由<strong>别的终端</strong>启动的 dsh（pid {{ dsh.externalPid }}）：「结束」会结束它，「重启」会结束它并按当前版本重新启动。</p>
-      <p v-else-if="dsh.portOther" class="hint">{{ dsh.port }} 被 {{ dsh.portOther }} 占用（不是 dsh）。为避免误杀，插件不会结束它。</p>
+      <p v-if="dsh.external" class="hint">{{ dsh.port }} 上有<strong>别的终端</strong>启动的 dsh（pid {{ dsh.externalPid }}）：「结束」会结束它，「重启」会按当前版本重新启动。</p>
+      <p v-else-if="dsh.portOther" class="hint">{{ dsh.port }} 被 {{ dsh.portOther }} 占用（不是 dsh），插件不会结束它，以免误杀。</p>
 
       <!-- 运行详情（只读）：版本对照 / 最近命令 / 页面地址 / 日志，展开时自动查一次最新版本。
            标题不叫「诊断信息」：「dsh 环境诊断」那张卡才是排查启动失败的检查项，
@@ -4173,7 +4175,7 @@ onUnmounted(() => {
                  必须有这一档收尾：否则会一路落到下面的「正在获取说明…」，取数明明已经结束却一直转圈 ——
                  用户看到的就是「卡住了」。如实说没有可展示的条目并给发布页入口，比装作还在加载有用 -->
             <div v-else-if="dshNotes && dshNotesOk && dshNotesFresh() && !dshNotes.empty" class="notes-sec">
-              <p class="hint notes-trunc">这 {{ dshNotes.versions ? dshNotes.versions.length : 0 }} 个版本没有可显示的说明条目。</p>
+              <p class="hint notes-trunc">这 {{ dshNotes.versions ? dshNotes.versions.length : 0 }} 个版本没有可显示的说明。</p>
               <button v-if="dshNotes.url" class="link-btn utils-btn utils-secondary" @click="openDoc(dshNotes.url)">在浏览器查看完整发布页</button>
             </div>
             <!-- 还没取过（首次展开）：主动取一次 -->
@@ -4190,7 +4192,7 @@ onUnmounted(() => {
           </label>
           <label class="field row">
             <span class="label">页面地址</span>
-            <span class="cmdline">{{ dsh.webUrl || ('http://127.0.0.1:' + dsh.port + '（未捕获 token，dsh 启动完成后会自动获取）') }}</span>
+            <span class="cmdline">{{ dsh.webUrl || ('http://127.0.0.1:' + dsh.port + '（未捕获 token，dsh 启动后自动获取）') }}</span>
           </label>
           <!-- 复制 / 定位的反馈就近显示：dshValueFlash 同时只挂一条，故四处共用同一行；
                成功与失败都只靠颜色区分（内容对「复制」是同一句、对「定位」是同一句），
@@ -4241,10 +4243,10 @@ onUnmounted(() => {
       <div class="fold">
         <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="dshFolds.trouble" @click="dshToggleTrouble">{{ dshFolds.trouble ? '收起 dsh 故障排查' : 'dsh 故障排查' }}</button>
         <div v-if="dshFolds.trouble" class="guide">
-          <p class="guide-use"><strong>结束 / 重启：</strong>不只管本插件启动的进程 —— 只要 dsh 端口上跑着 dsh（含在别的终端里启动的）都能被结束；非 dsh 占用端口时会拒绝执行，避免误杀。</p>
-          <p class="guide-use"><strong>首次安装很慢：</strong>要下载约 500 个包，国内建议把「npm 注册源」改成淘宝镜像；等待期间状态行会显示「已等待 x 秒」。</p>
-          <p class="guide-use"><strong>占用空间：</strong>「删除插件目录的 dsh」清掉插件装的那份（有全局安装时用不到它）；「清理 npx 旧缓存」清掉旧版本留在 npx 缓存里的副本。</p>
-          <p class="guide-use"><strong>装 / 卸 / 更新插件时报错、或市场卡片刷不出来：</strong>多半是 dsh 的 profile 写锁残留导致的。dsh 改 profile 前要先拿一把写锁，进程被强杀或取消更新时锁没被释放，之后所有操作都会卡在等锁上（真实报错是 <code>timed out waiting for the writer lock</code>）。点下面的按钮清理即可 —— 只有确认持有它的进程已经不存在时才会清理，锁正被别的进程持有时会拒绝并说明原因。</p>
+          <p class="guide-use"><strong>结束 / 重启：</strong>也作用于别的终端启动的 dsh；端口被非 dsh 占用时拒绝执行，避免误杀。</p>
+          <p class="guide-use"><strong>首次安装较慢：</strong>需下载约 500 个包，国内建议把「npm 注册源」改为淘宝镜像；状态行会显示已等待秒数。</p>
+          <p class="guide-use"><strong>占用空间：</strong>「删除插件目录的 dsh」清掉插件装的那份（有全局安装时用不到）；「清理 npx 旧缓存」清掉 npx 缓存里的旧版本副本。</p>
+          <p class="guide-use"><strong>装 / 卸 / 更新插件报错、或市场卡片刷不出来：</strong>多半是 profile 写锁残留 —— 进程被强杀时锁未释放，后续操作卡在等锁上（报错为 <code>timed out waiting for the writer lock</code>）。点下方按钮清理；仅在持锁进程已不存在时才清，锁被占用时会拒绝并说明原因。</p>
           <div class="btn-row">
             <button class="secondary utils-btn utils-secondary" :disabled="!dsh.installed || dshBusy" @click="dshMaintain('remove-plugin')">
               {{ dshConfirm === 'remove-plugin' ? '确认删除插件目录的 dsh？' : '删除插件目录的 dsh' }}
@@ -4274,7 +4276,7 @@ onUnmounted(() => {
                留在这里会让一次「装指定版本」横跨三个折叠区（运行详情查版本 → 这里选版本 → 上面点更新），
                而另外几项（端口 / 注册源 / Node 目录 / 行为）是设一次就不动的环境配置，才是名副其实的高级选项 -->
           <label class="field row">
-            <span class="label">Web UI 端口 <em>（默认 3080；改了要重启 dsh 才生效）</em></span>
+            <span class="label">Web UI 端口 <em>（默认 3080，改后需重启 dsh）</em></span>
             <input
               class="num"
               type="number"
@@ -4285,7 +4287,7 @@ onUnmounted(() => {
               @change="dshSetPort"
             />
           </label>
-          <p class="hint">3080 <template v-if="IS_WIN">落在 Windows/Hyper-V 的动态端口保留段，被预留时</template><template v-else>若被其它程序占用</template> dsh 会 bind 失败（<code>EADDRINUSE</code>）。换别的端口（如 4080）即可绕开；填非法值（0 / 超出 1–65535）退回 3080。</p>
+          <p class="hint">3080 <template v-if="IS_WIN">属 Windows/Hyper-V 动态端口段，被预留时</template><template v-else>若被其它程序占用</template> dsh 会启动失败（<code>EADDRINUSE</code>）。换 4080 等端口即可；非法值（0 或超出 1–65535）退回 3080。</p>
           <label class="field row">
             <span class="label">npm 注册源</span>
             <select v-model="cfg.dshRegistry" @change="patchCfg({ dshRegistry: cfg.dshRegistry })">
@@ -4301,33 +4303,40 @@ onUnmounted(() => {
             <button class="secondary utils-btn utils-secondary" @click="dshPickDir">选择目录</button>
             <button v-if="cfg.dshNodeDir" class="secondary utils-btn utils-secondary" @click="dshAutoDir">改为自动探测</button>
           </div>
+          <label class="field row">
+            <span class="label">打开 Web UI 时用 <em>（只影响「打开 Web UI」弹在哪；内置浏览器打不开就选系统默认）</em></span>
+            <select v-model="cfg.dshOpenIn" @change="patchCfg({ dshOpenIn: cfg.dshOpenIn })">
+              <option value="builtin">uTools 内置浏览器（不跳出 uTools）</option>
+              <option value="external">系统默认浏览器</option>
+            </select>
+          </label>
           <label class="field row check">
-            <span class="label">启动时不自动打开浏览器 <em>（勾选：命令追加 --no-open，启动后点「打开 Web UI」查看）</em></span>
+            <span class="label">启动时不自动打开浏览器 <em>（勾选后命令追加 --no-open，启动后点「打开 Web UI」查看）</em></span>
             <input type="checkbox" v-model="cfg.dshNoOpen" @change="patchCfg({ dshNoOpen: cfg.dshNoOpen })" />
           </label>
           <label class="field row check">
-            <span class="label">更新前重新下载 <em>（先删掉插件目录里的那份再装；用全局那份时不生效）</em></span>
+            <span class="label">更新前重新下载 <em>（先删插件目录里的那份再装；用全局那份时不生效）</em></span>
             <input type="checkbox" v-model="cfg.dshReinstall" @change="patchCfg({ dshReinstall: cfg.dshReinstall })" />
           </label>
           <label class="field row check">
-            <span class="label">uTools 退出后保留 dsh <em>（不勾选＝插件退出时自动结束，避免占着端口）</em></span>
+            <span class="label">uTools 退出后保留 dsh <em>（不勾选＝退出时自动结束，避免占端口）</em></span>
             <input type="checkbox" v-model="cfg.dshKeepAlive" @change="patchCfg({ dshKeepAlive: cfg.dshKeepAlive })" />
           </label>
           <!-- 以管理员身份启动：只在 Windows 出现（非 Windows 没有 UAC，也没有 runas 这条路） -->
           <label v-if="IS_WIN" class="field row check">
-            <span class="label">以管理员身份启动 <em>（给需要管理员权限的 dsh 插件用；改完要重启 dsh 才生效）</em></span>
+            <span class="label">以管理员身份启动 <em>（给需要管理员权限的 dsh 插件用；改后需重启 dsh）</em></span>
             <input type="checkbox" v-model="cfg.dshElevated" @change="patchCfg({ dshElevated: cfg.dshElevated })" />
           </label>
-          <p v-if="IS_WIN && cfg.dshElevated" class="hint">开启后<strong>每次启动都会弹一次 UAC</strong>；弹窗里点「否」会回落成普通权限启动（不会卡在半启动状态）。运行中的进程无法就地提权，所以这是「runas 起新实例 + 旧实例退出」的结果。结束这种实例同样要管理员权限，会再弹一次 UAC；「重启 / 更新」会先结束再启动，等于两次弹窗。<span v-if="dsh.admin">当前 uTools 已是管理员，启动时不会再弹。</span><br /><strong>uTools 退出时不会自动结束这种实例</strong>（免得退出流程被 UAC 卡住），它会继续跑并占着端口；下次启动若提示「端口已被占用」，就在本页点「结束」手动清掉（同样会弹 UAC）。<br />想完全免弹窗，可以改用「以最高权限运行」的计划任务启动 dsh；思路、<code>schtasks</code> 参数、凭证风险与回滚方式见 <code>docs/guide-dsh-admin.md</code>（系统层配置，本插件不代为创建）。</p>
+          <p v-if="IS_WIN && cfg.dshElevated" class="hint">开启后<strong>每次启动都弹一次 UAC</strong>；点「否」回落为普通权限启动（不会半启动）。运行中无法就地提权，故以 runas 起新实例、旧实例退出。结束这种实例同样要管理员权限，会再弹一次 UAC；「重启 / 更新」等于两次弹窗。<span v-if="dsh.admin">当前 uTools 已是管理员，启动时不再弹。</span><br /><strong>uTools 退出时不会自动结束这种实例</strong>（免得退出流程被 UAC 卡住），它会继续运行并占用端口；下次提示「端口已被占用」时点「结束」手动清掉（同样弹 UAC）。<br />想完全免弹窗，可改用「以最高权限运行」的计划任务启动 dsh；思路、<code>schtasks</code> 参数、凭证风险与回滚见 <code>docs/guide-dsh-admin.md</code>（系统层配置，本插件不代为创建）。</p>
         </div>
       </div>
 
       <div class="fold">
         <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="dshFolds.help" @click="dshFolds.help = !dshFolds.help">{{ dshFolds.help ? '收起使用说明' : '使用说明' }}</button>
         <div v-if="dshFolds.help" class="guide">
-          <p class="guide-use"><strong>启动：</strong>直接 <code>node &lt;那份 dsh&gt;/lib/bin.js web [--no-open]</code>（有全局安装就用全局那份，否则用插件目录的）—— 不再经过 npx，也就不会再堆缓存副本。</p>
-          <p class="guide-use"><strong>更新：</strong>结束正在运行的 dsh → 重新安装「dsh 版本」里选定的版本（自动＝latest）→ 原本在跑就用新版重新启动；已有全局安装时更新的就是全局那份（<code>npm i -g</code>）。</p>
-          <p class="guide-use"><strong>dsh 自己的数据：</strong>工作目录取用户主目录，配置与数据由 dsh 自己管理（默认 <code>~/.dsh</code>），本插件不做改动。</p>
+          <p class="guide-use"><strong>启动：</strong>直接 <code>node &lt;那份 dsh&gt;/lib/bin.js web [--no-open]</code>（有全局用全局，否则用插件目录的），不经 npx，不会堆缓存副本。</p>
+          <p class="guide-use"><strong>更新：</strong>结束 dsh → 重装「更新版本」里选定的版本（自动＝latest）→ 原本在跑就用新版重启；有全局安装时更新的是全局那份（<code>npm i -g</code>）。</p>
+          <p class="guide-use"><strong>dsh 数据：</strong>工作目录为用户主目录，配置与数据由 dsh 自管（默认 <code>~/.dsh</code>），插件不改动。</p>
         </div>
       </div>
       </template>
@@ -4346,9 +4355,9 @@ onUnmounted(() => {
       </div>
       <template v-if="devFolds.diagnose">
       <p class="hint">
-        逐项检查 dsh 起不来 / preset 挂不上的常见原因（重复模块、patch 条目与语法、<code>settings.yaml</code>、dsh 端口归属），
-        <strong>全部只读本地文件，不改动任何配置、不发任何网络请求</strong>。问题行的标记含义：<code>[✓]</code> 查过且正常 ·
-        <code>[!]</code> 有隐患或这一项没查出来 · <code>[✗]</code> 确实有问题。
+        逐项检查 dsh 起不来 / preset 挂不上的常见原因（重复模块、patch 条目与语法、<code>settings.yaml</code>、端口归属）。
+        <strong>只读本地文件，不改配置、不联网</strong>。标记：<code>[✓]</code> 正常 ·
+        <code>[!]</code> 有隐患或未查出 · <code>[✗]</code> 确有问题。
       </p>
       <div class="btn-row">
         <button class="utils-btn utils-primary" :disabled="diagnoseBusy" @click="diagnoseRefresh()">{{ diagnoseBusy ? '诊断中…' : '重新诊断' }}</button>
@@ -4365,14 +4374,14 @@ onUnmounted(() => {
            后者要 installed 真 —— 页面只剩一行 flash 红字与一张空卡，是最需要指引的时候反而没指引 -->
       <template v-if="diagnose && !diagnose.env">
         <p class="hint">
-          这一轮没能读到 dsh 的环境信息（<code>profile</code> 或 <code>node_modules</code> 读取失败、宿主进程异常等），
-          所以五项检查都没跑。<strong>上面的红字是具体原因</strong>；修掉后点「强制重跑」再试一次。
+          本轮未读到 dsh 环境信息（<code>profile</code> / <code>node_modules</code> 读取失败、宿主异常等），
+          五项检查均未运行。<strong>红字为具体原因</strong>，修复后点「强制重跑」。
         </p>
       </template>
 
       <!-- dsh 未安装：给明确文案，不报错、不列检查项（D11） -->
       <template v-else-if="diagnose && !diagnose.env?.installed">
-        <p class="hint">未检测到已安装的 dsh，无需诊断。先在「dsh」卡片里启动一次（会自动下载安装），再回来点「重新诊断」。</p>
+        <p class="hint">未检测到已安装的 dsh，无需诊断。先在「dsh」卡片启动一次（会自动下载安装），再回来点「重新诊断」。</p>
       </template>
 
       <!-- 用 v-else-if 而非 v-if：三道分支各自收尾，否则会多出一个无主的 </template> -->
@@ -4398,20 +4407,22 @@ onUnmounted(() => {
           <span class="ver">{{ diagnoseEnvText() }}</span>
         </label>
 
-        <div class="fold">
-          <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="diagnoseFolds.help" @click="diagnoseFolds.help = !diagnoseFolds.help">{{ diagnoseFolds.help ? '收起说明' : '说明' }}</button>
-          <div v-if="diagnoseFolds.help" class="guide">
-            <!-- 与「配置转储」「插件开关」两张卡分工：这张只回答「哪里坏了」，
-                 转储卡回答「这个条目是谁改的」，插件开关卡负责动手改。
-                 判据与改进办法在各自卡里只讲一遍，这里只留指引，避免三处说法随时间漂移。 -->
-            <p class="guide-use"><strong>本卡只诊断，不动手：</strong>这里回答「哪里坏了」，不会改任何文件。要看清某个条目是被谁改的用「dsh 配置转储」，要真的禁掉某个插件用「dsh 插件开关」。</p>
-            <p class="guide-use"><strong>重复模块：</strong>profile 的 <code>node_modules</code> 里装出了一份与全局 dsh 树<strong>同版本</strong>的 <code>@deepseek-ai/*</code>（比对包名 + 版本号判定，不看路径），会让 cordis 认成两份不同的包，报 <code>prompt section "deployment:persona" is already registered</code>，所有 preset 挂载失败。每次升级全局 dsh 都可能复现。</p>
-            <p class="guide-use"><strong>patch 条目：</strong><code>cordis.patch.yml</code> 里 <code>- id: X</code> 指向的条目必须真的存在于组装树中，否则 dsh 报 <code>patch: entry "X" not found</code>。报这个错<strong>不一定是拼错</strong>：这个 id 是组装树的注册 id，常见真因是该 id 由某个 bundle 内部 insert 出来、而那个 bundle 现在没装（或条目已改名 / 被上游移除）。先到「dsh 配置转储」的用户层列表对照，确认它是否还在，再决定改 id 还是删掉这条 patch —— 这一项的判据由 dsh 自己打印的 not-found 行给出，所以要先在转储卡里读一次，否则显示 <code>[!]</code>「无法判定」，不猜。</p>
-            <p class="guide-use"><strong>dsh 端口：</strong>被非 dsh 进程占用时 dsh 起不来；已有 dsh 在跑则不必再启。这一项要读进程名，个别系统上可能查不出归属 —— 那种情况显示 <code>[!]</code> 并附原因，属于「没查出来」，不是「查出来有问题」。</p>
-            <p class="guide-use"><strong>只读与缓存：</strong>本诊断不修任何东西，也不写 dsh 的任何文件。结果缓存 60 秒：「重新诊断」在缓存有效时直接复用（省掉一次遍历 <code>node_modules</code>），需要抹掉缓存重跑就点「强制重跑」。</p>
-          </div>
-        </div>
       </template>
+
+      <!-- 说明放在三道分支之外：未安装 / 整轮失败时也能看到本卡在做什么 -->
+      <div class="fold">
+        <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="diagnoseFolds.help" @click="diagnoseFolds.help = !diagnoseFolds.help">{{ diagnoseFolds.help ? '收起说明' : '说明' }}</button>
+        <div v-if="diagnoseFolds.help" class="guide">
+          <!-- 与「配置转储」「插件开关」两张卡分工：这张只回答「哪里坏了」，
+               转储卡回答「这个条目是谁改的」，插件开关卡负责动手改。
+               判据与改进办法在各自卡里只讲一遍，这里只留指引，避免三处说法随时间漂移。 -->
+          <p class="guide-use"><strong>本卡只诊断，不动手：</strong>回答「哪里坏了」，不改任何文件。查条目被谁改的用「dsh 配置转储」，要禁用插件用「dsh 插件开关」。</p>
+          <p class="guide-use"><strong>重复模块：</strong>profile 的 <code>node_modules</code> 里出现与全局 dsh 树<strong>同版本</strong>的 <code>@deepseek-ai/*</code>（按包名 + 版本号判定，不看路径），cordis 会认成两份包，报 <code>prompt section "deployment:persona" is already registered</code>，所有 preset 挂载失败。每次升级全局 dsh 都可能复现。</p>
+          <p class="guide-use"><strong>patch 条目：</strong><code>cordis.patch.yml</code> 里 <code>- id: X</code> 必须存在于组装树，否则报 <code>patch: entry "X" not found</code>。报错<strong>不一定是拼错</strong>：该 id 常由某个 bundle 内部 insert 出来，bundle 没装（或条目改名 / 被上游移除）也会报。先到「dsh 配置转储」的用户层列表确认它是否还在，再决定改 id 还是删 patch；未读转储时本项显示 <code>[!]</code>「无法判定」。</p>
+          <p class="guide-use"><strong>dsh 端口：</strong>被非 dsh 进程占用时 dsh 起不来；已有 dsh 在跑则不必再启。个别系统查不出进程归属时显示 <code>[!]</code> 并附原因，属「未查出」，不是「有问题」。</p>
+          <p class="guide-use"><strong>只读与缓存：</strong>不修改任何东西，也不写 dsh 文件。结果缓存 60 秒，「重新诊断」复用缓存；要抹掉缓存重跑点「强制重跑」。</p>
+        </div>
+      </div>
       </template>
     </section>
     <!-- [dsh] dsh 配置转储：一次 CLI 读取，摊开 patch 分层与生效/默认树差异，纯只读、不改配置、不联网 -->
@@ -4427,9 +4438,9 @@ onUnmounted(() => {
       </div>
       <template v-if="devFolds.dshDump">
       <p class="hint">
-        读出 dsh 实际组装用的配置树，摊成<strong>分层</strong>（哪一层、改了几条）与<strong>生效树 vs 默认树差异</strong>，
-        用来回答「这个条目到底是谁改的、默认长什么样」。一次 CLI 读取（<code>--dump-config</code> / <code>--dump-default-config</code>），
-        <strong>纯只读、不改动任何配置、不发任何网络请求</strong>。
+        读出 dsh 实际组装用的配置树，分为<strong>分层</strong>（哪一层、改了几条）与<strong>生效树 vs 默认树差异</strong>，
+        回答「条目是谁改的、默认长什么样」。一次 CLI 读取（<code>--dump-config</code> / <code>--dump-default-config</code>），
+        <strong>只读、不改配置、不联网</strong>。
       </p>
       <div class="btn-row">
         <button class="utils-btn utils-primary" :disabled="dshDumpBusy" @click="dshDumpRefresh()">{{ dshDumpBusy ? '读取中…' : '重新读取' }}</button>
@@ -4478,7 +4489,7 @@ onUnmounted(() => {
           <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="dshDumpFolds.diff" @click="dshDumpFolds.diff = !dshDumpFolds.diff">{{ dshDumpFolds.diff ? '收起差异' : '展开差异' }}</button>
           <div v-if="dshDumpFolds.diff">
             <p v-if="dshDump.diffError" class="hint">默认树读取失败，未能比对：{{ dshDump.diffError }}</p>
-            <p v-else-if="dshDump.diff && !dshDump.diff.changedTotal && !dshDump.diff.addedTotal && !dshDump.diff.removedTotal" class="hint">生效树与默认树完全一致，没有额外改动。</p>
+            <p v-else-if="dshDump.diff && !dshDump.diff.changedTotal && !dshDump.diff.addedTotal && !dshDump.diff.removedTotal" class="hint">生效树与默认树一致，无额外改动。</p>
             <template v-else-if="dshDump.diff">
               <p class="hint">改动 {{ dshDump.diff.changedTotal }} · 新增 {{ dshDump.diff.addedTotal }} · 移除 {{ dshDump.diff.removedTotal }}<template v-if="dshDump.diff.changed.length > 5">（下面列出前 5 条）</template></p>
               <p v-for="(e, i) in dshDump.diff.changed.slice(0, 5)" :key="'c' + i" class="diag-line diag-warn">
@@ -4486,7 +4497,7 @@ onUnmounted(() => {
                 <span class="diag-hint">→ {{ dshDumpChangedNote(e) }}</span>
               </p>
               <template v-if="!dshDump.diff.changedTotal">
-                <p class="hint">生效树里没有条目被用户层改过。</p>
+                <p class="hint">没有条目被用户层改过。</p>
               </template>
               <p v-for="(e, i) in dshDump.diff.added.slice(0, 5)" :key="'a' + i" class="diag-line diag-ok">
                 <span class="diag-line-text">[{{ dshDumpDiffText('added') }}] {{ dshDumpEntryLabel(e) }}</span>
@@ -4504,13 +4515,13 @@ onUnmounted(() => {
             <!-- 与「环境诊断」卡的分工：这张解释「谁改的 / 默认长什么样」，
                  诊断卡负责判「坏了没」。读一次转储同时给诊断卡提供 patch 判据，
                  这点在两边都要说清，否则用户不知道「诊断说无法判定」时该去哪。 -->
-            <p class="guide-use"><strong>本卡解释「为什么」，不诊断也不改配置：</strong>回答「这个条目是谁改的、默认长什么样」。判断配置有没有坏用「dsh 环境诊断」，要改某个插件的开关用「dsh 插件开关」。</p>
-            <p class="guide-use"><strong>顺手给诊断卡提供判据：</strong>dsh 解析 patch 时会打印 <code>patch: entry "X" not found</code>。诊断卡的「patch 条目指向不存在的 id」一项就是读这里的缓存来判定的 —— 没读过转储时那一项显示「无法判定」，读过才给结论。所以先读转储再跑诊断，结果最准。</p>
-            <p class="guide-use"><strong>分层怎么来的：</strong>dump 里每个分节头写着「这份配置来自哪个包」以及「被谁 patch 过」。包名来源算<strong>包内层</strong>（bundle 自带的 patch），<code>cordis.patch.yml</code> 的绝对路径算<strong>用户层</strong>（你自己写的 patch），没有任何来源的算<strong>基线</strong>。判用户层看的是「像不像绝对路径」，不写死某个目录 —— 改过 <code>$DSH_HOME</code> 也能认出来。</p>
-            <p class="guide-use"><strong>差异是怎么比的：</strong>生效树（<code>--dump-config</code>）与默认树（<code>--dump-default-config</code>）按条目 id 对齐，比三样：包名、是否禁用、config 的<strong>字段名</strong>。patch 是把整条替换掉的，所以同 id 后出现的分节会盖住先出现的，这里也按同样规则合并。</p>
-            <p class="guide-use"><strong>为什么看不到 config 的值：</strong>config 里可能带密钥，转储一律只留字段名不留值，界面上与「复制」里都是如此。</p>
-            <p class="guide-use"><strong><code>!!js</code> 表达式：</strong>形如 <code>disabled: !!js '...'</code> 的条目要 cordis 上下文才能求值，静态解析做不到，一律按「已禁用」标注，不代表它真的被禁用。</p>
-            <p class="guide-use"><strong>只读与缓存：</strong>整个读取只跑 <code>bin.js</code> 的 dump 子命令，不写 dsh 的任何文件；子进程 8 秒超时，结果缓存 60 秒：「重新读取」在缓存有效时直接复用（省掉两次 spawn），需要抹掉缓存重跑就点「强制重跑」。</p>
+            <p class="guide-use"><strong>本卡解释「为什么」，不诊断也不改配置：</strong>回答「条目是谁改的、默认长什么样」。判断配置是否损坏用「dsh 环境诊断」，改插件开关用「dsh 插件开关」。</p>
+            <p class="guide-use"><strong>为诊断卡提供判据：</strong>dsh 解析 patch 时会打印 <code>patch: entry "X" not found</code>。诊断卡的「patch 条目指向不存在的 id」读这里的缓存判定，未读转储时显示「无法判定」。先读转储再跑诊断，结果最准。</p>
+            <p class="guide-use"><strong>分层怎么来的：</strong>每个分节头写明配置来自哪个包、被谁 patch 过。包名来源为<strong>包内层</strong>（bundle 自带 patch），<code>cordis.patch.yml</code> 的绝对路径为<strong>用户层</strong>（你自己写的），无来源为<strong>基线</strong>。用户层按「是否绝对路径」判定，改过 <code>$DSH_HOME</code> 也能认出。</p>
+            <p class="guide-use"><strong>差异怎么比：</strong>生效树（<code>--dump-config</code>）与默认树（<code>--dump-default-config</code>）按条目 id 对齐，比包名、是否禁用、config 的<strong>字段名</strong>。patch 整条替换，同 id 后出现的分节覆盖先出现的，这里按同规则合并。</p>
+            <p class="guide-use"><strong>看不到 config 的值：</strong>config 可能带密钥，转储与「复制」都只留字段名、不留值。</p>
+            <p class="guide-use"><strong><code>!!js</code> 表达式：</strong>形如 <code>disabled: !!js '...'</code> 的条目需 cordis 上下文求值，静态解析不到，一律标注「已禁用」，不代表真的禁用。</p>
+            <p class="guide-use"><strong>只读与缓存：</strong>只跑 <code>bin.js</code> 的 dump 子命令，不写 dsh 文件；子进程 8 秒超时，结果缓存 60 秒，「重新读取」复用缓存；要重跑点「强制重跑」。</p>
           </div>
         </div>
       </template>
@@ -4534,13 +4545,13 @@ onUnmounted(() => {
       </div>
       <template v-if="devFolds.dshExport">
         <p class="hint">
-          把整个 <code>$DSH_HOME</code> 打包成一个 <code>.zip</code>（含 <code>profiles/</code> 下的
-          patch、插件、会话记录），用于<strong>换台机器接着用</strong>或长期存档。
-          包内会附一份 <code>whale-dsh-export.json</code> 清单，写明导出时间、来源目录与跳过了什么。
+          把整个 <code>$DSH_HOME</code> 打包为 <code>.zip</code>（含 <code>profiles/</code> 下的
+          patch、插件、会话记录），用于<strong>换机</strong>或存档。
+          包内附 <code>whale-dsh-export.json</code> 清单，写明导出时间、来源目录与跳过项。
         </p>
         <p class="hint">
-          与下面「dsh 插件开关」里的<strong>快照</strong>不是一回事：快照只备 3 个文件、由挂件管、
-          用来把 patch 还原回去；这里是全量搬运，<strong>挂件不解析包内容、也不负责还原</strong>。
+          与「dsh 插件开关」里的<strong>快照</strong>不同：快照只备 3 个文件、用于还原 patch；
+          这里是全量搬运，<strong>不解析包内容、不负责还原</strong>。
         </p>
 
         <p v-if="dshExportInfo && !dshExportInfo.ok" class="hint">
@@ -4564,32 +4575,32 @@ onUnmounted(() => {
                放在「预计导出」正下方 —— 用户看完条目数就会往下扫，这里是必读位置。
                三种状态分开说：在跑（黄）/ 端口被别的程序占（灰，性质不同）/ 判不出来（灰） -->
           <p v-if="dshExportInfo.running && dshExportInfo.running.running" class="hint hint-warn">
-            ⚠️ 检测到 dsh <strong>正在运行</strong><template v-if="dshExportInfo.running.pid">（pid {{ dshExportInfo.running.pid }}）</template>。
-            建议先退出 dsh 再导出：会话记录是<strong>边写边存</strong>的，运行中导出可能取到写了一半的记录，
-            配置也可能正处在修改中间态。<strong>不退出也能导，但包不保证是某一时刻的完整快照。</strong>
+            ⚠️ dsh <strong>正在运行</strong><template v-if="dshExportInfo.running.pid">（pid {{ dshExportInfo.running.pid }}）</template>。
+            建议先退出再导出：会话记录<strong>边写边存</strong>，运行中可能取到写了一半的记录，
+            配置也可能处于修改中间态。<strong>不退出也能导，但不保证是某一时刻的完整快照。</strong>
           </p>
           <p v-else-if="dshExportInfo.running && dshExportInfo.running.other" class="hint">
             端口 {{ dshExportInfo.running.other }} 被其他程序占用（不是 dsh，不影响导出）。
           </p>
           <!-- running 为 null = 探测没拿到结果。不谎报「没在跑」，明说判不出来 -->
           <p v-else-if="dshExportInfo.running === null" class="hint">
-            未能确认 dsh 是否在运行。若你正开着 dsh，建议先退出再导出。
+            未能确认 dsh 是否在运行；若正开着，建议先退出再导出。
           </p>
 
           <label class="field row">
             <span class="label">包含凭据</span>
             <input type="checkbox" :checked="cfg.dshExportCred" @change="dshExportSetCred(($event.target as HTMLInputElement).checked)" />
             <span class="hint">
-              默认不带。<code>.credentials.yaml</code> 等在包里是<strong>明文</strong> ——
-              要迁移登录态才勾，勾了别把包拷给别人或传网盘。
+              默认不带。<code>.credentials.yaml</code> 等在包内是<strong>明文</strong>，
+              仅迁移登录态时勾选；勾了勿外传或上传网盘。
             </span>
           </label>
           <label class="field row">
             <span class="label">跳过依赖</span>
             <input type="checkbox" :checked="cfg.dshExportNoMod" @change="dshExportSetNoMod(($event.target as HTMLInputElement).checked)" />
             <span class="hint">
-              默认跳过 <code>node_modules</code>（可重装、体积是配置的几十倍）。
-              取消勾选会显著增大包体积与耗时。
+              默认跳过 <code>node_modules</code>（可重装，体积是配置的几十倍）；
+              取消会显著增大体积与耗时。
             </span>
           </label>
 
@@ -4603,7 +4614,7 @@ onUnmounted(() => {
 
           <p v-if="dshExportInfo.truncated" class="hint">
             ⚠️ 文件数超过上限（{{ dshExportInfo.maxEntries }}），<strong>导出会被拒绝</strong>。
-            请先清理 <code>$DSH_HOME</code> 下的会话记录再试。
+            请先清理 <code>$DSH_HOME</code> 下的会话记录。
           </p>
 
           <div class="btn-row">
@@ -4640,9 +4651,9 @@ onUnmounted(() => {
       </div>
       <template v-if="devFolds.dshUsage">
       <p class="hint">
-        读 dsh 自己写在 <code>~/.dsh</code>（或 <code>$DSH_HOME</code>）下的用量数据做统计，
-        <strong>纯本地读取、不需要 API Key、不发任何网络请求</strong>。优先用 dsh-usage 的按天账本，
-        账本还没落盘时回落到会话投影缓存。
+        读 dsh 写在 <code>~/.dsh</code>（或 <code>$DSH_HOME</code>）下的用量数据，
+        <strong>纯本地、无需 API Key、不联网</strong>。优先用 dsh-usage 的按天账本，
+        未落盘时回落到会话投影缓存。
       </p>
       <div class="btn-row">
         <!-- 首次展开已自动读过一次，按钮主要当「刷新」用 -->
@@ -4691,7 +4702,7 @@ onUnmounted(() => {
             <span class="stat-label">{{ dshUsage.turnsLabel || '轮' }}</span>
             <span class="stat-sub">账本口径见说明</span>
           </div>
-          <div v-if="dshUsage.balance" class="stat-cell" title="dsh-usage 自己抓的余额快照，与挂件轮询的余额互为印证">
+          <div v-if="dshUsage.balance" class="stat-cell" title="dsh-usage 抓的余额快照，可与挂件余额互证">
             <span class="stat-num">{{ fmtDshBalanceAmount() }}</span>
             <span class="stat-label">dsh 抓到的余额</span>
             <span class="stat-sub">{{ fmtDshBalanceAt() || '快照' }}</span>
@@ -4727,11 +4738,11 @@ onUnmounted(() => {
         <div class="fold">
           <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="dshUsageFolds.help" @click="dshUsageFolds.help = !dshUsageFolds.help">{{ dshUsageFolds.help ? '收起说明' : '说明' }}</button>
           <div v-if="dshUsageFolds.help" class="guide">
-            <p class="guide-use"><strong>数据来源：</strong>优先读 <code>dsh-usage/usage-ledger.json</code>（dsh-usage 插件的按天账本，能画趋势）；账本还没有数据时回落到 <code>storages/session_projcache/sessions/*.json</code>，按「会话创建日」把该会话的全部用量记在一天里。两者不会同时累加，避免同一批 token 被算两遍。</p>
-            <p class="guide-use"><strong>花费：</strong>账本里的 <code>cost</code> 只有 DeepSeek 官方那档有值（单位人民币），其它 provider 未定价恒为 0，所以不会混币种。</p>
-            <p class="guide-use"><strong>轮次：</strong>按天账本给的是 LLM 调用次数，会话缓存给的是对话轮次，两者的单位不同，已在上面标出。</p>
-            <p class="guide-use"><strong>缓存：</strong>按会话缓存文件的 size/mtime 判断是否变化，只有变过的才重新解析。缓存里只有聚合数与文件指纹，<strong>不含任何凭据</strong>。</p>
-            <p class="guide-use"><strong>读不到数据：</strong>dsh 的账本由 dsh-usage / cost-meter 这类插件写入，装好并跑过几轮对话后才有数；也可以点「清除缓存并重扫」强制重读。</p>
+            <p class="guide-use"><strong>数据来源：</strong>优先读 <code>dsh-usage/usage-ledger.json</code>（按天账本，可画趋势）；无数据时回落到 <code>storages/session_projcache/sessions/*.json</code>，按「会话创建日」把全部用量记在一天。两者不叠加，避免重复计算。</p>
+            <p class="guide-use"><strong>花费：</strong>账本 <code>cost</code> 仅 DeepSeek 官方档有值（人民币），其它 provider 未定价恒为 0，不会混币种。</p>
+            <p class="guide-use"><strong>轮次：</strong>账本统计 LLM 调用次数，会话缓存统计对话轮次，单位不同，已在上方标出。</p>
+            <p class="guide-use"><strong>缓存：</strong>按缓存文件的 size/mtime 判断变化，只重新解析变过的。缓存仅含聚合数与文件指纹，<strong>不含凭据</strong>。</p>
+            <p class="guide-use"><strong>读不到数据：</strong>账本由 dsh-usage / cost-meter 这类插件写入，装好并跑过几轮对话后才有数据；也可点「清除缓存并重扫」强制重读。</p>
           </div>
         </div>
       </template>
@@ -4754,17 +4765,17 @@ onUnmounted(() => {
       <template v-if="devFolds.dshIsolate">
         <p class="hint">
           改的是用户层 patch（<code>cordis.patch.yml</code>）。<strong>两种改法</strong>：
-          行尾按钮<strong>一条一条</strong>即时改；或者勾选若干条后点「预览改动」→「确认隔离」<strong>一次改一批</strong>。
-          <strong>没勾的条目一个字节都不会碰</strong> —— 批量那侧的「隔离」不是「把所有插件全禁」。
+          行尾按钮<strong>逐条</strong>即时改；或勾选后点「预览改动」→「确认隔离」<strong>批量改</strong>。
+          <strong>未勾选的条目不会改动</strong> —— 批量那侧的「隔离」不是「全部禁用」。
         </p>
         <p class="hint">
-          ⚠️ 候选 = <strong>用户层 patch 里已有的条目</strong> ∪ <strong>组装树里读到的插件</strong>。
-          后者写进去等于<strong>新加</strong>一条 patch，而实测带前端界面的插件这样就禁不掉
+          ⚠️ 候选 = <strong>patch 里已有的条目</strong> ∪ <strong>组装树里读到的插件</strong>。
+          后者写进去等于<strong>新加</strong>一条 patch，带前端界面的插件这样禁不掉
           （加载入口在 <code>package.json</code> 的 <code>dependencies</code> 里）；
-          纯服务端插件（cost-meter / modlens / mnemon 这类）才可靠生效。
-          <br>⚠️ <strong>任何写入前都强制建快照</strong>，快照建不出来就中止写入，不会出现改完没法回滚的情况。
-          <br>⚠️ <strong>启用需重启</strong>：dsh 的 patch 热重载是<strong>单向</strong>的 —— 加 <code>disabled</code> 即时生效，
-          但<strong>删掉不恢复</strong>，所以「启用」后要重启 dsh 才看得到。
+          纯服务端插件（cost-meter / modlens / mnemon 等）才可靠生效。
+          <br>⚠️ <strong>写入前强制建快照</strong>，建不出来就中止，不会改完无法回滚。
+          <br>⚠️ <strong>启用需重启</strong>：patch 热重载是<strong>单向</strong>的 —— 加 <code>disabled</code> 即时生效，
+          但<strong>删掉不恢复</strong>，所以「启用」后要重启 dsh。
         </p>
         <div class="btn-row">
           <button class="utils-btn utils-primary" :disabled="dshIsolateBusy" @click="dshIsolateRefresh()">{{ dshIsolateBusy ? '读取中…' : '刷新清单' }}</button>
@@ -4794,7 +4805,7 @@ onUnmounted(() => {
 
         <template v-else-if="dshIsolate">
           <p v-if="!dshIsolate.items?.length" class="hint">
-            没有可隔离的候选 —— patch 文件里还没有条目，也没能从组装树里读到插件。
+            没有可隔离的候选：patch 里还没有条目，也未从组装树读到插件。
           </p>
 
           <template v-else>
@@ -4814,9 +4825,9 @@ onUnmounted(() => {
                  而实际只写进去前 100 条 —— 这正是早先候选被截断时的静默失效形态。
                  现在宿主是「超限直接拒绝」而不是截断，所以这里说「会被拦下」而不是「会分批」 -->
             <p v-if="dshIsolatePicked.size > DSH_ISOLATE_MAX_BATCH" class="hint">
-              ⚠️ 已勾 <strong>{{ dshIsolatePicked.size }}</strong> 条，超过单次写入上限
+              ⚠️ 已勾 <strong>{{ dshIsolatePicked.size }}</strong> 条，超过单次上限
               <strong>{{ DSH_ISOLATE_MAX_BATCH }}</strong> 条，点「预览改动」会被拦下。
-              先点「只选启用中的」缩小范围最快 —— 已禁用的条目本来就不需要再禁一次。
+              先点「只选启用中的」缩小范围；已禁用的无需再禁。
             </p>
             <div v-if="dshIsolateFolds.list" class="patch-list">
               <!-- 分组轴切换放在列表内部：它只对下面这堆候选有意义，列表没展开时露在外面就是个悬空控件。
@@ -4947,7 +4958,7 @@ onUnmounted(() => {
                   {{ dshKeepBusy ? '保存中…' : '保存' }}
                 </button>
                 <button class="secondary patch-btn utils-btn utils-secondary" @click="dshPruneNow()">立即清理</button>
-                <span class="hint bak-keep-note">「已知良好」与手动命名的备份不受这个数限制</span>
+                <span class="hint bak-keep-note">「已知良好」与手动命名的备份不计入此数</span>
               </div>
 
               <p v-if="!dshBackups?.snapshots?.length" class="hint">还没有快照。</p>
@@ -5020,17 +5031,17 @@ onUnmounted(() => {
         <div class="fold">
           <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="dshIsolateFolds.help" @click="dshIsolateFolds.help = !dshIsolateFolds.help">{{ dshIsolateFolds.help ? '收起说明' : '说明' }}</button>
           <div v-if="dshIsolateFolds.help" class="guide">
-            <p class="guide-use"><strong>为什么清单里有 200 多条：</strong>候选是<strong>用户层 patch 里已有的条目</strong> ∪ <strong>组装树里读到的插件</strong>。前者是「你已经写过的」，后者写进去等于<strong>新加</strong>一条 patch —— 只列前者的话，你想禁的第三方插件往往根本不在清单里，会找不到入口。加起来实测常有 200 条以上，用上面的分组轴收窄。</p>
-            <p class="guide-use"><strong>为什么候选要读组装树：</strong>实测写一个<strong>不存在的 id</strong>，dsh 只在 stderr 打一行 <code>patch: entry "X" not found</code>、退出码 0、启动照常 —— 也就是「写坏了不报错」。所以候选先拿一份真实存在的条目，让你<strong>勾不到拼错的 id</strong>。读不到组装树时降级为「只有 patch 里的条目」，不把整件事判死。</p>
-            <p class="guide-use"><strong>禁用是怎么写的：</strong>沿用 dsh 自己的行级写法 —— 已有条目就只改它那一行的 <code>disabled</code>；没有该条目就在文件末尾追加 <code>- id: X</code> + <code>disabled: true</code>（patch 是后者覆盖前者，追加在末尾等于优先级最高）。整份文件<strong>不会重新序列化</strong>，你的注释、引号风格、键顺序都原样保留。</p>
-            <p class="guide-use"><strong>单条改与批量改的区别：</strong>行尾按钮是立即写入一条；「预览改动」是 <strong>dryRun</strong>，只计算不写盘、把「会动哪几行」摆出来，你过目后再点「确认隔离」。批量改多条与单条不同 —— 往中间插行会让后面的行号整体顺延，所以实现里是<strong>从后往前</strong>改、并且<strong>一次写盘</strong>，不会半截写入。</p>
-            <p class="guide-use"><strong>「隔离」为什么不是「全禁」：</strong>原方案是往 profile 里补十几条 <code>disabled: true</code> 把用户整个 profile 干掉。这里改成只操作<strong>显式勾选</strong>的条目 —— 界面上点不出「我没选的东西」，改动范围永远能追溯到一份真实读到的清单。</p>
-            <p class="guide-use"><strong>一次最多写 100 条：</strong>超过会被拦下并提示先缩小范围（点「只选启用中的」最快 —— 已禁用的条目本来就不需要再禁一次）。<strong>是拒绝，不是分批</strong>，所以不会出现「以为全禁了、其实只写进去前 100 条」的静默失效。</p>
-            <p class="guide-use"><strong>三个分组轴怎么选：</strong>「按来源」回答「这条是谁的」（已在你 patch 里 / 第三方插件 / dsh 官方框架），「按启用状态」回答「这条现在开没开」，「按来源+状态」把两者叠起来看（外层来源、内层状态）。三个问题不重叠，所以做成可切换而不是合并成一个。官方框架默认折叠 —— 200 多条里绝大多数是 dsh 自己的组装树节点，铺开会把真正要操作的插件淹掉。</p>
-            <p class="guide-use"><strong>「状态未知」是什么：</strong>宿主没读到该条目的 dump 状态（组装树读取降级）时会显示成<strong>黄色虚线</strong>「状态未知」，而不是蓝色「启用中」 —— 拿「启用中」的颜色去画一个未知状态，等于替它背书。「只选启用中的」也只勾<strong>确定</strong>启用中的条目，未知的不替你决定。</p>
-            <p class="guide-use"><strong>已是禁用的条目：</strong>勾了也不会重复写，计划里会标成「已是禁用（不动）」，界面上说「改了 N 条」而不是「N 条已隔离」，免得把没动过的算进战果。</p>
-            <p class="guide-use"><strong>为什么每次都要备份：</strong>实测 dsh 对写坏的 patch <strong>不报错</strong>（见上），所以这里写完会<strong>回读磁盘校验</strong>，并且改动前一定先建快照：宁可不让改，也不能让改动不可撤销。</p>
-            <p class="guide-use"><strong>还原是整文件覆盖：</strong>因为热重载单向（删行不恢复），只有让文件真正回到改动前的完整内容才有效。代价是<strong>会一并回退这份文件上的其他改动</strong> —— 备份的价值就是拿到一个已知良好的状态。快照<strong>绝不包含</strong> <code>.credentials.yaml</code> 等凭据文件。</p>
+            <p class="guide-use"><strong>清单为何有 200 多条：</strong>候选 = <strong>patch 里已有的条目</strong> ∪ <strong>组装树里读到的插件</strong>。只列前者会让你想禁的第三方插件找不到入口；后者写进去等于<strong>新加</strong>一条 patch。实测常有 200 条以上，用上方分组轴收窄。</p>
+            <p class="guide-use"><strong>候选为何读组装树：</strong>写入<strong>不存在的 id</strong> 时，dsh 只在 stderr 打一行 <code>patch: entry "X" not found</code>、退出码 0、启动照常，即「写坏了不报错」。所以候选取真实存在的条目，让你<strong>勾不到拼错的 id</strong>；读不到组装树时降级为只有 patch 条目。</p>
+            <p class="guide-use"><strong>禁用怎么写：</strong>已有条目只改该行的 <code>disabled</code>；没有就在文件末尾追加 <code>- id: X</code> + <code>disabled: true</code>（后者覆盖前者，末尾优先级最高）。整份文件<strong>不重新序列化</strong>，注释、引号风格、键顺序原样保留。</p>
+            <p class="guide-use"><strong>单条与批量：</strong>行尾按钮立即写入一条；「预览改动」是 <strong>dryRun</strong>，只算不写，确认后才写。批量改多条时行号会顺延，故<strong>从后往前</strong>改、<strong>一次写盘</strong>，不会半截写入。</p>
+            <p class="guide-use"><strong>「隔离」不是「全禁」：</strong>只操作<strong>显式勾选</strong>的条目，改动范围可追溯到一份真实读到的清单。</p>
+            <p class="guide-use"><strong>一次最多写 100 条：</strong>超过会被拦下并提示缩小范围（点「只选启用中的」最快）。<strong>是拒绝，不是分批</strong>，不会出现「以为全禁、其实只写前 100 条」的静默失效。</p>
+            <p class="guide-use"><strong>三个分组轴：</strong>「按来源」看这条属于谁（你的 patch / 第三方插件 / dsh 官方框架），「按启用状态」看现在开没开，「按来源+状态」叠起来看。官方框架默认折叠，避免淹没要操作的插件。</p>
+            <p class="guide-use"><strong>「状态未知」：</strong>宿主没读到该条目的 dump 状态（组装树读取降级）时显示<strong>黄色虚线</strong>，不标成「启用中」；「只选启用中的」也只勾<strong>确定</strong>的条目。</p>
+            <p class="guide-use"><strong>已禁用的条目：</strong>勾了也不重复写，计划里标「已是禁用（不动）」，回执说「改了 N 条」而非「N 条已隔离」。</p>
+            <p class="guide-use"><strong>为什么每次备份：</strong>dsh 对写坏的 patch <strong>不报错</strong>，所以写完<strong>回读磁盘校验</strong>，改动前必建快照：宁可不让改，也不能改完不可撤销。</p>
+            <p class="guide-use"><strong>还原是整文件覆盖：</strong>热重载单向（删行不恢复），只有让文件回到改动前的完整内容才有效。代价是<strong>会一并回退这份文件上的其他改动</strong>。快照<strong>绝不包含</strong> <code>.credentials.yaml</code> 等凭据。</p>
           </div>
         </div>
       </template>
@@ -5068,8 +5079,8 @@ onUnmounted(() => {
         </div>
       </template>
       <p v-else class="hint">
-        ⚠️ <strong>本卡会联网</strong>（其余卡片只读本地文件）—— 点下面的「加载目录」才出站，
-        在此之前只读本地已装状态。
+        ⚠️ <strong>本卡会联网</strong>（其余卡片只读本地文件）：点「加载目录」才出站，
+        之前只读本地已装状态。
       </p>
 
       <!-- 已装包清单：「卸载」的兜底入口。
@@ -5080,15 +5091,15 @@ onUnmounted(() => {
            ⚠️ 为什么必须独立于目录列表：目录列表只渲染 catalog 里的条目，而「已装」是 profile 的
               事实 —— 已装但不在目录里、或 install 字段认不出的包，在目录列表里永远找不到行。
               这里直接列 installed 表，把两类盲区一次补齐。 -->
-      <div v-if="dshMarketStatus" class="fold">
-        <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="!dshMarketInstalledFold" @click="dshMarketInstalledFold = !dshMarketInstalledFold">
-          已装包（{{ dshMarketInstalledSummary }}）
-        </button>
-        <div v-if="!dshMarketInstalledFold && dshMarketInstalledList.length" class="patch-list">
+      <div class="fold">
+        <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="!dshMarketInstalledFold" @click="dshMarketInstalledFold = !dshMarketInstalledFold">已装包（{{ dshMarketInstalledSummary }}）</button>
+        <!-- 刷新入口跟着「已装包」一起常显：读取失败时 dshMarketStatus 为 null，原先只挂在市场区的那个按钮根本不渲染 -->
+        <button class="link-btn utils-btn utils-secondary" style="margin-left: 8px" :disabled="dshMarketStatusBusy" @click="dshMarketRefreshStatus()">{{ dshMarketStatusBusy ? '读取中…' : '刷新已装状态' }}</button>
+        <div v-if="dshMarketStatus && !dshMarketInstalledFold && dshMarketInstalledList.length" class="patch-list">
           <p class="hint">
-            这些是从 <code>profile/package.json</code> 与 patch 里直读的<strong>真实已装状态</strong>，
-            与目录是否加载无关。<strong>「禁用」只写 patch（包留在磁盘）</strong>；
-            <strong>「彻底删除」</strong>才会真的 <code>pnpm remove</code> 掉这个包。
+            从 <code>profile/package.json</code> 与 patch 直读的<strong>真实已装状态</strong>，
+            与目录是否加载无关。<strong>「停用」只写 patch（包留磁盘）</strong>；
+            <strong>「彻底删除」</strong>才 <code>pnpm remove</code>。
             两者都<strong>先出计划再确认</strong>，写入前自动建快照。
           </p>
           <div v-for="row in dshMarketInstalledList" :key="row.key" class="patch-item" :class="{ 'patch-off': row.hit?.disabled === true }">
@@ -5099,7 +5110,7 @@ onUnmounted(() => {
             <span v-if="row.hit?.inPatch" class="patch-state" :class="row.hit?.disabled ? 'state-off' : 'state-on'">
               {{ row.hit?.disabled ? '已禁用' : '启用中' }}
             </span>
-            <span v-else class="patch-tag" title="patch 文件里没有这一条，只能删包、不能只禁用">无 patch 条目</span>
+            <span v-else class="patch-tag" title="patch 里没有这一条，只能删包，不能只停用">无 patch 条目</span>
             <!-- 目录里找不到这条包时把「为什么没有更新按钮」说出来（见 dshMarketInstalledNoteMap）。
                  查表而非调用函数：逐行现算是 O(目录 × 已装) 量级，展开即卡死 -->
             <span v-if="dshMarketInstalledNoteMap[row.key]" class="patch-note">{{ dshMarketInstalledNoteMap[row.key] }}</span>
@@ -5120,12 +5131,12 @@ onUnmounted(() => {
               v-if="row.hit?.inDeps"
               class="patch-btn utils-btn utils-danger"
               :disabled="dshMarketBusy"
-              title="从 profile 里彻底删掉这个包（pnpm remove），只删这一个包名，不做依赖反查"
+              title="从 profile 彻底删掉这个包（pnpm remove），只删该包名，不做依赖反查"
               @click="dshMarketPreviewUninstall({ spec: '', npm: row.key, name: row.key } as DshMarketPlugin, true)"
             >彻底删除</button>
           </div>
         </div>
-        <p v-else-if="!dshMarketInstalledFold" class="hint">还没有读到已装包 —— 点上面的「刷新已装状态」重读一次。</p>
+        <p v-else-if="!dshMarketInstalledFold" class="hint">还没读到已装包：本地 profile 可能尚未生成，或读取失败。点「刷新已装状态」重试。</p>
       </div>
 
       <template v-if="dshMarketRevealed">
@@ -5138,9 +5149,9 @@ onUnmounted(() => {
         </button>
         <div v-if="dshMarketFolds.source" class="guide">
           <p class="hint">
-            ⚡ <strong>多源并发竞速，先到先用</strong>，其余立刻取消。官方源 4.37MB 实测 52–99 秒（还常连不上），
-            npm 镜像只有 1.09MB、0.2–0.7 秒，<strong>内容同源</strong>，所以官方源默认关闭；勾上它不影响快源，只是多占一条连接。
-            下方单选只改偏好、<strong>不触发抓取</strong>，抓取由「加载目录」发起；先「测速」再「用最快的」可挑出当前网络最快的一条。
+            ⚡ <strong>多源并发竞速，先到先用</strong>，其余立即取消。官方源 4.37MB 实测 52–99 秒（常连不上），
+            npm 镜像 1.09MB、0.2–0.7 秒，<strong>内容同源</strong>，故官方源默认关闭；勾上只多占一条连接。
+            下方单选只改偏好、<strong>不触发抓取</strong>；先「测速」再「用最快的」可选出当前最快源。
           </p>
           <div class="mkt-src">
             <label class="mkt-src-row">
@@ -5174,19 +5185,18 @@ onUnmounted(() => {
         </button>
         <div v-if="dshMarketFolds.install" class="guide">
           <p class="hint">
-            ⚠️ 安装走 <code>pnpm add --dir &lt;profiles/{{ dshPatchProfile }}&gt;</code> 写进 profile 的
+            ⚠️ 安装走 <code>pnpm add --dir &lt;profiles/{{ dshPatchProfile }}&gt;</code> 写入 profile 的
             <code>package.json</code>。<strong>写入前强制建快照，装完回读校验</strong>（dsh 对写坏的配置不报错，不能只信 pnpm 退出码）。
           </p>
           <p class="hint">
-            ⚠️ 装完/禁用后 <strong>dsh 需重新加载才生效</strong>；不会自动重启（会掐掉你正在跑的会话），
-            由你点「重启 dsh」。
+            ⚠️ 装完 / 停用后 <strong>需重启 dsh 才生效</strong>；不会自动重启（会中断正在跑的会话），
+            请点「重启 dsh」。
           </p>
         </div>
       </div>
       <div class="btn-row">
         <button class="utils-btn utils-primary" :disabled="dshMarketBusy" @click="dshMarketLoad(false)">{{ dshMarketBusy ? '加载中…' : (dshMarket ? '刷新目录' : '加载目录') }}</button>
         <button class="secondary utils-btn utils-secondary" :disabled="dshMarketBusy" @click="dshMarketLoad(true)">强制重抓</button>
-        <button class="secondary utils-btn utils-secondary" :disabled="dshMarketStatusBusy" @click="dshMarketRefreshStatus()">刷新已装状态</button>
         <button class="secondary utils-btn utils-secondary" @click="dshRestartNow()">重启 dsh</button>
       </div>
       <p v-if="dshMarketFlash.msg" class="msg" :class="msgCls(dshMarketFlash)">{{ dshMarketFlash.msg }}</p>
@@ -5196,8 +5206,8 @@ onUnmounted(() => {
                这条什么都别改，直接再点一次。两个指引同时在屏幕上会让人不知道该听谁的。 -->
       <template v-if="dshMarketRetry">
         <p class="hint">
-          这次失败像是<strong>瞬时问题</strong>（网络抖动或拉取超时），不是配置错误 —— 已自动重试过一次仍未成功。
-          稍等片刻直接再试一次通常就好了；无需改动任何配置。
+          这次失败像<strong>瞬时问题</strong>（网络抖动或拉取超时），不是配置错误，已自动重试一次仍未成功。
+          稍等后直接再试即可，无需改配置。
         </p>
         <div class="btn-row">
           <button class="utils-btn utils-primary" :disabled="dshMarketBusy" @click="dshMarketRetryNow()">{{ dshMarketBusy ? '处理中…' : '重试一次' }}</button>
@@ -5212,7 +5222,7 @@ onUnmounted(() => {
       <template v-if="dshMarketAllowBuilds">
         <p class="hint">
           ⚠️ <strong>pnpm 拦下了构建脚本</strong>：<code>{{ dshMarketAllowBuilds.name || dshMarketAllowBuilds.spec }}</code>
-          靠 <code>prepare</code> 在安装时构建，pnpm 默认不放行。这不是失败，是安全机制 —— 显式允许后再装一次。
+          靠 <code>prepare</code> 在安装时构建，pnpm 默认不放行。这不是失败，是安全机制，显式允许后再装一次。
         </p>
         <p class="hint">
           把这行加进 <code>{{ dshMarketAllowBuilds.file }}</code> 的 <code>allowBuilds:</code> 下（缩进与已有条目一致），保存后重装：
@@ -5220,7 +5230,7 @@ onUnmounted(() => {
         <p class="hint"><code>{{ dshMarketAllowBuilds.key }}: true</code></p>
         <p class="hint">
           ⚠️ 放行后该包安装时<strong>可执行任意脚本</strong>，先确认来源可信。key 带 commit hash，<strong>装前无法预知</strong>，
-          所以这类插件注定先失败一次。
+          这类插件注定先失败一次。
         </p>
         <div class="btn-row">
           <button class="secondary utils-btn utils-secondary" @click="dshMarketAllowBuilds = null">知道了</button>
@@ -5237,7 +5247,7 @@ onUnmounted(() => {
       </label>
 
       <!-- 还没加载：给一句话，不摊空列表（空列表会被误读成「目录里没有插件」） -->
-      <p v-if="!dshMarketLoaded" class="hint">点「加载目录」抓取插件清单（默认走 npm 镜像，约 1MB；首次约 1 秒，之后 60 秒内复用缓存）。</p>
+      <p v-if="!dshMarketLoaded" class="hint">点「加载目录」抓取插件清单（默认 npm 镜像，约 1MB；首次约 1 秒，60 秒内复用缓存）。</p>
 
       <template v-else-if="dshMarket && !dshMarket.ok">
         <p class="hint">{{ dshMarket.error || '目录加载失败，请稍后重试。' }}</p>
@@ -5353,15 +5363,15 @@ onUnmounted(() => {
                    不单独给一个方向开关 —— 那样会出现「方向：降序」但一个轴都没选中的空档状态 -->
               <span class="iso-axis-label">方向：{{ dshMarketSortDesc ? '降序' : '升序' }}</span>
             </div>
-            <p v-if="!dshMarketStatus" class="hint">还没读到本地已装状态，「已装 / 未装」两个筛选项暂时不会过滤（读不到就不冒充未安装）。</p>
+            <p v-if="!dshMarketStatus" class="hint">还没读到本地已装状态，「已装 / 未装」暂不过滤（读不到就不冒充未安装）。</p>
           </div>
         </div>
 
         <!-- 空态：把「筛掉的原因」说清楚，并带上全量条数 —— 只说「没有符合条件」
              会让人怀疑是目录没加载好，而不是自己筛得太窄 -->
         <p v-if="!dshMarketList.length" class="hint">
-          没有符合条件的插件（目录共 {{ dshMarket.count || dshMarket.plugins?.length || 0 }} 条）
-          —— 换个关键词，或把「分类 / 范围」放宽到「全部」。
+          没有符合条件的插件（目录共 {{ dshMarket.count || dshMarket.plugins?.length || 0 }} 条）。
+          换个关键词，或将「分类 / 范围」放宽到「全部」。
         </p>
 
         <template v-else>
@@ -5388,7 +5398,7 @@ onUnmounted(() => {
             <!-- ⚠️ 把「查的是谁」写死在文案里：用户实测问过「查的是已安装插件的还是目前列表
                  显示的插件的」—— 这正是本按钮最容易误解的地方。查的是**当前分页展示的条目**
                  （不是「已装清单」，也不是整个目录），故直接说「本页」。 -->
-            <span class="mkt-latest-scope">本页 {{ dshMarketLatestTargets.length }} 个可查（仅列出的 npm 来源）· 会联网</span>
+            <span class="mkt-latest-scope">本页 {{ dshMarketLatestTargets.length }} 个可查（仅 npm 来源）· 会联网</span>
             <span v-if="dshMarketLatestSummary()" class="mkt-latest-sum">{{ dshMarketLatestSummary() }}</span>
           </div>
           <!-- 只列「官方版本比基准版本新」的那些（1.65.1 这种查出来才有意义）。
@@ -5436,7 +5446,7 @@ onUnmounted(() => {
                 <!-- ⚠️ 「需构建」与「不认识」是两回事，必须分开说：
                      前者有按钮（装一次、按引导加 allowBuilds 再装一次就能成），
                      后者连按钮都不给（我们不知道拿什么去装，点了必然失败） -->
-                <span v-if="p.needsBuild" class="patch-tag" title="该来源靠 prepare 脚本在安装时构建，pnpm 默认拦截构建脚本">需构建</span>
+                <span v-if="p.needsBuild" class="patch-tag" title="该来源靠 prepare 在安装时构建，pnpm 默认拦截">需构建</span>
                 <span v-if="!p.specKind" class="patch-tag">目录未给可识别的安装方式</span>
                 <!-- DSH 宿主兼容性：**只显示查过的结论**（v-if 三态 tag）。
                      没查过时只给一个「检查兼容」按钮，不预置任何颜色 —— 见 dshMarketCompat 注释 -->
@@ -5479,7 +5489,7 @@ onUnmounted(() => {
                   v-if="dshMarketCompatable(p) && !dshMarketCompatOf(p)"
                   class="link-btn utils-btn utils-secondary"
                   :disabled="dshMarketCompatChecking(p)"
-                  title="从 npm 拉这个包的 manifest，看它声明的 DSH 版本范围是否包含你当前的 DSH"
+                  title="从 npm 拉 manifest，检查其声明的 DSH 版本范围是否包含当前 DSH"
                   @click="dshMarketCheckCompat(p)"
                 >{{ dshMarketCompatChecking(p) ? '检查中…' : '检查兼容' }}</button>
                 <!-- 停用 / 启用：蓝色次操作（可逆，包还在磁盘），与「安装」同档 -->
@@ -5599,16 +5609,16 @@ onUnmounted(() => {
                 {{ dshMarketPlan.hostForced ? '你正在强行安装一个宿主不兼容的插件' : '这个插件与当前 DSH 不兼容' }}
               </p>
               <p v-if="dshMarketPlan.hostIncompatible && !dshMarketPlan.hostForced" class="mkt-plan-warn-body">
-                它声明的 DSH 版本范围容不下当前宿主（要求见上方提示）。装上 pnpm 不会报错，
-                但 dsh 起插件时才会去核这条声明 —— 那一步失败通常只写进 dsh 自己的日志，
-                界面上不显示，看起来就像插件本身坏了。
+                它声明的 DSH 版本范围容不下当前宿主（要求见上方提示）。pnpm 安装不会报错，
+                但 dsh 加载插件时才核这条声明 —— 失败通常只写进 dsh 日志、界面不显示，
+                看起来像插件本身坏了。
               </p>
               <p v-else class="mkt-plan-warn-body">
-                写入会照常完成。若之后 dsh 加载它失败或行为异常，<strong>先回滚快照</strong>；
-                想真正用上它，需要把 DSH 升到它要求的版本再装。
+                写入会照常完成。若之后加载失败或行为异常，<strong>先回滚快照</strong>；
+                想真正用上它，需把 DSH 升到要求的版本再装。
               </p>
               <p class="mkt-plan-warn-body">
-                动手前会自动建快照，失败仍可回滚 —— 但「装上用不了」这件事本身，快照救不了。
+                动手前自动建快照，失败可回滚 —— 但「装上用不了」这件事，快照救不了。
               </p>
             </div>
             <!-- ⚠️ 用 `white-space: pre-line` 保留宿主 message 里的换行：message 尾部会挂一段
@@ -5629,8 +5639,8 @@ onUnmounted(() => {
                   <template v-if="dshMarketPlan.depVersion">（现在 <code>{{ dshMarketPlan.depVersion }}</code>）</template>
                   <template v-if="dshMarketPlan.version">，指明要 <b>v{{ dshMarketPlan.version }}</b></template>
                 </li>
-                <li>连带更新 <code>pnpm-lock.yaml</code>（旧版本会从 lock 里被替换掉）</li>
-                <li v-if="dshMarketPlan.needsBuild">该来源靠 <code>prepare</code> 脚本构建，pnpm 默认会拦一次</li>
+                <li>连带更新 <code>pnpm-lock.yaml</code>（旧版本被替换）</li>
+                <li v-if="dshMarketPlan.needsBuild">该来源靠 <code>prepare</code> 构建，pnpm 默认会拦一次</li>
                 <li>动手前自动建快照，失败可回滚</li>
               </template>
               <template v-else-if="dshMarketPlan.action === 'update'">
@@ -5643,7 +5653,7 @@ onUnmounted(() => {
                   <template v-if="dshMarketPlan.depVersion">：现在 <code>{{ dshMarketPlan.depVersion }}</code></template>
                   <template v-if="dshMarketPlan.version">，重装后指的是 <b>v{{ dshMarketPlan.version }}</b></template>
                 </li>
-                <li>连带更新 <code>pnpm-lock.yaml</code>（这是「更新」与「装这一版」的共同点：都会改写 lock）</li>
+                <li>连带更新 <code>pnpm-lock.yaml</code>（「更新」与「装这一版」都会改写 lock）</li>
                 <li>动手前自动建快照，失败可回滚</li>
               </template>
               <template v-else-if="dshMarketPlan.action === 'remove'">
@@ -5672,14 +5682,14 @@ onUnmounted(() => {
               <p class="mkt-progress-cmd">
                 <span class="mkt-progress-k">执行的命令</span>
                 <code v-if="dshMarketLastCmd">{{ dshMarketLastCmd }}</code>
-                <span v-else class="hint">尚未产生 —— 宿主还没进到起 pnpm 那一步（见下方「实时输出」的阶段说明）</span>
+                <span v-else class="hint">尚未产生：宿主还没到起 pnpm 那一步（见下方「实时输出」）</span>
               </p>
               <p class="mkt-progress-k">实时输出</p>
               <pre v-if="dshMarketLogTail" ref="dshMarketLogEl" class="mkt-progress-log">{{ dshMarketLogTail }}</pre>
-              <pre v-else class="mkt-progress-log mkt-progress-log-empty">（还没有输出。若进程已起来却长时间没动静，带构建的来源要先 clone 再 prepare，首次会比较慢）</pre>
+              <pre v-else class="mkt-progress-log mkt-progress-log-empty">（暂无输出。带构建的来源需先 clone 再 prepare，首次较慢）</pre>
               <p class="hint">
-                完整日志见上方「运行详情」→「查看 dsh 日志」（本区块只显示最后 {{ DSH_MARKET_TAIL_LINES }} 行）。
-                请不要关掉本页：pnpm 由宿主进程托管，关页不会中断，但也看不到结果。
+                完整日志见上方「运行详情」→「查看 dsh 日志」（此处只显示最后 {{ DSH_MARKET_TAIL_LINES }} 行）。
+                关页不会中断 pnpm（由宿主托管），但会看不到结果。
               </p>
             </div>
             <div class="btn-row mkt-plan-actions">
@@ -5708,13 +5718,13 @@ onUnmounted(() => {
         <div class="fold">
           <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="dshMarketFolds.help" @click="dshMarketFolds.help = !dshMarketFolds.help">{{ dshMarketFolds.help ? '收起说明' : '说明' }}</button>
           <div v-if="dshMarketFolds.help" class="guide">
-            <p class="guide-use"><strong>目录从哪来：</strong>默认走 npm 镜像（<code>registry.npmmirror.com</code> 的 <code>dsh-plugin-catalog</code>，与官方同源但只有 1.09MB）。勾「官方源」会让 <code>awesome-dsh-plugin.com/plugins.json</code>（4.37MB）一起参赛。多源<strong>并发竞速、先到先用</strong>；全挂则用本地副本并标「可能已过期」。也可填自定义 URL（优先于镜像）。</p>
-            <p class="guide-use"><strong>为什么默认不联网：</strong>本 Tab 其余卡片展开即读本地文件，唯独这张要发 HTTP。所以展开只读已装状态，点「进入市场」→「加载目录」才抓取；来源单选只改偏好，不触发抓取。</p>
-            <p class="guide-use"><strong>安装用什么 spec：</strong>用目录条目自带的 <code>install</code> 字段（目录作者原话），剥出末尾 spec 去装。<strong>不按 <code>npm</code> 字段拼</strong> —— 4183 条里 2033 条（48.6%）<code>npm</code> 为 null，装的是 <code>github:owner/repo</code> 或远端 <code>.tgz</code>，只认 npm 名等于判死近一半目录。三种形态：裸包名、<code>github:owner/repo</code>、<code>https://…/x.tgz</code>；认不出时<strong>不给安装按钮</strong>。</p>
-            <p class="guide-use"><strong>「需构建」是什么：</strong>github / tarball 来源靠 <code>prepare</code> 在安装时构建，pnpm 默认拦截（防止不明来源的包安装时执行代码）。报错给出带 commit hash 的 key，要写进 profile 的 <code>pnpm-workspace.yaml</code> → <code>allowBuilds</code>。<strong>装前拿不到 key</strong>，所以注定先失败一次。<strong>不会替你放行</strong> —— 那等于废掉这个安全机制。</p>
-            <p class="guide-use"><strong>禁用 vs 彻底删除：</strong>「禁用」只往 patch 写 <code>disabled: true</code>，包还在磁盘，随时改回；「彻底删除」跑 <code>npm uninstall</code>。<strong>只删你点的这个包名</strong>，不做依赖反查 —— 反查会连带删掉别的插件共用的依赖。</p>
-            <p class="guide-use"><strong>禁用为什么用短名：</strong>patch 条目 id 是你实际写的名字（常是去掉 <code>@scope/</code> 的短名），目录给的是完整包名。用完整名 append 等于新加一条指向不存在插件的条目 —— dsh <strong>不报错</strong>，只静默失效。所以先用完整名对，对不上再用短名兜。</p>
-            <p class="guide-use"><strong>缓存两层：</strong>内存 60 秒（挡反复刷新）+ 落本地存储做离线兜底。「强制重抓」绕开内存缓存真重新请求；改了来源后也会自动重抓。</p>
+            <p class="guide-use"><strong>目录从哪来：</strong>默认走 npm 镜像（<code>registry.npmmirror.com</code> 的 <code>dsh-plugin-catalog</code>，与官方同源，仅 1.09MB）。勾「官方源」会让 <code>awesome-dsh-plugin.com/plugins.json</code>（4.37MB）参赛。多源<strong>并发竞速、先到先用</strong>；全挂则用本地副本并标「可能已过期」。自定义 URL 优先于镜像。</p>
+            <p class="guide-use"><strong>为什么默认不联网：</strong>本 Tab 其余卡展开即读本地，唯独这张发 HTTP。所以展开只读已装状态，点「进入市场」→「加载目录」才抓取；来源单选只改偏好。</p>
+            <p class="guide-use"><strong>安装用什么 spec：</strong>用目录条目的 <code>install</code> 字段（目录作者原话）剥出 spec 安装，<strong>不按 <code>npm</code> 字段拼</strong>：4183 条里 2033 条（48.6%）<code>npm</code> 为 null，实为 <code>github:owner/repo</code> 或远端 <code>.tgz</code>，只认 npm 名等于判死近一半。三种形态：裸包名、<code>github:owner/repo</code>、<code>https://…/x.tgz</code>；认不出时<strong>不给安装按钮</strong>。</p>
+            <p class="guide-use"><strong>「需构建」是什么：</strong>github / tarball 来源靠 <code>prepare</code> 在安装时构建，pnpm 默认拦截（防止不明来源的包执行代码）。报错给出带 commit hash 的 key，需写进 profile 的 <code>pnpm-workspace.yaml</code> → <code>allowBuilds</code>。<strong>装前拿不到 key</strong>，注定先失败一次；<strong>不会替你放行</strong>，那等于废掉该机制。</p>
+            <p class="guide-use"><strong>停用 vs 卸载：</strong>「停用」只往 patch 写 <code>disabled: true</code>，包留磁盘，随时改回；「卸载 / 彻底删除」跑 <code>npm uninstall</code>。<strong>只删你点的这个包名</strong>，不做依赖反查，以免连带删掉共用依赖。</p>
+            <p class="guide-use"><strong>停用为什么用短名：</strong>patch 条目 id 常是去掉 <code>@scope/</code> 的短名，目录给的是完整包名。用完整名追加等于新加一条指向不存在插件的条目，dsh <strong>不报错</strong>，只静默失效。故先用完整名对，对不上再用短名兜。</p>
+            <p class="guide-use"><strong>缓存两层：</strong>内存 60 秒（挡反复刷新）+ 本地存储做离线兜底。「强制重抓」绕开内存缓存重新请求；改来源后也会自动重抓。</p>
           </div>
         </div>
       </template>

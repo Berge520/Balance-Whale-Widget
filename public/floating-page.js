@@ -1406,7 +1406,7 @@
     else if (err) text = err;
     // 端口被改但进程还在跑：ready 描述的是 runPort（旧端口）上的事实，不能读成「启动中」。
     // 与设置页文案保持一致：说明现监听哪个端口，让用户去点「重启」。
-    else if (s.running) text = s.stopping ? '正在结束…' : (s.needsPortRestart ? '运行中 · pid ' + s.pid + '（' + s.runPort + '）· 端口已改为 ' + port : (s.ready ? '运行中 · pid ' + s.pid : '启动中…（' + port + ' 未就绪）'));
+    else if (s.running) text = s.stopping ? '正在结束…' : (s.needsPortRestart ? '运行中 · pid ' + s.pid + '（' + s.runPort + '）· 端口已改为 ' + port : (s.ready ? '运行中 · pid ' + s.pid : '启动中…（' + port + ' 未就绪' + (s.startedAt ? '，已 ' + Math.max(0, Math.round((Date.now() - s.startedAt) / 1000)) + 's' : '') + '）'));
     // 外部 dsh 同理：它可能停在旧端口上（改过配置端口），要说明「现监听哪个」，否则用户以为端口已切过去。
     else if (ext) text = '外部 dsh · pid ' + s.externalPid + (s.externalRunPort && s.externalRunPort !== port ? '（' + s.externalRunPort + '）· 端口已改为 ' + port : '');
     else if (other) text = '端口 ' + port + ' 被 ' + other + ' 占用';
@@ -1697,9 +1697,12 @@
       root.classList.toggle('dshwv-theme-fantasy', themeId === 'fantasy');
     } catch (err) {}
   }
+  // 气泡配色临时预览（状态机见 floating-theme-preview.js）：按新主题亮几秒再回落。只换色没用 ——
+  // 气泡平常收着（bubbleOn），用户看不到颜色，故 onOpen 里真把气泡弹出 / 收起
+  var themePreview = window.WhaleThemePreview(function () { return themeId; }, function (id) { themeId = id; }, applyTheme,
+    function (open) { if (open) showNormalBubble(undefined, true); else hideBubble(); });
 
-  // —— 鼠标穿透：悬停临时接管 + IPC 去重 ——
-  // 穿透态下窗口 setIgnoreMouseEvents(true, {forward:true}) 仍会把 mousemove 转给页面，
+  // —— 鼠标穿透：穿透态下窗口 setIgnoreMouseEvents(true, {forward:true}) 仍会把 mousemove 转给页面，
   // 所以「悬停唤醒」与「穿透中」角标都能工作；点击/滚轮才真正穿透给下层应用。
   var PASS_DWELL_MS = 1200;    // 穿透态下鼠标在鲸鱼/菜单按钮上停留多久 → 临时接管
   var PASS_RELEASE_MS = 700;   // 临时接管后离开 UI 多久 → 交回穿透
@@ -3194,17 +3197,29 @@
   var WHALE_RINGS = window.WhaleRings;
   // 粗细档位写在 svg 的 CSS 变量上，与画不画无关：圈收起时也先写好，亮起那一刻不会先弹一帧旧粗细
   function syncRingWidth() { WHALE_RINGS.setWidth(ringSvg, ringWidth); }
-  function setRing(on, color, pct, hot) {
-    syncRingWidth();
-    WHALE_RINGS.setRing(ringSvg, ringFill, RING_CIRCUM, on, color, pct, hot);
+  function setRing(on, color, pct, hot) { syncRingWidth(); WHALE_RINGS.setRing(ringSvg, ringFill, RING_CIRCUM, on, color, pct, hot); }
+  // —— 外圈样式临时预览：设置页改「粗细 / 圈色跟随主题」时圈平时收着、改了看不见，
+  // 收到 ring-preview 亮几秒再收起；计时 / 倒计时在画圈时以它们为准（见 updateTimerRing）
+  var ringPreviewState = null;
+  function ringPreviewEnd() {
+    if (!ringPreviewState) return;
+    clearTimeout(ringPreviewState.timer); ringPreviewState = null; updateTimerRing(); // 交回归属方：在跑就重画，否则收起
   }
-  // 深色系主题（夜间 / 未至之境）底上换一档更亮的圈色，取法见 rings.ringColor。
-  // 判据与 bubble-render.js 的 THEMES 对齐，不另立一个没人加的 dark 类名。
-  // 「圈色跟随主题」关掉后恒浅色底口径（原色），给用户一个「就要这抹蓝」的出口
-  function ringDarkTheme() { return ringFollowTheme && (themeId === 'dark' || themeId === 'fantasy'); }
+  function startRingPreview(ms) {
+    if (ringPreviewState) clearTimeout(ringPreviewState.timer);
+    var dur = Number(ms); if (!isFinite(dur) || dur <= 0 || dur > 20000) dur = 3200;
+    ringPreviewState = { until: Date.now() + dur, timer: setTimeout(ringPreviewEnd, dur) }; updateTimerRing();
+  }
+  // 圈色用的主题 id：跟随开 → 当前气泡主题（樱花 / 未至之境各有手调档，见 rings.RING_THEME）；关 → null（= 原色）。
+  // 关掉后仍按原色画：关它的人多半是深色底，早先恒浅色口径会把圈压暗，与「就要这抹蓝」相反
+  function ringTheme() { return ringFollowTheme ? themeId : null; }
   // 环形进度条：每秒刷新进度与阶段配色。正计时无固定总量，用已计秒数对 3600 取模做循环动画。
   // 下班倒计时开着且当前该显示它时，圈改由 applyOffworkView 每秒按当日工时进度画（两者不抢：计时优先）
   function updateTimerRing() {
+    if (ringPreviewState && !offworkOwnsRing() && !timerRunning && !timerPaused) { // 没人画圈时才轮到预览
+      if (Date.now() >= ringPreviewState.until) { ringPreviewEnd(); return; }
+      setRing(true, WHALE_RINGS.previewColor(ringTheme()), WHALE_RINGS.PREVIEW_PCT, false); return;
+    }
     if (offworkOwnsRing()) { updateOffworkRing(); return; }
     if (!timerRunning && !timerPaused) { setRing(false); return; }
     var f = WHALE_RINGS.timerFrame({
@@ -3218,7 +3233,7 @@
       // 定时：运行中用剩余量算；倒计时：总量与本轮已存的剩余
       remain: timerRunning ? Math.max(0, timerEndAt - Date.now()) : timerRemain,
       totalSec: timerArg ? Number(timerArg) : 0,
-    }, ringDarkTheme());
+    }, ringTheme());
     setRing(true, f.color, f.pct, f.hot);
   }
   // 下班倒计时接管圈的条件：倒计时开着且该渲染它，同时没有在跑的计时（计时在进行/暂停时圈归计时）。
@@ -3237,7 +3252,7 @@
     var p = OFFWORK_CORE.dayProgress(Date.now(), offworkCfgObj());
     if (!p) { setRing(false); return; }
     var ov = offworkState();
-    var f = WHALE_RINGS.workFrame({ s: p, near: !!(ov && ov.near) }, ringDarkTheme());
+    var f = WHALE_RINGS.workFrame({ s: p, near: !!(ov && ov.near) }, ringTheme());
     setRing(true, f.color, f.pct, f.hot);
   }
   function startTimerTick() {
@@ -3997,10 +4012,10 @@
     }
     showNormalBubble();
   }
-  // 常规内容气泡（余额 / 今日用量 / 报时 / 按压气泡模型），停留 bubbleDwellMs 后按 onExpire 收尾。
-  // onExpire 缺省 hideBubble；「计时中双击看余额」传一个「到点切回计时气泡」的收尾进来
-  function showNormalBubble(onExpire) {
-    if (!bubbleOn) return;
+  // 常规内容气泡（余额 / 今日用量 / 报时 / 按压气泡模型），停留 bubbleDwellMs 后按 onExpire 收尾（缺省 hideBubble）。
+  // force=true 只给气泡配色预览用：绕过 bubbleOn 总闸，让「关着气泡」的用户也能看到新配色
+  function showNormalBubble(onExpire, force) {
+    if (!bubbleOn && !force) return;
     if (bubbleTimer) { clearTimeout(bubbleTimer); bubbleTimer = null; }
     renderer.cancelGifFade();
     bubbleShown = true;
@@ -4091,6 +4106,7 @@
     timerDoneActions.classList.remove('dshwv-actions-open');
     if (timerFinished) clearTimerDone();
     bubbleShown = false;
+    themePreview.shown = false; // 气泡已收（无论谁收的），让预览的「收起」不再重复处理
     bubbleBox.classList.remove('dshwv-bubble-open');
     // gif 靠 CSS opacity 淡出；display:none 会跳过过渡，等淡出完成再隐藏
     renderer.fadeOutGif(240);
@@ -4338,11 +4354,10 @@
     fitBubbleText();
   }
   function offworkStep() {
-    // 后台节流：复用既有的每秒巡检（bubbleTtlSweep），气泡没开时只刷圈、不碰文案，不做多余 DOM 操作。
-    // 例外：计时在跑时它照常走，因为这是计时圈的每秒刷新入口（与气泡无关）
-    if (!bubbleShown && !timerRunning) return;
-    // 气泡收起时 render 不跑，圈要在这里自己跟着走
-    if (!bubbleActive) updateTimerRing();
+    // 后台节流：复用每秒巡检（bubbleTtlSweep）。气泡没开时没有文案要动，只把圈跟着走
+    // （早先这里直接 return，下班倒计时圈会冻在开气泡那一刻的比例）
+    if (!bubbleShown && !timerRunning) { if (offworkOwnsRing()) updateTimerRing(); return; }
+    if (!bubbleActive) updateTimerRing(); // 气泡收起 / 不在倒计时页时 render 不跑，圈在这里跟着走
     if (!offworkCanRender()) return; // 被临时接管（拖拽台词 / 提醒 / 试播 / 随机台词）时不碰文案，圈上面已刷
     applyOffworkView(false);
   }
@@ -5059,10 +5074,7 @@
         : (customSkin ? 'custom' : DEFAULT_SKIN);
       applySkin();
     }
-    if (typeof cfg.theme === 'string') {
-      themeId = (cfg.theme === 'dark' || cfg.theme === 'sakura' || cfg.theme === 'fantasy') ? cfg.theme : 'default';
-      applyTheme();
-    }
+    if (typeof cfg.theme === 'string') themePreview.applyConfig(cfg.theme); // 记下落盘主题；预览中不打断
     // 界面深浅色偏好：值变了就立即重新合成（utoolsDark 缓存已是最新，不用等下一轮推送）
     if (typeof cfg.uiMode === 'string') {
       var nextUiMode = (cfg.uiMode === 'light' || cfg.uiMode === 'dark' || cfg.uiMode === 'fantasy') ? cfg.uiMode : 'auto';
@@ -6100,6 +6112,11 @@
       startTodoTimer(target);
       // 菜单可能正开着（用户从设置页回来时挂件没关），刷新一下行内按钮的三态
       if (menuOpen) renderTodoMenu();
+    } else if (data.cmd === 'ring-preview') {
+      startRingPreview(data.payload && data.payload.ms); // 改外圈样式后临时亮几秒看效果
+    } else if (data.cmd === 'theme-preview') { // 改气泡配色后按新主题亮几秒
+      themePreview.start(data.payload && data.payload.theme, data.payload && data.payload.ms);
+      if (ringFollowTheme) startRingPreview(data.payload && data.payload.ms); // 圈也按主题取（见 ringTheme），换配色时连圈一起亮；关着恒原色不亮
     }
   });
   whaleApi.onBubblePreview(function (data) { showBubblePreviewBubble(data); });

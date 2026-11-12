@@ -28,7 +28,9 @@ test('气泡 HUD 只在 fantasy 主题显示，且装饰不参与命中', () => 
 
 test('背景氛围跟随界面深浅色（深色 / 浅色 / 媒体）', () => {
   const look = read('src/views/LookView.vue')
-  assert.match(look, /<BubblePreview[^>]*:theme="cfg\.theme"/)
+  // 气泡配色不再用设置页内的预览图（改配色直接在真实挂件上弹泡演示），故这里钉 theme-preview
+  assert.match(look, /<select :value="cfg\.theme"/)
+  assert.match(look, /window\.services\?\.themePreview\?\.\(\{ theme, ms: 3200 \}\)/)
   assert.match(look, /bg-gallery/)
   assert.match(look, /value: 'deep'/)
   assert.match(look, /value: 'aurora'/)

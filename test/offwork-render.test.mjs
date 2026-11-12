@@ -217,10 +217,11 @@ test('开关关闭后首行与附加项恢复：走 render 统一回填', () => 
 })
 
 test('鲸鱼外的进度圈：计时未跑时改画当日工时进度，计时进行/暂停时归计时', () => {
-  // 同一只 svg（dshwv-ring）两用：先判归属，倒计时接管时走 updateOffworkRing 并按秒重画
+  // 同一只 svg（dshwv-ring）两用：先判归属，倒计时接管时走 updateOffworkRing 并按秒重画。
+  // 外圈预览只排在两者之后（都不在画圈时才轮到它），不改变「计时 / 倒计时优先」的归属顺序
   assert.match(
     page,
-    /function updateTimerRing\(\) \{\s*if \(offworkOwnsRing\(\)\) \{ updateOffworkRing\(\); return; \}\s*if \(!timerRunning && !timerPaused\) \{ setRing\(false\); return; \}/,
+    /function updateTimerRing\(\) \{\n\s*if \(ringPreviewState && !offworkOwnsRing\(\) && !timerRunning && !timerPaused\) \{ \/\/[^\n]*\n[\s\S]*?\n\s*\}\n\s*if \(offworkOwnsRing\(\)\) \{ updateOffworkRing\(\); return; \}\n\s*if \(!timerRunning && !timerPaused\) \{ setRing\(false\); return; \}/,
   )
   // 归属条件：用户没关「显示进度圈」、倒计时可渲染、且计时既没在跑也没暂停
   assert.match(
@@ -230,56 +231,100 @@ test('鲸鱼外的进度圈：计时未跑时改画当日工时进度，计时�
   // 剩余比例 = 1 − 当日工时进度；配色随剩余工时由蓝转琥珀，最后 30 分钟橙红 + 呼吸；进度算不出来就收圈
   assert.match(page, /if \(!p\) \{ setRing\(false\); return; \}\s*var ov = offworkState\(\);/)
   // 剩余比例 / 圈色 / 呼吸三件事只在 rings 里算一次（workFrame），页面不再自己拼 setRing 参数
-  assert.match(page, /var f = WHALE_RINGS\.workFrame\(\{ s: p, near: !!\(ov && ov\.near\) \}, ringDarkTheme\(\)\);\s*setRing\(true, f\.color, f\.pct, f\.hot\);/)
+  assert.match(page, /var f = WHALE_RINGS\.workFrame\(\{ s: p, near: !!\(ov && ov\.near\) \}, ringTheme\(\)\);\s*setRing\(true, f\.color, f\.pct, f\.hot\);/)
   assert.match(page, /var p = OFFWORK_CORE\.dayProgress\(Date\.now\(\), offworkCfgObj\(\)\);/)
   // 逐秒重画挂在 applyOffworkView 上（不受文本判重影响），气泡收起时由 offworkStep 续画
   assert.match(page, /if \(offworkOwnsRing\(\)\) updateOffworkRing\(\);/)
   assert.match(page, /if \(!bubbleActive\) updateTimerRing\(\);/)
   // 计时同理：归属判定与原始量留在页面，口径与配色走 rings.timerFrame
-  assert.match(page, /var f = WHALE_RINGS\.timerFrame\(\{[\s\S]*?\}, ringDarkTheme\(\)\);\s*setRing\(true, f\.color, f\.pct, f\.hot\);/)
+  assert.match(page, /var f = WHALE_RINGS\.timerFrame\(\{[\s\S]*?\}, ringTheme\(\)\);\s*setRing\(true, f\.color, f\.pct, f\.hot\);/)
   // 绘制与计时进度计算在 floating-rings.js：专注蓝与三种计时的进度口径都钉在那
-  assert.match(rings, /window\.WhaleRings = \{\s*setRing: setRing, setWidth: setWidth, timerColor: timerColor, timerPct: timerPct, workColor: workColor,\s*timerFrame: timerFrame, workFrame: workFrame, RING_WIDTHS: RING_WIDTHS,\s*\};/)
+  assert.match(rings, /window\.WhaleRings = \{\s*setRing: setRing, setWidth: setWidth, timerColor: timerColor, timerPct: timerPct, workColor: workColor,\s*timerFrame: timerFrame, workFrame: workFrame, previewColor: previewColor, RING_WIDTHS: RING_WIDTHS,\s*PREVIEW_PCT: PREVIEW_PCT,\s*\};/)
   assert.match(rings, /if \(s\.totalSec > 0\) \{\s*pct = s\.remain \/ \(s\.totalSec \* 1000\);/)
   // 圈色阶段：过半前专注蓝、最后 30 分钟橙红；呼吸只动 stroke-opacity（svg 的 opacity 归 active 淡入）
-  assert.match(rings, /if \(near\) return ringColor\(HOT_RED, dark\);\s*s = Math\.max\(0, Math\.min\(1, Number\(s\) \|\| 0\)\);\s*if \(s >= 0\.5\) return ringColor\(BLUE, dark\);/)
+  assert.match(rings, /if \(near\) return ringColor\(HOT_RED, theme\);\s*s = Math\.max\(0, Math\.min\(1, Number\(s\) \|\| 0\)\);\s*if \(s >= 0\.5\) return ringColor\(BLUE, theme\);/)
   assert.match(rings, /ringSvg\.classList\.toggle\('dshwv-ring-hot', hot === true\);/)
   assert.match(rings, /ringSvg\.classList\.remove\('dshwv-ring-active', 'dshwv-ring-hot'\);/)
   assert.match(floatingCss, /\.dshwv-ring\.dshwv-ring-hot \.dshwv-ring-fill \{ animation: whale-ring-hot 1\.6s ease-in-out infinite; \}/)
   assert.match(floatingCss, /@keyframes whale-ring-hot \{ 50% \{ stroke-opacity: \.45; \} \}/)
   // 计时阶段色只定义一处：专注蓝 / 短休绿 / 长休琥珀共用同一组常量
   assert.match(rings, /var BLUE = '#4a90d9', GREEN = '#2fa24c', AMBER = '#e8a317', HOT_RED = '#e0433f';/)
-  assert.match(rings, /if \(!s\.isBreak\) return ringColor\(BLUE, dark\);/)
-  assert.match(rings, /return ringColor\(\(s\.pomoOn && s\.longBreak\) \? AMBER : GREEN, dark\);/)
+  assert.match(rings, /if \(!s\.isBreak\) return ringColor\(BLUE, theme\);/)
+  assert.match(rings, /return ringColor\(\(s\.pomoOn && s\.longBreak\) \? AMBER : GREEN, theme\);/)
 })
 
-test('圈的算法直接跑：计时与倒计时共用一套帧口径，深色主题换亮一档', () => {
+test('圈的算法直接跑：计时与倒计时共用一套帧口径，深色主题换亮一档、浅底压深一档、樱花 / 未至之境各有手调档', () => {
   const R = loadRings()
+  const sunk = (c) => 'rgb(' + [1, 3, 5].map((i) => Math.round(parseInt(c.slice(i, i + 2), 16) * 0.88)).join(',') + ')'
   // 剩余比例 = 1 − 当日工时进度；临近档同时决定橙红与呼吸，两者不能各判一次
-  assert.deepEqual(R.workFrame({ s: { pct: 25 }, near: false }), { pct: 0.75, color: '#4a90d9', hot: false })
-  const near = R.workFrame({ s: { pct: 80 }, near: true })
+  // 不传主题（跟随关掉）= 原色口径；浅底主题（default / sakura）见下
+  assert.deepEqual(R.workFrame({ s: { pct: 25 }, near: false }, null), { pct: 0.75, color: '#4a90d9', hot: false })
+  const near = R.workFrame({ s: { pct: 80 }, near: true }, null)
   assert.ok(Math.abs(near.pct - 0.2) < 1e-9, '剩余比例应为 0.2')
   assert.deepEqual({ color: near.color, hot: near.hot }, { color: '#e0433f', hot: true })
+  assert.deepEqual(R.workFrame({ s: { pct: 25 }, near: false }, 'default'), { pct: 0.75, color: sunk('#4a90d9'), hot: false })
   // 过半后由蓝线性过渡到琥珀：刚过半仍是蓝，越接近下班越偏琥珀（终点 96% 已很接近琥珀的暖色），
   // 还没到临近档不会直接跳橙红
-  assert.equal(R.workFrame({ s: { pct: 50 }, near: false }).color, '#4a90d9')
-  const warm = R.workFrame({ s: { pct: 96 }, near: false }).color.match(/^rgb\((\d+),(\d+),(\d+)\)$/).slice(1).map(Number)
-  assert.ok(warm[0] > 180 && warm[2] < 80, '接近下班时应明显偏暖：' + warm)
-  assert.equal(R.workFrame({ s: { pct: 0 }, near: false }).color, '#4a90d9')
+  assert.equal(R.workFrame({ s: { pct: 50 }, near: false }, 'default').color, sunk('#4a90d9'))
+  const warm = R.workFrame({ s: { pct: 96 }, near: false }, 'default').color.match(/^rgb\((\d+),(\d+),(\d+)\)$/).slice(1).map(Number)
+  assert.ok(warm[0] > 160 && warm[2] < 80, '接近下班时应明显偏暖：' + warm)
+  assert.equal(R.workFrame({ s: { pct: 0 }, near: false }, 'default').color, sunk('#4a90d9'))
   // 计时：专注蓝 → 剩余/总量；正计时按 60 分钟循环；休息轮短休绿、长休琥珀；计时永不呼吸
-  assert.deepEqual(R.timerFrame({ isBreak: false, mode: 'down', remain: 75000, totalSec: 300 }), { pct: 0.25, color: '#4a90d9', hot: false })
-  assert.equal(R.timerFrame({ isBreak: true, pomoOn: false, mode: 'down', remain: 60000, totalSec: 300 }).color, '#2fa24c')
-  assert.equal(R.timerFrame({ isBreak: true, pomoOn: true, longBreak: true, mode: 'down', remain: 60000, totalSec: 300 }).color, '#e8a317')
+  assert.deepEqual(R.timerFrame({ isBreak: false, mode: 'down', remain: 75000, totalSec: 300 }, 'default'), { pct: 0.25, color: sunk('#4a90d9'), hot: false })
+  assert.equal(R.timerFrame({ isBreak: true, pomoOn: false, mode: 'down', remain: 60000, totalSec: 300 }, 'default').color, sunk('#2fa24c'))
+  assert.equal(R.timerFrame({ isBreak: true, pomoOn: true, longBreak: true, mode: 'down', remain: 60000, totalSec: 300 }, 'default').color, sunk('#e8a317'))
   assert.equal(R.timerFrame({ isBreak: false, mode: 'up', running: true, elapsed: 90 * 60000, startAt: 0, now: 0 }).pct, 0.5)
   assert.equal(R.timerFrame({ isBreak: false, mode: 'at', remain: 250, atSpan: 1000 }).pct, 0.75)
-  // 深色主题：固定阶段色换成更亮的一档；过渡段是连续插值不换色
-  assert.equal(R.timerColor({ isBreak: false }, true), '#7db4f0')
-  assert.equal(R.timerFrame({ isBreak: true, pomoOn: true, longBreak: true, mode: 'down', remain: 1, totalSec: 2 }, true).color, '#ffc247')
-  assert.equal(R.workFrame({ s: { pct: 90 }, near: true }, true).color, '#ff6b66')
-  assert.equal(R.workFrame({ s: { pct: 25 }, near: false }, true).color, '#7db4f0')
-  // 明暗判据挂在页面：themeId 是已有状态（bubble-render.js 的 THEMES），不另立没人加的类名；
-  // 且受「圈色跟随主题」开关约束（关掉后所有主题都用原色）
-  assert.match(page, /function ringDarkTheme\(\) \{ return ringFollowTheme && \(themeId === 'dark' \|\| themeId === 'fantasy'\); \}/)
+  // 深色主题：固定阶段色换成更亮的一档
+  assert.equal(R.timerColor({ isBreak: false }, 'dark'), '#7db4f0')
+  assert.equal(R.timerFrame({ isBreak: true, pomoOn: true, longBreak: true, mode: 'down', remain: 1, totalSec: 2 }, 'dark').color, '#ffc247')
+  assert.equal(R.workFrame({ s: { pct: 90 }, near: true }, 'dark').color, '#ff6b66')
+  assert.equal(R.workFrame({ s: { pct: 25 }, near: false }, 'dark').color, '#7db4f0')
+  // 过渡段（过半到下班）深色下也要提亮：早先 workColor 自己拼 rgb() 串、绕过 ringColor，
+  // 深色主题下整段返回原色，后半段黄绿压在深底上几乎看不见。现在逐点都比浅色亮
+  // 过渡段的取值是 rgb() 串、档位色是十六进制，比对前统一成数组
+  const rgbOf = (c) => (c.charAt(0) === '#' ? [1, 3, 5].map((i) => parseInt(c.slice(i, i + 2), 16)) : c.match(/^rgb\((\d+),(\d+),(\d+)\)$/).slice(1).map(Number))
+  for (const s of [0.45, 0.4, 0.3, 0.2, 0.1, 0.05]) {
+    const light = rgbOf(R.workColor(s, false, 'default'))
+    const dark = rgbOf(R.workColor(s, false, 'dark'))
+    assert.ok(dark.every((c, i) => c >= light[i]), `s=${s} 深色应不比浅色暗：${light} → ${dark}`)
+    assert.ok(dark.reduce((a, b) => a + b, 0) > light.reduce((a, b) => a + b, 0), `s=${s} 深色应整体更亮`)
+  }
+  // 端点对齐档位色：起步接专注蓝、末尾接长休琥珀，切档不跳色
+  assert.equal(R.workColor(0.5, false, 'dark'), '#7db4f0')
+  assert.deepEqual(rgbOf(R.workColor(0, false, 'dark')), rgbOf('#ffc247'))
+  // 浅底也压深一档（亮蓝亮橙压在浅白气泡上太抢眼）：固定阶段色比原色暗，
+  // 过渡段首尾与相邻档位一致（终点 = 压暗后的琥珀，与长休琥珀同一取值）
+  const sink2 = (c) => rgbOf(c).map((x) => Math.round(x * 0.88))
+  assert.deepEqual(rgbOf(R.workColor(0.5, false, 'default')), sink2('#4a90d9'))
+  assert.deepEqual(rgbOf(R.timerFrame({ isBreak: true, pomoOn: true, longBreak: true, mode: 'down', remain: 1, totalSec: 2 }, 'default').color), sink2('#e8a317'))
+  assert.deepEqual(rgbOf(R.workColor(0, false, 'default')), sink2('#e8a317'))
+  // 主题个性化：樱花 / 未至之境各有一组手调档，且与通用口径都不同（否则「个性化」名不副实）
+  assert.equal(R.timerColor({ isBreak: false }, 'sakura'), '#b8567f')
+  assert.equal(R.timerColor({ isBreak: false }, 'fantasy'), '#5b93ff')
+  assert.notEqual(R.timerColor({ isBreak: false }, 'sakura'), R.timerColor({ isBreak: false }, 'default'))
+  assert.notEqual(R.timerColor({ isBreak: false }, 'fantasy'), R.timerColor({ isBreak: false }, 'dark'))
+  // 插值端点一律取各自主题的档位色：樱花两头都是手调档（#b8567f → #c8821a），
+  // 未至之境蓝取品牌蓝亮版、琥珀沿用通用提亮档
+  assert.deepEqual(rgbOf(R.workColor(0.5, false, 'sakura')), rgbOf('#b8567f'))
+  assert.deepEqual(rgbOf(R.workColor(0, false, 'sakura')), rgbOf('#c8821a'))
+  assert.equal(R.workColor(0.5, false, 'fantasy'), '#5b93ff')
+  assert.deepEqual(rgbOf(R.workColor(0, false, 'fantasy')), rgbOf('#ffc247'))
+  // 明暗判据挂在页面：跟随开 → 传当前气泡主题；关 → null（= 原色，早先恒浅色口径反而会压暗）
+  assert.match(page, /function ringTheme\(\) \{ return ringFollowTheme \? themeId : null; \}/)
   assert.match(page, /if \(offworkOwnsRing\(\)\) \{ updateOffworkRing\(\); return; \}/)
+})
+
+test('改气泡配色的预览：圈色跟随开着时连同圈色一起亮，关着时不亮', () => {
+  // 同一条 theme-preview 指令：气泡换色预览之外，跟随开着还要亮一次圈 —— 圈色本就按主题取，
+  // 用户换樱花 / 未至之境时看不见圈色变化会以为「专属配色没生效」
+  assert.match(
+    page,
+    /themePreview\.start\(data\.payload && data\.payload\.theme, data\.payload && data\.payload\.ms\);[\s\S]{0,400}?if \(ringFollowTheme\) startRingPreview\(data\.payload && data\.payload\.ms\);/,
+  )
+  // 画的是新主题的色：start() 内部先换 themeId，ringTheme() 随之返回新主题，圈预览取色不需要另传
+  assert.match(page, /function ringTheme\(\) \{ return ringFollowTheme \? themeId : null; \}/)
+  assert.match(page, /WHALE_RINGS\.previewColor\(ringTheme\(\)\)/)
 })
 
 test('进度圈可自由开关：关掉后圈只归计时，工时进度改看倒计时页里的细进度条', () => {
@@ -317,8 +362,9 @@ test('外圈画法两键（粗细 / 跟随主题）：默认值不变、四处�
   assert.match(store, /ringFollowTheme: p\.ringFollowTheme !== false,/)
   assert.match(store, /ringFollowTheme: cfg\.ringFollowTheme !== false,/)
   assert.match(store, /if \(p\.ringFollowTheme !== undefined\) cfg\.ringFollowTheme = p\.ringFollowTheme !== false/)
-  // 三档换算表只在 rings 里一份，页面经 setWidth 写内联变量；CSS 缺省值仍是 3.5
-  assert.match(rings, /var RING_WIDTHS = \{ thin: 2\.5, normal: 3\.5, thick: 5 \};/)
+  // 三档换算表只在 rings 里一份，页面经 setWidth 写内联变量；CSS 缺省值仍是 3.5。
+  // 相邻档必须拉得开（细档 2.5 与标准 3.5 只差 1px 肉眼看不出，现为 1.75 / 3.5 / 6）
+  assert.match(rings, /var RING_WIDTHS = \{ thin: 1\.75, normal: 3\.5, thick: 6 \};/)
   assert.match(rings, /ringSvg\.style\.setProperty\('--dshw-ring-width', String\(RING_WIDTHS\[key\]\)\)/)
   assert.match(rings, /setRing: setRing, setWidth: setWidth,/)
   assert.match(floatingCss, /stroke-width: var\(--dshw-ring-width, 3\.5\)/)
@@ -329,9 +375,72 @@ test('外圈画法两键（粗细 / 跟随主题）：默认值不变、四处�
   assert.match(page, /if \(cfg\.ringFollowTheme !== undefined\) \{[\s\S]*?ringFollowTheme = rf;/)
   // 设置页：两个控件都归「挂件外观」卡（共用一圈，样式不归某一种用途）
   assert.match(lookView, /外圈粗细/)
-  assert.match(lookView, /emit\('patch', \{ ringWidth: /)
+  assert.match(lookView, /onRingPatch\(\{ ringWidth: /)
   assert.match(lookView, /圈色跟随气泡主题/)
-  assert.match(lookView, /emit\('patch', \{ ringFollowTheme: /)
+  assert.match(lookView, /onRingPatch\(\{ ringFollowTheme: /)
+})
+
+test('改外圈样式后挂件临时亮一圈几秒做预览：只显示不落盘，不抢计时 / 倒计时的圈', () => {
+  const ipc = fs.readFileSync(new URL('../public/preload/lib/ipc.js', import.meta.url), 'utf8')
+  const settings = fs.readFileSync(new URL('../public/preload/lib/settings.js', import.meta.url), 'utf8')
+  const lookView = fs.readFileSync(new URL('../src/views/LookView.vue', import.meta.url), 'utf8')
+  // 设置页：改完配置后请求预览，宿主没挂（旧版设置页）就静默跳过，不影响设置本身
+  assert.match(lookView, /function onRingPatch\(p: Record<string, unknown>\) \{[\s\S]*?emit\('patch', p\)[\s\S]*?window\.services\?\.ringPreview\?\.\(\{ ms: 3200 \}\)/)
+  // 宿主：窗口在但不可见也算「未显示」（窗口存在 ≠ 可见），否则用户看不到还回 ok
+  assert.match(settings, /ringPreview\(p\) \{ return this\.cmdPreview\(\{ cmd: 'ring-preview', ms: Math\.round\(Number\(p && p\.ms\)\) \}\) \}/)
+  assert.match(settings, /cmdPreview\(p\) \{\n[\s\S]*?getWindow\(\)\.isVisible\(\)[\s\S]*?sendToWidget\('whale:cmd', \{ cmd: p\.cmd, payload: p \}\)/)
+  // 页面：收到指令起预览，到时自动收起并交回归属方
+  assert.match(page, /data\.cmd === 'ring-preview'[\s\S]*?startRingPreview\(data\.payload && data\.payload\.ms\)/)
+  assert.match(page, /function startRingPreview\(ms\) \{[\s\S]*?setTimeout\(ringPreviewEnd, dur\)/)
+  assert.match(page, /dur > 20000\) dur = 3200/)
+  // 交回归属方：清预览状态后立刻重画一圈（在跑计时 / 倒计时就接着画它们，否则收起）
+  assert.match(page, /function ringPreviewEnd\(\) \{[\s\S]*?ringPreviewState = null; updateTimerRing\(\);/)
+  // 归属方优先：计时有跑 / 倒计时该画圈时预览不抢圈；预览底色取 rings.previewColor（与真实专注轮同源），画 3/4 圈
+  assert.match(page, /if \(ringPreviewState && !offworkOwnsRing\(\) && !timerRunning && !timerPaused\) \{/)
+  assert.match(page, /setRing\(true, WHALE_RINGS\.previewColor\(ringTheme\(\)\), WHALE_RINGS\.PREVIEW_PCT, false\)/)
+  const rings = fs.readFileSync(new URL('../public/floating-rings.js', import.meta.url), 'utf8')
+  assert.match(rings, /function previewColor\(theme\) \{ return timerColor\(\{ isBreak: false \}, theme\); \}/)
+  // 预览进度 0.75（留 1/4 缺口）只在 rings 定义一处
+  assert.match(rings, /var PREVIEW_PCT = 0\.75;/)
+  // 预览请求走既有通用指令通道，不新开 IPC
+  assert.ok(ipc.includes('whale:config'))
+})
+
+test('改气泡配色后挂件按新主题临时亮几秒：只换渲染主题不落盘，结束时回落配置值', () => {
+  const settings = fs.readFileSync(new URL('../public/preload/lib/settings.js', import.meta.url), 'utf8')
+  const lookView = fs.readFileSync(new URL('../src/views/LookView.vue', import.meta.url), 'utf8')
+  // 设置页：先请求预览再落盘（反过来的话配置推送会立刻把主题定成新值，看不到「亮一下」）
+  assert.match(lookView, /function onThemeChange\(theme: string\) \{\n\s*try \{ window\.services\?\.themePreview\?\.\(\{ theme, ms: 3200 \}\) \} catch \{ \/\*[^\n]*\*\/ \}\n\s*emit\('patch', \{ theme \}\)/)
+  assert.match(lookView, /<select :value="cfg\.theme" @change="onThemeChange\(\(\$event\.target as HTMLSelectElement\)\.value\)">/)
+  // 宿主：归一到 cmdPreview（与 ringPreview 同口径：探 isVisible、走 whale:cmd），失败由设置页静默忽略
+  assert.match(settings, /themePreview\(p\) \{ return this\.cmdPreview\(\{ cmd: 'theme-preview', theme: String\(\(p && p\.theme\) \|\| ''\), ms: Math\.round\(Number\(p && p\.ms\)\) \}\) \}/)
+  assert.match(settings, /cmdPreview\(p\) \{\n[\s\S]*?getWindow\(\)\.isVisible\(\)[\s\S]*?sendToWidget\('whale:cmd', \{ cmd: p\.cmd, payload: p \}\)/)
+  // 页面：指令分发到状态机；页面只做装配（状态机在 floating-theme-preview.js）
+  assert.match(page, /data\.cmd === 'theme-preview'[\s\S]*?\n\s*themePreview\.start\(data\.payload && data\.payload\.theme, data\.payload && data\.payload\.ms\);/)
+  assert.match(page, /var themePreview = window\.WhaleThemePreview\(function \(\) \{ return themeId; \}, function \(id\) \{ themeId = id; \}, applyTheme,\n\s*function \(open\) \{ if \(open\) showNormalBubble\(undefined, true\); else hideBubble\(\); \}\);/)
+  // 只换 CSS 变量用户根本看不见（气泡平常收着，见 bubbleOn），故预览期间必须真把气泡弹出来：
+  // 绕过 bubbleOn 总闸的 force 分支只在 showNormalBubble 一处，收泡统一走 hideBubble
+  assert.match(page, /function showNormalBubble\(onExpire, force\) \{\n\s*if \(!bubbleOn && !force\) return;/)
+  // 气泡被谁收起（用户点击 / bubbleArm 到点 / 预览结束）都要复位预览标记，否则下次开预览会被当成「已弹着」而跳过
+  assert.match(page, /bubbleShown = false;\n\s*themePreview\.shown = false;/)
+  assert.match(page, /if \(typeof cfg\.theme === 'string'\) themePreview\.applyConfig\(cfg\.theme\);/)
+  // 脚本引入顺序：状态机必须在 floating-page.js 之前
+  const html = fs.readFileSync(new URL('../public/floating.html', import.meta.url), 'utf8')
+  assert.ok(html.indexOf('./floating-theme-preview.js') > 0
+    && html.indexOf('./floating-theme-preview.js') < html.indexOf('./floating-page.js'), 'floating-theme-preview.js 必须在 floating-page.js 之前引入')
+  // 状态机：非法主题不动、时长缺省 3200 / 上限 20000、到时回落到配置里的主题
+  const themePrev = fs.readFileSync(new URL('../public/floating-theme-preview.js', import.meta.url), 'utf8')
+  assert.match(themePrev, /window\.WhaleThemePreview = function \(getTheme, setTheme, repaint, onOpen\) \{/)
+  // 预览开始弹泡、到点收泡；连改几档时 shown 去重，不重复重画
+  assert.match(themePrev, /open: function \(v\) \{\n\s*if \(!!v === api\.shown\) return;/)
+  assert.match(themePrev, /api\.open\(true\); \/\/ 只换色用户看不见/)
+  assert.match(themePrev, /repaint\(\);\n\s*api\.open\(false\);/)
+  assert.match(themePrev, /var DEFAULT_MS = 3200, MAX_MS = 20000;/)
+  assert.match(themePrev, /if \(!window\.BubbleRender\.THEMES\[theme\]\) return;/)
+  assert.match(themePrev, /if \(!isFinite\(dur\) \|\| dur <= 0 \|\| dur > MAX_MS\) dur = DEFAULT_MS;/)
+  assert.match(themePrev, /api\.state = null;\n\s*setTheme\(api\.savedTheme\);/)
+  // 预览期间配置推送只更新回落目标，不打断正在放的预览
+  assert.match(themePrev, /api\.savedTheme = \(theme === 'dark' \|\| theme === 'sakura' \|\| theme === 'fantasy'\) \? theme : 'default';\n\s*if \(api\.state\) return;/)
 })
 
 test('逐秒刷新：说明行直写不走淡入淡出，重排前复位字号', () => {

@@ -1,9 +1,10 @@
 <script lang="ts" setup>
 import { computed, reactive, ref, watch } from 'vue'
 
-// 「计时」整卡：只管「一轮怎么设」（默认时长 / 快捷档位 / 休息与番茄 / 气泡与状态）。
+// 「计时」整块：只管「一轮怎么设」（默认时长 / 快捷档位 / 休息与番茄 / 气泡与状态）。
+// 卡头由父级「待办与计时」卡统一提供，本块只出分区（h3.card-sub）。
 // 「到点怎么提示」（留言 / 系统通知 / 气泡停留 / 邮件）归「提醒与通知」卡 —— 那是一类提醒，
-// 不是计时参数，本卡只留一句指向。
+// 不是计时参数，本块只在卡尾留一句指向。
 // 从「提醒与通知」卡里拆出来：那边四类自动提醒与通知渠道已经够长，计时 9 个控件夹在中间，
 // 用户搜到「倒计时」滚过去也只看到一张默认收起的卡。拆成独立卡后搜索直达、入口随挂件菜单的
 // 「计时设置」深链（target='timer'）直接落在这里。
@@ -28,8 +29,8 @@ const focusRulesHint = computed(() => {
   const hidden = (props.cfg.hiddenCards || []).includes('focus')
     || (props.cfg.hiddenTabs || []).includes('usage')
   return hidden
-    ? '挂件菜单里开不开「专注」组，在「待办与计时」卡（已在显示管理中隐藏）'
-    : '挂件菜单里开不开「专注」组，见上面的「待办与计时」卡'
+    ? '挂件菜单「专注」组的开关在「待办与计时」卡（已在显示管理中隐藏）'
+    : '挂件菜单「专注」组的开关见上方「待办与计时」卡'
 })
 
 // —— 低频分区折叠：休息与番茄 / 计时气泡与状态默认收起 ——
@@ -137,10 +138,8 @@ function onCheck(key: string, e: Event) {
   <!-- [用量] 计时：计时功能的全部配置。不做卡级折叠 —— 搜索「倒计时 / 番茄 / 快捷时长」
        会直接滚到这里，折起来等于「搜到了却看不到控件」。 -->
   <section class="card-embedded" data-search="timer">
-    <h3 class="card-sub">计时设置</h3>
-    <p class="hint">这里只设<b>默认值</b>；挂件里临时改的时长只影响那一轮。</p>
-
-    <h3 class="card-sub">默认与快捷档位</h3>
+    <h3 class="card-sub">默认时长</h3>
+    <p class="hint">这里只设<b>默认值</b>，挂件里临时改的时长不改这里。</p>
     <div class="field row">
       <span class="label">默认倒计时时长 <em>（填 0 按 25 分钟）</em></span>
       <input class="num" type="number" min="0" max="23" step="1" v-model.number="timerHms.h" @change="commitTimerHms" />
@@ -150,8 +149,10 @@ function onCheck(key: string, e: Event) {
       <input class="num" type="number" min="0" max="59" step="1" v-model.number="timerHms.s" @change="commitTimerHms" />
       <span class="num-text">秒</span>
     </div>
+
+    <h3 class="card-sub">快捷档位</h3>
+    <p class="hint">挂件四个快捷按钮，只对那一轮生效，不改上面的默认时长。</p>
     <div class="field row">
-      <span class="label">快捷时长档位 <em>（挂件里的四个快捷按钮，分钟）</em></span>
       <div class="timer-presets">
         <input v-for="(p, i) in (cfg.timerPresets || timerPresetsDefault)" :key="i"
                class="num timer-preset" type="number" min="1" max="600" step="1"
@@ -159,11 +160,6 @@ function onCheck(key: string, e: Event) {
                @change="commitPreset(i, $event)" />
       </div>
     </div>
-    <p class="hint">只对那一轮生效，不改默认时长。</p>
-
-    <!-- 「到点提醒」（留言 / 系统通知 / 气泡停留 / 邮件）已迁到「提醒与通知」卡：
-         本卡只回答「一轮多长、怎么循环、气泡怎么写」，到点怎么提示归提醒 -->
-    <p class="hint">到点怎么提示（留言 / 系统通知 / 邮件 / 气泡停留）在「提醒与通知」卡里设。</p>
 
     <h3 class="card-sub card-sub-toggle" role="button" tabindex="0"
         :aria-expanded="foldOpen('rest')"
@@ -209,7 +205,7 @@ function onCheck(key: string, e: Event) {
          只管「待办这条做完了要不要接着下一条」，与上面的番茄循环（轮间怎么休息）正交。
          v1.15 硬移除是因为它当时无条件生效；现在做成显式开关 + 到点气泡仍可取消 -->
     <label class="field row check">
-      <span class="label">到点自动开始下一条待办 <em>（待办计时结束时，自动接下一条未完成项）</em></span>
+      <span class="label">到点自动开始下一条待办 <em>（待办计时结束自动接下一条未完成项）</em></span>
       <input type="checkbox" :checked="cfg.todoAutoNext" @change="onCheck('todoAutoNext', $event)" />
     </label>
     </template>
@@ -237,8 +233,12 @@ function onCheck(key: string, e: Event) {
     </label>
     </template>
 
+    <!-- 「到点提醒」（留言 / 系统通知 / 气泡停留 / 邮件）已迁到「提醒与通知」卡：
+         本卡只回答「一轮多长、怎么循环、气泡怎么写」，到点怎么提示归提醒。
+         指向句放卡尾：夹在两个分区之间时，读起来像「默认档位」的一部分 -->
     <p class="hint">
       实际计时在挂件菜单的「{{ cfg.todoOn ? '专注' : '计时' }}」组；{{ focusRulesHint }}。
+      到点提示（留言 / 系统通知 / 邮件 / 气泡停留）在「提醒与通知」卡设。
     </p>
   </section>
 </template>

@@ -2,7 +2,6 @@
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import { msgCls, type Flash } from '../composables/useFlash'
 import { useFold } from '../composables/useFold'
-import BubblePreview from '../components/BubblePreview.vue'
 import DownloadBox from '../components/DownloadBox.vue'
 import type { DownloadProgress, HolidayStatus, MediaItem, SkinGallery, SkinMeta, SoundMeta, SoundRole, WhaleServices } from '../types/services'
 
@@ -93,13 +92,10 @@ const emit = defineEmits<{
   // 切到资源页「背景与片头」卡
   (e: 'go-assets'): void
 }>()
-// 气泡主题预览样本：与挂件同一套渲染器，切主题前先看效果（含未至之境 HUD）。
-// 金额遮蔽开启时预览也显示 ***，与挂件本体保持一致（遮蔽只影响显示，不改配置里的真实值）
-const themePreviewLines = computed<Array<{ t: string; s: 'A' | 'B' | 'P' | 'C' }>>(() => [
-  { t: 'DeepSeek 余额', s: 'A' },
-  { t: props.cfg.hideAmounts === true ? '***' : '¥ 88.88', s: 'B' },
-  { t: props.cfg.hideAmounts === true ? '今日已用 ***' : '今日已用 ¥ 1.23', s: 'C' },
-])
+// 按压气泡（自定义泡泡）模型是否已启用：一旦启用，气泡内容全部由「按压气泡」卡片里的模块决定，
+// 常规三行气泡（含它的首行报时）不再渲染 —— 顶层的「小鲸鱼报时」开关随之失效。
+// 这里据此把该开关置灰并给提示，避免用户以为是开关坏了（报时改在按压气泡里加「报时」模块）
+const bubbleModelOn = computed(() => props.cfg.bubble?.on === true)
 // 「随机」抽签池规模：内置那张（开关打开时）+ 画廊里未取消参与随机的项。
 // 口径与父级 allSkinChoices 一致 —— 这里只用来显示，真正的抽签仍在父级 doRandomSkin。
 const randomPoolCount = computed(() => {
@@ -111,11 +107,20 @@ const randomPoolNote = computed(() => (props.cfg.randomIncludeBuiltin === false
   ? '只算你标了「参与随机」的'
   : '含随包内置那张'))
 
-// 按压气泡（自定义泡泡）模型是否已启用：一旦启用，气泡内容全部由「按压气泡」卡片里的模块决定，
-// 常规三行气泡（含它的首行报时）不再渲染 —— 顶层的「小鲸鱼报时」开关随之失效。
-// 这里据此把该开关置灰并给提示，避免用户以为是开关坏了（报时改在按压气泡里加「报时」模块）
-const bubbleModelOn = computed(() => props.cfg.bubble?.on === true)
 // 统一的消息态（Flash）收口在 composables/useFlash.ts，各卡不再各持一份。
+
+// —— 气泡配色 / 外圈样式：改完先让挂件临时亮一下，再落盘 ——
+// 顺序不能反：先落盘的话宿主会立刻按新配置重渲染，用户看不到「亮一下」这个对比过程。
+// 预览走宿主通用指令通道（whale:cmd），宿主没挂（旧版设置页 / 浏览器预览）就静默跳过，
+// 不影响设置本身生效。
+function onThemeChange(theme: string) {
+  try { window.services?.themePreview?.({ theme, ms: 3200 }) } catch { /* 宿主未提供：只落盘 */ }
+  emit('patch', { theme })
+}
+function onRingPatch(p: Record<string, unknown>) {
+  emit('patch', p)
+  try { window.services?.ringPreview?.({ ms: 3200 }) } catch { /* 宿主未提供：只落盘 */ }
+}
 
 // 两个折叠组（气泡与文案 / 音效）：仅本卡消费，随卡搬入。
 // 默认收起：这两组都是「配置一次后很少再动」的低频项（气泡配色 / 峰谷文案 / 节假日表 /
@@ -395,8 +400,7 @@ onUnmounted(() => {
     <template v-if="lookOpen">
 
     <p class="hint">
-      素材都会复制到本地数据目录（不引用源文件），单文件 ≤5MB。导入 / 删除 / 试听、素材占用与素材包导出
-      都在「资源」页；未导入时分别回退为「默认形象」与「小黄鸭」。
+      形象 / 音效的导入、删除、试听在「资源」页；未导入时回退「默认形象」与「小黄鸭」。
     </p>
 
     <label class="field row">
@@ -448,10 +452,10 @@ onUnmounted(() => {
       <span class="skin-pool-legend-dot"></span> 绿点的是参与随机的。
     </p>
     <p v-if="cfg.skin === 'custom' && !skinMeta" class="hint">
-      还没有导入形象，去「资源」页加一张后这里才有「自定义」可用（当前会回退为「默认形象」）。
+      还没导入形象，当前回退「默认形象」；去「资源」页加一张后「自定义」才可用。
     </p>
     <p v-else-if="skinUnused" class="hint">
-      已导入但当前未使用：「形象」选的不是「自定义」。
+      已导入但没在用：「形象」选的不是「自定义」。
     </p>
     <p v-else-if="skinMeta" class="hint">
       当前使用：{{ skinMeta.name }}（{{ assetSize(skinMeta) }}）。
@@ -469,39 +473,51 @@ onUnmounted(() => {
       </select>
     </label>
     <p class="hint">
-      设置页与挂件菜单面板的深浅形态，一般选「跟随 uTools」。浅色 / 深色会固定下来，与 uTools 主题相反；
-      「未至之境」恒为暗色。不影响气泡配色（在下方「气泡与文案」里单独设置）。
+      设置页与挂件菜单面板的深浅形态，一般选「跟随 uTools」；浅色 / 深色会固定下来，与 uTools 主题相反。
+      不影响气泡配色（在「气泡与文案」里设）。
     </p>
 
-    <!-- 外圈：计时与下班倒计时共用同一圈（谁在跑归谁），样式放这里；「要不要给倒计时画」仍在下班倒计时卡 -->
-    <label class="field row">
-      <span class="label">外圈粗细</span>
-      <select class="auto" :value="cfg.ringWidth" @change="emit('patch', { ringWidth: ($event.target as HTMLSelectElement).value })">
-        <option value="thin">细</option><option value="normal">标准</option><option value="thick">粗</option>
-      </select>
-    </label>
+    <!-- 挂件最常调的三个开关（思考气泡 / 报时 / 右上角菜单）不再埋进折叠区：
+         折叠区默认收起，用户点「气泡与文案」才看得到，而这三项恰恰是日常最想改的。
+         外圈样式属「设一次就不再动」的，故下沉到折叠区末尾 -->
     <label class="field row check">
-      <span class="label">圈色跟随气泡主题 <em>（深色主题下换亮一档）</em></span>
-      <input type="checkbox" :checked="cfg.ringFollowTheme !== false"
-             @change="emit('patch', { ringFollowTheme: ($event.target as HTMLInputElement).checked })" />
+      <span class="label">思考气泡</span>
+      <input type="checkbox" :checked="cfg.bubbleOn" @change="emit('patch', { bubbleOn: ($event.target as HTMLInputElement).checked })" />
+    </label>
+    <!-- 关掉后不只是「不弹台词」：所有气泡类反馈一起没了，连计时到点的动作条也挂不出来
+         （动作条定位在气泡下缘，见 floating-page.js 的 updateTimerActions）。
+         这句话只在关着时出现 —— 开着的时候说一遍「关掉会怎样」纯属噪音 -->
+    <p v-if="!cfg.bubbleOn" class="hint">
+      已关闭：不再弹任何气泡 —— 峰谷 / 预算 / 低余额提醒、计时气泡，以及计时到点气泡旁的
+      「休息 / 再来一轮」按钮都跟着消失，只剩系统通知（若开着）。
+    </p>
+    <label class="field row check">
+      <span class="label">小鲸鱼报时 <em>（气泡首行显示当前时间）</em></span>
+      <input type="checkbox" :checked="cfg.timeBubbleOn" :disabled="bubbleModelOn"
+             @change="emit('patch', { timeBubbleOn: ($event.target as HTMLInputElement).checked })" />
+    </label>
+    <!-- 报时与「下班倒计时」可同时开启：倒计时只在最后一张「倒计时页」出现，第一张气泡始终是步骤页 -->
+    <p v-if="bubbleModelOn" class="hint">已启用「按压气泡」，气泡内容由那里的模块决定，本开关失效 —— 报时请在「按压气泡」卡里加一个「报时」模块（如「现在是 {time}」）。</p>
+    <p v-else-if="cfg.offworkOn === true" class="hint">已开启「下班倒计时」，两者可同时生效：倒计时占用最后一张「倒计时页」，第一张气泡仍是步骤页。</p>
+    <label class="field row check">
+      <span class="label">挂件右上角菜单按钮 <em>（关掉后悬停不出现；右键点鲸鱼仍可唤出）</em></span>
+      <input type="checkbox" :checked="cfg.menuBtn" @change="emit('patch', { menuBtn: ($event.target as HTMLInputElement).checked })" />
     </label>
 
     <div class="fold">
-      <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="lookFolds.bubble" @click="lookFolds.bubble = !lookFolds.bubble">{{ lookFolds.bubble ? '收起气泡与文案' : '气泡与文案（主题 · 峰谷 · 报时等）' }}</button>
+      <button class="link-btn utils-btn utils-secondary fold-toggle" :aria-expanded="lookFolds.bubble" @click="lookFolds.bubble = !lookFolds.bubble">{{ lookFolds.bubble ? '收起气泡配色与文案' : '气泡配色与文案（主题 · 峰谷 · 节假日表）' }}</button>
       <div v-if="lookFolds.bubble">
         <label class="field row">
           <span class="label">气泡配色</span>
-          <select :value="cfg.theme" @change="emit('patch', { theme: ($event.target as HTMLSelectElement).value })">
+          <select :value="cfg.theme" @change="onThemeChange(($event.target as HTMLSelectElement).value)">
             <option value="default">默认（蓝白）</option>
             <option value="dark">深色</option>
             <option value="sakura">樱花</option>
             <option value="fantasy">未至之境（深蓝）</option>
           </select>
         </label>
-        <div class="theme-preview">
-          <div class="theme-preview-label">效果预览</div>
-          <BubblePreview :lines="themePreviewLines" :theme="cfg.theme" :scale="0.5" />
-        </div>
+        <!-- 配色不在设置页放预览图：改完直接在真实挂件上弹泡演示（theme-preview），
+             比静态样张更准，也不用维护第二份样本 -->
         <label class="field row">
           <span class="label">峰谷文案</span>
           <select :value="cfg.peakMode" @change="emit('patch', { peakMode: ($event.target as HTMLSelectElement).value })">
@@ -524,28 +540,18 @@ onUnmounted(() => {
           <p class="hint holiday-note">{{ holidayNote }}（表内日期全天谷价）</p>
           <p v-if="holidayFlash" class="hint" :class="msgCls(holidayFlash)">{{ holidayFlash.msg }}</p>
         </div>
-        <label class="field row check">
-          <span class="label">思考气泡</span>
-          <input type="checkbox" :checked="cfg.bubbleOn" @change="emit('patch', { bubbleOn: ($event.target as HTMLInputElement).checked })" />
+        <!-- 外圈：计时与下班倒计时共用同一圈（谁在跑归谁），样式放这里；「要不要给倒计时画」仍在下班倒计时卡。
+             属「设一次就不再动」的低频项，放折叠区末尾 -->
+        <label class="field row">
+          <span class="label">外圈粗细</span>
+          <select class="auto" :value="cfg.ringWidth" @change="onRingPatch({ ringWidth: ($event.target as HTMLSelectElement).value })">
+            <option value="thin">细</option><option value="normal">标准</option><option value="thick">粗</option>
+          </select>
         </label>
-        <!-- 关掉后不只是「不弹台词」：所有气泡类反馈一起没了，连计时到点的动作条也挂不出来
-             （动作条定位在气泡下缘，见 floating-page.js 的 updateTimerActions）。
-             这句话只在关着时出现 —— 开着的时候说一遍「关掉会怎样」纯属噪音 -->
-        <p v-if="!cfg.bubbleOn" class="hint">
-          已关闭：挂件不再弹任何气泡 —— 峰谷 / 预算 / 低余额提醒、计时气泡，以及计时到点后气泡旁的
-          「休息 / 再来一轮」按钮都跟着消失，只剩系统通知（若开着）。
-        </p>
         <label class="field row check">
-          <span class="label">小鲸鱼报时 <em>（气泡首行显示当前时间）</em></span>
-          <input type="checkbox" :checked="cfg.timeBubbleOn" :disabled="bubbleModelOn"
-                 @change="emit('patch', { timeBubbleOn: ($event.target as HTMLInputElement).checked })" />
-        </label>
-        <!-- 报时与「下班倒计时」可同时开启：倒计时只在最后一张「倒计时页」出现，第一张气泡始终是步骤页 -->
-        <p v-if="bubbleModelOn" class="hint">已启用「按压气泡」，气泡内容由那里的模块决定，本开关失效 —— 报时请在「按压气泡」卡里加一个「报时」模块（如「现在是 {time}」）。</p>
-        <p v-else-if="cfg.offworkOn === true" class="hint">已开启「下班倒计时」，两者可同时生效：倒计时占用最后一张「倒计时页」，第一张气泡仍是步骤页。</p>
-        <label class="field row check">
-          <span class="label">挂件右上角菜单按钮 <em>（关掉后悬停不出现；右键点鲸鱼仍可唤出）</em></span>
-          <input type="checkbox" :checked="cfg.menuBtn" @change="emit('patch', { menuBtn: ($event.target as HTMLInputElement).checked })" />
+          <span class="label">圈色跟随气泡主题 <em>（浅底压深、深底调亮；樱花与未至之境另配色）</em></span>
+          <input type="checkbox" :checked="cfg.ringFollowTheme !== false"
+                 @change="onRingPatch({ ringFollowTheme: ($event.target as HTMLInputElement).checked })" />
         </label>
       </div>
     </div>
@@ -579,10 +585,10 @@ onUnmounted(() => {
           <span class="num-text">{{ Math.round(volDraft * 100) }}%</span>
         </label>
         <p v-if="cfg.soundSet === 'custom' && !soundsMeta.press.length" class="hint">
-          还没有导入按压音，去「资源」页加一个后这里才有「自定义」可用（当前会回退为「小黄鸭」）。
+          还没导入按压音，当前回退「小黄鸭」；去「资源」页加一个后「自定义」才可用。
         </p>
         <p v-else-if="soundUnused" class="hint">
-          已导入但当前未使用：「音效开关」没开，或「音色」选的不是「自定义」。
+          已导入但没在用：「音效开关」没开，或「音色」选的不是「自定义」。
         </p>
         <p v-else-if="soundsMeta.press.length" class="hint">
           自定义音色：按压音 {{ soundLabel('press') }}<template v-if="soundsMeta.release.length"> · 释放音 {{ soundLabel('release') }}</template><template v-else> · 释放音未导入（松开时静音）</template>。
@@ -603,6 +609,8 @@ onUnmounted(() => {
       <!-- 默认收起：背景与片头基本是「调一次就不再动」的低频项，展开后很长 -->
       <h2 class="card-toggle" @click="toggleCardFold('pageVisual')">
         <span class="caret">{{ pageVisualOpen ? '▾' : '▸' }}</span>设置页视觉
+        <!-- 紧跟「挂件外观」时容易被读成挂件外观的一部分：卡头直接点明只管设置页自己 -->
+        <em class="card-note">（只影响设置页本身，不改挂件）</em>
         <span v-if="!pageVisualOpen" class="card-sum">{{ pageVisualSummary }}</span>
       </h2>
     </div>
@@ -624,7 +632,7 @@ onUnmounted(() => {
         </button>
       </div>
     </div>
-    <p class="hint">纯 CSS 背景零素材；视频壁纸需单独下载、自定义媒体在「资源」页导入，都只在设置页播放，不进挂件。画面随界面深浅色自动适配。</p>
+    <p class="hint">纯 CSS 背景零素材；视频壁纸需单独下载、自定义媒体在「资源」页导入，都只在设置页播放，不进挂件。画面随界面深浅色适配。</p>
 
     <div v-if="cfg.bgMode === 'video'" class="bg-video-box">
       <template v-if="bgVideo.installed">
@@ -745,7 +753,7 @@ onUnmounted(() => {
           <button class="link-btn utils-btn utils-secondary" type="button" @click="emit('bg-media-play')">播放视频</button>
         </div>
         <div v-else-if="bgMediaPaused" class="bg-video-play-row">
-          <span class="hint">视频已暂停；浏览器可能拦截了自动播放，点右侧继续。</span>
+          <span class="hint">视频已暂停（可能被浏览器拦截自动播放），点右侧继续。</span>
           <button class="link-btn utils-btn utils-secondary" type="button" @click="emit('bg-media-play')">播放视频</button>
         </div>
         <div v-else class="bg-video-replay-row">
@@ -901,19 +909,8 @@ onUnmounted(() => {
   color: var(--fg);
   border-color: var(--accent);
 }
-/* 气泡主题预览：与挂件同一渲染器；stage 自带虚线框，这里只做居中与间距 */
-.theme-preview {
-  margin: 10px 0 14px;
-}
-.theme-preview-label {
-  margin-bottom: 6px;
-  font-size: 12px;
-  color: var(--fg-faint);
-}
-.theme-preview :deep(.bubble-preview-stage) {
-  margin: 0 auto;
-}
-
+/* 卡头括号注：常显、不随 .card-sum 推到最右，且不用斜体 */
+.card-toggle .card-note { font-size: 12px; font-weight: 400; font-style: normal; color: var(--fg-dim) }
 /* 视频壁纸的状态区：下载按钮 / 重新下载 / 删除 + 许可署名，跟在「背景氛围」下拉后 */
 .bg-video-box {
   margin: 8px 0 4px;

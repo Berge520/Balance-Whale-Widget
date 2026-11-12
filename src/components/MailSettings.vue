@@ -187,8 +187,8 @@ defineExpose({ collapse, stop: mailFlashStop })
         <input v-model="mail.mailPass" type="password" :placeholder="mailPassSaved ? '已保存，留空则不修改' : '邮箱授权码（非登录密码）'" autocomplete="off" />
       </label>
       <p class="hint">
-        授权码存于 uTools 加密存储，<b>不进备份文件</b>；填过一次后留空即表示沿用已保存的值。
-        多数邮箱（QQ / 163 / Gmail）需要在邮箱设置里单独开启 SMTP 并生成授权码，不能直接填登录密码。
+        授权码存于 uTools 加密存储，<b>不进备份文件</b>；填过后留空即沿用已保存的值。
+        多数邮箱（QQ / 163 / Gmail）需在邮箱设置里开启 SMTP 并生成授权码，不能填登录密码。
       </p>
 
       <label class="field row">
@@ -220,9 +220,9 @@ defineExpose({ collapse, stop: mailFlashStop })
       </div>
       <p v-if="mailFlash.msg" class="msg" :class="msgCls(mailFlash)">{{ mailFlash.msg }}</p>
       <p class="hint">
-        测试邮件用的是上方「当前填的内容」（未保存也会用），方便先验证再保存；<b>发送成功会自动收起本区</b>。
-        上方「测试通知」读的是已保存的配置，两者分工不同；SMTP 服务器与授权码需点「保存邮件设置」落盘。
-        免打扰时段内邮件与系统通知一并静默（计时到点不受免打扰影响）。
+        测试邮件用上方当前填写的内容（未保存也会用），<b>发送成功会自动收起本区</b>。
+        「测试通知」读的是已保存配置，两者分工不同；SMTP 服务器与授权码需点「保存邮件设置」落盘。
+        免打扰时段内邮件与系统通知一并静默（计时到点不受影响）。
       </p>
     </div>
   </div>

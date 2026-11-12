@@ -2299,9 +2299,7 @@ module.exports = {
     return readTodo()
   },
   // 输入框 maxlength 与条数上限：单一来源是 constants.js，设置页不必再存一份副本
-  todoLimits() {
-    return { textMax: TODO_TEXT_MAX, max: TODO_MAX }
-  },
+  todoLimits() { return { textMax: TODO_TEXT_MAX, max: TODO_MAX } },
   todoAdd(text) {
     const t = normTodoText(text)
     if (!t) return { ok: false, error: '内容为空', todo: readTodo() }
@@ -4057,38 +4055,40 @@ module.exports = {
       return ''
     }
   },
-  // 挂件此刻是否真的显示在屏幕上（供设置页判断「试播」等操作能否发出去）。
-  // 判据分两层：窗口不存在 → 一定没显示；窗口存活但被 uTools 连带 hide() → 存在 ≠ 可见。
-  // 探不到可见性（isVisible 缺失/抛错）时按「可见」处理：宁可让用户点一下再收到明确报错，
-  // 也不要把一条本来能用的路径永久灰掉 —— 与 bubblePreview 的口径保持一致。
+  // 挂件此刻是否真的显示在屏幕上（供设置页判断「试播」等操作能否发出去）。判据分两层：
+  // 窗口不存在 → 一定没显示；窗口存活但被 uTools 连带 hide() → 存在 ≠ 可见。探不到可见性时按
+  // 「可见」处理（宁让用户点一下收到明确报错），与 bubblePreview 同口径。
   isWidgetVisible() {
     if (!winAlive()) return false
-    try {
-      const w = getWindow()
-      if (!w || typeof w.isVisible !== 'function') return true
-      return !!w.isVisible()
-    } catch (err) { return true }
+    const w = getWindow()
+    return w && typeof w.isVisible === 'function' ? !!w.isVisible() : true
   },
-  // 按压气泡试播到挂件：把设置页当前编辑的泡泡队列整份发去真弹一次。载荷即新模型的 items
-  // （泡数组），此处走 normBubble 的 items 归一化，保证与落库同口径；悬浮页点挂件按
-  // tapAdvance/dwell/dragLines 推进。未显示挂件时返回 ok:false 由页面提示。
+  // 按压气泡试播：把设置页当前编辑的泡泡队列整份发去真弹一次（载荷走 normBubble 归一化，
+  // 与落库同口径；悬浮页按 tapAdvance/dwell/dragLines 推进）。未显示挂件时 ok:false 由页面提示
   bubblePreview(payload) {
     const p = payload && typeof payload === 'object' ? payload : {}
     const items = normBubble({ items: p.items }).items
     if (!items.length) return { ok: false, error: '没有可预览的泡泡' }
     if (!winAlive()) return { ok: false, error: '挂件未显示，先在设置页显示挂件再试播' }
-    // 窗口「存在 ≠ 可见」：隐藏（hide）后窗口仍存活，sendToWidget 照样返回 true，
-    // 用户会看到「已发送」但屏幕上什么都不发生。所以这里必须再查一次可见性。
+    // 窗口「存在 ≠ 可见」：hide 之后 sendToWidget 仍返回 true，用户会看到「已发送」却什么都没发生
     let visible = true
     try { visible = !!getWindow().isVisible() } catch (err) {} // 探不到就按可见处理，别把能用的路径也挡了
     if (!visible) return { ok: false, error: '挂件未显示，先在设置页显示挂件再试播' }
     const sent = sendToWidget('whale:bubble-preview', { items: items })
     return sent ? { ok: true } : { ok: false, error: '发送失败，挂件窗口可能正在重建' }
   },
-  // 诊断日志（同步落盘 %TEMP%\whale-debug.log，进程被 uTools 结束也不丢）。
-  // 返回末尾部分即可，避免整份日志撑爆剪贴板/界面。
-  // 日志超 1MB 会轮转：主文件被清空重建、真内容进了 .1。此时若只读主文件，
-  // 用户报问题时拿到的是一份几乎空的日志 —— 故主文件若只剩轮转头，改读 .1
+  // theme-preview：在 ring-preview 基础上多带一个 theme（气泡配色 id），其余同口径
+  ringPreview(p) { return this.cmdPreview({ cmd: 'ring-preview', ms: Math.round(Number(p && p.ms)) }) },
+  themePreview(p) { return this.cmdPreview({ cmd: 'theme-preview', theme: String((p && p.theme) || ''), ms: Math.round(Number(p && p.ms)) }) },
+  cmdPreview(p) {
+    let visible = true
+    try { visible = !!getWindow().isVisible() } catch (err) {} // 探不到按可见处理
+    if (!visible) return { ok: false, error: '挂件未显示，先在设置页显示挂件再试' }
+    return sendToWidget('whale:cmd', { cmd: p.cmd, payload: p }) ? { ok: true } : { ok: false, error: '发送失败' }
+  },
+  // 诊断日志（同步落盘 %TEMP%\whale-debug.log，进程被 uTools 结束也不丢）。只返回末尾部分，
+  // 免得整份日志撑爆剪贴板/界面。超 1MB 会轮转：主文件清空重建、真内容进 .1 —— 若只读主文件，
+  // 用户拿到的是一份几乎空的日志，故主文件只剩轮转头时改读 .1
   getDebugLog() {
     if (!LOG_FILE) return { path: '', text: '' }
     let text = ''

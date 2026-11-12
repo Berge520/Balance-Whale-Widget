@@ -1382,8 +1382,8 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
         </span>
       </label>
       <p class="hint">
-        「清除未使用」只删当前设置用不到的素材（没在用的形象、已关掉的提醒音、没在用的背景 / 片头媒体等），正在使用的一律保留；
-        「清除全部素材」把导入的形象、气泡图与音效全删掉，形象 / 音色回退内置（同「数据」页勾「导入的素材」）。两者都不影响其它设置。
+        「清除未使用」只删当前用不到的素材（未用形象、提醒音、背景 / 片头），在用的保留；
+        「清除全部素材」删光导入素材、形象 / 音色回退内置，均不影响其它设置。
       </p>
 
       <div class="fold">
@@ -1483,7 +1483,7 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
       </p>
       <template v-if="galleryOpen('media')">
         <p class="hint">
-          已用 {{ mediaItems.length }} / 20 项 · 合计 {{ fmtBytes(mediaTotalBytes) }}。图片 ≤10MB，视频 ≤10MB；文件复制进本地数据目录，不联网。图片用于背景，视频可用于背景或启动片头。背景/片头媒体不随素材包导出，换机器请打开数据目录单独备份。
+          已用 {{ mediaItems.length }} / 20 项 · 合计 {{ fmtBytes(mediaTotalBytes) }}。图片 / 视频各 ≤10MB；复制进本地数据目录，不联网。图片用于背景，视频还可作启动片头。媒体不随素材包导出，换机器请打开数据目录单独备份。
         </p>
         <p v-if="mediaFlash.msg" class="msg" :class="msgCls(mediaFlash)">{{ mediaFlash.msg }}</p>
         <p v-if="!mediaItems.length" class="hint">还没有导入。点右上角「导入图片 / 导入视频」。</p>
@@ -1623,7 +1623,7 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
       <template v-if="galleryOpen('skins')">
       <!-- 上段：已落盘的形象。包含用户导入的（占 20 张配额、删了要重导）与已下载的内置 / 共享
            （不占配额、删了能重下）—— 两类靠悬停「删」的 title 文案区分，不必再分两张卡 -->
-      <p class="group-title skin-group-title">我的形象 <em>（共 {{ skinGallery.items.length }} 张 · 点缩略图选用，单击可批量整理）</em></p>
+      <p class="group-title skin-group-title">我的形象 <em>（共 {{ skinGallery.items.length }} 张 · 单击选中可批量整理，双击选用）</em></p>
       <div class="skin-grid">
         <div v-for="(it, idx) in skinGallery.items" :key="it.id" class="skin-cell"
              :class="{ active: it.id === skinGallery.current, picked: skinPicked.indexOf(it.id) >= 0, broken: thumbBroken[it.id], noprev: !it.thumb && !thumbBroken[it.id], dragging: draggingId === it.id, 'drop-before': dragOverId === it.id && !dragOverAfter, 'drop-after': dragOverId === it.id && dragOverAfter }"
@@ -1675,12 +1675,11 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
         参与随机 {{ randomSkinPool.length }} / {{ skinGallery.items.length }} 张{{ poolBuiltinNote }}，「随机一张」从它们里挑。
       </p>
       <p v-if="skinMeta && skinHintOpen" class="hint">
-        单击缩略图选中（可连点多张），再点卡片上方「整理」，可对它们：切换使用 / 移到最前 / 移到最后 / 参与随机 / 不参与随机 / 删除；
-        双击缩略图直接切换使用，最多保留 20 张；直接拖动缩略图可排到任意位置；
-        右上角圆点表示是否参与随机，绿 = 参与、灰 = 不参与。
+        单击缩略图可多选，点卡头「整理」批量执行：使用 / 移到最前 / 移到最后 / 参与随机 / 不参与随机 / 删除；
+        双击切换使用，拖动排序，最多保留 20 张；右上角圆点绿 = 参与随机、灰 = 不参与。
       </p>
       <p v-else-if="!skinMeta" class="hint">
-        还没有导入形象。点「导入图片…」加一张，支持 png / jpg / webp / gif / apng（动图不裁剪，保留动画）。
+        还没有导入形象。点「导入图片…」添加，支持 png / jpg / webp / gif / apng（动图保留动画）。
       </p>
       <p v-if="skinUnused" class="hint">
         已导入但当前未使用：「挂件外观 → 形象」选的不是「自定义」。
@@ -1708,8 +1707,7 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
         <DownloadBox v-if="dlProgress && dlProgress.pack === 'shared-skins'"
                      :progress="dlProgress" :percent="dlPercent" :amount="dlAmountText" />
         <p v-if="skinInUseMissing" class="msg err">
-          你正在使用的形象「{{ missingSkinName }}」不在随包清单里，挂件暂用默认形象显示。
-          点下方它的缩略图即可下载找回。
+          正在使用的形象「{{ missingSkinName }}」不在随包清单里，挂件暂用默认形象；点下方它的缩略图可下载找回。
         </p>
         <!-- 内置（随包声明、可下载）：未装灰底 + 「下载」角标；已装则与本卡上段共用一套展示（可选用 / 可删）。
              已装的项也在上段画廊里（同一份数据），这里同时列出是为了「一个入口看全所有可选形象」 -->
@@ -1776,9 +1774,8 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
                  @change="emit('patch', { skinPackSrc: ($event.target as HTMLInputElement).value })" />
         </label>
         <p class="hint">
-          下载回来的形象存本地、<strong>不占「导入」的 20 张配额</strong>（配额只算你自己导入的）。
-          点缩略图只下这一张（下完自动切到它），已下载的悬停可「删」单张、删了能重新下载；
-          卡头的「下载剩余 N 张」则把还没下来的整批补齐（已下载的自动跳过、不重复占体积）。
+          下载的形象存本地，<strong>不占「导入」的 20 张配额</strong>（配额只算自己导入的）。点缩略图下这一张，下完自动切换；
+          已下载的悬停可删单张、删了能重下；卡头「下载剩余 N 张」补齐其余（已下载自动跳过）。
         </p>
         <p v-if="skinPackFlash.msg" class="msg" :class="msgCls(skinPackFlash)">{{ skinPackFlash.msg }}</p>
         <p v-if="sharedSkinFlash.msg" class="msg" :class="msgCls(sharedSkinFlash)">{{ sharedSkinFlash.msg }}</p>
@@ -1786,7 +1783,7 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
         </template>
       </template>
       <p v-else-if="!skinGallery.items.length" class="hint">
-        暂无形象：点「导入图片…」加一张，支持 png / jpg / webp / gif / apng（动图不裁剪，保留动画）。
+        暂无形象：点「导入图片…」添加，支持 png / jpg / webp / gif / apng（动图保留动画）。
       </p>
       </template>
     </section>
@@ -1833,10 +1830,10 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
         </button>
       </div>
       <p v-if="bubbleItems.length" class="hint">
-        点小鲸鱼抽到「动图组」时，从这 {{ bubbleItems.length }} 张里随机显示一张；删光即回退内置动图，最多保留 8 张。
+        点小鲸鱼抽到「动图组」时，从这 {{ bubbleItems.length }} 张里随机显示一张；删光回退内置动图，最多保留 8 张。
       </p>
       <p v-else class="hint">
-        还没有导入气泡图，点小鲸鱼时显示内置动图。点「导入图片…」加一张，支持 png / jpg / webp / gif / apng（动图不裁剪，保留动画）。
+        还没有导入气泡图，点小鲸鱼时显示内置动图。点「导入图片…」添加，支持 png / jpg / webp / gif / apng（动图保留动画）。
       </p>
       <p v-if="bubbleFlash.msg" class="msg" :class="msgCls(bubbleFlash)">{{ bubbleFlash.msg }}</p>
       </template>
@@ -1877,7 +1874,7 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
       <!-- 上段：我的音效。六槽位（按压 / 释放 + 四类提醒音），每槽位一段手导 + 若干挂在本槽的共享段。
            每个槽位最多一段手导：再导入就是替换掉旧的，所以没有「第 1 段 / 第 2 段」的编号。
            块有底色与描边 —— 六个槽位连同各自的明细不加框会连成一片，看不出归属 -->
-      <p class="group-title skin-group-title">我的音效 <em>（六个槽位各一段，再导入 = 替换；可挂共享库的段一起随机播放）</em></p>
+      <p class="group-title skin-group-title">我的音效 <em>（六槽位各一段，再导入即替换；可挂共享库的段一起随机播放）</em></p>
       <div class="sound-group" v-for="r in SOUND_ROLES" :key="r">
         <div class="sound-group-head">
           <span class="label" :title="ALERT_SOUND_WHEN[r]">{{ SOUND_ROLE_LABEL[r] }}</span>
@@ -1926,16 +1923,15 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
                 <p v-if="!soundPickFiltered.length" class="hint">没有名字匹配「{{ soundPickQuery }}」的段。</p>
               </div>
               <p class="hint">
-                添加后这段会与「{{ soundNameOf(r) || '你导入的那段' }}」<strong>一起随机播放</strong>，
-                不会顶掉它 —— 挂件每次触发时随机选一段。
+                添加后与「{{ soundNameOf(r) || '你导入的那段' }}」<strong>一起随机播放</strong>，不会顶掉它；每次触发随机选一段。
               </p>
             </template>
             <p v-else class="hint">
-              共享音效库已下载的段都挂到了本槽位，可以在下方「可下载音效」里下载更多、或调整它们参加哪些槽位。
+              已下载的共享段都已挂到本槽位；可在下方「可下载音效」再下载，或调整它们参加的槽位。
             </p>
           </template>
           <p v-else class="hint">
-            共享音效库还没有已下载的段 —— 在下方「可下载音效」里先下载几段，再回来添加。
+            共享音效库还没有已下载的段；先在下方「可下载音效」下载几段再回来添加。
           </p>
         </div>
         <!-- 单段时直接并进槽位头一行：既然只有一个，再单起一行纯属浪费纵向空间 -->
@@ -1969,7 +1965,7 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
         </div>
       </div>
       <p v-if="cfg.soundSet === 'custom' && !soundsMeta.press.length && !sharedPinnedTo('press').length" class="hint">
-        还没有导入按压音，「挂件外观 → 音色」的「自定义」当前会回退为「小黄鸭」。
+        还没有导入按压音，「挂件外观 → 音色」的「自定义」会回退为「小黄鸭」。
       </p>
       <p v-if="soundUnused" class="hint">
         按压 / 释放音已导入但当前未使用：「音效开关」没开，或「音色」选的不是「自定义」。
@@ -2059,7 +2055,7 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
             </div>
             <p v-if="!sharedSoundInstalledShown.length" class="hint">没有符合条件的已下载段。</p>
           </template>
-          <p v-else class="hint">共享音效库暂时是空的 —— 卡头按钮若显示「下载剩余 N 段」，点它把音效拉回来。</p>
+          <p v-else class="hint">共享音效库暂时为空；卡头「下载剩余 N 段」可把音效拉回来。</p>
 
           <div class="fold" v-if="sharedSoundPendingItems.length">
             <button class="link-btn utils-btn utils-secondary fold-toggle" type="button"
@@ -2092,7 +2088,7 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
         </div>
         </template>
       </template>
-      <p v-else-if="!sharedSoundQuery" class="hint">共享音效清单未拉到时这里为空，展开本卡会自动重拉一次。</p>
+      <p v-else-if="!sharedSoundQuery" class="hint">共享音效清单未拉到时此处为空，展开本卡会自动重拉。</p>
 
       <!-- 使用说明默认折叠：原先四行小字常驻卡尾，把六个槽位压到下面去了。
            摘要只报「能干什么」，不重复上方每行状态（那些行里已经写着「已导入 / 未导入（用内置音）」） -->
@@ -2101,11 +2097,9 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
           {{ soundHelpOpen ? '收起音效使用说明' : '音效使用说明' }}
         </button>
         <div v-if="soundHelpOpen" class="guide">
-          <p class="hint">每槽位一段手导，再导入即替换。想多几段就点槽位头的「从共享库添加…」，一起随机播放。</p>
-          <p class="hint">共享段不随插件分发，按需从 GitHub 下载；下载后默认不挂任何槽位，勾选后才会响。</p>
-          <p class="hint">共享段<strong>不会顶掉</strong>手导的那段：每次触发在两者间<strong>随机选一段</strong>。一段可挂多个槽位，一个槽位也可挂多段。</p>
-          <p class="hint">提醒音留空则用内置提醒音；播放跟随「挂件外观」的音效开关与音量。</p>
-          <p class="hint">支持 mp3 / wav / ogg，导入时可拖选片段（最长 10 秒），存为单声道 WAV。</p>
+          <p class="hint">每槽位一段手导，再导入即替换；要更多段点槽位头「从共享库添加…」，一起随机播放。</p>
+          <p class="hint">共享段不随插件分发，按需从 GitHub 下载，默认不挂槽位；<strong>不会顶掉</strong>手导那段，每次触发<strong>随机选一段</strong>。一段可挂多个槽位，一个槽位也可挂多段。</p>
+          <p class="hint">提醒音留空用内置音；播放跟随「挂件外观」的音效开关与音量。支持 mp3 / wav / ogg，导入时可拖选片段（最长 10 秒），存为单声道 WAV。</p>
         </div>
       </div>
       <p v-if="soundFlash.msg" class="msg" :class="msgCls(soundFlash)">{{ soundFlash.msg }}</p>

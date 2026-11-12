@@ -443,7 +443,7 @@ defineExpose({ applyHistory, refreshTodayModels, refreshDetail })
              :value="cfg.historyKeepDays"
              @change="emit('history-keep-change', Number(($event.target as HTMLInputElement).value))" />
       <span class="num-text">天</span>
-      <span class="hint">{{ historyKeep.MIN }}–{{ historyKeep.MAX }} 天，默认 {{ historyKeep.DEFAULT }}；保留越久账本越大</span>
+      <span class="hint">{{ historyKeep.MIN }}–{{ historyKeep.MAX }} 天，默认 {{ historyKeep.DEFAULT }}；保留越久占用越大</span>
     </label>
 
     <!-- 自定义单价（可选）：官方调价没跟上、或走中转站按自己的价目结算时用。
@@ -453,14 +453,14 @@ defineExpose({ applyHistory, refreshTodayModels, refreshDetail })
          默认展开（与「位置类默认收起」不同——本块只在令牌模式下出现，进来的就是来改价的） -->
     <div v-if="cfg.usageMode === 'token'" class="price-box">
       <button class="link-btn utils-btn utils-secondary fold-toggle" type="button" :aria-expanded="priceFold" @click="priceFold = !priceFold">
-        {{ priceFold ? '收起自定义单价' : '自定义单价（调价没跟上 / 按自己的价目结算）' }}
+        {{ priceFold ? '收起自定义单价' : '自定义单价（调价未更新 / 自定价目）' }}
       </button>
       <div v-if="priceFold">
       <label class="field row check">
         <span class="label">自定义单价</span>
         <input type="checkbox" :checked="cfg.tokenPrice.on"
                @change="emit('token-price-change', { key: 'on', value: ($event.target as HTMLInputElement).checked })" />
-        <span class="hint">整表覆盖（关闭 = 全部用内置价目表）</span>
+        <span class="hint">整表覆盖（关闭则全用内置价目表）</span>
       </label>
       <div v-if="cfg.tokenPrice.on" class="price-row">
         <label class="price-cell">
@@ -495,12 +495,12 @@ defineExpose({ applyHistory, refreshTodayModels, refreshDetail })
       </label>
       <p class="hint">
         单价单位：{{ cfg.tokenPrice.cur === 'USD' ? '美元' : '元' }} / 百万 token，填谷价（峰价自动翻倍）。
-        <template v-if="cfg.tokenPrice.cur === 'USD'">按上方汇率折成人民币后记账。</template>
-        改动后下次刷新余额时更新今日已用。
+        <template v-if="cfg.tokenPrice.cur === 'USD'">按上方汇率折成人民币记账。</template>
+        改动在下次刷新余额时生效。
       </p>
 
       <p class="group-title">
-        按模型覆盖 <em>（只改列出的模型，其余仍用内置价目表；名称按子串匹配）</em>
+        按模型覆盖 <em>（只改列出的模型，其余用内置价目表；名称按子串匹配）</em>
       </p>
       <div v-for="(it, i) in cfg.tokenPrice.models" :key="i" class="price-row">
         <label class="price-cell price-cell-model">
@@ -529,7 +529,7 @@ defineExpose({ applyHistory, refreshTodayModels, refreshDetail })
                 @click="priceDelConfirm = priceDelConfirm === i ? null : i">{{ priceDelConfirm === i ? '取消' : '删' }}</button>
       </div>
       <div v-if="priceDelConfirm !== null && cfg.tokenPrice.models[priceDelConfirm]" class="price-row price-confirm">
-        <span>删除「{{ cfg.tokenPrice.models[priceDelConfirm].name || '未命名模型' }}」这条单价覆盖？删后它的价格要重新填。</span>
+        <span>删除「{{ cfg.tokenPrice.models[priceDelConfirm].name || '未命名模型' }}」这条单价覆盖？价格需重新填写。</span>
         <button class="export-btn utils-btn utils-outline"
                 @click="emit('remove-price-model', priceDelConfirm as number); priceDelConfirm = null">确认删除</button>
         <button class="link-btn utils-btn utils-secondary" @click="priceDelConfirm = null">取消</button>
@@ -560,7 +560,7 @@ defineExpose({ applyHistory, refreshTodayModels, refreshDetail })
       :fmt-cost="costFmt"
       :ultra-threshold="90"
       :val-fmt="valFmt"
-      empty-text="暂无用量记录（挂件运行并记账后自动显示）。"
+      empty-text="暂无用量记录（挂件运行记账后自动显示）。"
       @update:range="setUsageRange" />
     <!-- 「累计已用」是账本的滚动累计（quotaUsed + 今天），不受历史保留期裁剪影响，故与上方区间无关 -->
     <p v-if="historyMax > 0 || cumUsed > 0" class="hint month-sum">
@@ -644,7 +644,7 @@ defineExpose({ applyHistory, refreshTodayModels, refreshDetail })
           <div class="quota-fill" :class="{ 'quota-fill-warn': quotaPct >= 90 }" :style="{ width: quotaPct + '%' }"></div>
         </div>
       </template>
-      <p v-else class="hint">填「额度总量」后这里显示进度与剩余（0 = 不显示）。额度只做展示，不影响余额与记账口径。</p>
+      <p v-else class="hint">填「额度总量」后显示进度与剩余（0 = 不显示）；额度仅展示，不影响余额与记账。</p>
     </div>
     <!-- 今日模型占比：模型明细只有平台用量接口会给，因此只在令牌模式显示 -->
     <div v-if="cfg.usageMode === 'token'" class="model-share">

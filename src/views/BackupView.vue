@@ -38,7 +38,7 @@ const backupItems: Array<{ key: string; label: string; note: string }> = [
   { key: 'timer', label: '计时状态', note: '（重载插件后恢复）' },
   { key: 'holidays', label: '节假日表', note: '（联网更新的覆盖层，未更新过则无此项）' },
   { key: 'bubbles', label: '气泡图素材', note: '（按压气泡导入的自定义配图；导出时勾选「包含气泡图素材」才带）' },
-  { key: 'todo', label: '待办与专注记录', note: '（待办清单 + 历史专注数据，后者界面已不展示、仅随备份保留；同名覆盖，备份里没有时无此项）' },
+  { key: 'todo', label: '待办与专注记录', note: '（待办清单 + 历史专注数据，后者已不展示、仅随备份保留；同名覆盖，备份里没有则无此项）' },
   // 与「数据与隐私」页清除侧、导出侧同一口径：whale:secrets 里不止 API Key / 平台 Token，
   // 还有各模型密钥与邮件 SMTP 凭据 —— 恢复会整份覆盖，文案漏写会让人以为只动前两项
   { key: 'secrets', label: '凭据', note: '（API Key / 平台 Token / 各模型密钥 / SMTP 密码，用备份密码解密）' },
@@ -101,7 +101,7 @@ function backupPick() {
     } else {
       backupPreview.value = r as BackupPreviewResult
       backupItems.forEach((it) => { backupPicks[it.key] = backupHas(it.key) })
-      backupFlash.msg = '已读取备份，请勾选要恢复的项，再点「恢复选中项」'
+      backupFlash.msg = '已读取备份，请勾选要恢复的项后点「恢复选中项」'
     }
   } catch (err: any) {
     backupFlash.err = true

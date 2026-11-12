@@ -502,11 +502,11 @@ function toggleHelp(k: string) { help.value = help.value === k ? '' : k }
 // 父级落盘后 props.modules 必然是新引用，把它算进来就会「打一个字，展开的模块自己收起来」
 watch(() => [props.side, props.title], () => { openKey.value = ''; help.value = '' })
 const HELP: Record<string, string> = {
-  add: '一个泡可以摆多行，一行最多 6 个模块（超了自动另起一行）；图片独占一行、一个泡只能放一张。点模块标题展开它的内容与样式设置；并列泡用上面的 A / B 按钮换侧。',
-  tpl: '这个模块的正文由运行时的数据决定（余额、峰谷状态等），模板里的 {balance_ds} / {status} / {countdown} 这类占位符会被自动替换。留空则用默认正文。',
+  add: '一个泡可摆多行，一行最多 6 个模块（超出自动另起一行）；图片独占一行，一个泡只能放一张。点模块标题展开内容与样式；并列泡用上方 A / B 换侧。',
+  tpl: '正文由运行时数据决定（余额、峰谷状态等），模板里的 {balance_ds} / {status} / {countdown} 会被自动替换；留空用默认正文。',
   bg: '底色跑马灯优先于纯色底色：两者都设时只跑马灯生效。',
-  img: '还没有导入过气泡图：去「资源」页导入后，这里才能指定用哪一张；选「随机」每次点开会在已导入的图里换一张。',
-  randimg: '在「资源」页下载的共享角色里随机抽一张展示。默认留空 = 每次从整池随机；想限定范围就一行填一个下标（1 = 池里第 1 张）。池里一张都没有时这一项取不到图，不显示。',
+  img: '还没导入气泡图：去「资源」页导入后才能指定用哪张；选「随机」每次点开换一张。',
+  randimg: '从「资源」页下载的共享角色里随机抽一张。留空 = 每次整池随机；想限范围就一行填一个下标（1 = 池里第 1 张）。池里无图时不显示。',
 }
 </script>
 
@@ -845,7 +845,7 @@ const HELP: Record<string, string> = {
            @dragover="onEndDragOver($event)" @drop="onEndDrop($event)">放到末尾</div>
 
       <p v-if="emptyHint" class="bmp-empty">
-        这个泡是空的。空泡存下去会被丢掉，请至少加一个模块。
+        这个泡是空的，存下去会被丢掉，请至少加一个模块。
       </p>
 
       <!-- 新起一行加模块 -->
@@ -868,7 +868,7 @@ const HELP: Record<string, string> = {
 
         <!-- 模块库面板 -->
         <div v-if="libOpen" class="bmp-lib">
-          <p v-if="!lib.length" class="bmp-note">模块库还是空的：展开任意模块，点「存入模块库」把它存下来。</p>
+          <p v-if="!lib.length" class="bmp-note">模块库为空：展开任意模块，点「存入模块库」即可保存。</p>
           <div v-for="it in lib" :key="it.id" class="bmp-lib-item">
             <span class="bmp-lib-name">{{ it.name }}</span>
             <span class="bmp-lib-type">{{ modLabel(it.module?.type || '') }}</span>

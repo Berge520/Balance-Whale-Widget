@@ -105,7 +105,7 @@ function onOpacityCommit() {
         <option value="settings">只显示设置窗口</option>
       </select>
     </label>
-    <p class="hint">分离后点最小化即收起设置窗（插件与挂件照常运行）；Esc 和点窗口外收不起。点右上角 X、Alt+F4 或从任务栏关闭会退出插件，挂件一起关。</p>
+    <p class="hint">分离后最小化即收起设置窗（插件与挂件继续运行）；Esc、点窗口外收不起。点 X、Alt+F4 或任务栏关闭会退出插件，挂件同关。</p>
     <div class="btn-row">
       <button class="utils-btn utils-primary" @click="emit('show-widget')">显示挂件</button>
       <button class="secondary utils-btn utils-secondary" @click="emit('hide-widget')">隐藏挂件</button>
@@ -135,10 +135,10 @@ function onOpacityCommit() {
       <input type="checkbox" :checked="cfg.passThrough" @change="onCheckChange('passThrough', $event)" />
     </label>
     <p class="hint">
-      关闭时（默认）：鼠标移到鲸鱼、气泡或菜单上就能操作，移开即恢复穿透，四周透明留白也不挡下层应用。开启后：连鲸鱼本体也要停留约 1 秒才接管。
+      关闭（默认）：移到鲸鱼、气泡或菜单即可操作，移开恢复穿透，透明留白不挡下层应用。开启后：鲸鱼本体也需停留约 1 秒才接管。
     </p>
     <p class="hint">
-      开启后连菜单都点不到，建议先绑个全局快捷键当「逃生通道」：uTools 设置 → 全局功能 → 新增 → 指令填「{{ CMD_PASSTHROUGH }}」→ 按组合键。也可在鲸鱼上停留约 1 秒临时接管。
+      开启后连菜单都点不到，建议先绑全局快捷键作「逃生通道」：uTools 设置 → 全局功能 → 新增 → 指令填「{{ CMD_PASSTHROUGH }}」→ 按组合键。
     </p>
     <div class="btn-row">
       <button class="secondary utils-btn utils-secondary" @click="emit('copy-cmd', CMD_PASSTHROUGH)">复制「穿透」指令名</button>
@@ -149,7 +149,7 @@ function onOpacityCommit() {
     </p>
 
     <label class="field row check">
-      <span class="label">自动避让任务栏 <em>（实时识别任务栏隐藏/显示，弹出时让位、收起后贴回）</em></span>
+      <span class="label">自动避让任务栏 <em>（识别任务栏隐藏 / 显示，弹出时让位、收起后贴回）</em></span>
       <input type="checkbox" :checked="cfg.avoidTaskbar" @change="onCheckChange('avoidTaskbar', $event)" />
     </label>
     <p class="hint taskbar-hint">
@@ -172,7 +172,7 @@ function onOpacityCommit() {
         <em>左</em><input class="num" type="number" min="0" max="400" step="4" :value="cfg.edgeLeft" @change="onNumChange('edgeLeft', $event)" />
       </span>
     </label>
-    <p class="hint">贴边间距：挂件贴到该边时留出的像素数（0＝紧贴）。开了「自动避让任务栏」时，任务栏占位的那条边会自动让位，收起后再贴回这里设定的距离。</p>
+    <p class="hint">贴边间距：贴到该边时留出的像素数（0＝紧贴）。开启「自动避让任务栏」后，任务栏占位的那边自动让位，收起后回到此距离。</p>
 
     <label class="field row">
       <span class="label">吸附与翻转</span>
@@ -187,14 +187,14 @@ function onOpacityCommit() {
       <span class="num-text">%</span>
     </label>
     <p class="hint">
-      吸附：拖拽松手时，挂件中心落进某条边的吸附区就贴到那条边（吸附区宽度按可用区宽 / 高算，默认 25%＝左右各 1/4、上下各 1/4）；关掉后松手停在哪就是哪。
+      吸附：松手时挂件中心落在某边吸附区即贴到该边（按可用区宽 / 高算，默认 25%，左右各 1/4、上下各 1/4）；关闭后自由摆放。
     </p>
     <p class="hint">
-      朝向不用配：锚在屏幕左半边就朝右、右半边就朝左，鲸鱼始终面向屏幕内侧（关掉吸附也一样）。
+      朝向无需配置：锚在屏幕左半边朝右、右半边朝左，始终面向屏幕内侧（关掉吸附也一样）。
     </p>
 
     <label class="field row check">
-      <span class="label">避让滚动条 <em>（挂件贴右边缘时留出像素，避免盖住最大化窗口的纵向滚动条）</em></span>
+      <span class="label">避让滚动条 <em>（贴右边缘时留白，避免盖住最大化窗口的纵向滚动条）</em></span>
       <input type="checkbox" :checked="cfg.scrollGapOn" @change="onCheckChange('scrollGapOn', $event)" />
     </label>
     <label class="field row" v-if="cfg.scrollGapOn">
@@ -202,12 +202,12 @@ function onOpacityCommit() {
       <input class="num" type="number" min="0" max="100" step="1" :value="cfg.scrollGapPx" @change="onNumChange('scrollGapPx', $event)" />
       <span class="num-text">px</span>
     </label>
-    <p class="hint" v-if="cfg.scrollGapOn">Windows 默认滚动条约 17px；填 0 等于贴边（与关闭开关等效）。与「贴边间距 → 右」取较大值，不会叠加。</p>
+    <p class="hint" v-if="cfg.scrollGapOn">Windows 默认滚动条约 17px；填 0 等于贴边（等同关闭）。与「贴边间距 → 右」取较大值，不叠加。</p>
 
     <div class="btn-row">
       <button class="secondary utils-btn utils-secondary" @click="emit('reset-pos')">复位窗口位置</button>
     </div>
-    <p class="hint">把挂件挪回默认位置（右下角、紧贴边缘）——换显示器、改分辨率或拖出屏幕后用。</p>
+    <p class="hint">把挂件挪回默认位置（右下角、紧贴边缘）；换显示器、改分辨率或拖出屏幕后用。</p>
       </div>
     </div>
     <p v-if="widgetFlash.msg" class="msg" :class="msgCls(widgetFlash)">{{ widgetFlash.msg }}</p>

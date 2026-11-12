@@ -11,7 +11,8 @@ import fs from 'node:fs'
 
 const src = fs.readFileSync(new URL('../public/preload/floating.js', import.meta.url), 'utf8')
 
-const mapMatch = src.match(/const handlers = \{([\s\S]*?)\}\n/)
+// 事件表是**单行**对象字面量（一个事件一行会让这个文件成为行数棘轮的常客），故取到行尾为止
+const mapMatch = src.match(/const handlers = \{([^\n]*)\}/)
 assert.ok(mapMatch, '找不到 handlers 事件表')
 
 const declared = new Set(

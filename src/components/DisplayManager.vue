@@ -40,7 +40,7 @@
             <span>记住每张卡上次的展开状态</span>
           </label>
           <span class="fold-remember-hint">
-            {{ foldRemember ? '关闭设置页再打开，卡片保持你上次的样子' : '关闭后每次打开都按下面的「默认展开 / 默认收起」来' }}
+            {{ foldRemember ? '重开设置页时保持上次的样子' : '关闭后每次打开都按下方「默认展开 / 默认收起」' }}
           </span>
         </div>
 
@@ -85,7 +85,7 @@
                   v-if="canShowAllInTab(tab)"
                   type="button"
                   class="mini-btn link"
-                  title="把这组里被单独隐藏的卡片全部放出来"
+                  title="把本组单独隐藏的卡片全部放出"
                   @click="showAllInTab(tab)"
                 >全显示</button>
               </span>
@@ -435,7 +435,7 @@ function canDrag(key: string): boolean {
 function dragTitle(key: string): string {
   if (kw.value) return '搜索状态下不能调序，清空搜索后再拖'
   if (MERGED_CARD_ROOT[key]) return '这张卡跟着它的主卡走，请拖上面那张'
-  return '按住拖动，调整这张卡在本组内的顺序'
+  return '按住拖动，调整本组内顺序'
 }
 function onDragStart(e: DragEvent, tabKey: string, key: string) {
   if (!canDrag(key)) { e.preventDefault(); return }

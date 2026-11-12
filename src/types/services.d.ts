@@ -144,14 +144,14 @@ export interface WhaleConfig {
   // 以管理员身份启动 dsh（仅 Windows 生效）。开启后每次启动都会弹 UAC：
   // 运行中的进程无法就地提权，只能 runas 拉起新实例再结束旧实例（见 dsh.js 的 startMode）
   dshElevated: boolean
-  // dsh Web UI 监听端口（默认 3080 = DSH_PORT_DEFAULT）。落在系统动态保留段被占用时可改，
-  // 宿主把它透传给 `dsh web --port <n>`；改动需重启 dsh 才生效
+  // dsh Web UI 监听端口（默认 3080 = DSH_PORT_DEFAULT）。落在系统动态保留段被占用时可改，宿主把它透传给 `dsh web --port <n>`；改动需重启 dsh 才生效
   dshPort: number
-  // npm 注册源（'' = 官方源）/ 固定版本（'' = 自动：安装/更新时取 latest）/ 更新前是否先删掉插件目录里的 dsh / 启动是否带 --no-open
+  // npm 注册源（'' = 官方源）/ 固定版本（'' = 自动：安装/更新时取 latest）/ 更新前是否先删掉插件目录里的 dsh / 启动是否带 --no-open / 打开 Web UI 用内置还是系统浏览器
   dshRegistry: string
   dshVersion: string
   dshReinstall: boolean
   dshNoOpen: boolean
+  dshOpenIn: 'builtin' | 'external'
   // dsh 插件市场目录源（并发竞速，见 dsh-market.js 的 loadCatalog）：
   //   url      = 自定义目录 URL（'' = 不加这条）
   //   mirror   = 是否让镜像源参赛（默认开）
@@ -193,9 +193,8 @@ export interface WhaleConfig {
   mailTo: string
   mailFromName: string
   mailSubjectPrefix: string
-  // 待办与计时：唯一开关（v1.15 起 focusOn 与 todoOn 合并）。关着时挂件不显示待办分组，
-  // 也不把计时上报成 whale:focus；编辑面始终在设置页。旧配置里的 focusOn 由宿主 readConfig
-  // 兜底读进来，保存后不再写出。
+  // 待办与计时：唯一开关（v1.15 起 focusOn 与 todoOn 合并）。关着时挂件不显示待办分组，也不把
+  // 计时上报成 whale:focus；编辑面始终在设置页。旧配置里的 focusOn 由宿主 readConfig 兜底读进来
   todoOn: boolean
   // 下班倒计时（v1.14.0）：独立可开关的挂件展示形态。offworkDays 用 Date.getDay() 编号
   // （0 = 周日 … 6 = 周六），默认 [1,2,3,4,5]；跨日班由「下班时间 <= 上班时间」判定
@@ -2457,12 +2456,13 @@ export interface WhaleServices {
   // 读取指令当前绑定的全局快捷键（uTools 8.0 起；未绑定或旧版本返回空串）
   getCmdHotKey(cmdLabel?: string): string
   isWidgetVisible(): boolean
-  // 试播按压气泡：把队列整份发给挂件真弹一次（只发不落盘，挂件那边会存引用，
-  // 故调用方需先深拷贝）。items 经宿主 normBubble 归一化与截断；挂件未显示 / 队列为空时 ok:false
+  // 预览类：看效果不落盘（ringPreview 亮 3/4 圈、themePreview 换主题色）；bubblePreview 试播泡泡队列
   bubblePreview(payload: { items: unknown[] }): { ok: boolean; error?: string }
-  // —— 待办清单：设置页是唯一编辑面，挂件页只做勾选 / 设为专注（走 ipc 的 whale:todo） ——
+  ringPreview(payload?: { ms?: number }): { ok: boolean; error?: string }
+  themePreview(payload?: { theme?: string; ms?: number }): { ok: boolean; error?: string }
+  // —— 待办清单 ——
   todoGet(): TodoState
-  // 输入框 maxlength 与条数上限（单一来源是宿主 constants.js）
+  // 输入框 maxlength 与条数上限（来源 constants.js）
   todoLimits(): TodoLimits
   // 写操作统一回 { ok, todo, error? }：todo 是操作后的整份清单，失败时也回传供界面回填
   todoAdd(text: string): TodoMutateResult
