@@ -1386,10 +1386,10 @@ const cfg = reactive({
   offworkStart: '09:00',
   offworkEnd: '18:00',
   offworkDays: [1, 2, 3, 4, 5],
-  offworkShowSec: true,
-  offworkRing: true,
-  offworkWeekendOn: false,
-  offworkPaydayOn: false,
+  offworkShowSec: true, offworkRing: true,
+  ringWidth: 'normal' as 'thin' | 'normal' | 'thick',
+  ringFollowTheme: true, // 外圈粗细 / 圈色跟随气泡主题（LookView 的 :value 直接读，缺了「外圈粗细」下拉框会空选）
+  offworkWeekendOn: false, offworkPaydayOn: false,
   offworkPaydayDay: 10,
   // 时薪（元/小时）：0 = 未配置（输入框显示空、挂件不显示「今日已赚」），只有正数才参与估算
   offworkHourlyWage: 0,
@@ -3351,7 +3351,7 @@ function applyConfig(c: any) {
   cfg.offworkEnd = normOffworkHm(c.offworkEnd, OFFWORK_DEFAULTS.end)
   cfg.offworkDays = normOffworkDays(c.offworkDays, OFFWORK_DEFAULTS.days)
   cfg.offworkShowSec = c.offworkShowSec !== false
-  cfg.offworkRing = c.offworkRing !== false
+  cfg.offworkRing = c.offworkRing !== false; cfg.ringWidth = ['thin', 'thick'].includes(c.ringWidth) ? c.ringWidth : 'normal'; cfg.ringFollowTheme = c.ringFollowTheme !== false // 外圈粗细带档位校验（非法回默认 normal），圈色默认跟随主题；缺回填会让 LookView 的下拉框空选
   cfg.offworkWeekendOn = c.offworkWeekendOn === true
   cfg.offworkPaydayOn = c.offworkPaydayOn === true
   cfg.offworkPaydayDay = normOffworkPayday(c.offworkPaydayDay)

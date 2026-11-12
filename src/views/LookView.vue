@@ -823,9 +823,9 @@ onUnmounted(() => {
    通用控件样式已由 main.css 统一提供（全局唯一来源），本组件只留自身特有的控件样式。
    .btn-row 骨架、utils 档位配色与 .link-btn 基类也已在 main.css，此处不再留副本。 */
 
-/* 外圈粗细的档位下拉只容纳「细 / 标准 / 粗」：`.field.row select` 全局 flex: 1 会撑满整行像个空输入框，
-   这里收回自然宽度 */
-.field.row select.auto { flex: 0 0 auto; min-width: 84px }
+/* 外圈粗细的档位下拉只容纳「细 / 标准 / 粗」：全局 `.field.row select` 是 flex: 1、`select` 又是 width: 100%，
+   只写 flex: 0 0 auto 会以整行宽度为基准且不收缩，叠上左侧标签就把卡片撑出边界 —— 必须同时收回 width */
+.field.row select.auto { flex: 0 0 auto; width: auto; max-width: 100%; min-width: 84px }
 
 /* 正文里嵌的「参与随机」图例小圆点：与「资源 → 导入的形象」格子上那枚角标
    （.skin-cell-pool）保持同一形态与配色，用户在这边读到时能对上那边的视觉 */
