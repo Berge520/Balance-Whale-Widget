@@ -132,14 +132,23 @@ function resetAlerts() {
 // 收起后只留标题与一行摘要，让「用量」组的其它卡上浮
 // 使用 useFold 持久化折叠状态到 localStorage，避免用户每次打开都要重新展开
 const cardFold = useFold('notify', false)
+// 计时到点**实际生效**的渠道：分渠道开关还要与「通知方式」里的总开关取与
+// （宿主 notify.js 的 notifyTimer 就是这么判的）。只播报配置值会骗人 ——
+// 邮件总开关默认关着，默认配置下播报「通知 + 邮件」，那封邮件永远发不出去。
+const timerCh = computed(() => ({
+  sys: props.cfg.timerNotifyOn === true && props.cfg.notifySystemOn !== false,
+  mail: props.cfg.timerMailOn === true && props.cfg.notifyMailOn === true,
+}))
 // 收起态摘要：播报四类自动提醒各开了几个，收起也能看出「现在会收到哪些提醒」；
 // 计时到点（留言 / 系统通知 / 邮件）也归本卡，一并计入 —— 否则收起后看不出「计时会不会提醒」
 const cardSummary = computed(() => {
   const auto = [props.cfg.peakRemindOn, props.cfg.lowAlertOn, props.cfg.budgetOn, props.cfg.dropAlertOn].filter(Boolean).length
-  const timer = props.cfg.timerNotifyOn || props.cfg.timerMailOn
+  const { sys, mail } = timerCh.value
   const parts: string[] = []
   parts.push(auto ? `已开启 ${auto}/4 类自动提醒` : '四类自动提醒均未开启')
-  if (timer) parts.push(props.cfg.timerMailOn ? '计时到点：通知 + 邮件' : '计时到点：系统通知')
+  if (sys || mail) parts.push('计时到点：' + (sys && mail ? '通知 + 邮件' : sys ? '系统通知' : '邮件'))
+  // 两个分渠道开关都开着、但总开关把它们全关掉：明说「只剩气泡」，别让人以为还有提醒
+  else if (props.cfg.timerNotifyOn || props.cfg.timerMailOn) parts.push('计时到点：仅气泡')
   return parts.join(' · ')
 })
 // 计时到点折叠：四项（留言 / 通知 / 气泡停留 / 邮件）配一次就不动，默认收起，与「更多提醒设置」「提醒音音量」同一套
@@ -147,9 +156,10 @@ const timerFold = useFold('timerNote', false)
 // 收起态摘要：把「到点什么、走哪些渠道」说出来，收起也不等于没信息
 const timerBrief = computed(() => {
   const note = String(props.cfg.timerNote || '').trim()
+  const { sys, mail } = timerCh.value
   const ch: string[] = []
-  if (props.cfg.timerNotifyOn) ch.push('通知')
-  if (props.cfg.timerMailOn) ch.push('邮件')
+  if (sys) ch.push('通知')
+  if (mail) ch.push('邮件')
   const stay = props.cfg.timerRemindSec > 0 ? `${props.cfg.timerRemindSec} 秒` : '常驻'
   return `${note ? '「' + note + '」' : '未设留言'} · ${ch.length ? ch.join(' + ') : '仅气泡'} · 停留 ${stay}`
 })
@@ -270,7 +280,7 @@ defineExpose({ syncAlertsBaseline })
         </label>
 
         <label class="field row check">
-          <span class="label">计时到点系统通知 <em>（关掉后只留气泡）</em></span>
+          <span class="label">计时到点系统通知 <em>（关掉后不弹系统通知；邮件另由下面的开关控制）</em></span>
           <input type="checkbox" :checked="cfg.timerNotifyOn" @change="emit('patch', { timerNotifyOn: ($event.target as HTMLInputElement).checked })" />
         </label>
 
@@ -285,7 +295,7 @@ defineExpose({ syncAlertsBaseline })
         </label>
 
         <label class="field row check">
-          <span class="label">计时到点也发邮件 <em>（需先开启「邮件通知」并填好 SMTP）</em></span>
+          <span class="label">计时到点也发邮件 <em>（需先开启「邮件通知」并填好 SMTP）</em><b v-if="cfg.timerMailOn === true && cfg.notifyMailOn !== true" class="warn-note">邮件通知总开关没开，这个勾选暂不生效</b></span>
           <input type="checkbox" :checked="cfg.timerMailOn" @change="emit('patch', { timerMailOn: ($event.target as HTMLInputElement).checked })" />
         </label>
       </div>
@@ -447,6 +457,12 @@ defineExpose({ syncAlertsBaseline })
   font-style: normal;
   font-size: 12px;
   color: var(--fg-faint);
+}
+/* 「勾了也不生效」的常显提醒：只加提示不改值 —— 总开关临时关掉时不该顺手清掉用户的勾选 */
+.warn-note {
+  margin-left: 6px;
+  font-weight: 600;
+  color: var(--warn);
 }
 .range {
   flex: 1;

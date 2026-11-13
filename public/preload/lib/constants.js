@@ -17,7 +17,7 @@ const UPDATE_FETCH_TIMEOUT_MS = 15000
 const UPDATE_CHECK_URL = 'https://ghfast.top/https://raw.githubusercontent.com/Berge520/Balance-Whale-Widget/refs/heads/main/package.json'
 // 当前插件版本。uTools 未提供读取插件自身版本的 API，此处由 scripts/sync-version.mjs
 // 在构建前从 package.json 的 version 自动写入，无需手动维护
-const PLUGIN_VERSION = '1.15.0'
+const PLUGIN_VERSION = '1.16.0'
 const UPDATE_TTL_MS = 12 * 3600 * 1000
 
 const MIN_SCALE = 0.6
@@ -127,6 +127,17 @@ const BG_VIDEO_LICENSE = 'CC BY-NC-SA 4.0'
 const BG_VIDEO_AUTHOR = 'stushansusu'
 const BG_VIDEO_SOURCE = 'https://github.com/zhu1090093659/dsh-web'
 const BG_VIDEO_LICENSE_URL = 'https://creativecommons.org/licenses/by-nc-sa/4.0/'
+
+// 用户自行导入的素材（形象 / 气泡图 / 音效）**单文件**体积上限。
+// 原本 skins / bubbles / sounds 三个模块各写一份 `5 * 1024 * 1024`，且报错文案里
+// 还各写死一句「限 5MB」—— 改上限时得同时记得改 3 处常量 + 9 处文案，漏一处就出现
+// 「提示限 5MB、实际限 10MB」这种自相矛盾的提示。收敛到这里，文案由 MEDIA_LIMIT_TEXT 派生。
+const MEDIA_IMPORT_MAX_BYTES = 5 * 1024 * 1024
+// 报错文案里的「限 5MB」：从上面的字节数算出来（不足 1MB 时保留一位小数），
+// 上限一变文案自动跟着变，不再有第二份字面量
+const MEDIA_LIMIT_TEXT = (MEDIA_IMPORT_MAX_BYTES % 1048576
+  ? (MEDIA_IMPORT_MAX_BYTES / 1048576).toFixed(1)
+  : String(MEDIA_IMPORT_MAX_BYTES / 1048576)) + 'MB'
 
 // 共享角色图清单：id → { name, file, sha256, size }。id 是打包时生成的 ASCII 短名
 // （中文名含全角括号，通不过 skins.js 的 id 白名单，故原名留作展示 name）。
@@ -366,6 +377,9 @@ const K = {
   win: 'whale:window',      // dbStorage：窗口锚点
   update: 'whale:update',   // dbStorage：上次检查更新结果缓存
   timer: 'whale:timer',     // dbStorage：计时状态（重建挂件后恢复）
+  // dbStorage：上一次「邮件发送失败」系统提示的时间戳（epoch ms）。只用于 24h 节流，
+  // 发送成功即删；纯运行时状态，不进备份
+  mailFailAt: 'whale:mailFailAt',
   // dbStorage：待办清单 { items: [{ id, text, done, at, doneAt, est, rounds, tm, mins }], focusId }。
   // rounds（该任务的完成轮数）是会话明细的派生缓存，由 store.syncTodoRounds 用 focus.roundsByTodo 回填，不再自己累加
   // 与计时分开存：清单是长期数据（进备份），计时是易失的会话状态（只用于重建恢复）
@@ -605,6 +619,8 @@ module.exports = {
   BG_VIDEO_AUTHOR,
   BG_VIDEO_SOURCE,
   BG_VIDEO_LICENSE_URL,
+  MEDIA_IMPORT_MAX_BYTES,
+  MEDIA_LIMIT_TEXT,
   NEWEST_VERSION,
   DSH_PORT_DEFAULT,
   BASE_MIN,

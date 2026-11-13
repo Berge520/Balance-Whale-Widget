@@ -1840,8 +1840,11 @@ function recordLedgerUsage(currentBalance, currency, extra) {
   const keys = Object.keys(led.history).sort()
   const keep = historyKeepDays()
   while (keys.length > keep) delete led.history[keys.shift()]
-  try { utools.dbStorage.setItem(K.ledger, led) } catch (err) { logErr('[whale][ledger] 写账本失败', err && err.message) }
-  return { ledger: led, adjust: adjust, drop: drop }
+  // 写失败要如实告诉调用方：账本没落盘时「今日已用」只活到重启，早先只 logErr、上层当成功，
+  // 用户看到的是个不会留存也不会报错的数字（用 ok:false 而非布尔三元：正常路径不新增字段）
+  const r = { ledger: led, adjust: adjust, drop: drop }
+  try { utools.dbStorage.setItem(K.ledger, led) } catch (err) { logErr('[whale][ledger] 写账本失败', err && err.message); r.ok = false }
+  return r
 }
 // 手动校准今日已用：只改当天累计值，不动余额基准（后续记账仍按真实余额差值累加）。
 // 令牌模式下平台今日总量是权威值、会覆盖校准结果，因此该入口只对记账模式有意义。
@@ -1861,18 +1864,6 @@ function calibrateTodayUsage(amount) {
     return { ok: false, error: '校准写入失败：' + errMsg(err) }
   }
   return { ok: true, from: from, to: to, todayAdjust: led.todayAdjust || 0 }
-}
-// 每日提醒去重：预算 / 低余额两类系统通知各自每天最多一次（按日期字符串比较，跨天自动失效）。
-// 返回 true 表示本次调用认领了今天的提醒名额，可以发通知。
-const NOTICE_KEYS = { budget: 'budgetNotifiedOn', low: 'lowNotifiedOn', goal: 'focusGoalNotifiedOn' }
-function claimDailyNotice(kind) {
-  const key = NOTICE_KEYS[kind] || NOTICE_KEYS.budget
-  const led = readLedger()
-  const t = todayKey()
-  if (led[key] === t) return false
-  led[key] = t
-  try { utools.dbStorage.setItem(K.ledger, led) } catch (err) { logErr('[whale][ledger] 写提醒标记失败', err && err.message) }
-  return true
 }
 // 导入：把 [{ date, usage }] 合并进账本历史（同日覆盖），按日期升序只保留最近保留期内的天数。
 // 当天（led.date）需同步写入 todayUsage，否则趋势图的当天柱仍取实时累计值，导入的当天行会被忽略；
@@ -1907,7 +1898,11 @@ function mergeLedgerHistory(entries) {
 function setTodayUsage(amount) {
   const led = readLedger()
   led.todayUsage = Math.max(0, Number(amount) || 0)
-  try { utools.dbStorage.setItem(K.ledger, led) } catch (err) { logErr('[whale][ledger] 写今日用量失败', err && err.message) }
+  try { utools.dbStorage.setItem(K.ledger, led) } catch (err) {
+    // 落盘失败也要返回账本本身（本次显示仍对），由调用方另判 .ok 决定要不要提示未保存
+    logErr('[whale][ledger] 写今日用量失败', err && err.message)
+    led.ok = false
+  }
   return led
 }
 
@@ -1917,7 +1912,7 @@ function setTodayUsage(amount) {
 // 由悬浮窗在开始/停止/到点时上报；宿主只做落库，重建挂件后回推给页面恢复。
 // 传 null 表示清除（用户关掉「计时保存」开关时）。
 function readTimer() {
-  const dft = { mode: 'off', running: false, paused: false, startAt: 0, endAt: 0, elapsed: 0, remain: 0, arg: '', isBreak: false, back: 0, cycle: 0, cycleDate: '', span: 0 }
+  const dft = { mode: 'off', running: false, paused: false, startAt: 0, endAt: 0, elapsed: 0, remain: 0, arg: '', isBreak: false, back: 0, cycle: 0, cycleDate: '', span: 0, reported: false, notified: false }
   try {
     const t = utools.dbStorage.getItem(K.timer)
     if (t && typeof t === 'object') {
@@ -1938,6 +1933,7 @@ function readTimer() {
         cycle: isFinite(Number(t.cycle)) ? Math.max(0, Math.round(Number(t.cycle))) : 0,
         cycleDate: typeof t.cycleDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(t.cycleDate) ? t.cycleDate : '',
         span: isFinite(Number(t.span)) ? Math.max(0, Math.round(Number(t.span))) : 0,
+        reported: t.reported === true, notified: t.notified === true, // 幂等位：看门狗代发后写回，避免重开重复
       }
     }
   } catch (err) {}
@@ -2097,20 +2093,22 @@ function readModelState() {
   } catch (err) {}
   return {}
 }
+// 返回是否落盘：状态只是展示缓存（刷新失败下次会重拉），但删除模型时清不掉会让它「复活」，那个入口必须据此报失败
 function writeModelState(state) {
   try {
     utools.dbStorage.setItem(K.models, state && typeof state === 'object' ? state : {})
+    return true
   } catch (err) {
     logErr('[whale][models] 写模型状态失败', err && err.message)
+    return false
   }
 }
-// 删除模型时清掉它的运行时状态（密钥槽位由 settings.js 一并删）
+// 删除模型时清掉它的运行时状态（密钥槽位由 settings.js 一并删）。返回是否清干净
 function dropModelState(id) {
   const st = readModelState()
-  if (Object.prototype.hasOwnProperty.call(st, id)) {
-    delete st[id]
-    writeModelState(st)
-  }
+  if (!Object.prototype.hasOwnProperty.call(st, id)) return true
+  delete st[id]
+  return writeModelState(st)
 }
 
 // ──────────────────────────────────────────────
@@ -2165,7 +2163,6 @@ module.exports = {
   readLedger,
   recordLedgerUsage,
   calibrateTodayUsage,
-  claimDailyNotice,
   keyFingerprint,
   mergeLedgerHistory,
   setTodayUsage,

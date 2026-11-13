@@ -13,8 +13,8 @@ const fs = require('fs')
 const path = require('path')
 const crypto = require('crypto')
 const { log, logErr } = require('./log')
-const { PLUGIN_VERSION } = require('./constants')
-const { errMsg, stamp } = require('./util')
+const { PLUGIN_VERSION, K } = require('./constants')
+const { errMsg, stamp, writeFileAtomicSync } = require('./util')
 const {
   readConfig, writeConfig, readSecrets, writeSecrets,
   readLedger, mergeLedgerHistory, readTimer, writeTimer,
@@ -24,6 +24,10 @@ const holidays = require('./holidays')
 const bubbles = require('./bubbles')
 
 const KIND = 'balance-whale-widget-backup'
+// 来源标记：文件选择器允许任意 *.json，用户很容易误选别的插件的备份。
+// 只认 kind 不够 —— 历史版本 / 手改文件的 kind 可能缺失，故另有 APP 作为**缺省**来源标记：
+// 有 kind 走 kind，没 kind 才看 app；两者都没有的旧备份交给设置页做二次确认
+const APP = 'balance-whale-widget'
 const SCHEMA = 1
 const MIN_PWD = 6
 // scrypt 参数：内存约 16MB / 次，桌面端足够快，也让暴力破解代价高
@@ -132,6 +136,7 @@ function exportBackup(opts) {
   }
   const payload = {
     kind: KIND,
+    app: APP,
     schema: SCHEMA,
     appVersion: PLUGIN_VERSION,
     exportedAt: new Date().toISOString(),
@@ -145,11 +150,10 @@ function exportBackup(opts) {
     },
     data,
   }
-  try {
-    fs.writeFileSync(filePath, JSON.stringify(payload, null, 2), 'utf8')
-  } catch (err) {
-    return { ok: false, error: '写入备份文件失败：' + errMsg(err) }
-  }
+  // 原子写：备份文件是用户拿去换机 / 存档的凭据，半份 JSON 解析不了、也看不出坏了。
+  // 临时文件与目标同目录（rename 不跨卷），失败时 writeFileAtomicSync 自己会清掉临时文件
+  const w = writeFileAtomicSync(filePath, JSON.stringify(payload, null, 2), 'utf8')
+  if (!w.ok) return { ok: false, error: '写入备份文件失败：' + w.error }
   log('[whale][backup] 导出备份', { filePath, withSecrets, bubbles: bubbleCount })
   return { ok: true, path: filePath, withSecrets, bubbles: bubbleCount, bubblesBytes: bubbleBytes, exportedAt: payload.exportedAt }
 }
@@ -174,7 +178,21 @@ function pickBackup() {
   } catch (err) {
     return { ok: false, error: '不是有效的备份文件（读取或解析失败）：' + errMsg(err) }
   }
-  if (!payload || payload.kind !== KIND || !payload.data || typeof payload.data !== 'object') {
+  // 来源校验：kind 对得上就是本插件的备份（有 kind 时不再看 app，兼容早期的导出）；
+  // kind 缺失时退回看 app；两者都没有 → 放行但标 noMark（设置页提示「来源不明」让用户确认）
+  // 而不是直接拒 —— 用户在别处手存过一份只有 data 的 JSON 这种老用法还能用。
+  // 另：payload 也可能是数组 / null，其上取 .kind 是 undefined，自然走「没给」分支
+  // kind 只在「给了且不是本插件的」时候才拒；null / 空串算没给（手改文件常见）
+  const kindOk = payload.kind === KIND
+  const appOk = payload.app === APP
+  if (!kindOk && payload.kind != null && payload.kind !== '') {
+    return { ok: false, error: '这不是本插件的备份文件' }
+  }
+  // 只认非空字符串：JSON 里手写的空串不算「来自另一个应用」，改坏一个字段不该把能用的备份判死
+  if (!kindOk && !appOk && typeof payload.app === 'string' && payload.app) {
+    return { ok: false, error: '这份备份来自另一个应用（' + payload.app + '），本插件不识别' }
+  }
+  if (!payload.data || typeof payload.data !== 'object') {
     return { ok: false, error: '这不是本插件的备份文件' }
   }
   if (Number(payload.schema) > SCHEMA) {
@@ -182,24 +200,36 @@ function pickBackup() {
   }
   const d = payload.data
   pending = { path: filePath, payload: payload }
+  // 预览的「有没有这一项」必须与 applyBackup 的「写不写得进去」同一把尺子：
+  // 前者原先只判「对象在不在」，于是勾了「窗口位置」恢复时因锚点不合法被 skip、勾了「气泡图」
+  // 恢复时因图片全坏整体放弃 —— 用户勾了个寂寞，还会以为是 bug。故这里复用恢复侧同一批判据
+  const anchorOk = validAnchor(d.window)
+  const bubbleOk = Array.isArray(d.bubbles) && d.bubbles.some((it) => {
+    const raw = it && typeof it === 'object' ? it : {}
+    return bubbles.checkImport(String(raw.ext || '').toLowerCase(), Buffer.from(String(raw.data || ''), 'base64')).ok
+  })
   return {
     ok: true,
     path: filePath,
     exportedAt: String(payload.exportedAt || ''),
     appVersion: String(payload.appVersion || ''),
+    // 无来源标记的旧备份：设置页据此要求二次确认，别让它静默覆盖现有数据
+    noMark: !kindOk && !appOk,
+    // 凭据要密码才解得开，预览侧无法预判密码对不对；但至少要提醒「勾了就得填密码」——
+    // 否则用户勾上凭据、密码留空点恢复，预检整体失败，其余勾选项一项也没写，很迷惑
+    noPasswordHint: !!(d.secretsEnc && typeof d.secretsEnc === 'object' && d.secretsEnc.data),
     has: {
       config: !!d.config && typeof d.config === 'object',
       ledger: !!d.ledger && typeof d.ledger === 'object',
-      window: !!d.window && typeof d.window === 'object',
+      window: anchorOk,
       timer: !!d.timer && typeof d.timer === 'object',
       holidays: !!d.holidays && typeof d.holidays === 'object' && Array.isArray(d.holidays.dates) && d.holidays.dates.length > 0,
-      bubbles: Array.isArray(d.bubbles) && d.bubbles.length > 0,
-      // 与导出侧对称：空清单 / 空统计不算「有」，避免用户勾了一项却只是把现有数据清空
-      todo: !!d.todo && typeof d.todo === 'object' && Array.isArray(d.todo.items) && d.todo.items.length > 0,
-      // 与导出侧对称：空清单 / 空统计不算「有」，避免用户勾了一项却只是把现有数据清空。
-      // 专注统计天表与会话明细任一非空都算有（只留明细的老数据也要能恢复）
+      bubbles: bubbleOk,
+      // 与恢复侧同判据：有 items 数组就写得进去，哪怕为空（清除现有清单也是用户勾选后的真实意图）
+      todo: !!d.todo && typeof d.todo === 'object' && Array.isArray(d.todo.items),
+      // 与恢复侧同判据：days 是对象、或 sessions 是非空数组即可写（只留明细的老数据也要能恢复）
       focus: !!d.focus && typeof d.focus === 'object' && (
-        (!!d.focus.days && typeof d.focus.days === 'object' && Object.keys(d.focus.days).length > 0)
+        (!!d.focus.days && typeof d.focus.days === 'object')
         || (Array.isArray(d.focus.sessions) && d.focus.sessions.length > 0)
       ),
       secrets: !!(d.secretsEnc && typeof d.secretsEnc === 'object' && d.secretsEnc.data),
@@ -230,12 +260,57 @@ function applyBackup(opts) {
   const applied = []
   const skipped = []
   const errors = []
+  // 有写入但不算完整恢复（目前只有「气泡图只写进去一部分」）：ok 要判真，applied 不含它
+  let partial = false
   // writeConfig / writeTimer / writeAnchor / mergeLedgerHistory 写失败时**不抛错**（内部 logErr 后返回 false / ok:false），
   // 所以每个分支都必须判返回值：只 try/catch 会把「写失败」记成 applied，
   // 用户看到「恢复成功」但重启后一切照旧 —— 这是全项目唯一会丢数据的路径，宁可报错也不能假报成功。
   const fail = (label, detail) => {
     logErr('[whale][backup] 恢复 ' + label + ' 失败', detail || '')
     errors.push(label + '：写入失败' + (detail ? '（' + detail + '）' : ''))
+  }
+
+  // ── 预检（只读）：把「一定写不进去」的情况提前拦下，一个字节都不写 ──
+  // 各分支原本按勾选项顺序直接落盘，凭据解密却排在最后：密码错时 config / 账本 / 待办已经写进去了，
+  // 用户看到「恢复失败」，重启后却发现一半设置已经变了；而气泡图分支是「先 clearAll 再写」，
+  // 备份里的图全不合法时会把现有图清空、再一张也写不回来。
+  // 故把「解密凭据」「气泡图可写性」这两件可提前判定的事挪到写盘之前，失败即整体放弃。
+  // 预检失败不消耗 pending：用户改对密码 / 换一份备份后可以直接重试，不用重新选文件。
+  let secretPlan = null
+  if (want('secrets') && d.secretsEnc) {
+    try {
+      const s = decryptSecrets(d.secretsEnc, String(o.password || ''))
+      if (!s || typeof s !== 'object') throw new Error('解密结果异常')
+      secretPlan = s
+    } catch (err) {
+      // AES-GCM 认证标签不匹配 → 密码错或文件被改过
+      logErr('[whale][backup] 预检凭据失败（密码错或备份损坏）', errMsg(err))
+      const m = '凭据：密码不正确或备份已损坏（' + errMsg(err) + '）'
+      return { ok: false, precheck: true, applied: [], skipped: [], errors: [m], error: m }
+    }
+  }
+  let bubblePlan = null
+  // 备份里声明了几张：预检会把不合法的剔掉，只比较 bubblePlan 自己的长度发现不了「丢图」
+  let bubbleTotal = 0
+  if (want('bubbles') && Array.isArray(d.bubbles) && d.bubbles.length) {
+    bubbleTotal = d.bubbles.length
+    const plan = []
+    for (const it of d.bubbles) {
+      const raw = it && typeof it === 'object' ? it : {}
+      const ext = String(raw.ext || '').toLowerCase()
+      const data = Buffer.from(String(raw.data || ''), 'base64')
+      // 口径交给 bubbles.checkImport：预检与真正落盘必须用同一把尺子，
+      // 否则会出现「预检通过、清空后却一张都写不进」
+      if (!bubbles.checkImport(ext, data).ok) continue
+      const thumb = Buffer.from(String(raw.thumb || ''), 'base64')
+      plan.push({ name: String(raw.name || ''), ext: ext, data: data, thumb: thumb.length ? thumb : null, at: Number(raw.at) || 0 })
+    }
+    if (!plan.length) {
+      logErr('[whale][backup] 预检气泡图失败：备份里的图片均不合法')
+      const m = '气泡图素材：备份里的图片均无法写入'
+      return { ok: false, precheck: true, applied: [], skipped: [], errors: [m], error: m }
+    }
+    bubblePlan = plan
   }
 
   if (want('config')) {
@@ -255,9 +330,19 @@ function applyBackup(opts) {
         const hist = d.ledger.history && typeof d.ledger.history === 'object' ? d.ledger.history : {}
         const entries = Object.keys(hist).map((date) => ({ date: date, usage: hist[date] }))
         if (d.ledger.date) entries.push({ date: String(d.ledger.date), usage: d.ledger.todayUsage })
-        // 同日覆盖，只保留配置的账本保留天数之内
-        if (mergeLedgerHistory(entries).ok) applied.push('ledger')
-        else fail('账本')
+        // 写回后回读核对：setItem 可能「不抛错但也没真存进去」（存储层是异步落盘的），
+        // 只判返回值等于相信写入方，这里再读一次确认备份里那条数据确实还在
+        const mr = mergeLedgerHistory(entries)
+        const back = readLedger()
+        const dayIn = !!(d.ledger.date && d.ledger.history
+          && typeof d.ledger.history === 'object'
+          && Object.prototype.hasOwnProperty.call(d.ledger.history, String(d.ledger.date)))
+        const gotToday = back.todayUsage === Math.max(0, Number(d.ledger.todayUsage) || 0)
+        if (!mr.ok) fail('账本')
+        else if (d.ledger.date && !dayIn && !gotToday) {
+          // 备份当天既不在历史里、今日用量也没对上 = 这份账本没真正落进去
+          fail('账本', '写入后回读不到备份里的数据')
+        } else applied.push('ledger')
       } catch (err) { fail('账本', errMsg(err)) }
     }
   }
@@ -265,11 +350,19 @@ function applyBackup(opts) {
     if (!validAnchor(d.window)) skipped.push('window')
     else {
       try {
-        if (writeAnchor({
+        const want = {
           hAnchor: d.window.hAnchor, hDist: Math.max(0, Math.round(Number(d.window.hDist))),
           vAnchor: d.window.vAnchor, vDist: Math.max(0, Math.round(Number(d.window.vDist))),
-        })) applied.push('window')
-        else fail('窗口位置')
+        }
+        if (!writeAnchor(want)) fail('窗口位置')
+        else {
+          // 回读核对必须绕开 readAnchor：它带内存缓存，写的正是这份缓存，
+          // 拿缓存比对等于自己跟自己比，落盘失败也发现不了。故直接从存储读原始值
+          const back = utools.dbStorage.getItem(K.win)
+          if (back && back.hAnchor === want.hAnchor && back.hDist === want.hDist
+            && back.vAnchor === want.vAnchor && back.vDist === want.vDist) applied.push('window')
+          else fail('窗口位置', '写入后回读不到备份里的位置')
+        }
       } catch (err) { fail('窗口位置', errMsg(err)) }
     }
   }
@@ -292,27 +385,29 @@ function applyBackup(opts) {
     else fail('节假日表')
   }
   if (want('bubbles')) {
-    // 气泡图配图：备份里没有 → skipped；有则「先清后写」——恢复的语义是「回到备份时的样子」，
-    // 若只做「补充」会与现有图混在一起，还可能撞上 8 张上限导致只恢复一半，反而更乱
-    const list = Array.isArray(d.bubbles) ? d.bubbles : []
-    if (!list.length) skipped.push('bubbles')
+    // 配图已在预检里解码、筛过（bubblePlan）；这里只负责「先清后写」——
+    // 恢复的语义是「回到备份时的样子」，若只做「补充」会与现有图混在一起，
+    // 还可能撞上 8 张上限导致只恢复一半，反而更乱
+    if (!bubblePlan) skipped.push('bubbles')
     else {
       try {
         bubbles.clearAll()
         let added = 0
-        let bad = 0
-        for (const it of list) {
-          const data = Buffer.from(String(it.data || ''), 'base64')
-          const thumb = Buffer.from(String(it.thumb || ''), 'base64')
-          const r = bubbles.importBuffer(
-            String(it.name || ''), String(it.ext || '').toLowerCase(),
-            data, thumb.length ? thumb : null, Number(it.at) || 0)
+        for (const it of bubblePlan) {
+          const r = bubbles.importBuffer(it.name, it.ext, it.data, it.thumb, it.at)
           if (r && r.ok) added++
-          else bad++
         }
-        if (added > 0) applied.push('bubbles')
-        else fail('气泡图素材', '备份里的图片均无法写入')
-        if (bad > 0) logErr('[whale][backup] 恢复气泡图有 ' + bad + ' 张失败（格式或体积不合法）')
+        // 恢复的语义是「回到备份时的样子」：少一张也算没恢复完整。原先进 applied 只在旁边
+        // 加一条 errors，界面就成了「已恢复：…」+ 小字报错，用户只看得到成功。
+        // 分母用 bubbleTotal（备份里声明的张数）而不是 bubblePlan 长度 —— 预检剔掉的也在其中
+        if (added < bubbleTotal) {
+          logErr('[whale][backup] 恢复气泡图有 ' + (bubbleTotal - added) + ' 张失败（格式或体积不合法）')
+          if (added > 0) errors.push('气泡图素材：只写入了 ' + added + '/' + bubbleTotal + ' 张')
+          else fail('气泡图素材', '备份里的图片均无法写入')
+          // 部分写入不算 applied（界面不能报「已恢复」），但确实写了东西：
+          // 只勾了气泡图时 ok 不能为 false，否则界面直接报「恢复失败」，用户以为图没进去
+          if (added > 0) partial = true
+        } else applied.push('bubbles')
       } catch (err) { fail('气泡图素材', errMsg(err)) }
     }
   }
@@ -343,11 +438,11 @@ function applyBackup(opts) {
     }
   }
   if (want('secrets')) {
-    if (!d.secretsEnc) skipped.push('secrets')
+    // 解密已在预检里做过（secretPlan）；这里只剩写存储，失败才记 error
+    if (!secretPlan) skipped.push('secrets')
     else {
       try {
-        const s = decryptSecrets(d.secretsEnc, String(o.password || ''))
-        if (!s || typeof s !== 'object') throw new Error('解密结果异常')
+        const s = secretPlan
         writeSecrets({
           apiKey: String(s.apiKey || ''),
           platformToken: String(s.platformToken || ''),
@@ -359,17 +454,18 @@ function applyBackup(opts) {
           // 备份文件里那份加密凭据等于白存。老备份无此字段时传 undefined 沿用现值
           notifyMail: s.notifyMail === undefined ? undefined : s.notifyMail,
         })
-        applied.push('secrets')
-      } catch (err) {
-        // AES-GCM 认证标签不匹配 → 密码错或文件被改过
-        logErr('[whale][backup] 恢复凭据失败（密码错或备份损坏）', errMsg(err))
-        errors.push('凭据：密码不正确或备份已损坏（' + errMsg(err) + '）')
-      }
+        // 凭据是「写进去了就算」（不能回读比对：万一读失败会误报，而密码错已在预检拦下）。
+        // 但至少要确认关键字段真的落到了存储里 —— 加密存储写失败在某些环境不抛异常
+        const wantKey = String(s.apiKey || '')
+        const backS = readSecrets()
+        if (wantKey && backS.apiKey !== wantKey) fail('凭据', '写入后回读不到 API Key')
+        else applied.push('secrets')
+      } catch (err) { fail('凭据', errMsg(err)) }
     }
   }
   log('[whale][backup] 恢复备份', { applied: applied.join(','), skipped: skipped.join(','), errors: errors.length })
-  if (applied.length) pending = null
-  return { ok: applied.length > 0, applied: applied, skipped: skipped, errors: errors, error: errors[0] || '' }
+  if (applied.length || partial) pending = null
+  return { ok: applied.length > 0 || partial, applied: applied, skipped: skipped, errors: errors, error: errors[0] || '' }
 }
 
 module.exports = {

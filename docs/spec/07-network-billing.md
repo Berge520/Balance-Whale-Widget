@@ -17,7 +17,7 @@
 - **今日模型占比**：只在 `usageMode==='token'` 时渲染（记账模式拿不到明细）。`settings.getTodayModels()` 复用 `fetchPlatformUsage`，返回 `{ok,models,amount,tokens}`；无 Token 返回 `{ok:false,error:'未配置平台 Token'}`。页面在 `onMounted` / 切模式 / 窗口重新可见时各拉一次，不进轮询。
 - **三态契约**（`getTodayModels` / `testPlatformToken` 都只认）：① 成功 → 有 `amount`（+`tokens`/`byModel`）；② **空态** → `error === 'no usage'`（**硬契约字面量，不许改**），调用方返回空列表 / `empty:true`，**不得当失败透传**；③ 失败 → 其余 `error`，**一律中文**：`NO_TOKEN`→「未配置平台 Token」、401→「平台 Token 无效或已过期」、`<500`→「用量接口返回 HTTP <码>」、5xx/网络失败重试后→「暂时不可用 / 网络请求失败」、非 JSON→「不是合法 JSON」；**不得把 `http 401` / `fetch failed` 甩给用户**。返回体另带 `code`/`transient`。空态与中文化有单测（`test/models-today-empty.test.mjs`）。
 - 峰谷：北京时间**周一至周五（不含法定节假日）9–12、14–18** 为峰，其余（含周末）全谷；`CN_HOLIDAYS`（`constants.js` 内置 `YYYY-MM-DD` 表）里的节假日全天谷价。表只列「实际放假」的日子（调休补班的周末已按周末判谷）；跨年未收录时按普通工作日算（只会高估，不会少计），此时 `pricing.warnIfHolidayCalendarStale` 记日志；结构与「均判谷价」由 `test/pricing.test.mjs` 静态校验。
-- 成功后 `setTodayUsage(amount)` 写入账本 `todayUsage`：趋势图 / 导出 / 今日已用都取账本，不写会与挂件不一致。
+- 成功后 `setTodayUsage(amount)` 写入账本 `todayUsage`：趋势图 / 导出 / 今日已用都取账本，不写会与挂件不一致。返回值即账本本身（写成功时不带 `ok`），**存储写失败时补 `ok:false`**；`recordLedgerUsage` 同口径。二者任一失败都会在余额 payload 上打 `ledgerSaveFailed: true`——数字照常显示，但重启后会退回旧值，界面据此提示，不把「没存上」说成成功。
 
 **定价表**（每百万 token，CNY，谷/峰）：
 

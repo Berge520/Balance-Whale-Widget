@@ -337,13 +337,43 @@ function mailConfig() {
   return {}
 }
 
+// 邮件失败提示：自动提醒失败原先只 logErr，用户完全是盲的 —— SMTP 配错后以为「提醒没触发」，
+// 实际上是邮件全丢。这里在发送失败时补一条系统通知，但同一段连续故障里 24h 最多一条
+// （发信成功后解除节流，所以「好了又坏」能立刻再提示一次，整体并非绝对 24h 一条）：
+// 余额 / 峰谷这类提醒十来分钟就可能发一封，不节流会把通知中心刷爆。
+// 刻意不看 notifySystemOn：总开关关的是「自动提醒弹窗」，而这是一条故障告知；
+// 用户把邮件关掉后根本走不到这里，不存在「关了还弹」的骚扰。
+const MAIL_FAIL_NOTICE_MS = 24 * 60 * 60 * 1000
+
+// 纯函数：距上次提示是否已过 24h。last 非正数（从没提示过 / 存储坏了）视为该提示；
+// 时钟回拨（last 在未来）也放行 —— 不然一次系统时间错乱就把提示永久钉死。
+function shouldNoticeMailFail(now, last) {
+  const t = typeof now === 'number' && isFinite(now) ? now : Date.now()
+  const prev = typeof last === 'number' && isFinite(last) && last > 0 ? last : 0
+  if (!prev) return true
+  return t - prev >= MAIL_FAIL_NOTICE_MS || t < prev
+}
+
+function noticeMailFail(err) {
+  let last = 0
+  try { last = Number(utools.dbStorage.getItem(K.mailFailAt)) || 0 } catch (e) {}
+  if (!shouldNoticeMailFail(Date.now(), last)) return false
+  // 先落标记再弹窗：弹窗本身失败也不该让它退化成「每封都提示」
+  try { utools.dbStorage.setItem(K.mailFailAt, Date.now()) } catch (e) {}
+  const reason = errMsg(err).trim().slice(0, 120)
+  notifySystem('小鲸鱼提醒：邮件通知没发出去' + (reason ? '（' + reason + '）' : '') +
+    '。连续失败时 24 小时内只提示这一次（邮件恢复后重新计时），可在设置页「通知与提醒」检查邮箱配置')
+  return true
+}
+
 // 发一封通知邮件。返回 Promise<{ok,error}>，但**自动提醒的调用方不 await**——
 // 邮件失败绝不影响主流程，错误只在内部 logErr 留痕（见文件头「两条铁律」）。
 // 设置页的「测试通知」要拿结果给用户看，所以这里把 Promise 返回出去。
 // cfg 是**完整配置**（readConfig 的结果）：凭据在加密存储、收件人在 config，
 // 这里负责把两者合成 sendMail 需要的完整视图。漏合并会让 mailFrom/mailTo 落空、
 // 被判成「发件邮箱格式不正确」——自动提醒这条路的错误只 logErr 不弹窗，用户看不到，必须合对
-function sendMailAsync(cfg, text) {
+// opts.noticeFail：自动提醒专用，失败时补一条（24h 节流的）系统通知，见上面的 noticeMailFail
+function sendMailAsync(cfg, text, opts) {
   const c = cfg && typeof cfg === 'object' ? cfg : {}
   const mail = Object.assign({}, mailConfig(), {
     mailFrom: c.mailFrom,
@@ -352,7 +382,14 @@ function sendMailAsync(cfg, text) {
   })
   const title = c.mailSubjectPrefix || ''
   return sendMail(mail, mailSubject(title ? title + ' ' + text : text), text).then((r) => {
-    if (!r.ok) logErr('[whale][notify] 邮件通知失败', r.error)
+    if (r.ok) {
+      // 发成功就解除节流：修好之后再次坏掉，要能第一时间再提示一次
+      try { utools.dbStorage.removeItem(K.mailFailAt) } catch (err) {}
+      return r
+    }
+    logErr('[whale][notify] 邮件通知失败', r.error)
+    // 只有自动提醒才提示；设置页「测试通知」自己会展示结果，不需要再弹一遍
+    if (opts && opts.noticeFail === true) noticeMailFail(r.error)
     return r
   })
 }
@@ -372,7 +409,7 @@ function notify(text, cfg) {
   const wantSystem = c.notifySystemOn !== false
   const wantMail = c.notifyMailOn === true
   const system = wantSystem ? sendSystemAsync(t) === true : false
-  if (wantMail) sendMailAsync(c, t)
+  if (wantMail) sendMailAsync(c, t, { noticeFail: true })
   return { system, mail: wantMail }
 }
 
@@ -393,7 +430,7 @@ function notifyTimer(text, cfg, channels) {
   const system = wantSystem && c.notifySystemOn !== false
   const mail = wantMail && c.notifyMailOn === true
   if (system) senders.system(t)
-  if (mail) senders.mail(c, t)
+  if (mail) senders.mail(c, t, { noticeFail: true })
   return { system, mail }
 }
 
@@ -407,4 +444,4 @@ function _setSendersForTest(impl) {
     : { system: sendSystemAsync, mail: sendMailAsync }
 }
 
-module.exports = { notify, notifyTimer, sendMail, mailSubject, notifySystem, mailConfig, sendMailAsync, buildMail, mimeHeaderText, mailAddress, resolvePort, portHint, SmtpClient, _setNetForTest, _setSendersForTest }
+module.exports = { notify, notifyTimer, sendMail, mailSubject, notifySystem, mailConfig, sendMailAsync, buildMail, mimeHeaderText, mailAddress, resolvePort, portHint, shouldNoticeMailFail, noticeMailFail, SmtpClient, _setNetForTest, _setSendersForTest }

@@ -78,7 +78,7 @@ test('上报幂等：一轮只记一次，重载后补弹「时间到」不会�
   assert.match(blockOf(PAGE, /function reportFocusSession\(/, '\n  }'), /if \(timerReported\) return/,
     '有标记就不再记')
   assert.match(PAGE, /timerReported = true/, '上报后置位')
-  assert.match(PAGE, /timerReported = false; \/\/ 新一轮开始/, '起新一轮时清标记')
+  assert.match(PAGE, /timerReported = false;.*\/\/ 新一轮开始/, '起新一轮时清标记')
   // 超出宽限的过期轮：既不补「时间到」也不记账，标记置位让它静默翻页
   assert.match(blockOf(PAGE, /function restoreTimer\(t\)/, '\n  }'),
     /timerReported = true;\s*\n\s*resetTimer\(\);/)

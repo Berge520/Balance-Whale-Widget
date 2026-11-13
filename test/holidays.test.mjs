@@ -28,7 +28,7 @@ const require = createRequire(import.meta.url)
 const holidays = require('../public/preload/lib/holidays.js')
 const { K, CN_HOLIDAYS } = require('../public/preload/lib/constants.js')
 
-const { isHoliday, coveredYears, update, clear, status, snapshot, restore, SOURCES, SPAN, _resetCache } = holidays
+const { isHoliday, coveredYears, update, clear, status, snapshot, restore, SOURCES, SPAN, FAIL_COOLDOWN_MS, _resetCache } = holidays
 
 // 每个用例前后都清内存缓存 + 存储，避免相互串味
 function reset() {
@@ -131,6 +131,52 @@ test('update：全部源失败时 ok:false 且不抛（设置页据此提示失�
   assert.equal(r.ok, false)
   assert.ok(r.error, '失败要带原因，不能静默')
   assert.equal(isHoliday('2030-01-01'), false, '没拉到就什么都别写')
+})
+
+test('update：整次失败后短时间内再点不重复联网（失败冷却）', async () => {
+  let hits = 0
+  const failing = async () => { hits++; throw new Error('fetch failed') }
+  await withFetch(() => update(Date.UTC(2030, 0, 15, 0, 0) / 1000), failing)
+  const firstRound = hits
+  assert.ok(firstRound > 0, '首轮真的联网了')
+
+  const r = await withFetch(() => update(Date.UTC(2030, 0, 15, 0, 0) / 1000), failing)
+  assert.equal(hits, firstRound, '冷却期内不该再发请求（连点不再干等）')
+  assert.equal(r.ok, false)
+  assert.equal(r.cachedFail, true, '要标记这是冷却期内的缓存结论')
+  assert.match(r.error, /秒后可重试/, '提示里要告诉用户多久后能再试')
+})
+
+test('update：冷却到期后自动允许重试（失败不是永久拉黑）', async () => {
+  await withFetch(() => update(Date.UTC(2030, 0, 15, 0, 0) / 1000), async () => { throw new Error('fetch failed') })
+  const realNow = holidays.now
+  try {
+    holidays.now = () => realNow() + FAIL_COOLDOWN_MS + 1000
+    const r = await withFetch(() => update(Date.UTC(2030, 0, 15, 0, 0) / 1000), async () => (
+      { ok: true, json: async () => yearBody(['2030-01-01']) }
+    ))
+    assert.equal(r.ok, true, '冷静期过后要重新联网并成功')
+    assert.equal(r.cachedFail, undefined)
+  } finally {
+    holidays.now = realNow
+  }
+})
+
+test('update：部分年份失败不算整次失败，不进入冷却', async () => {
+  const tried = []
+  const impl = async (url) => {
+    tried.push(url)
+    if (url.includes('2031')) throw new Error('fetch failed')
+    return { ok: true, json: async () => yearBody(['2030-01-01']) }
+  }
+  const r1 = await withFetch(() => update(Date.UTC(2030, 0, 15, 0, 0) / 1000), impl)
+  assert.equal(r1.ok, true)
+  assert.deepEqual(r1.failed, [2031], '失败年份要如实报出来')
+
+  const before = tried.length
+  const r2 = await withFetch(() => update(Date.UTC(2030, 0, 15, 0, 0) / 1000), impl)
+  assert.equal(r2.ok, true)
+  assert.ok(tried.length > before, '当年拿到了就不该拦用户再补次年')
 })
 
 test('update：HTTP 非 2xx 视为该源失败（5xx 不能被当成成功）', async () => {

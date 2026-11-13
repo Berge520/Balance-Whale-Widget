@@ -11,9 +11,12 @@
  */
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import fs from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import notify from '../public/preload/lib/notify.js'
 
-const { buildMail, mailSubject, mimeHeaderText, mailAddress, resolvePort, portHint, SmtpClient, _setNetForTest, notifyTimer, _setSendersForTest } = notify
+const { buildMail, mailSubject, mimeHeaderText, mailAddress, resolvePort, portHint, SmtpClient, _setNetForTest, notifyTimer, _setSendersForTest, shouldNoticeMailFail, noticeMailFail } = notify
 
 function installSenders() {
   const calls = { system: [], mail: [] }
@@ -214,4 +217,78 @@ test('notifyTimer：空文案不发，返回实际分发结果', () => {
     assert.equal(calls.system.length, 0)
     assert.deepEqual(notifyTimer('到点', { notifySystemOn: true, notifyMailOn: false }, { system: true, mail: true }), { system: true, mail: false })
   } finally { _setSendersForTest(null) }
+})
+
+// ──────────────────────────────────────────────
+// 邮件失败提示（24h 节流）
+// 自动提醒的邮件失败原先只进日志，用户配错 SMTP 后以为「提醒没触发」。
+// ──────────────────────────────────────────────
+
+// utools 桩：dbStorage 用普通对象模拟，showNotification 收文案
+function stubUtools(store) {
+  const prev = globalThis.utools
+  const shown = []
+  globalThis.utools = {
+    showNotification: (t) => shown.push(t),
+    dbStorage: {
+      getItem: (k) => (Object.prototype.hasOwnProperty.call(store, k) ? store[k] : null),
+      setItem: (k, v) => { store[k] = v },
+      removeItem: (k) => { delete store[k] },
+    },
+  }
+  return { shown, restore: () => { globalThis.utools = prev } }
+}
+
+test('shouldNoticeMailFail：没提示过 / 超 24h / 时钟回拨都放行', () => {
+  const now = 1_800_000_000_000
+  const day = 24 * 60 * 60 * 1000
+  assert.equal(shouldNoticeMailFail(now, 0), true)
+  assert.equal(shouldNoticeMailFail(now, undefined), true)
+  assert.equal(shouldNoticeMailFail(now, NaN), true)
+  assert.equal(shouldNoticeMailFail(now, now - 60 * 1000), false)
+  assert.equal(shouldNoticeMailFail(now, now - day), true)
+  // 系统时间被回拨（标记在未来）也要放行，否则一次错乱就永久钉死
+  assert.equal(shouldNoticeMailFail(now, now + 1000), true)
+})
+
+test('noticeMailFail：首次提示并落标记，24h 内不再提示', () => {
+  const store = {}
+  const { shown, restore } = stubUtools(store)
+  try {
+    assert.equal(noticeMailFail(new Error('535 auth failed')), true)
+    assert.equal(shown.length, 1)
+    assert.match(shown[0], /邮件通知没发出去/)
+    assert.match(shown[0], /535 auth failed/)
+    assert.ok(store['whale:mailFailAt'] > 0, '提示后必须落标记（否则每封失败都弹）')
+    assert.equal(noticeMailFail(new Error('again')), false)
+    assert.equal(shown.length, 1)
+  } finally { restore() }
+})
+
+test('noticeMailFail：标记超过 24h 后重新提示', () => {
+  const store = { 'whale:mailFailAt': Date.now() - 25 * 60 * 60 * 1000 }
+  const { shown, restore } = stubUtools(store)
+  try {
+    assert.equal(noticeMailFail(new Error('boom')), true)
+    assert.equal(shown.length, 1)
+    assert.ok(store['whale:mailFailAt'] > Date.now() - 60 * 1000, '提示后标记要刷新')
+  } finally { restore() }
+})
+
+test('自动提醒才开失败提示：notifyTimer 的邮件带 noticeFail，设置页测试不强制', () => {
+  const seen = []
+  _setSendersForTest({ system: () => {}, mail: (cfg, text, opts) => seen.push(opts) })
+  try {
+    notifyTimer('到点', { notifySystemOn: false, notifyMailOn: true }, { system: false, mail: true })
+    assert.deepEqual(seen, [{ noticeFail: true }])
+  } finally { _setSendersForTest(null) }
+})
+
+test('发送成功即解除节流（源码契约：成功分支删掉 mailFailAt）', () => {
+  const src = fs.readFileSync(
+    path.join(path.dirname(fileURLToPath(import.meta.url)), '../public/preload/lib/notify.js'),
+    'utf8',
+  )
+  assert.match(src, /if\s*\(r\.ok\)\s*\{[\s\S]{0,200}removeItem\(K\.mailFailAt\)/,
+    '修好后再次坏掉要能立刻提示，成功分支必须删掉节流标记')
 })

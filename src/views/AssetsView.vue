@@ -13,7 +13,7 @@
 import { computed, onMounted, onUnmounted, reactive, ref, watch, nextTick } from 'vue'
 import { msgCls, useFlash, type Flash } from '../composables/useFlash'
 import { useFold } from '../composables/useFold'
-import { assetSize, fetchAsDataUrl, fmtBytes, pad2, sharedSkinThumb } from '../utils/format'
+import { assetSize, failText, fetchAsDataUrl, fmtBytes, pad2, sharedSkinThumb } from '../utils/format'
 import SoundRow from '../components/SoundRow.vue'
 import DownloadBox from '../components/DownloadBox.vue'
 import type {
@@ -52,6 +52,9 @@ const props = defineProps<{
   soundUnused: boolean
   // —— 父级的忙碌态（与 assets 卡片联动） ——
   assetsBusy: boolean
+  // 「形象导入进行中」由父级持有（doImportSkin 里有 await，期间连点会并发跑第二遍），
+  // 这里只读来做按钮禁用；两处「导入」入口都在本组件模板里，故必须传下来
+  skinImportBusy: boolean
   // 「展开形象卡」指令：新手引导的「去挑形象」会把它 +1。折叠态是本组件私有（galleryFolds），
   // 父级改不了，故用自增计数器当一次性指令（父级只写、这里 watch 后展开）
   browseSkinsTick: number
@@ -251,6 +254,10 @@ const assetTotalBytes = computed(() => {
   for (const it of props.skinGallery.items) n += Number(it.size) || 0
   for (const it of props.bubbleItems) n += Number(it.size) || 0
   for (const r of SOUND_ROLES) for (const it of (props.soundsMeta[r] || [])) n += Number(it.size) || 0
+  // 共享素材池（共享角色 + 共享音效）也是真占地方的：漏掉它们会让「合计」只报几 MB，
+  // 用户在数据目录里看到几十 MB，会以为这里算错了
+  for (const it of sharedSoundItems.value) if (it.installed) n += Number(it.size) || 0
+  for (const it of sharedSkinItems.value) if (it.installed) n += Number(it.size) || 0
   return n
 })
 // assetSize：素材体积文案，已收进 utils/format.ts（此处直接引用）
@@ -963,7 +970,7 @@ async function doDownloadSharedSkins() {
     }
     const okCount = todo.length - failed.length
     if (failed.length) {
-      sharedSkinFlash.msg = `已下载 ${okCount} 张，${failed.length} 张失败 —— ${failed[0]}`
+      sharedSkinFlash.msg = `已下载 ${okCount} 张，${failed.length} 张失败 —— ${failText(failed)}`
       sharedSkinFlash.err = true
       return
     }
@@ -1121,7 +1128,7 @@ async function doDownloadSharedSounds() {
     }
     const okCount = todo.length - failed.length
     if (failed.length) {
-      soundFlash.msg = `已下载 ${okCount} 段，${failed.length} 段失败 —— ${failed[0]}`
+      soundFlash.msg = `已下载 ${okCount} 段，${failed.length} 段失败 —— ${failText(failed)}`
       soundFlash.err = true
       return
     }
@@ -1528,7 +1535,7 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
         </button>
         <div class="head-actions">
             <button class="export-btn utils-btn utils-outline" type="button" @click="doRandomSkin()">随机一张</button>
-            <button class="export-btn utils-btn utils-outline" type="button" @click="doImportSkin()">导入图片…</button>
+            <button class="export-btn utils-btn utils-outline" type="button" :disabled="skinImportBusy" @click="doImportSkin()">{{ skinImportBusy ? '导入中…' : '导入图片…' }}</button>
             <!-- 卡头唯一的整理入口。原来这里是「选中操作」「随机设置」两个下拉并列，两处很别扭：
                  1) 面板与箭头都在表达「我有独立状态」，但实际共用一个布尔，点一个两个同时展开；
                  2) 「设为参与随机」在两边各有一份（选中批量 / 全部批量），用户要在两个面板间找；
@@ -1659,7 +1666,7 @@ defineExpose({ refreshSkinPacks, refreshSharedSkins, refreshSharedSounds })
                   :title="it.random !== false ? '参与随机：会被「随机一张」抽到' : '不参与随机：不会被抽到'"></span>
           </div>
         </div>
-        <button class="skin-cell skin-cell-add" type="button" title="导入图片" @click="doImportSkin()">
+        <button class="skin-cell skin-cell-add" type="button" :disabled="skinImportBusy" :title="skinImportBusy ? '正在导入…' : '导入图片'" @click="doImportSkin()">
           <span class="skin-cell-add-plus">＋</span>
           <span class="skin-cell-add-txt">导入</span>
         </button>

@@ -80,12 +80,13 @@ function clearSelectedData() {
       if (clearItems.assets) names.push('导入的素材')
       if (picked.todo) names.push('待办与专注记录')
       // 宿主只在挂件原本可见时才销毁重建（隐藏状态保持隐藏），别写成「一定重建」骗用户去找挂件
+      // 部分项没清干净时宿主返回 ok:false + error：不能照报「已清除」，否则用户以为全清了
       dataFlash.msg = `已清除：${names.join('、')}。`
         + (picked.config || picked.window ? '挂件已按默认值重置（原本隐藏则仍隐藏）。' : '')
       // 页面回显刷新（凭据置空 / 设置回填 / 账本重读）读父级全局状态，交回父级做
       emit('cleared', picked)
     } else {
-      dataFlash.msg = '清除失败：' + ((r && r.error) || '未知错误')
+      dataFlash.msg = '清除未全部完成：' + ((r && r.error) || '未知错误')
     }
   } catch (err: any) {
     dataFlash.err = true

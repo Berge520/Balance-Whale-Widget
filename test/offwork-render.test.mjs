@@ -228,8 +228,10 @@ test('鲸鱼外的进度圈：计时未跑时改画当日工时进度，计时�
     page,
     /return offworkRing && !!OFFWORK_CORE && offworkCanRender\(\) && !timerRunning && !timerPaused;/,
   )
-  // 剩余比例 = 1 − 当日工时进度；配色随剩余工时由蓝转琥珀，最后 30 分钟橙红 + 呼吸；进度算不出来就收圈
-  assert.match(page, /if \(!p\) \{ setRing\(false\); return; \}\s*var ov = offworkState\(\);/)
+  // 剩余比例 = 1 − 当日工时进度；配色随剩余工时由蓝转琥珀，最后 30 分钟橙红 + 呼吸；
+  // 进度算不出来就收圈；已下班（phase 'after'，进度恒 100%）也收整只圈 —— 否则填充画到 0、
+  // 灰色轨道还留着，看起来就是「圈没消失」
+  assert.match(page, /if \(!p \|\| p\.phase === 'after'\) \{ setRing\(false\); return; \}\s*var ov = offworkState\(\);/)
   // 剩余比例 / 圈色 / 呼吸三件事只在 rings 里算一次（workFrame），页面不再自己拼 setRing 参数
   assert.match(page, /var f = WHALE_RINGS\.workFrame\(\{ s: p, near: !!\(ov && ov\.near\) \}, ringTheme\(\)\);\s*setRing\(true, f\.color, f\.pct, f\.hot\);/)
   assert.match(page, /var p = OFFWORK_CORE\.dayProgress\(Date\.now\(\), offworkCfgObj\(\)\);/)

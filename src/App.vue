@@ -2330,6 +2330,9 @@ function doBatchRandom(mode: 'all' | 'none' | 'keepCurrent') {
 }
 // 裁剪弹层：非空时显示（选图片 → 裁剪 → 确认后才落盘）
 const skinCrop = ref<{ dataUrl: string; name: string } | null>(null)
+// 导入进行中（防连点重入）：doImportSkin 里有一次 `await makeThumb`，期间再点会并发跑第二遍
+// —— 弹两个裁剪窗、或两张图同时写（后写的顶掉先写的）。进入置真、finally 复位，按钮据此禁用
+const skinImportBusy = ref(false)
 function refreshSkin() {
   const g = services.listSkins?.()
   skinGallery.value = g && Array.isArray(g.items) ? g : { current: '', items: [] }
@@ -2385,45 +2388,32 @@ function makeThumb(dataUrl: string): Promise<string> {
 // 导入先取文件（宿主只读成 data URL，不落盘）→ 弹裁剪窗 → 确认后才写盘。
 // 导入后自动切到「自定义」：导了图却还在用内置形象会很困惑
 async function doImportSkin() {
+  if (skinImportBusy.value) return
+  skinImportBusy.value = true
   skinFlash.msg = ''
   skinFlash.err = false
   try {
     const r = services.pickImageFile?.()
-    if (!r) {
-      skinFlash.err = true
-      skinFlash.msg = '宿主 API 不可用'
-      return
-    }
+    if (!r) throw new Error('宿主 API 不可用')
     if (r.canceled) return
-    if (!r.ok || !r.dataUrl) {
-      skinFlash.err = true
-      skinFlash.msg = '导入失败：' + (r.error || '未知错误')
-      return
-    }
+    if (!r.ok || !r.dataUrl) throw new Error(r.error || '未知错误')
     // 动图（gif/apng）走直接复制，不裁剪：canvas 只取首帧会丢掉动画
     if (r.ext === 'gif' || r.ext === 'apng') {
       const thumb = await makeThumb(r.dataUrl)
       const ir = services.importSkinFromPath?.(r.filePath || '', r.name || '', thumb)
-      if (!ir) {
-        skinFlash.err = true
-        skinFlash.msg = '宿主 API 不可用'
-        return
-      }
-      if (!ir.ok) {
-        skinFlash.err = true
-        skinFlash.msg = '导入失败：' + (ir.error || '未知错误')
-        return
-      }
+      if (!ir) throw new Error('宿主 API 不可用')
+      if (!ir.ok) throw new Error(ir.error || '未知错误')
       skinFlash.msg = `已导入形象「${ir.name || r.name || ''}」（动图不裁剪，保留动画）`
       refreshSkin()
       cfg.skin = 'custom'
-      patchCfg({ skin: cfg.skin })
-      return
+      return patchCfg({ skin: cfg.skin })
     }
     skinCrop.value = { dataUrl: r.dataUrl, name: r.name || '' }
   } catch (err: any) {
     skinFlash.err = true
     skinFlash.msg = '导入失败：' + String(err?.message || err)
+  } finally {
+    skinImportBusy.value = false
   }
 }
 async function onSkinCropConfirm(p: { dataUrl: string; name: string }) {
@@ -3896,6 +3886,7 @@ onUnmounted(() => {
       :skin-unused="skinUnused"
       :sound-unused="soundUnused"
       :assets-busy="assetsBusy"
+      :skin-import-busy="skinImportBusy"
       :media-refresh-tick="mediaRefreshTick"
       :shared-skin-thumb-data-url="sharedSkinThumbDataUrl"
       :builtin-skins="BUILTIN_SKINS"

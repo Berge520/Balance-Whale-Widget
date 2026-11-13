@@ -2759,10 +2759,9 @@
   // 休息轮：到点后点「休息 N 分钟」起的那一轮。必须与专注轮分开，否则休息会被记成
   // 专注分钟、气泡还挂着「专注：xxx」、休息完「再来一轮」也按休息时长重启
   var timerIsBreak = false;   // 这一轮是休息：不记专注、不挂专注尾注、到点不给「休息 / 完成这条」
-  var timerReported = false;  // 本轮已记账（到点或放弃）：防止「到点后重置」「重载后补弹时间到」再记一次
+  var timerReported = false, timerNotified = false; // 本轮已记账 / 已发到点通知（看门狗代发后写回，重开据此避免重复）
   var timerBreakBackSec = 0;  // 休息前的专注时长（秒）：休息结束还原给 timerArg，供「继续专注」
-  var timerBreakSec = 0;      // 本次休息时长（秒）：刻意不写进三段时间输入框 —— 那是专注时长，
-                              // 写进去会被 saveCfg 的 timerSec 永久覆盖，用户下次专注就变 5 分钟了
+  var timerBreakSec = 0;      // 本次休息时长（秒）：刻意不写进三段时间输入框（那是专注时长，会被 saveCfg 永久覆盖）
   var timerBreakMin = TIMER_BREAK_DEFAULT; // 到点后「休息」按钮的分钟数（0 = 不显示该按钮）
   // 番茄循环：短休/长休/每 N 轮/自动衔接。与 timerBreakMin 正交 —— 后者是手动「休息」按钮的时长，
   // 前者是计时结束后自动进入的休息轮。两者可单独使用也可组合
@@ -3252,7 +3251,8 @@
     if (!offworkOwnsRing()) { setRing(false); return; }
     if (typeof OFFWORK_CORE.dayProgress !== 'function') { setRing(false); return; }
     var p = OFFWORK_CORE.dayProgress(Date.now(), offworkCfgObj());
-    if (!p) { setRing(false); return; }
+    // 已下班（phase 'after'，进度恒 100%）：填充画到 0 但灰色轨道还在，看着就是圈没消失，整只圈收起
+    if (!p || p.phase === 'after') { setRing(false); return; }
     var ov = offworkState();
     var f = WHALE_RINGS.workFrame({ s: p, near: !!(ov && ov.near) }, ringTheme());
     setRing(true, f.color, f.pct, f.hot);
@@ -3289,6 +3289,8 @@
   // 平时只开系统通知时行为不变；只开邮件时也该发信，所以不能只看 timerNotifyOn。
   // 正文带上用户开始前写的那句留言：通知离开挂件也要能看出「接下来做什么」。
   function notifyTimerDone() {
+    if (timerNotified) return; // 宿主看门狗已在挂件隐藏期间代发过：重开只补气泡与记账，不再重复响铃
+    timerNotified = true;
     if (!timerNotifyOn && !(timerMailOn && mailOn)) return;
     var text = '小鲸鱼提醒：' + timerDoneText();
     try {
@@ -3298,10 +3300,10 @@
   }
   // 到点说的一句话：用户留言优先，没有就按模式给默认说法。
   // 倒计时的 timerArg 是秒数串，必须换算成 时:分:秒 —— 早先直接拼出来是「倒计时结束（1500）」
+  // 只有 down / at 会走到这里（正计时无「到点」，两处 finishTimer 调用点都排除了 up），故不设 up 分支。
   function timerDoneText() {
     var base;
     if (timerMode === 'at') base = '定时到点（' + timerArg + '）';
-    else if (timerMode === 'up') base = '正计时结束';
     else base = timerModeLabel() + '结束（' + fmtClock((Number(timerArg) || 0) * 1000) + '）';
     return timerNote ? base + ' · ' + timerNote : base;
   }
@@ -3316,10 +3318,9 @@
       elapsed: timerMode === 'up' ? timerElapsed : 0,
       remain: (timerPaused && timerMode !== 'up') ? timerRemain : 0,
       arg: timerArg,
-      // 休息轮必须一起存：重载后恢复成专注轮会把休息记成专注，且「继续专注」会按休息时长重启
-      isBreak: timerIsBreak,
-      // 本轮是否已记账：重载后补弹「时间到」/「到点后重置」都靠它挡住第二次上报
-      reported: timerReported,
+      isBreak: timerIsBreak, // 休息轮必须一起存：重载后恢复成专注会把休息记成专注
+      reported: timerReported, // 本轮已记账：重载后补弹「时间到」/「到点后重置」靠它挡第二次上报
+      notified: timerNotified, // 本轮已发到点通知：宿主看门狗代发后写回，重开据此避免重复通知
       back: timerBreakBackSec,
       // 番茄循环状态：cycle = 本轮是第几个番茄，cycleDate = 记录 cycle 的本地日期（跨日归零）
       cycle: timerCycle,
@@ -3340,7 +3341,7 @@
     timerMode = t.mode;
     timerArg = typeof t.arg === 'string' ? t.arg : '';
     timerIsBreak = t.isBreak === true;
-    timerReported = t.reported === true;
+    timerReported = t.reported === true; timerNotified = t.notified === true;
     timerBreakBackSec = Math.max(0, Math.round(Number(t.back) || 0));
     // 番茄循环状态恢复：cycle / cycleDate / 定时跨度
     timerCycle = Math.max(0, Math.round(Number(t.cycle) || 0));
@@ -3518,7 +3519,7 @@
     clearTimerHandoff();
     cancelPomoAutoNext(); // 用户手动起一轮 → 不再等自动衔接（否则几秒后被它盖掉）
     timerIsBreak = !!asBreak;
-    timerReported = false; // 新一轮开始：记账标记归零，这一轮到点/放弃时才落一笔
+    timerReported = false; timerNotified = false; // 新一轮开始：两个幂等位归零，到点/放弃时才落一笔
     if (!timerIsBreak) timerBreakBackSec = 0;
     var now = Date.now();
     if (timerMode === 'down') {

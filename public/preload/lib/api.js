@@ -15,8 +15,9 @@ const { errMsg } = require('./util')
 const http = require('./http')
 const {
   readSecrets, sanitizeKey, recordLedgerUsage, keyFingerprint, readConfig, setTodayUsage,
-  claimDailyNotice, readModelState, writeModelState, todayKey, alertFor, alertOneLine,
+  readModelState, writeModelState, todayKey, alertFor, alertOneLine,
 } = require('./store')
+const { claimDailyNotice } = require('./notice-claim')
 const { isPeakTime, nextPeakChangeAt, warnIfHolidayCalendarStale, priceFor, customPriceTable, customModelPrice } = require('./pricing')
 const { notify } = require('./notify')
 // codex(33KB) 只在解析「Codex 本地会话统计」时用得到（parseModelCodex，运行时）。
@@ -615,7 +616,10 @@ function checkUpdate(force) {
       if (cached && typeof cached.at === 'number' && now - cached.at < UPDATE_TTL_MS) {
         return Promise.resolve(Object.assign({}, cached, { fresh: false }))
       }
-    } catch (err) {}
+    } catch (err) {
+      // 坏缓存不清就会每轮联网重查（用户以为缓存没生效）：留痕 + 清掉，下一轮正常写回
+      logErr('[whale][update] 读更新缓存失败，已清除', err && err.message); try { utools.dbStorage.removeItem(K.update) } catch (e) {}
+    }
   }
   if (updateInFlight) return updateInFlight
   updateInFlight = fetch(UPDATE_CHECK_URL, { signal: AbortSignal.timeout(UPDATE_FETCH_TIMEOUT_MS) })
@@ -627,11 +631,7 @@ function checkUpdate(force) {
       const latest = String((data && data.version) || '').trim()
       if (!parseVersion(latest)) throw new Error('远端未提供有效版本号')
       const result = {
-        ok: true,
-        fresh: true,
-        at: now,
-        current: PLUGIN_VERSION,
-        latest,
+        ok: true, fresh: true, at: now, current: PLUGIN_VERSION, latest,
         hasUpdate: isNewerVersion(latest, PLUGIN_VERSION),
       }
       try { utools.dbStorage.setItem(K.update, result) } catch (err) { logErr('[whale][update] 写更新缓存失败', err && err.message) }
@@ -810,11 +810,10 @@ async function getBalancePayload(manual) {
   warnIfHolidayCalendarStale(nowSec)
   // 下次峰谷切换的绝对时刻（挂件按它显示「距峰时/谷时」倒计时，避免页面自己再实现一套时段规则）
   full.peakNextAt = nextPeakChangeAt(nowSec)
-  // 本次采样的余额下降量（挂件气泡占位符 {change} 用）：仅自动刷新有意义 ——
-  // 手动刷新会强制采样一次，得到的不是「距上次自动采样的变化」，会报出一个虚假的 0 或偏差值；
-  // 非消费下降（赠送额到期等，rec.adjust 非空）也不算「变化」，给 0。
-  // 正数=余额少了这么多（与账本 drop 同号），页面据此加「-」前缀
+  // 本次采样的余额下降量（{change} 用）：仅自动刷新有意义（手动刷新是强制采样，会报虚假的 0/偏差值），
+  // 非消费下降（赠送额到期，rec.adjust 非空）不算；正数=余额少了（与账本 drop 同号），页面加「-」，账本没落盘时界面能提示
   full.change = !manual && !rec.adjust ? Math.max(0, Number(rec.drop) || 0) : 0
+  if (!rec.ok) full.ledgerSaveFailed = true
   if (cfg.usageMode === 'token' && secrets.platformToken) {
     const u = await fetchPlatformUsage(secrets.platformToken, cfg.tokenPrice)
     if (u && u.amount !== undefined) {
@@ -822,7 +821,8 @@ async function getBalancePayload(manual) {
       full.usageMode = 'token'
       // 令牌模式今日已用以平台返回为准，不弹「这笔没算用量」
       full.adjust = null
-      setTodayUsage(u.amount) // 同步进账本，趋势图/导出与挂件显示保持一致
+      // 同步进账本与趋势图保持一致；写失败只影响留存，不据此判整次刷新失败
+      if (!setTodayUsage(u.amount).ok) full.ledgerSaveFailed = true
       maybeNotifyAlerts(full, cfg, rec.drop, null)
       return full
     }

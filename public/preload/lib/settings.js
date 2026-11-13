@@ -3361,13 +3361,14 @@ module.exports = {
     const cfg = readConfig()
     // models 先于 mainModelId 处理：列表里已没有这个 id，主显示会自动回退
     patchConfig({ models: cfg.models.filter((m) => m.id !== mid), mainModelId: cfg.mainModelId })
-    dropModelState(mid)
+    // 状态清不掉时模型会在「刷新余额」后带着旧数据复活，必须报失败；配置与密钥两处失败会抛异常，不必判
+    const stateCleared = dropModelState(mid)
     const cur = readSecrets()
     const models = Object.assign({}, cur.models)
     delete models[mid]
     writeSecrets({ apiKey: cur.apiKey, platformToken: cur.platformToken, models: models })
     pushModels()
-    return { ok: true }
+    return stateCleared ? { ok: true } : { ok: false, error: '模型已删除，但本地状态清不掉，重启后可能重新出现，请重试' }
   },
   // 切换挂件主显示的模型（'deepseek' 为内置）
   setMainModel(id) {
@@ -3774,13 +3775,13 @@ module.exports = {
       return { ok: false, error: '无法打开保存对话框：' + errMsg(err) }
     }
     if (!filePath) return { ok: false, canceled: true }
-    try {
-      fs.writeFileSync(filePath, csv, 'utf8')
-      return { ok: true, path: filePath }
-    } catch (err) {
-      logErr('[whale][csv] 写入失败', filePath, err && err.message)
-      return { ok: false, error: '写入文件失败：' + errMsg(err) }
+    // 原子写：CSV 是用户拿去对账的，写一半（磁盘满 / 被占用）会留下半份文件，Excel 打开像「少了几天」
+    const w = writeFileAtomicSync(filePath, csv, 'utf8')
+    if (!w.ok) {
+      logErr('[whale][csv] 写入失败', filePath, w.error)
+      return { ok: false, error: '写入文件失败：' + w.error }
     }
+    return { ok: true, path: filePath }
   },
   // 导入用量 CSV（与导出格式一致：日期,用量[,币种]）：弹系统打开框 → 解析 → 合并进账本历史。
   // 同日以导入值覆盖；只保留最近 30 天；不影响当天实时记账基准。
@@ -3825,69 +3826,64 @@ module.exports = {
   //   bubble  = 按压气泡「文案 + 配图」两处的组合语义：重置 config.bubble / config.bubbleOn（文案、队列、开关）
   //             + 清 whale:bubbles 磁盘配图。按压气泡数据天然分散在这里两处，用户要的是「整个功能回到默认」，
   //             故单列一项；它与 config（清整个配置）并非互斥，两个都勾只是多做一次同样的重置，无副作用。
+  // 任一项失败都会在返回值 ok:false + error 里点名（以前只打日志恒报成功，用户以为清干净了）
   // 卸载 uTools 插件不会删除这些数据，需要彻底清除时由设置页调用。
   clearAllData(opts) {
     const o = opts && typeof opts === 'object' ? opts : {}
     const wasVisible = winAlive()
-    if (o.secrets) { try { utools.dbCryptoStorage.removeItem(K.secrets) } catch (err) { logErr('[whale][settings] 清除凭据失败', err && err.message) } }
+    const failed = []
+    const tryRemove = (label, fn) => {
+      try { fn() } catch (err) {
+        logErr('[whale][settings] 清除' + label + '失败', errMsg(err))
+        failed.push(label)
+      }
+    }
+    if (o.secrets) tryRemove('凭据', () => utools.dbCryptoStorage.removeItem(K.secrets))
     if (o.config) {
-      try { utools.dbStorage.removeItem(K.config) } catch (err) { logErr('[whale][settings] 清除配置失败', err && err.message) }
+      tryRemove('配置', () => utools.dbStorage.removeItem(K.config))
       // 模型列表随配置一起没了，运行时快照（余额/额度）留着只会在下次同名重建时冒充新数据
-      try { utools.dbStorage.removeItem(K.models) } catch (err) { logErr('[whale][settings] 清除模型快照失败', err && err.message) }
+      tryRemove('模型快照', () => utools.dbStorage.removeItem(K.models))
       clearTimer() // 设置被重置，一并清掉已落库的计时状态
       // 节假日联网覆盖层：它改的是峰谷计费判据（哪几天算节假日），属于「设置」的一部分；
       // 不随设置清掉的话，用户以为自己回到了默认，实际峰谷时段仍按联网表走
-      try { holidays.clear() } catch (err) { logErr('[whale][settings] 清除节假日覆盖层失败', err && err.message) }
+      tryRemove('节假日覆盖层', () => holidays.clear())
     }
     if (o.ledger) {
-      try { utools.dbStorage.removeItem(K.ledger) } catch (err) { logErr('[whale][settings] 清除账本失败', err && err.message) }
+      tryRemove('账本', () => utools.dbStorage.removeItem(K.ledger))
       // 用量类派生缓存与账本同源（Codex 会话统计 / dsh 用量），一并清掉才叫「清干净」：
       // 只清账本会留下这两份按天聚合的缓存，重开后设置页仍显示旧用量，像是没清
-      try { codex.clearCodexCache() } catch (err) { logErr('[whale][settings] 清除 Codex 统计缓存失败', err && err.message) }
-      try { dshUsage.clearDshUsageCache() } catch (err) { logErr('[whale][settings] 清除 dsh 用量缓存失败', err && err.message) }
+      tryRemove('Codex 统计缓存', () => codex.clearCodexCache())
+      tryRemove('dsh 用量缓存', () => dshUsage.clearDshUsageCache())
     }
     // 自定义音效：音频文件（userData/whale-sounds）+ 元信息，独立于「挂件设置」
     if (o.sounds) {
-      try { sounds.clearAll() } catch (err) { logErr('[whale][settings] 清除自定义音效失败', err && err.message) }
-      // 音效没了，音色还停在「自定义」就没有音源：顺带回退到内置「小黄鸭」
-      // （连同 config 一起清除时不必处理 —— 整份配置已重置，soundSet 本就是默认值）
-      if (!o.config) {
-        try {
-          if (readConfig().soundSet === 'custom') {
-            patchConfig({ soundSet: 'duck' })
-            pushConfig()
-          }
-        } catch (err) { logErr('[whale][settings] 回退音色失败', err && err.message) }
-      }
+      tryRemove('自定义音效', () => sounds.clearAll())
+      // 音效没了、音色还停在「自定义」就没有音源：回退内置「小黄鸭」。
+      // 随 config 一起清时不必处理 —— 整份配置已重置，soundSet 本就是默认值
+      if (!o.config) tryRemove('音色回退', () => { if (readConfig().soundSet === 'custom') { patchConfig({ soundSet: 'duck' }); pushConfig() } })
     }
     if (o.skins) {
-      try { skins.clearAll() } catch (err) { logErr('[whale][settings] 清除自定义形象失败', err && err.message) }
-      // 同音效：自定义形象没了，形象还停在「自定义」就无图可显示，回退到默认内置形象
-      if (!o.config) {
-        try {
-          if (readConfig().skin === 'custom') {
-            patchConfig({ skin: 'DSniang1' })
-            pushConfig()
-          }
-        } catch (err) { logErr('[whale][settings] 回退形象失败', err && err.message) }
-      }
+      tryRemove('自定义形象', () => skins.clearAll())
+      // 同音效：自定义形象没了、形象还停在「自定义」就无图可显示，回退默认内置形象
+      if (!o.config) tryRemove('形象回退', () => { if (readConfig().skin === 'custom') { patchConfig({ skin: 'DSniang1' }); pushConfig() } })
     }
     if (o.bubbles) {
       // 气泡图没有「当前用哪张」的概念，删光即自动回退内置 rua.webp，不必改配置
-      try { bubbles.clearAll() } catch (err) { logErr('[whale][settings] 清除自定义气泡图失败', err && err.message) }
+      tryRemove('自定义气泡图', () => bubbles.clearAll())
     }
     // 背景/片头媒体：文件 + 元信息；清空后若配置还引用着，media.clearAll 会回退为 off/auto
     if (o.media) {
-      try {
+      tryRemove('背景/片头媒体', () => {
         const r = media.clearAll()
         if (r && r.configChanged) pushConfig()
-      } catch (err) { logErr('[whale][settings] 清除背景/片头媒体失败', err && err.message) }
+      })
     }
     // 待办与专注统计：同属用户的长期记录，但两者互相独立 —— 清了清单不该顺手抹掉专注历史，
     // 反之亦然；所以合并成一项「待办与专注记录」一起清，由用户显式勾选。
     if (o.todo) {
-      try { clearTodo() } catch (err) { logErr('[whale][settings] 清除待办失败', err && err.message) }
-      try { clearFocus() } catch (err) { logErr('[whale][settings] 清除专注统计失败', err && err.message) }
+      tryRemove('待办', () => clearTodo())
+      tryRemove('专注统计', () => clearFocus())
+      // 推送失败不影响「已清除」这个事实，只影响挂件即时刷新，留日志即可
       try { pushTodo() } catch (err) { logErr('[whale][settings] 推送空待办失败', err && err.message) }
       // 今日轮数缓存也要一起清：只清读数不推，挂件会一直显示清零前的数字
       try { pushFocusStats() } catch (err) { logErr('[whale][settings] 推送空专注统计失败', err && err.message) }
@@ -3898,28 +3894,28 @@ module.exports = {
     // 用 patchConfig 的按字段写回（而非删整个 config）——用户勾的可能只是「按压气泡」，
     // 不该顺手把挂件其他设置也清掉；config 项被勾时整份配置已重置，这里的写回等于写回默认值，不冲突。
     if (o.bubble) {
-      try {
+      tryRemove('按压气泡文案', () => {
         const dft = defaultConfig()
         patchConfig({ bubble: dft.bubble, bubbleOn: dft.bubbleOn })
         pushConfig()
-      } catch (err) { logErr('[whale][settings] 重置按压气泡文案失败', err && err.message) }
-      try { bubbles.clearAll() } catch (err) { logErr('[whale][settings] 清除按压气泡配图失败', err && err.message) }
+      })
+      tryRemove('按压气泡配图', () => bubbles.clearAll())
     }
     if (o.window) {
-      try { utools.dbStorage.removeItem(K.win) } catch (err) { logErr('[whale][settings] 清除窗口锚点失败', err && err.message) }
-      try { utools.dbStorage.removeItem(K.update) } catch (err) { logErr('[whale][settings] 清除更新检查缓存失败', err && err.message) }
-      try { utools.dbStorage.removeItem(K.dshVersions) } catch (err) { logErr('[whale][settings] 清除 dsh 版本列表失败', err && err.message) }
+      tryRemove('窗口锚点', () => utools.dbStorage.removeItem(K.win))
+      tryRemove('更新检查缓存', () => utools.dbStorage.removeItem(K.update))
+      tryRemove('dsh 版本列表', () => utools.dbStorage.removeItem(K.dshVersions))
       // 「查过版本」标记与版本列表同进退：清了列表却留着标记，设置页会以为已查过而不再自动查
-      try { utools.dbStorage.removeItem(K.dshVersionsQueried) } catch (err) { logErr('[whale][settings] 清除 dsh 版本查询标记失败', err && err.message) }
+      tryRemove('dsh 版本查询标记', () => utools.dbStorage.removeItem(K.dshVersionsQueried))
       // 说明正文缓存也一并清：它按版本号索引，版本列表都清了，留着这份正文没有意义
       // （正文写完虽不可变，但用户点「清除」的意图就是「别再留着这些缓存了」，不该偷偷保留）
-      try { utools.dbStorage.removeItem(K.dshNotes) } catch (err) { logErr('[whale][settings] 清除 dsh 说明缓存失败', err && err.message) }
+      tryRemove('dsh 说明缓存', () => utools.dbStorage.removeItem(K.dshNotes))
       // 「自动刷新版本」是设置页侧的纯偏好（宿主不读它），与查询标记同进退清掉即可
-      try { utools.dbStorage.removeItem(K.dshAutoRefreshVersions) } catch (err) { logErr('[whale][settings] 清除 dsh 自动刷新偏好失败', err && err.message) }
+      tryRemove('dsh 自动刷新偏好', () => utools.dbStorage.removeItem(K.dshAutoRefreshVersions))
       // dsh 诊断 / 配置转储 / 市场目录都是缓存：TTL 内会被复用，不清掉会看到旧结果
       // （市场目录还兼「离线兜底」，不清则断网时仍按旧目录展示）
-      try { diagnostics.clearDshDiagnoseCache() } catch (err) { logErr('[whale][settings] 清除 dsh 诊断缓存失败', err && err.message) }
-      try { dshDump.clearDshDumpCache() } catch (err) { logErr('[whale][settings] 清除 dsh 转储缓存失败', err && err.message) }
+      tryRemove('dsh 诊断缓存', () => diagnostics.clearDshDiagnoseCache())
+      tryRemove('dsh 转储缓存', () => dshDump.clearDshDumpCache())
       clearMarketCache()
       resetAnchorCache()
     }
@@ -3953,7 +3949,8 @@ module.exports = {
       if (!o.config) pushConfig()
     }
     return {
-      ok: true,
+      ok: failed.length === 0,
+      error: failed.length ? '以下项没能清除，请重试：' + failed.join('、') : undefined,
       cleared: {
         secrets: !!o.secrets, config: !!o.config, ledger: !!o.ledger, window: !!o.window,
         sounds: !!o.sounds, skins: !!o.skins, bubbles: !!o.bubbles, bubble: !!o.bubble,
@@ -4013,9 +4010,12 @@ module.exports = {
   // 把挂件位置复位到默认锚点（右下角、紧贴边缘）并立即重摆。
   // 换显示器 / 改分辨率 / 误拖到角落之后，靠它一键找回，不必手动拖拽。
   resetWidgetPosition() {
-    writeAnchor(defaultAnchor())
+    // 锚点没写进去 = 这次复位只在本次会话有效，重建挂件或重启后又回到旧位置。
+    // 以前不判返回值，界面照样报「已复位」，用户下次再看到挂件飘回角落就懵了
+    const saved = writeAnchor(defaultAnchor())
     const ok = repositionFromAnchor()
-    return { ok: ok, error: ok ? '' : '挂件窗口未显示，请先唤出挂件' }
+    if (!ok) return { ok: false, error: '挂件窗口未显示，请先唤出挂件' }
+    return { ok: true, error: saved ? '' : '位置已复位，但本地存储写入失败，重启后可能回到旧位置' }
   },
   getWidgetError() {
     return getWidgetError()

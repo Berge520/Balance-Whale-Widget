@@ -2017,10 +2017,10 @@ export interface BackupExportResult {
 // 备份预览（选择文件后解析出来，尚未写入）
 export interface BackupPreviewResult {
   ok: boolean
-  canceled?: boolean
-  path?: string
-  exportedAt?: string
-  appVersion?: string
+  canceled?: boolean; path?: string
+  exportedAt?: string; appVersion?: string
+  noMark?: boolean // 来源不明（无 kind / app）→ 界面提示后再恢复
+  noPasswordHint?: boolean // 备份含加密凭据 → 恢复时须填密码，否则整次预检失败
   has?: { config: boolean; ledger: boolean; window: boolean; timer: boolean; holidays: boolean; bubbles: boolean; todo: boolean; focus: boolean; secrets: boolean }
   error?: string
 }

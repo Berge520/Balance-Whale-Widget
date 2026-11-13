@@ -8,7 +8,7 @@
   "public/preload/lib/dsh.js": 2829,
   "public/preload/lib/hosts.js": 1423,
   "public/preload/lib/settings.js": 4132,
-  "public/preload/lib/store.js": 2230,
+  "public/preload/lib/store.js": 2226,
   "public/preload/lib/widget.js": 1354,
   "src/App.vue": 7519,
   "src/bubble/bubble-render.js": 705,

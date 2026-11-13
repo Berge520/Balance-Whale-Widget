@@ -8,7 +8,7 @@
 
 `todoAutoNext`（`=== true`，**默认 false**）= **待办到点自动接下一条**，与上面的番茄循环正交：番茄循环管「专注轮 → 休息轮」，这一项管「A 待办的计时结束 → B 待办的计时开始」。开启后，一条待办计时走完，气泡里给 5 秒等待期并显示「取消衔接」，期内点取消或切走则不接；期满自动把下一条未完成的待办设为专注并按它的参数启动计时（不计时的条目不接，停在原地）。v1.15 删掉过同类自动衔接（`timerAutoNext`，休息完自动回专注），根因是「无条件生效」，所以这次配显式开关 + 等待期 + 取消按钮。
 
-`timerPresets` = **快捷时长四档**（分钟，默认 `TIMER_PRESETS_DEFAULT` = `[15,25,45,60]`；`normTimerPresets` 固定输出 4 项：逐项取整并 clamp 1–600，缺项 / 非法值补默认值，非数组回默认表）。**只有设置页「计时」卡写它**，挂件菜单的四个快捷按钮按它渲染（`data-min` 存值、点击时现读，不缓存闭包）。与 `timerSec` / `timerMode` 同一套语义：**设置页是默认值的唯一写入方**，挂件菜单里改时长、点快捷档位、从待办开始、「再来一轮」都只是**这一轮**的临时参数，不回写这两个键（`startTimer` 不落配置，运行态走 `whale:timer`）；宿主广播配置时挂件用 `cfgTimerSecSeen` / `cfgTimerModeSeen` / `cfgTimerAtSeen` 记住上次收到的值，只在**真的变化**时才回填，计时中收到新默认时长先存入 `pendingTimerSec`，回到空闲再落地。
+`timerPresets` = **快捷时长四档**（分钟，默认 `TIMER_PRESETS_DEFAULT` = `[15,25,45,60]`；`normTimerPresets` 固定输出 4 项：逐项取整并 clamp 1–600，缺项 / 非法值补默认值，非数组回默认表）。**只有设置页「待办与计时」卡的计时设置区写它**，挂件菜单的四个快捷按钮按它渲染（`data-min` 存值、点击时现读，不缓存闭包）。与 `timerSec` / `timerMode` 同一套语义：**设置页是默认值的唯一写入方**，挂件菜单里改时长、点快捷档位、从待办开始、「再来一轮」都只是**这一轮**的临时参数，不回写这两个键（`startTimer` 不落配置，运行态走 `whale:timer`）；宿主广播配置时挂件用 `cfgTimerSecSeen` / `cfgTimerModeSeen` / `cfgTimerAtSeen` 记住上次收到的值，只在**真的变化**时才回填，计时中收到新默认时长先存入 `pendingTimerSec`，回到空闲再落地。
 
 `focusGoal` = **每日专注目标轮数**（0–99，默认 0 = 不设；`store.js` 四处按 `FOCUS_GOAL_MAX` clamp）。从「未达成」跨入「已达成」的那一刻弹一次系统通知（`notifyDaily(kind='goal')`，`focusGoalNotifiedOn` 记日期去重），挂件菜单同时显示 `N / goal 轮`。
 

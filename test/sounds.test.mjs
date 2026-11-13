@@ -134,6 +134,46 @@ test('installBuiltin：格式 / 空字节 / 超限 同样被挡', () => {
 })
 
 // ──────────────────────────────────────────────
+// shared 素材池配额：用户自建 ≤20 段，官方段不占配额
+// ──────────────────────────────────────────────
+test('installBuiltin：共享音效库自建段最多 20 段，第 21 段被挡', () => {
+  clearAll()
+  for (let i = 1; i <= 20; i++) assert.ok(installBuiltin('u' + i + '.mp3', 'mp3', Buffer.alloc(4, i)).ok, '第 ' + i + ' 段应成功')
+  const r = installBuiltin('u21.mp3', 'mp3', Buffer.alloc(4))
+  assert.equal(r.ok, false)
+  assert.match(r.error, /最多保留 20 段/)
+  assert.equal(readMeta().shared.length, 20)
+})
+
+test('installBuiltin：装满后同名覆盖不算新增（不占新条目）', () => {
+  clearAll()
+  for (let i = 1; i <= 20; i++) installBuiltin('u' + i + '.mp3', 'mp3', Buffer.alloc(4, i))
+  assert.ok(installBuiltin('u1.mp3', 'mp3', Buffer.alloc(6, 9)).ok, '同名覆盖应放行')
+  assert.equal(readMeta().shared.length, 20)
+})
+
+test('installBuiltin：官方段（official）不受用户配额限制，也不计入配额', () => {
+  clearAll()
+  for (let i = 1; i <= 20; i++) installBuiltin('u' + i + '.mp3', 'mp3', Buffer.alloc(4, i))
+  assert.ok(installBuiltin('o1.mp3', 'mp3', Buffer.alloc(4), { official: true }).ok, '官方段应绕过配额')
+  assert.equal(readMeta().shared.length, 21)
+  // 官方段仍不占用户配额：用户侧还是 20 段，再加一段用户段依旧被挡
+  assert.equal(installBuiltin('u21.mp3', 'mp3', Buffer.alloc(4)).ok, false)
+})
+
+test('readMeta：official 标记归一化后保留（否则下次写 meta 就丢，官方段开始占配额）', () => {
+  clearAll()
+  installBuiltin('o2.mp3', 'mp3', Buffer.alloc(4), { official: true })
+  installBuiltin('plain.mp3', 'mp3', Buffer.alloc(4))
+  const m = readMeta().shared
+  assert.equal(m.find((x) => x.name === 'o2.mp3').official, true)
+  assert.equal(m.find((x) => x.name === 'plain.mp3').official, undefined)
+  // 再触发一次写 meta（装第三段），官方标记必须还在
+  installBuiltin('plain2.mp3', 'mp3', Buffer.alloc(4))
+  assert.equal(readMeta().shared.find((x) => x.name === 'o2.mp3').official, true)
+})
+
+// ──────────────────────────────────────────────
 // nextFile 编号复用：删掉一段后编号回填
 // ──────────────────────────────────────────────
 test('落盘编号复用最小空位（删掉中间一段后，下一段填回该号）', () => {

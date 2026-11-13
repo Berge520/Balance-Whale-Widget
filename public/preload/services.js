@@ -12,12 +12,13 @@
  *  settings.js   对外 window.services（设置页 API）
  */
 const { log, logErr, LOG_FILE } = require('./lib/log')
-const { readConfig, patchConfig, alertFor, alertOneLine } = require('./lib/store')
-const { notify } = require('./lib/notify')
+const { readConfig, patchConfig, alertFor, alertOneLine, readTimer, writeTimer } = require('./lib/store')
+const { notify, notifyTimer } = require('./lib/notify')
 const { checkUpdate } = require('./lib/api')
-const { ensureWidget, toggleWidget, pushConfig, dispose: disposeWidget } = require('./lib/widget')
+const { ensureWidget, toggleWidget, pushConfig, dispose: disposeWidget, winAlive } = require('./lib/widget')
 const { registerIpc, sendWidgetCmd } = require('./lib/ipc')
 const { runRemindTick } = require('./lib/remind-tick')
+const { runTimerWatch } = require('./lib/timer-watch')
 
 // dsh 一族（dsh / dsh-market / dsh-export / dsh-backup / dsh-usage / ...）合计 300KB+，
 // 而启动路径上只在「插件进程真正退出」时才用得到 stopOnQuit()。顶层 require 会把这整片
@@ -72,7 +73,11 @@ function settingsApiOrNull() { return isSettingsWindow() ? getSettings() : null 
 let remindTimer = null
 function startReminders() {
   stopReminders()
-  const tick = () => runRemindTick(sendWidgetCmd, 'main')
+  const tick = () => {
+    runRemindTick(sendWidgetCmd, 'main')
+    // 计时到点看门狗：挂件被隐藏/销毁期间由宿主补发到点通知（挂件在时页面自己会报，这里不插手）
+    runTimerWatch({ alive: winAlive, readConfig, readTimer, writeTimer, notifyTimer, logErr })
+  }
   tick() // 启动补扫：插件不在期间错过的也补一次
   remindTimer = setInterval(tick, 30000)
 }

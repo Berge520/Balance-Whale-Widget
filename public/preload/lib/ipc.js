@@ -453,6 +453,10 @@ function registerIpc() {
       cycleDate: typeof state.cycleDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(state.cycleDate) ? state.cycleDate : '',
       // 「定时」模式的总跨度（毫秒）：环形进度条算比例要用，暂停/恢复后也不能丢
       span: isFinite(Number(state.span)) ? Math.max(0, Math.round(Number(state.span))) : 0,
+      // 已记账 / 已通知两个幂等位必须落库：挂件隐藏期间由宿主看门狗（timer-watch）代发通知，
+      // 它会写回 notified=true；不存这两个字段，重开挂件就会重复通知、重复记专注
+      reported: state.reported === true,
+      notified: state.notified === true,
     })
   })
 

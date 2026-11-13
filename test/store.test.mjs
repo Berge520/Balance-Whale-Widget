@@ -339,11 +339,13 @@ test('normBubble 幂等：一次归一的出口再喂进去不变形（patchConf
 // 账本（recordLedgerUsage / calibrateTodayUsage / claimDailyNotice / mergeLedgerHistory / setTodayUsage）
 // ──────────────────────────────────────────────
 const {
-  todayKey, historyKeepDays, readLedger, recordLedgerUsage, calibrateTodayUsage, claimDailyNotice,
+  todayKey, historyKeepDays, readLedger, recordLedgerUsage, calibrateTodayUsage,
   keyFingerprint, mergeLedgerHistory, setTodayUsage, readTimer, writeTimer, clearTimer,
   readModelState, writeModelState, dropModelState, readAnchor, writeAnchor, resetAnchorCache,
   DSB_KEEP_MIN, DSB_KEEP_MAX,
 } = store
+// 提醒名额去重已从 store 拆到独立模块（体积棘轮）
+const { claimDailyNotice } = require('../public/preload/lib/notice-claim.js')
 
 const clearLedger = () => db.delete(K.ledger)
 const clearCfg = () => db.delete(K.config)
@@ -505,15 +507,26 @@ test('recordLedgerUsage：余额未下降（持平或上升）不记任何差值
   assert.equal(same.ledger.todayUsage, 0)
 })
 
-test('recordLedgerUsage：写账本失败时不抛错（只 logErr 留痕）', () => {
+test('recordLedgerUsage：写账本失败不抛错，但返回 ok:false 让上层能提示未保存', () => {
   clearLedger()
   const saved = globalThis.utools.dbStorage.setItem
   globalThis.utools.dbStorage.setItem = () => { throw new Error('quota') }
   try {
-    assert.doesNotThrow(() => recordLedgerUsage(100, 'CNY', {}))
+    let r
+    assert.doesNotThrow(() => { r = recordLedgerUsage(100, 'CNY', {}) })
+    assert.equal(r.ok, false)
+    // 存不进去时账本里只剩「本次观测」这一层有效信息（基准值读不回来），但返回值本身仍是账本对象
+    assert.equal(typeof r.ledger, 'object')
+    assert.equal(typeof r.ledger.date, 'string')
   } finally {
     globalThis.utools.dbStorage.setItem = saved
   }
+})
+
+test('recordLedgerUsage：正常写入不带 ok 字段（避免多余字段被深拷贝进 payload）', () => {
+  clearLedger()
+  const r = recordLedgerUsage(50, 'CNY', {})
+  assert.equal('ok' in r, false)
 })
 
 test('calibrateTodayUsage：非法 / 负数拒绝，等于现值不写，正常值写入并记 calibrateLog', () => {
@@ -611,10 +624,12 @@ test('mergeLedgerHistory：写失败返回 ok:false', () => {
 
 test('setTodayUsage：直接覆盖当天用量、负数/非法夹到 0、返回账本', () => {
   clearLedger()
+  // 返回值就是账本本身（写成功时没有 ok 字段），写失败才补 ok:false 由调用方提示
   assert.equal(setTodayUsage(7.5).todayUsage, 7.5)
   assert.equal(readLedger().todayUsage, 7.5)
   assert.equal(setTodayUsage(-3).todayUsage, 0)
   assert.equal(setTodayUsage('abc').todayUsage, 0)
+  assert.equal(setTodayUsage(1).ok, undefined)
 })
 
 // ──────────────────────────────────────────────
@@ -623,11 +638,11 @@ test('setTodayUsage：直接覆盖当天用量、负数/非法夹到 0、返回�
 test('readTimer：空存储 / 非对象回默认（mode off）', () => {
   db.delete(K.timer)
   const d = readTimer()
-  assert.deepEqual(d, { mode: 'off', running: false, paused: false, startAt: 0, endAt: 0, elapsed: 0, remain: 0, arg: '', isBreak: false, back: 0, cycle: 0, cycleDate: '', span: 0 })
+  assert.deepEqual(d, { mode: 'off', running: false, paused: false, startAt: 0, endAt: 0, elapsed: 0, remain: 0, arg: '', isBreak: false, back: 0, cycle: 0, cycleDate: '', span: 0, reported: false, notified: false })
 })
 
 test('readTimer：逐字段归一化 —— mode 白名单、布尔严格、数值钳负、arg 只认串', () => {
-  db.set(K.timer, { mode: 'bogus', running: 1, paused: 'yes', startAt: 'abc', endAt: '123', elapsed: -5, remain: '9', arg: 42, isBreak: 1, back: -5, cycle: -3, cycleDate: 'not-a-date', span: -1 })
+  db.set(K.timer, { mode: 'bogus', running: 1, paused: 'yes', startAt: 'abc', endAt: '123', elapsed: -5, remain: '9', arg: 42, isBreak: 1, back: -5, cycle: -3, cycleDate: 'not-a-date', span: -1, reported: 1, notified: 'yes' })
   const t = readTimer()
   assert.equal(t.mode, 'off') // 认不出回 off
   assert.equal(t.running, false) // 1 不算 true
@@ -642,7 +657,10 @@ test('readTimer：逐字段归一化 —— mode 白名单、布尔严格、数�
   assert.equal(t.cycle, 0) // 负值钳到 0
   assert.equal(t.cycleDate, '') // 格式不对回空
   assert.equal(t.span, 0) // 负跨度钳到 0
-  db.set(K.timer, { mode: 'down', isBreak: true, back: '9', cycle: 3, cycleDate: '2026-10-28', span: '7200000' })
+  assert.equal(t.reported, false) // 只认严格 true
+  assert.equal(t.notified, false)
+  db.set(K.timer, { mode: 'down', isBreak: true, back: '9', cycle: 3, cycleDate: '2026-10-28', span: '7200000', reported: true, notified: true })
+  assert.equal(readTimer().reported, true) // 幂等位必须原样保留：丢了会重复记账 / 重复通知
   assert.equal(readTimer().isBreak, true)
   assert.equal(readTimer().back, 9) // 数字串可解析
   assert.equal(readTimer().cycle, 3)
@@ -660,7 +678,7 @@ test('readTimer：逐字段归一化 —— mode 白名单、布尔严格、数�
 
 test('writeTimer：落盘成功回 true 且可回读；失败回 false 不抛', () => {
   db.delete(K.timer)
-  const state = { mode: 'up', running: true, paused: false, startAt: 1000, endAt: 0, elapsed: 5, remain: 0, arg: 'x', isBreak: true, back: 1500, cycle: 2, cycleDate: '2026-10-28', span: 0 }
+  const state = { mode: 'up', running: true, paused: false, startAt: 1000, endAt: 0, elapsed: 5, remain: 0, arg: 'x', isBreak: true, back: 1500, cycle: 2, cycleDate: '2026-10-28', span: 0, reported: true, notified: true }
   assert.equal(writeTimer(state), true)
   assert.deepEqual(readTimer(), state)
   const saved = globalThis.utools.dbStorage.setItem

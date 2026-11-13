@@ -11,7 +11,7 @@ const fs = require('fs')
 const path = require('path')
 const { K } = require('./constants')
 const { logErr } = require('./log')
-const { errMsg } = require('./util')
+const { errMsg, writeFileAtomicSync } = require('./util')
 const { readConfig, patchConfig } = require('./store')
 const { dataDir } = require('./data-dir')
 
@@ -84,9 +84,25 @@ function readRaw() {
   return items
 }
 
+// 返回是否真的写进去了：早先只 logErr 不返回，上层一律回 ok:true，
+// 用户看到「已导入」、重启后（读存储读到的仍是旧内容）那项却不在列表里。
 function writeRaw(items) {
-  try { utools.dbStorage.setItem(K.media, { items: items }) } catch (err) {
+  try {
+    utools.dbStorage.setItem(K.media, { items: items })
+    return true
+  } catch (err) {
     logErr('[whale][media] 写入媒体信息失败', err && err.message)
+    return false
+  }
+}
+
+// 元信息没写进去时回滚已落盘的文件，避免留下打不开的孤儿文件
+function discardFiles(id) {
+  for (const ext of IMG_EXT.concat(VID_EXT)) {
+    try { fs.unlinkSync(filePath(id, ext)) } catch (err) {}
+  }
+  for (const ext of ['webp', 'png']) {
+    try { fs.unlinkSync(thumbPath(id, ext)) } catch (err) {}
   }
 }
 
@@ -154,10 +170,13 @@ function writeThumb(id, dataUrl) {
   if (!m) return
   const buf = Buffer.from(url.slice(m[0].length), 'base64')
   if (!buf.length || buf.length > MAX_THUMB_BYTES) return
-  try {
-    fs.mkdirSync(dir(), { recursive: true })
-    fs.writeFileSync(thumbPath(id, m[1]), buf)
-  } catch (err) { logErr('[whale][media] 写缩略图失败', err && err.message) }
+  try { fs.mkdirSync(dir(), { recursive: true }) } catch (err) {
+    logErr('[whale][media] 创建缩略图目录失败', err && err.message)
+    return
+  }
+  // 原子写：缩略图写一半会让列表读出一张坏图
+  const w = writeFileAtomicSync(thumbPath(id, m[1]), buf)
+  if (!w.ok) logErr('[whale][media] 写缩略图失败', w.error)
 }
 
 // 导入已选好的文件：校验 -> 复制 -> 写元信息。thumb 只有图片会带（设置页 canvas 生成）。
@@ -181,7 +200,8 @@ function importFile(opts) {
   })
   if (items.length >= MAX_ITEMS) return { ok: false, error: `最多保留 ${MAX_ITEMS} 项媒体，请先删掉不用的` }
   if (items.length !== rawItems.length) {
-    try { writeRaw(items) } catch (err) { logErr('[whale][media] 清理丢失的媒体元信息失败', err && err.message) }
+    // 只是顺手清理「文件已不在」的幽灵记录，写失败不影响本次导入（下次导入再清一次）
+    writeRaw(items)
   }
   const id = 'm' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5)
   try {
@@ -197,7 +217,12 @@ function importFile(opts) {
     type: type, size: stat.size, at: Date.now(),
   }
   items.unshift(item)
-  writeRaw(items)
+  // 元信息写不进去就是「导入失败」：文件已在磁盘上但列表里没有它，
+  // 不报错的话用户以为导进去了，重启后那项凭空消失。回滚已落盘的文件再按失败返回。
+  if (!writeRaw(items)) {
+    discardFiles(id)
+    return { ok: false, error: '媒体信息保存失败（本地存储写入失败），请稍后重试' }
+  }
   return { ok: true, item: item }
 }
 
@@ -215,7 +240,8 @@ function remove(id) {
     try { fs.unlinkSync(thumbPath(it.id, ext)) } catch (err) {}
   }
   items.splice(idx, 1)
-  writeRaw(items)
+  // 元信息没删掉就是「删除失败」：文件已删、记录还在，读回时是一张打不开的坏图
+  if (!writeRaw(items)) return { ok: false, error: '删除失败（本地存储写入失败），请稍后重试' }
   let configChanged = false
   try {
     const cfg = readConfig()
@@ -266,7 +292,7 @@ function injectGhost() {
   const items = readRaw()
   const id = 'ghost' + Date.now().toString(36)
   items.push({ id: id, name: 'ghost.png', ext: 'png', type: 'image', size: 1, at: Date.now() })
-  writeRaw(items)
+  if (!writeRaw(items)) return ''
   return id
 }
 

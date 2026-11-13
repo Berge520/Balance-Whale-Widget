@@ -10,14 +10,14 @@
  */
 const fs = require('fs')
 const path = require('path')
-const { K } = require('./constants')
+const { K, MEDIA_IMPORT_MAX_BYTES: MAX_BYTES, MEDIA_LIMIT_TEXT } = require('./constants')
 const { logErr } = require('./log')
 const { errMsg } = require('./util')
 const { dataDir } = require('./data-dir')
 
 // Chromium 可直接解码的音频格式；flac/m4a 也支持但对话框里主要引导 mp3/wav/ogg
 const OK_EXT = ['mp3', 'wav', 'ogg', 'm4a', 'flac']
-const MAX_BYTES = 5 * 1024 * 1024
+// 单文件上限与文案都来自 constants，别在这里再写死字节数或「5MB」字样
 const MIME = { mp3: 'audio/mpeg', wav: 'audio/wav', ogg: 'audio/ogg', m4a: 'audio/mp4', flac: 'audio/flac' }
 
 // 音效槽位。press / release 是「音色」的两段（有内置回落，见挂件页 SOUND_FILES）；
@@ -34,6 +34,12 @@ const ROLE_LABEL = {
   low: '低余额提醒音', budget: '预算提醒音', peak: '峰谷提醒音', pass: '穿透提醒音',
   shared: '共享音效库',
 }
+
+// shared 素材池的条数上限。早期没设上限，理论上能一直往里装（每段最大 5MB，
+// 而 getSoundData 会把被挂上槽位的段整段读成 base64 推给挂件，池子失控会拖慢每次配置变更）。
+// 口径与 skins.js 的 MAX_ITEMS 一致：用户自己仍可装 20 段，官方素材包按 name 优先占位；
+// 下载侧走 installBuiltin(…, { official: true })，官方段不受这条用户配额限制
+const MAX_ITEMS = 20
 
 // base64 data URL 缓存：导入/删除/重载插件前有效，元信息变化时置空
 let dataCache = null
@@ -94,6 +100,9 @@ function oneItem(v, role) {
     }
     if (roles.length) out.roles = roles
   }
+  // 官方素材包的段：与 skins 的 builtin 同义，不计入用户配额（必须是 readMeta 带出的字段，
+  // 否则下一次 writeMeta 会把它静默抹掉，官方段就开始按用户段占配额了）
+  if (v.official === true) out.official = true
   return out
 }
 
@@ -116,8 +125,16 @@ function readMeta() {
   return out
 }
 
+// 返回是否真的写进去了：早先只 logErr 不返回，上层一律回 ok:true，
+// 用户看到「已导入」、重启后（读存储读到的仍是旧内容）那段音效却不在列表里。
 function writeMeta(meta) {
-  try { utools.dbStorage.setItem(K.sounds, meta) } catch (err) { logErr('[whale][sounds] 写音效信息失败', err && err.message) }
+  try {
+    utools.dbStorage.setItem(K.sounds, meta)
+    return true
+  } catch (err) {
+    logErr('[whale][sounds] 写音效信息失败', err && err.message)
+    return false
+  }
 }
 
 // 新段落的文件名 <role>-<n>.<ext>：<role>.<ext> 留给老结构那条，不参与编号。
@@ -160,9 +177,20 @@ function saveOne(role, name, ext, buf, opts) {
   // 同名命中（仅在 append 模式下有意义）：覆盖它就复用其文件名，避免素材库里越攒越多
   const dup = o.append ? list.findIndex((x) => x.name === item.name) : -1
   const reused = dup >= 0 ? list[dup] : null
+  // 素材池配额（同名覆盖 = 不新增条目，放行；官方段不占用户配额）。
+  // 只挡「新装一段」，删和覆盖不受影响 —— 挡在这里是为了在落盘前就拦住，不产生孤儿文件
+  if (o.append && !reused && !o.official) {
+    const ownCount = list.filter((x) => x.official !== true).length
+    if (ownCount >= MAX_ITEMS) {
+      return { ok: false, error: '音效库最多保留 ' + MAX_ITEMS + ' 段，请先删掉不用的' }
+    }
+  }
   // shared 重装同名段（素材包 / 重下载）时继承原有的 roles：勾选记在段自己身上，
   // 不该因为重装一次素材包就全丢掉 —— 那会让用户以为「勾了又自己没了」
   if (reused && Array.isArray(reused.roles) && reused.roles.length) item.roles = reused.roles.slice()
+  // official 同理要继承：官方段重装（重下 / 素材包）时若丢了这个标记，它就会开始占用户配额
+  if (reused && reused.official === true && !o.official) item.official = true
+  if (o.official) item.official = true
   item.file = reused && reused.ext === ext ? reused.file : nextFile(role, ext, reused && reused.file)
   try {
     fs.mkdirSync(dir, { recursive: true })
@@ -172,23 +200,33 @@ function saveOne(role, name, ext, buf, opts) {
     return { ok: false, error: '保存音效失败：' + errMsg(err) }
   }
   if (o.append) {
-    // 素材库：只删被同名顶掉的那一个（若换了文件名）
-    if (reused && reused.file !== item.file) {
-      try { fs.unlinkSync(path.join(dir, reused.file)) } catch (err) {}
-    }
     if (dup >= 0) list[dup] = item
     else list.push(item)
     meta[role] = list
   } else {
-    // 实播槽位：新文件已落盘，再清掉该槽位原有的全部旧段
+    meta[role] = [item]
+  }
+  // 元信息写不进去就是「导入失败」：文件已落盘但 meta 里没有它，不报错的话
+  // 用户以为导进去了，重启后（读存储读到的仍是旧内容）那段音效凭空消失。
+  // 这里在删旧文件之前就拦住并回滚新文件 —— 旧段保持原样，等于这次导入没发生。
+  if (!writeMeta(meta)) {
+    try { fs.unlinkSync(path.join(dir, item.file)) } catch (err) {}
+    return { ok: false, error: '音效信息保存失败（本地存储写入失败），请稍后重试' }
+  }
+  // 元信息已就位，再清理不再被引用的旧文件（删不掉只是留垃圾，不影响本次结果）
+  if (o.append) {
+    // 素材库：只删被同名顶掉的那一个（若换了文件名）
+    if (reused && reused.file !== item.file) {
+      try { fs.unlinkSync(path.join(dir, reused.file)) } catch (err) {}
+    }
+  } else {
+    // 实播槽位：清掉该槽位原有的全部旧段
     for (const old of list) {
       if (old.file && old.file !== item.file) {
         try { fs.unlinkSync(path.join(dir, old.file)) } catch (err) {}
       }
     }
-    meta[role] = [item]
   }
-  writeMeta(meta)
   dataCache = null
   return { ok: true, role: role, name: item.name, ext: ext }
 }
@@ -218,7 +256,7 @@ function pickAudioFile(title) {
     return { error: '读取文件失败：' + errMsg(err) }
   }
   if (!stat.isFile()) return { error: '请选择一个音频文件' }
-  if (stat.size > MAX_BYTES) return { error: '文件过大（限 5MB），建议 1 秒左右的短音效' }
+  if (stat.size > MAX_BYTES) return { error: '文件过大（限 ' + MEDIA_LIMIT_TEXT + '），建议 1 秒左右的短音效' }
   return { filePath: filePath, ext: ext }
 }
 
@@ -265,7 +303,7 @@ function importSoundFromData(role, name, dataUrl) {
   // 按解码后的字节数校验大小：base64 字符串长度不可信（填充与字符集差异会让它偏离实际体积）
   const buf = Buffer.from(url.slice(PREFIX.length), 'base64')
   if (!buf.length) return { ok: false, error: '音频数据为空' }
-  if (buf.length > MAX_BYTES) return { ok: false, error: '音频过大（限 5MB），请缩短选区' }
+  if (buf.length > MAX_BYTES) return { ok: false, error: '音频过大（限 ' + MEDIA_LIMIT_TEXT + '），请缩短选区' }
   return saveOne(role, name || (role + '.wav'), 'wav', buf)
 }
 
@@ -280,7 +318,8 @@ function removeSound(role, file) {
     try { fs.unlinkSync(path.join(dir, it.file)) } catch (err) {}
   }
   meta[role] = file ? list.filter((x) => x.file !== file) : []
-  writeMeta(meta)
+  // 元信息没删掉就是「删除失败」：文件已删、记录还在，读回时是一段播不出来的坏音效
+  if (!writeMeta(meta)) return { ok: false, error: '删除失败（本地存储写入失败），请稍后重试' }
   dataCache = null
   return { ok: true, role: role }
 }
@@ -309,7 +348,7 @@ function setSharedRoles(file, roles) {
   if (want.length) item.roles = want
   else delete item.roles
   meta.shared[idx] = item
-  writeMeta(meta)
+  if (!writeMeta(meta)) return { ok: false, error: '保存失败（本地存储写入失败），请稍后重试' }
   dataCache = null
   return { ok: true, file: f, roles: want }
 }
@@ -349,19 +388,21 @@ function importBuffer(role, name, ext, buf, at) {
   const e = String(ext || '').toLowerCase()
   if (OK_EXT.indexOf(e) < 0) return { ok: false, error: '不支持的音频格式：' + ext }
   if (!buf || !buf.length) return { ok: false, error: '音频数据为空' }
-  if (buf.length > MAX_BYTES) return { ok: false, error: '音频过大（限 5MB）' }
+  if (buf.length > MAX_BYTES) return { ok: false, error: '音频过大（限 ' + MEDIA_LIMIT_TEXT + '）' }
   return saveOne(role, name || (role + '.' + e), e, buf, { at: at })
 }
 
 // 装一段「共享音效库」音效（供 lib/assets-packs.js 调用）：落进 shared 素材池、同名覆盖。
 // 必须 append：shared 是素材池，要装很多段；若走「一段一槽位」的替换语义，
 // 下载第二段就会把第一段抹掉。
-function installBuiltin(name, ext, buf) {
+// official: 这是官方向导出的素材包音效（几十段），不受用户自建 20 段配额限制 —— 否则装到第 21 段就卡住
+function installBuiltin(name, ext, buf, opts) {
+  const o = opts && typeof opts === 'object' ? opts : {}
   const e = String(ext || '').toLowerCase()
   if (OK_EXT.indexOf(e) < 0) return { ok: false, error: '不支持的音频格式：' + ext }
   if (!buf || !buf.length) return { ok: false, error: '音频数据为空' }
-  if (buf.length > MAX_BYTES) return { ok: false, error: '音频过大（限 5MB）' }
-  return saveOne('shared', name, e, buf, { append: true })
+  if (buf.length > MAX_BYTES) return { ok: false, error: '音频过大（限 ' + MEDIA_LIMIT_TEXT + '）' }
+  return saveOne('shared', name, e, buf, { append: true, official: o.official === true })
 }
 
 // 音频本体 → base64 data URL 数组（挂件随机取一条 new Audio(dataURL) 播放）。

@@ -143,7 +143,12 @@ function backupApply() {
       // 宿主返回的 ok 只表示「至少有一项写进去了」：部分失败时 applied 与 errors 同时非空，
       // 只报「已恢复」会让用户以为全都写进去了（重启后发现设置照旧），故改口径为「部分恢复」
       const errs = (r.errors || []) as string[]
-      let msg = (errs.length ? '部分恢复：' : '已恢复：') + backupNames(applied) + '。'
+      // 前面的项写成功、后面某项失败时，`已恢复：A、B。` 是大字绿字、失败原因是小字：
+      // 用户只会读到「已恢复」。有任一错误就统一改口径为「部分恢复」，哪怕前几项都写进去了
+      // applied 可能为空（只勾了气泡图、写进去一部分）：这时宿主 ok 为真但没有任何一项完整恢复，
+      // 拼成「部分恢复：。」会是个断头句，故无 applied 时只报错误详情
+      const names = backupNames(applied)
+      let msg = names ? (errs.length ? '部分恢复：' : '已恢复：') + names + '。' : ''
       if (skipped.length) msg += '备份里没有：' + backupNames(skipped) + '。'
       if (r.widgetRebuilt) msg += '挂件已按恢复的设置重建。'
       if (errs.length) msg += errs.join('；') + '。'
@@ -208,9 +213,11 @@ const hintOpen = ref(false)
       <span class="label">包含气泡图素材 <em>（按压气泡的自定义配图，会明显增大文件体积）</em></span>
       <input type="checkbox" v-model="backupWithBubbles" @change="backupFlash.msg = ''" />
     </label>
-    <label v-if="backupWithSecrets" class="field row">
+    <!-- 导出时填密码用于加密；导入含凭据的备份时也要填 —— 原先这个输入框只在「导出勾了包含凭据」
+         时出现，于是导入场景根本没有地方输密码，勾上「凭据」点恢复必然预检失败 -->
+    <label v-if="backupWithSecrets || backupPreview?.noPasswordHint" class="field row">
       <span class="label">备份密码</span>
-      <input type="password" v-model="backupPassword" placeholder="至少 6 位，导入时要用" autocomplete="new-password" />
+      <input type="password" v-model="backupPassword" :placeholder="backupPreview?.noPasswordHint ? '导入这份备份要用的密码' : '至少 6 位，导入时要用'" autocomplete="new-password" />
     </label>
     <div class="btn-row">
       <button class="secondary utils-btn utils-secondary" :disabled="backupBusy" @click="backupExport">导出备份…</button>
@@ -220,8 +227,11 @@ const hintOpen = ref(false)
 
     <div v-if="backupPreview">
       <p class="guide-use">已选：<code>{{ backupPreview.path }}</code><br />导出于 {{ backupPreview.exportedAt || '未知' }} · 版本 {{ backupPreview.appVersion || '未知' }}</p>
+      <!-- 无来源标记（早期导出或被手改过）的备份：必须让用户知道「来源不明」再动手覆盖 -->
+      <p v-if="backupPreview.noMark" class="hint">⚠ 这份文件没有本插件的来源标记，可能是早期备份或被改过的文件。确认无误再恢复。</p>
+      <p v-if="backupPreview.noPasswordHint" class="hint">这份备份含加密凭据：勾选「凭据」时必须在下方填对备份密码，否则整次恢复不会写入任何一项。</p>
       <label v-for="it in backupItems" :key="it.key" class="field row check">
-        <span class="label">{{ it.label }} <em>{{ it.note }}{{ backupHas(it.key) ? '' : '：备份里没有这一项' }}</em></span>
+        <span class="label">{{ it.label }} <em>{{ it.note }}{{ backupHas(it.key) ? '' : '：备份里没有可用数据' }}</em></span>
         <input type="checkbox" v-model="backupPicks[it.key]" :disabled="!backupHas(it.key)" @change="backupConfirm = false" />
       </label>
       <label v-if="backupHas('secrets')" class="field row">
@@ -230,7 +240,7 @@ const hintOpen = ref(false)
       </label>
       <div class="btn-row">
         <button class="danger utils-btn utils-danger" :disabled="backupBusy || !backupAnyItem" @click="backupApply">
-          {{ backupConfirm ? '确认覆盖写入？不可撤销' : '恢复选中项' }}
+          {{ backupConfirm ? '确认覆盖写入？不可撤销' : backupPreview.noMark ? '仍要恢复（来源不明）' : '恢复选中项' }}
         </button>
         <button v-if="backupConfirm" class="secondary utils-btn utils-secondary" @click="backupConfirm = false">取消</button>
       </div>

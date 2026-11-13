@@ -1603,7 +1603,7 @@ function stop(done) {
     if (needElevatedKill) {
       pushLog('结束管理员实例需要管理员权限：会再弹一次 UAC')
       killElevated(pid, (err) => onKillErr(err)) // 成功后由 monitorElevated 发现进程已死，走正常 exit 清理
-    } else if (WIN) execFile('taskkill', ['/pid', String(pid), '/T', '/F'], (err) => onKillErr(err))
+    } else if (WIN) execFile('taskkill', ['/pid', String(pid), '/T', '/F'], { windowsHide: true }, (err) => onKillErr(err))
     else {
       // 进程组整体结束（spawnCmd 用了 detached: true）
       try { process.kill(-pid, 'SIGTERM') } catch (err) { child.kill('SIGTERM') }
@@ -2212,7 +2212,7 @@ function runPnpm(args) {
       // child.kill() 未必连子进程一起收：Windows 下 cmd 包了一层，POSIX 下 pnpm 会派生 node 子进程
       // —— 再按 pid 兜一次。Windows 用 taskkill /T，POSIX 用负 pid 杀整个进程组
       if (child.pid) {
-        if (WIN) { try { execFile('taskkill', ['/pid', String(child.pid), '/T', '/F'], () => {}) } catch (err) {} }
+        if (WIN) { try { execFile('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true }, () => {}) } catch (err) {} }
         else { try { execFile('kill', ['-TERM', '-' + child.pid], () => {}) } catch (err) {} }
       }
       finish({ code: -1, ok: false, out: out, err: 'pnpm 超时未退出' })

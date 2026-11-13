@@ -50,6 +50,9 @@ const bubbles = require('../public/preload/lib/bubbles.js')
 
 const { _encryptSecrets, _decryptSecrets, applyBackup, pickBackup, clearPending } = backup
 
+// 启动即清空：bubbles 的清单是模块级缓存，跨用例残留会让「预览该为 false」的判定串味
+bubbles.clearAll()
+
 // 真实形状：两项内置凭据 + 各厂商模型的密钥槽位
 const secrets = {
   apiKey: 'sk-abc123XYZ_-',
@@ -336,6 +339,68 @@ test('applyBackup：气泡图数据全坏 → 记 error，不假报成功', () =
   assert.match(r.errors[0], /气泡图/)
 })
 
+test('applyBackup：密码错时其他已勾选项一个字节都不写，且 pending 保留可重试', () => {
+  // 预检失败必须整体放弃：早先凭据分支排在最后，密码错时 config / 账本已经落盘，
+  // 用户看到「恢复失败」却发现设置已经被改了一半；而且 pending 被清空，只能重新选文件
+  store.delete('whale:config')
+  store.delete('whale:ledger')
+  const vaultBefore = vault.get('whale:secrets')
+  stage({
+    config: { scale: 1.75 },
+    ledger: { history: { '2026-11-01': 2.5 } },
+    secretsEnc: _encryptSecrets({ apiKey: 'sk-x', platformToken: '' }, 'right-pw'),
+  })
+  const r = applyBackup({ config: true, ledger: true, secrets: true, password: 'wrong-pw' })
+  assert.equal(r.ok, false)
+  assert.equal(r.precheck, true)
+  assert.deepEqual(r.applied, [])
+  assert.match(r.errors[0], /凭据/)
+  assert.equal(store.has('whale:config'), false, '预检失败时挂件设置不该被写')
+  assert.equal(store.has('whale:ledger'), false, '预检失败时账本不该被写')
+  assert.deepEqual(vault.get('whale:secrets'), vaultBefore, '预检失败时凭据也不该被覆盖')
+
+  // pending 没被消耗：改对密码再点一次就能恢复，不必重新选一遍文件
+  const r2 = applyBackup({ config: true, ledger: true, secrets: true, password: 'right-pw' })
+  assert.equal(r2.ok, true, r2.error)
+  assert.deepEqual(r2.applied, ['config', 'ledger', 'secrets'])
+  assert.equal(vault.get('whale:secrets').apiKey, 'sk-x', '第二次（密码正确）应真的写进凭据')
+  store.delete('whale:config')
+  store.delete('whale:ledger')
+})
+
+test('applyBackup：气泡图全坏时不清空现有图（预检拦在 clearAll 之前）', () => {
+  bubbles.clearAll()
+  seedBubble('keep.png', 2)
+  store.delete('whale:config')
+  stage({
+    config: { scale: 1.5 },
+    bubbles: [{ name: 'bad.xyz', ext: 'xyz', at: 0, data: PNG.toString('base64') }],
+  })
+  const r = applyBackup({ config: true, bubbles: true })
+  assert.equal(r.ok, false)
+  assert.equal(r.precheck, true)
+  assert.deepEqual(r.applied, [])
+  assert.equal(bubbles.exportItems().length, 2, '备份里的图全不合法时，现有图不能被清空')
+  assert.equal(store.has('whale:config'), false, '预检失败时同一次勾的挂件设置也不该写')
+})
+
+test('applyBackup：气泡图部分不合法时，仍然恢复可写的那几张', () => {
+  bubbles.clearAll()
+  stage({
+    bubbles: [
+      { name: 'ok.png', ext: 'png', at: 1, data: PNG.toString('base64') },
+      { name: 'bad.xyz', ext: 'xyz', at: 2, data: PNG.toString('base64') },
+    ],
+  })
+  const r = applyBackup({ bubbles: true })
+  // 可写的照常写进去，但「少一张」不能报成已恢复（见下一条用例）
+  assert.equal(r.ok, true, r.error)
+  assert.equal(r.errors.length, 1)
+  const list = bubbles.exportItems()
+  assert.equal(list.length, 1, '坏的那张跳过，好的那张照常恢复')
+  assert.equal(list[0].name, 'ok.png')
+})
+
 test('pickBackup：has.bubbles 只在备份确实带图时为 true', () => {
   stage({ bubbles: [{ name: 'a.png', ext: 'png', at: 0, data: PNG.toString('base64') }] })
   assert.equal(pickBackup().has.bubbles, true, '带图 → has.bubbles = true')
@@ -345,4 +410,113 @@ test('pickBackup：has.bubbles 只在备份确实带图时为 true', () => {
 
   stage({ config: { scale: 1 } })
   assert.equal(pickBackup().has.bubbles, false, '没有该键 → false')
+})
+
+// 文件选择器允许任意 *.json，误选别的应用的备份不能静默覆盖现有数据
+function fromRaw(obj) {
+  const p = path.join(tmpDir, 'r' + (++seq) + '.json')
+  fs.writeFileSync(p, JSON.stringify(obj), 'utf8')
+  globalThis.utools.showOpenDialog = () => [p]
+  return pickBackup()
+}
+
+// 预览必须与恢复同一把尺子：预览说有、恢复时却被 skip，等于让用户勾了个寂寞
+test('pickBackup：has 与 applyBackup 的判据一致（勾得动就写得进）', () => {
+  // 窗口位置：对象在但锚点不合法 —— 恢复侧走 validAnchor，会 skip
+  const bad = fromRaw({
+    kind: 'balance-whale-widget-backup',
+    data: { window: { hAnchor: 'middle', hDist: 10, vAnchor: 'top', vDist: 10 } },
+  })
+  assert.equal(bad.has.window, false, '锚点不合法时不该让用户勾选')
+  assert.deepEqual(applyBackup({ window: true }).skipped, ['window'], '对照：恢复侧确实会 skip')
+
+  // 气泡图：数组非空但全部不合法 —— 恢复侧预检会整体放弃
+  const badBubble = fromRaw({
+    kind: 'balance-whale-widget-backup',
+    data: { bubbles: [{ name: 'x.xyz', ext: 'xyz', data: PNG.toString('base64') }] },
+  })
+  assert.equal(badBubble.has.bubbles, false, '一张都写不进去时不该让用户勾选')
+
+  // 待办与专注：恢复侧见到 items 数组 / days 对象就写（哪怕为空），预览不能比它更严，
+  // 否则「备份里是空清单」会被说成「没有这一项」，用户无法主动用它清空现有清单
+  const emptyList = fromRaw({ kind: 'balance-whale-widget-backup', data: { todo: { items: [] }, focus: { days: {} } } })
+  assert.equal(emptyList.has.todo, true)
+  assert.equal(emptyList.has.focus, true)
+})
+
+// 含加密凭据的备份：界面要据此提示「必须填密码」。原先导入侧连密码输入框都不渲染，
+// 用户勾上「凭据」点恢复 → 预检整体失败，其余勾选项一项也没写
+test('pickBackup：含凭据时给出 noPasswordHint，否则不给', () => {
+  const withSecret = fromRaw({
+    kind: 'balance-whale-widget-backup',
+    data: { secretsEnc: { algo: 'aes-256-gcm', salt: 'AA==', iv: 'AA==', tag: 'AA==', data: 'AA==' } },
+  })
+  assert.equal(withSecret.noPasswordHint, true)
+  assert.equal(fromRaw({ kind: 'balance-whale-widget-backup', data: { config: { a: 1 } } }).noPasswordHint, false)
+})
+
+// 气泡图只写进去一部分时，不能进 applied —— 界面会显示大字「已恢复」，
+// 小字报错没人看。必须落到 errors，让界面改口径为「部分恢复」
+test('applyBackup：气泡图部分写入记 errors，不算 applied', () => {
+  bubbles.clearAll()
+  const r = fromRaw({
+    kind: 'balance-whale-widget-backup',
+    data: { bubbles: [
+      { name: 'a.png', ext: 'png', data: PNG.toString('base64') },
+      { name: 'b.xyz', ext: 'xyz', data: PNG.toString('base64') },
+    ] },
+  })
+  assert.equal(r.has.bubbles, true, '有一张能写就不该禁掉整项')
+  const out = applyBackup({ bubbles: true })
+  assert.equal(out.applied.indexOf('bubbles'), -1, '少一张就不是「已恢复」')
+  assert.ok(out.errors.some((e) => e.indexOf('只写入了 1/2') >= 0), '要告诉用户写进去几张')
+})
+
+test('pickBackup：kind 对得上就认（早期导出没有 app 字段也算本插件的）', () => {
+  const r = fromRaw({ kind: 'balance-whale-widget-backup', data: { config: { scale: 1 } } })
+  assert.equal(r.ok, true)
+  assert.equal(r.noMark, false, '有 kind → 来源明确，不要求二次确认')
+})
+
+test('pickBackup：kind 不符直接拒绝，不把别人的数据当备份', () => {
+  const r = fromRaw({ kind: 'some-other-app-backup', data: { config: { scale: 1 } } })
+  assert.equal(r.ok, false)
+  assert.match(r.error, /不是本插件/)
+})
+
+test('pickBackup：app 明确是别的应用时拒绝并点名', () => {
+  const r = fromRaw({ app: 'other-plugin', data: { config: { scale: 1 } } })
+  assert.equal(r.ok, false)
+  assert.match(r.error, /other-plugin/)
+})
+
+test('pickBackup：既无 kind 也无 app → 放行但标记 noMark，交给界面二次确认', () => {
+  const r = fromRaw({ data: { config: { scale: 1 } } })
+  assert.equal(r.ok, true, '来源不明的老备份不能一刀切拒掉')
+  assert.equal(r.noMark, true)
+})
+
+test('pickBackup：kind 为 null 也算「没有 kind」，不能因此判成别的插件', () => {
+  const r = fromRaw({ kind: null, data: { config: { scale: 1 } } })
+  assert.equal(r.ok, true, '手改文件留下的 null 不该把能用的备份判死')
+  assert.equal(r.noMark, true)
+})
+
+test('pickBackup：app 是空串不算「来自别的应用」，按来源不明放行', () => {
+  const r = fromRaw({ app: '', data: { config: { scale: 1 } } })
+  assert.equal(r.ok, true)
+  assert.equal(r.noMark, true)
+})
+
+test('pickBackup：kind 对上时不再管 app（早期导出可能把 app 写错）', () => {
+  const r = fromRaw({ kind: 'balance-whale-widget-backup', app: 'oops', data: { config: { scale: 1 } } })
+  assert.equal(r.ok, true)
+  assert.equal(r.noMark, false)
+})
+
+test('applyBackup：窗口位置写入后要回读存储核对（readAnchor 带缓存，不能拿缓存自证）', () => {
+  stage({ window: { hAnchor: 'left', hDist: 10, vAnchor: 'top', vDist: 20 } })
+  const r = applyBackup({ window: true })
+  assert.equal(r.ok, true, r.errors && r.errors.join('；'))
+  assert.deepEqual(store.get('whale:window'), { hAnchor: 'left', hDist: 10, vAnchor: 'top', vDist: 20 })
 })

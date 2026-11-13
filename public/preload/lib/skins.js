@@ -11,15 +11,15 @@
  */
 const fs = require('fs')
 const path = require('path')
-const { K } = require('./constants')
+const { K, MEDIA_IMPORT_MAX_BYTES: MAX_BYTES, MEDIA_LIMIT_TEXT } = require('./constants')
 const { logErr } = require('./log')
-const { errMsg } = require('./util')
+const { errMsg, writeFileAtomicSync } = require('./util')
 const { dataDir } = require('./data-dir')
 
 // Chromium 能直接渲染的位图格式（不要 SVG：外部 SVG 可带脚本，且挂件是本地页面，没必要开这个口子）
 // apng 的 MIME 与签名都是 image/png，Chromium 原生播放动画
 const OK_EXT = ['png', 'jpg', 'jpeg', 'webp', 'gif', 'apng']
-const MAX_BYTES = 5 * 1024 * 1024
+// 单文件上限与文案都来自 constants，别在这里再写死字节数或「5MB」字样
 const MIME = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', webp: 'image/webp', gif: 'image/gif', apng: 'image/png' }
 // 缩略图上限（PNG data URL 解码后的字节数）：128px 方图正常只有几 KB，这里只是防异常输入
 const THUMB_MAX_BYTES = 256 * 1024
@@ -101,8 +101,26 @@ function readRaw() {
   return { items: items, current: current }
 }
 
+// 返回是否真的写进去了：早先只 logErr 不返回，上层一律回 ok:true，
+// 用户看到「已导入」、重启后那张图却不在库里；删掉的项也会「复活」（元信息没删掉）。
 function writeRaw(raw) {
-  try { utools.dbStorage.setItem(K.skins, raw) } catch (err) { logErr('[whale][skins] 写形象信息失败', err && err.message) }
+  try {
+    utools.dbStorage.setItem(K.skins, raw)
+    return true
+  } catch (err) {
+    logErr('[whale][skins] 写形象信息失败', err && err.message)
+    return false
+  }
+}
+
+// 元信息没写进去时，图片文件已经落盘了 —— 必须清掉，否则下次导入在同目录留下孤儿文件
+function discardFiles(id) {
+  for (const e of OK_EXT) {
+    try { fs.unlinkSync(path.join(skinsDir(), id + '.' + e)) } catch (err) {}
+  }
+  for (const t of ['png', 'webp']) {
+    try { fs.unlinkSync(path.join(skinsDir(), id + '.thumb.' + t)) } catch (err) {}
+  }
 }
 
 // 缩略图读取：优先 png（用户导入时设置页 canvas 生成），其次 webp（共享角色 / 内置包打包时生成）。
@@ -189,7 +207,7 @@ function pickImage(title) {
     return { error: '读取文件失败：' + errMsg(err) }
   }
   if (!stat.isFile()) return { error: '请选择一张图片' }
-  if (stat.size > MAX_BYTES) return { error: '文件过大（限 5MB），建议方形透明底 PNG' }
+  if (stat.size > MAX_BYTES) return { error: '文件过大（限 ' + MEDIA_LIMIT_TEXT + '），建议方形透明底 PNG' }
   return { filePath: filePath, ext: ext }
 }
 
@@ -214,11 +232,21 @@ function writeThumb(id, dataUrl) {
     if (other === ext) continue
     try { fs.unlinkSync(path.join(dir, id + '.thumb.' + other)) } catch (err) {}
   }
-  try { fs.writeFileSync(path.join(dir, id + '.thumb.' + ext), buf) } catch (err) {
-    logErr('[whale][skins] 写缩略图失败', err && err.message)
+  // 原子写：缩略图写一半会让画廊读出一张坏图，且缓存里已是「有缩略图」状态
+  const w = writeFileAtomicSync(path.join(dir, id + '.thumb.' + ext), buf)
+  if (!w.ok) {
+    logErr('[whale][skins] 写缩略图失败', w.error)
     return false
   }
   return true
+}
+
+// 原图落盘：同样走原子写（先写临时文件再 rename）。writeFileAtomicSync 不抛错、只返回 {ok,error}，
+// 而 addItem 靠 try/catch 把写失败转成 {ok:false, error:'保存图片失败：…'}，
+// 所以这里失败要显式抛出，让上层统一的失败提示口径保持不变。
+function writeImage(file, buf) {
+  const w = writeFileAtomicSync(file, buf)
+  if (!w.ok) throw new Error(w.error)
 }
 
 // 新增一项并把「当前形象」切过去（导了图却还在用内置形象会很困惑）。
@@ -242,7 +270,9 @@ function addItem(name, ext, write, thumb, opts) {
       let dirty = false
       if (o.builtin === true && exist.builtin !== true) { exist.builtin = true; dirty = true }
       if (o.displayName && exist.name !== o.displayName) { exist.name = String(o.displayName).slice(0, 120); dirty = true }
-      if (dirty) writeRaw(raw)
+      // 只在真有元信息要补时才写；写不进去不报错 —— 图片本体已经换成新的了，
+      // 只是旧记录的名字/官方标记没补上，退回「文件已更新但记录是旧的」也比「整次导入失败」强
+      if (dirty && !writeRaw(raw)) logErr('[whale][skins] 覆盖后补正元信息失败', o.id)
       invalidateCaches()
       return { ok: true, id: o.id, name: exist.name, ext: ext, existed: true }
     }
@@ -267,7 +297,14 @@ function addItem(name, ext, write, thumb, opts) {
   if (o.builtin === true) item.builtin = true
   raw.items.unshift(item)
   if (o.keepCurrent !== true) raw.current = id
-  writeRaw(raw)
+  // 元信息写不进去就是「导入失败」：图片文件已落盘但库里没有这条记录，
+  // 不报错的话用户以为导进去了，重启后（读存储读到的仍是旧内容）那张图凭空消失。
+  // 所以这里回滚 —— 删掉刚写的文件，并按失败口径返回。
+  if (!writeRaw(raw)) {
+    discardFiles(id)
+    invalidateCaches()
+    return { ok: false, error: '形象信息保存失败（本地存储写入失败），请稍后重试' }
+  }
   invalidateCaches()
   return { ok: true, id: id, name: safeName, ext: ext }
 }
@@ -319,9 +356,9 @@ function importSkinFromData(name, dataUrl, thumb) {
   // 按解码后的字节数校验大小：base64 字符串长度不可信（填充与字符集差异会让它偏离实际体积）
   const buf = Buffer.from(url.slice(PREFIX.length), 'base64')
   if (!buf.length) return { ok: false, error: '图片数据为空' }
-  if (buf.length > MAX_BYTES) return { ok: false, error: '图片过大（限 5MB），请裁剪小一些' }
+  if (buf.length > MAX_BYTES) return { ok: false, error: '图片过大（限 ' + MEDIA_LIMIT_TEXT + '），请裁剪小一些' }
   return addItem(name || 'skin.png', 'png',
-    (id) => fs.writeFileSync(path.join(skinsDir(), id + '.png'), buf), thumb)
+    (id) => writeImage(path.join(skinsDir(), id + '.png'), buf), thumb)
 }
 
 // 切换「当前形象」：挂件用哪张由它决定（配置里的 skin='custom' 只表示「用自定义」）
@@ -329,7 +366,7 @@ function setCurrent(id) {
   const raw = readRaw()
   if (!raw.items.some((x) => x.id === id)) return { ok: false, error: '形象不存在' }
   raw.current = id
-  writeRaw(raw)
+  if (!writeRaw(raw)) return { ok: false, error: '切换失败（本地存储写入失败），请稍后重试' }
   dataCache = null
   return { ok: true, current: id }
 }
@@ -353,7 +390,7 @@ function moveSkin(id, to, index) {
   if (want < 0 || want >= raw.items.length) return { ok: true, moved: false }
   const one = raw.items.splice(idx, 1)[0]
   raw.items.splice(want, 0, one)
-  writeRaw(raw)
+  if (!writeRaw(raw)) return { ok: false, error: '调整顺序失败（本地存储写入失败），请稍后重试' }
   return { ok: true, moved: true, index: want }
 }
 
@@ -378,7 +415,7 @@ function moveSkins(ids, index) {
   // 顺序没变就别白写盘（如单张已在该位置）
   if (next.every((x, i) => x.id === raw.items[i].id)) return { ok: true, moved: false }
   raw.items = next
-  writeRaw(raw)
+  if (!writeRaw(raw)) return { ok: false, error: '调整顺序失败（本地存储写入失败），请稍后重试' }
   return { ok: true, moved: true, index: want }
 }
 
@@ -398,7 +435,7 @@ function setRandomBatch(map) {
     else delete one.random
     changed++
   }
-  if (changed) writeRaw(raw)
+  if (changed && !writeRaw(raw)) return { ok: false, error: '保存失败（本地存储写入失败），请稍后重试' }
   return { ok: true, changed: changed }
 }
 
@@ -416,7 +453,12 @@ function removeSkin(id) {
   }
   raw.items.splice(idx, 1)
   if (raw.current === id) raw.current = raw.items[0] ? raw.items[0].id : ''
-  writeRaw(raw)
+  // 元信息没删掉就是「删除失败」：文件已经删了，但记录还在读回时就是一张打不开的坏图
+  // （用户会以为「删不干净」）。这里不假装成功，让设置页提示他重试。
+  if (!writeRaw(raw)) {
+    invalidateCaches()
+    return { ok: false, error: '删除失败（本地存储写入失败），请稍后重试' }
+  }
   invalidateCaches()
   return { ok: true, current: raw.current, left: raw.items.length }
 }
@@ -446,7 +488,10 @@ function removeSkins(ids) {
   if (!removed) return { ok: true, removed: 0, failed: failed }
   // 当前形象被删掉了才重算：只有当它已不在列表里，才把当前位交给剩下的第一张
   if (!raw.items.some((x) => x.id === raw.current)) raw.current = raw.items[0] ? raw.items[0].id : ''
-  writeRaw(raw)
+  if (!writeRaw(raw)) {
+    invalidateCaches()
+    return { ok: false, error: '删除失败（本地存储写入失败），请稍后重试' }
+  }
   invalidateCaches()
   return { ok: true, removed: removed, failed: failed, current: raw.current, left: raw.items.length }
 }
@@ -462,7 +507,7 @@ function builtinIds() {
 //   内置包不带则回落到 id。已存在同 id 的项时，一并把名字补正（旧记录当时只存了 id）。
 function installBuiltin(id, ext, buf, thumb, displayName) {
   const name = String(displayName || id).slice(0, 120)
-  return addItem(name, ext, (fid) => fs.writeFileSync(path.join(skinsDir(), fid + '.' + ext), buf),
+  return addItem(name, ext, (fid) => writeImage(path.join(skinsDir(), fid + '.' + ext), buf),
     typeof thumb === 'string' ? thumb : '',
     { id: id, builtin: true, keepCurrent: true, displayName: name })
 }
@@ -519,13 +564,14 @@ function exportItems() {
 function importBuffer(name, ext, buf, thumbBuf, at, id, builtin) {
   if (OK_EXT.indexOf(ext) < 0) return { ok: false, error: '不支持的图片格式：' + ext }
   if (!buf || !buf.length) return { ok: false, error: '图片数据为空' }
-  if (buf.length > MAX_BYTES) return { ok: false, error: '图片过大（限 5MB）' }
+  if (buf.length > MAX_BYTES) return { ok: false, error: '图片过大（限 ' + MEDIA_LIMIT_TEXT + '）' }
   const thumb = thumbBuf && thumbBuf.length ? 'data:image/png;base64,' + thumbBuf.toString('base64') : ''
   const r = addItem(name || ('形象.' + ext), ext,
-    (iid) => fs.writeFileSync(path.join(skinsDir(), iid + '.' + ext), buf), thumb,
+    (iid) => writeImage(path.join(skinsDir(), iid + '.' + ext), buf), thumb,
     { id: id, builtin: builtin === true, keepCurrent: true })
   if (r.ok && Number(at) > 0) {
-    // addItem 里写的是当下时间，导入素材包时沿用原导入时间（展示更真实）
+    // addItem 里写的是当下时间，导入素材包时沿用原导入时间（展示更真实）。
+    // 只是补个展示时间，写不进去不影响这次导入本身 —— 记日志即可
     const raw = readRaw()
     const one = raw.items.filter((x) => x.id === r.id)[0]
     if (one) { one.at = Number(at); writeRaw(raw) }

@@ -23,6 +23,11 @@ export function assetSize(m: { size?: number } | null | undefined): string {
   return n > 0 ? fmtBytes(n) : '体积未知'
 }
 
+// 批量失败的展示：列前 3 条、其余折成「等 N 项」。只报第一条时用户修完再跑才发现还有别的
+export function failText(list: string[]): string {
+  return list.length > 3 ? list.slice(0, 3).join('；') + ` 等 ${list.length} 项` : list.join('；')
+}
+
 // 随包内置的共享角色缩略图路径（几 KB 的 webp）。
 export function sharedSkinThumb(id: string): string {
   return './resources/thumbs/' + encodeURIComponent(id) + '.webp'

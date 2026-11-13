@@ -231,7 +231,7 @@ async function downloadSharedSound(id, opts) {
     const origin = fileUrl('sounds', meta.id, meta.ext)
     const res = await fetchWithChain(o.prefix, origin, meta.sha256, fetchImpl)
     dlp.phase('install', { label: '正在写入音效…', total: res.item.buf.length })
-    const r = sounds.installBuiltin(meta.name, meta.ext, res.item.buf)
+    const r = sounds.installBuiltin(meta.name, meta.ext, res.item.buf, { official: true })
     if (!r || !r.ok) {
       const why = (r && r.error) || '写入失败'
       dlp.end(false, res.item.buf.length)

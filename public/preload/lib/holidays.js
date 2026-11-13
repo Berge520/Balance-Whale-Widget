@@ -38,6 +38,21 @@ const SPAN = 2
 
 let override = null // { fetchedAt, dates: Set<string>, years: Set<string> } | null（null = 未加载）
 
+// 失败冷却（未命中也算一种结果，只是「没拿到」）：断网时用户会连点「更新」，
+// 每点一次都是「2 年 × 3 源」的联网尝试（单源最长 8s），表现就是点了半天没反应。
+// 整次失败后记 60 秒，冷却期内直接回上一次的失败原因、不再发请求。
+// 只在**全部年份都失败**时才记：部分成功（当年可用、次年源缺）再点一次是有意义的。
+// 只放内存（重启插件即清空），不为这几十秒的限流新增存储键，也不违反「默认零网络」。
+const FAIL_COOLDOWN_MS = 60 * 1000
+let lastFail = null // { at: ms, error: string } | null
+
+// 可在单测里替换的时钟接缝（与 codex.js 的 later 同款理由）：冷却靠「现在几点」判断，
+// 测试不能真等 60 秒。⚠️ 调用点必须走 `module.exports.now()` 这个间接层 ——
+// 本文件末尾是 module.exports 整体替换，裸调会绑死在定义时的函数上，测试替换无效
+function now() {
+  return Date.now()
+}
+
 function readOverride() {
   try {
     const raw = utools.dbStorage.getItem(K.cnHolidays)
@@ -119,10 +134,19 @@ async function fetchYearAllSources(year) {
 }
 
 // 对外入口：拉当年 + 次年，与内置表**合并**后落盘。返回 { ok, added, years, error }，失败不抛。
-// force 目前不影响行为（总是重新拉），保留形参只为将来做 TTL 缓存留口子。
+// 整次失败后 60 秒内再调会直接返回上次的原因（见 FAIL_COOLDOWN_MS），不发请求。
 async function update(timeSec) {
-  const now = Number.isFinite(Number(timeSec)) ? Number(timeSec) : Math.floor(Date.now() / 1000)
-  const bjYear = new Date(now * 1000 + 8 * 3600 * 1000).getUTCFullYear()
+  const nowMs = module.exports.now()
+  if (lastFail && nowMs - lastFail.at < FAIL_COOLDOWN_MS) {
+    const left = Math.ceil((FAIL_COOLDOWN_MS - (nowMs - lastFail.at)) / 1000)
+    log('[whale][holidays] 上次拉取刚失败，' + left + 's 内不重复联网')
+    return {
+      ok: false, added: 0, total: 0, years: [], sources: {}, cachedFail: true, retryInMs: left * 1000,
+      error: lastFail.error + '，' + left + ' 秒后可重试',
+    }
+  }
+  const nowSec = Number.isFinite(Number(timeSec)) ? Number(timeSec) : Math.floor(nowMs / 1000)
+  const bjYear = new Date(nowSec * 1000 + 8 * 3600 * 1000).getUTCFullYear()
   const targets = []
   for (let i = 0; i < SPAN; i++) targets.push(bjYear + i)
 
@@ -140,8 +164,12 @@ async function update(timeSec) {
     }
   }
   if (!collected.length) {
-    return { ok: false, added: 0, years: [], sources: sources, error: '未能从数据源取到任何节假日（网络或数据源异常）' }
+    const error = '未能从数据源取到任何节假日（网络或数据源异常）'
+    lastFail = { at: module.exports.now(), error }
+    return { ok: false, added: 0, years: [], sources: sources, error: error }
   }
+  // 拿到东西就把冷却清掉：下次是用户主动点的，没有理由拦
+  lastFail = null
 
   // 与内置表合并（并集）：拉到的不删内置，内置的本就不重复落盘
   const next = new Set(collected)
@@ -150,14 +178,14 @@ async function update(timeSec) {
   const dates = Array.from(next).sort()
 
   const years = Array.from(new Set(dates.map((d) => d.slice(0, 4)))).sort()
-  const payload = { fetchedAt: now, dates: dates, years: years, sources: sources, failed: failed }
+  const payload = { fetchedAt: nowSec, dates: dates, years: years, sources: sources, failed: failed }
   try {
     utools.dbStorage.setItem(K.cnHolidays, payload)
   } catch (err) {
     logErr('[whale][holidays] 写存储失败', err && err.message)
     return { ok: false, added: 0, years: [], sources: sources, error: '写入本地存储失败' }
   }
-  override = { fetchedAt: now, dates: next, years: new Set(years), sources: sources }
+  override = { fetchedAt: nowSec, dates: next, years: new Set(years), sources: sources }
 
   const added = dates.filter((d) => !o || !o.dates.has(d)).length
   log('[whale][holidays] 已更新：' + dates.length + ' 天 / ' + years.join(',') + (failed.length ? '（' + failed.join(',') + ' 年失败）' : ''))
@@ -186,8 +214,8 @@ function status() {
   }
 }
 
-// 单测用：清掉内存缓存，强制重新读存储
-function _resetCache() { override = null }
+// 单测用：清掉内存缓存，强制重新读存储（顺带清失败冷却，用例之间不串味）
+function _resetCache() { override = null; lastFail = null }
 
 // ── 备份 / 恢复（供 lib/backup.js 调用）──
 // 导出：把覆盖层的原始载荷（落库那份结构）原样交出去；没有覆盖层时返回 null（备份里就不带这一项）
@@ -226,4 +254,4 @@ function restore(raw) {
   return true
 }
 
-module.exports = { isHoliday, coveredYears, update, clear, status, snapshot, restore, SOURCES, SPAN, _resetCache }
+module.exports = { isHoliday, coveredYears, update, clear, status, snapshot, restore, SOURCES, SPAN, FAIL_COOLDOWN_MS, now, _resetCache }

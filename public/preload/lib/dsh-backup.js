@@ -227,11 +227,12 @@ function createSnapshot(opts) {
     // 快照文件用「把路径分隔符换成 __」的扁平名，避免在快照目录里再造一层 profiles/web/
     // （还原时按 manifest 的 rel 反推原路径，不依赖文件名可逆）
     const flat = t.rel.replace(/[\\/]/g, '__')
-    try {
-      fs.writeFileSync(path.join(dir, flat), r.text, 'utf8')
-    } catch (err) {
-      logErr('[whale][dsh-backup] 写快照文件失败', t.rel + ': ' + errMsg(err))
-      return { ok: false, error: '写快照文件失败（' + t.rel + '）：' + errMsg(err) }
+    // 原子写：manifest 里记了 sha256，半份文件会让「备份完整」的校验结论失真，
+    // 还原时才暴露成坏文件。writeFileAtomicSync 返回 { ok, error }、不抛
+    const w = writeFileAtomicSync(path.join(dir, flat), r.text, 'utf8')
+    if (!w.ok) {
+      logErr('[whale][dsh-backup] 写快照文件失败', t.rel + ': ' + w.error)
+      return { ok: false, error: '写快照文件失败（' + t.rel + '）：' + w.error }
     }
     files.push({ rel: t.rel, ok: true, flat: flat, sha256: sha256(r.text), bytes: Buffer.byteLength(r.text, 'utf8') })
   }
@@ -422,7 +423,14 @@ function restoreSnapshot(opts) {
       for (let i = undo.length - 1; i >= 0; i--) {
         try {
           if (undo[i].prev === null) fs.rmSync(undo[i].abs, { force: true })
-          else fs.writeFileSync(undo[i].abs, undo[i].prev, 'utf8')
+          else {
+            // 回滚写回的也是配置文件，同样必须原子（半份 = 用户配置坏掉，且这次没有第二层兜底了）
+            const uw = writeFileAtomicSync(undo[i].abs, undo[i].prev, 'utf8')
+            if (!uw.ok) {
+              logErr('[whale][dsh-backup] 回滚写文件失败', path.basename(undo[i].abs) + ': ' + uw.error)
+              continue
+            }
+          }
           undone.push(path.basename(undo[i].abs))
         } catch (e2) {
           // 回滚自己再失败就没救了，只留痕（不能再抛，否则连错误信息都被盖掉）
